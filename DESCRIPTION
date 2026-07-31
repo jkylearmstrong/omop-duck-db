@@ -9,6 +9,8 @@ Description: Tools for building an OMOP Common Data Model (CDM) v5.4 schema
     concept-mapping SQL. Also includes a Google Drive sync helper for the
     large generated database/vocabulary files.
 License: MIT + file LICENSE
+URL: https://github.com/jkylearmstrong/omop-duck-db, https://jkylearmstrong.github.io/omop-duck-db
+BugReports: https://github.com/jkylearmstrong/omop-duck-db/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 Depends:

@@ -1,5 +1,8 @@
 url: https://jkylearmstrong.github.io/omop-duck-db/
 
+template:
+  bootstrap: 5
+
 reference:
 - title: Schema and vocabulary
   contents:

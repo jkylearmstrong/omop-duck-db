@@ -22,6 +22,8 @@
 ^\.pytest_cache$
 ^__pycache__$
 ^\.Rprofile$
+^README\.Rmd$
+^LICENSE\.md$
 ^_pkgdown\.yml$
 ^docs$
 .dockerignore
