@@ -9,6 +9,14 @@ package and a Python package, with parallel ETL implementations that
 share the same schema and concept-mapping SQL, so a human (or an AI
 agent) picking either language gets the same result.
 
+## Scope
+
+This repo provides general-purpose mapping/ETL tooling and a small
+fabricated sample fixture for testing – it does not itself ingest,
+store, or process any protected or identifiable data. Real-world use
+against production source data happens outside this repo, against your
+own data infrastructure.
+
 ## Layout
 
 - `inst/extdata/5.4/duckdb/*.sql` — OMOP CDM v5.4 DDL, generated once
@@ -56,7 +64,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\RtmpETaaGV\file1ea41a0e31e3.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmp08KKV0\fileeedc464a458d.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]

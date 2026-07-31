@@ -14,6 +14,13 @@ both an R package and a Python package, with parallel ETL implementations that
 share the same schema and concept-mapping SQL, so a human (or an AI agent)
 picking either language gets the same result.
 
+## Scope
+
+This repo provides general-purpose mapping/ETL tooling and a small fabricated
+sample fixture for testing -- it does not itself ingest, store, or process
+any protected or identifiable data. Real-world use against production source
+data happens outside this repo, against your own data infrastructure.
+
 ## Layout
 
 - `inst/extdata/5.4/duckdb/*.sql` — OMOP CDM v5.4 DDL, generated once via the
