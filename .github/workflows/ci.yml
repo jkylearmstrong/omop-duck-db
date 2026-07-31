@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  r-check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      # Avoid the renv-autoload trap we hit locally/in Docker: this job
+      # installs deps directly via r-lib/actions, not through renv::restore().
+      RENV_CONFIG_AUTOLOADER_ENABLED: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          error-on: '"warning"'
+          upload-snapshots: true
+
+  python-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+    env:
+      RENV_CONFIG_AUTOLOADER_ENABLED: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # R is needed too: tests/test_etl_parity.py shells out to Rscript to
+      # run the R ETL and diff it against the Python one.
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install R package + its hard dependencies
+        run: Rscript -e 'install.packages(c("DBI","duckdb","stringr","yaml")); install.packages(".", repos = NULL, type = "source")'
+        shell: Rscript {0}
+
+      - name: Install Python package (+ dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest tests/ -v
+
+  python-only:
+    # Proves the Python package works standalone with no R installed at all --
+    # the real target for this: GPU/deep-learning machines running just the
+    # ETL/inference side, no R toolchain. tests/test_etl_parity.py must SKIP
+    # here (via its shutil.which("Rscript") is None guard), not fail; if it
+    # fails instead, that guard has regressed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python package (+ dev extras) -- no R anywhere in this job
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest (parity test should skip, not fail)
+        run: pytest tests/ -v
+
+  docker-build:
+    # Docker isn't available the same way on windows-latest/macos-latest
+    # runners; this validates the containerized path on Linux only.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (runs both test suites at build time)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: omopduckdb:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

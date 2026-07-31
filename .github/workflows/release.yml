@@ -1,0 +1,65 @@
+name: Release (Python -> PyPI)
+
+# Builds and checks the Python distribution on every version tag push, then
+# publishes to PyPI -- but only after a human approves it. Nothing here can
+# publish without that manual click; and even then, it needs one-time setup
+# on both PyPI and GitHub before it can succeed at all (see below).
+#
+# One-time setup required before publish-pypi can work:
+#   1. Create the PyPI project (or use "pending publisher" for one that
+#      doesn't exist yet: https://pypi.org/manage/account/publishing/).
+#   2. Register this repo + workflow file as a Trusted Publisher on PyPI --
+#      no token/secret needed, PyPI verifies GitHub's OIDC token instead.
+#   3. Repo Settings -> Environments -> New environment named
+#      "pypi-release" -> add yourself as a required reviewer. That's the
+#      approval gate: the publish job pauses here until manually approved,
+#      every single time, regardless of how the tag push happened.
+#
+# Until all three exist, build-check still runs and is useful on its own
+# (confirms the tag actually produces a valid, installable distribution);
+# publish-pypi will simply fail or sit waiting for an environment that
+# doesn't exist yet, and can be safely ignored until you're ready.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install build twine
+
+      - run: python -m build
+
+      - run: twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+  publish-pypi:
+    needs: build-check
+    runs-on: ubuntu-latest
+    # This environment is the manual-approval gate -- see setup notes above.
+    environment:
+      name: pypi-release
+      url: https://pypi.org/p/omop-duck-db
+    permissions:
+      id-token: write # Trusted Publishing (OIDC) -- no PYPI_API_TOKEN secret needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
