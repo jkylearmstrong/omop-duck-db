@@ -22,6 +22,9 @@ Suggests:
     googledrive,
     bigrquery,
     CommonDataModel,
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    usethis (>= 3.2.1)
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0
+Remotes:  
+    jkylearmstrong/usethis

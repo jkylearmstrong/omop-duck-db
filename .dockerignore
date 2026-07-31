@@ -1,0 +1,36 @@
+.git
+.gitignore
+.Rbuildignore
+.Rproj.user
+.vscode
+NEWS.md
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+revdep/
+pkgdown/
+renv/library
+renv/staging
+
+# Project-specific: large generated artifacts and real credentials --
+# never send these to the Docker build context.
+*.duckdb
+*.duckdb.wal
+vocabulary_download_v5_*/
+vocabulary_download_v5_*.zip
+config/*.yml
+!config/*.yml.example
+data/
+out/
+dist/
+build/
+*.egg-info/
+docs/
+.venv/
+__pycache__/
+.pytest_cache/
+tasks/
+computed_tasks/
+.claude/

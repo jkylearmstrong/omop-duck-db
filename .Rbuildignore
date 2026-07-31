@@ -24,3 +24,5 @@
 ^\.Rprofile$
 ^_pkgdown\.yml$
 ^docs$
+.dockerignore
+^Dockerfile$
