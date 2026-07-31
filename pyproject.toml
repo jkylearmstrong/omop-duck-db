@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omop-duck-db"
+version = "0.1.0"
+description = "Tools for building an OMOP CDM v5.4 DuckDB database and mapping PCORnet-format source data into it."
+readme = "README.md"
+license = { file = "LICENSE.md" }
+authors = [{ name = "J Kyle Armstrong" }]
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb>=1.0,<2.0",
+    "pandas>=2.0,<3.0",
+    "pyarrow>=15.0,<19.0",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0,<9.0", "build>=1.0", "twine>=5.0"]
+
+[project.scripts]
+omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
+
+[project.urls]
+Homepage = "https://github.com/jkylearmstrong/omop-duck-db"
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/omop_etl"]
+
+# Bundle the shared DDL/macros SQL (single source of truth under inst/, also
+# used by the R package) into the wheel so a real (non-editable) `pip install`
+# works, not just running from a git checkout.
+[tool.hatch.build.targets.wheel.force-include]
+"inst/sql/mapping_macros.sql" = "omop_etl/resources/sql/mapping_macros.sql"
+"inst/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql" = "omop_etl/resources/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

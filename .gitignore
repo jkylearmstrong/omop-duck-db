@@ -1,0 +1,44 @@
+# Large generated/downloaded artifacts (synced via Google Drive instead, see R/gdrive_sync.R)
+*.duckdb
+*.duckdb.wal
+vocabulary_download_v5_*/
+vocabulary_download_v5_*.zip
+out/
+
+# Claude Code / ComputeGate session scratch (not part of the project)
+tasks/
+computed_tasks/
+
+# R
+.Rhistory
+.Rdata
+.Rproj.user/
+renv/library/
+renv/local/
+renv/staging/
+README.knit.md
+*_files/
+docs/
+Meta/
+doc/
+/*.tar.gz
+/*.Rcheck/
+
+# Python packaging build artifacts
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Credentials / tokens - never commit
+.env
+*token*.json
+*credentials*.json
+config/*.yml
+!config/*.yml.example

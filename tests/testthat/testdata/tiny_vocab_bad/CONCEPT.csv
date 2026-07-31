@@ -1,0 +1,2 @@
+concept_id	concept_name	domain_id	vocabulary_id	concept_class_id	standard_concept	concept_code	valid_start_date	valid_end_date	invalid_reason
+3		Observation	FAKEVOCAB	Fake Class	S	FAKE003	19700101	20991231	

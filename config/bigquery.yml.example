@@ -1,0 +1,9 @@
+# Copy this file to config/bigquery.yml and fill in your own values.
+# config/bigquery.yml is gitignored -- do not commit it.
+
+# Your own GCP project, used to attribute BigQuery query cost/quota
+# (required even when querying public datasets like bigquery-public-data.*).
+billing_project: "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
+
+# Default BigQuery dataset to pull from -- e.g. the CMS synthetic OMOP dataset.
+dataset: "bigquery-public-data.cms_synthetic_patient_data_omop"

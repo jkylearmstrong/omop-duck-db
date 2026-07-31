@@ -1,0 +1,52 @@
+
+Attaching package: 'dplyr'
+
+The following objects are masked from 'package:stats':
+
+    filter, lag
+
+The following objects are masked from 'package:base':
+
+    intersect, setdiff, setequal, union
+
+The duckplyr package is configured to fall back to dplyr when it encounters an
+incompatibility. Fallback events can be collected and uploaded for analysis to
+guide future development. By default, data will be collected but no data will
+be uploaded.
+ℹ Automatic fallback uploading is not controlled and therefore disabled, see
+  `?duckplyr::fallback()`.
+✔ Number of reports ready for upload: 2.
+→ Review with `duckplyr::fallback_review()`, upload with
+  `duckplyr::fallback_upload()`.
+ℹ Configure automatic uploading with `duckplyr::fallback_config()`.
+✔ Overwriting dplyr methods with duckplyr methods.
+ℹ Turn off with `duckplyr::methods_restore()`.
+LOINC count:
+# A tibble: 1 × 10
+  concept_id concept_name domain_id   vocabulary_id concept_class_id
+       <int> <chr>        <chr>       <chr>         <chr>           
+1   40791227 Albumin      Observation LOINC         LOINC Component 
+# ℹ 5 more variables: standard_concept <chr>, concept_code <chr>,
+#   valid_start_date <date>, valid_end_date <date>, invalid_reason <chr>
+
+Maps To standard concept id for LOINC code LP6118-6:
+# A tibble: 0 × 6
+# ℹ 6 variables: concept_id_1 <int>, concept_id_2 <int>, relationship_id <chr>,
+#   valid_start_date <date>, valid_end_date <date>, invalid_reason <chr>
+
+Subsumes relationship?
+# A tibble: 97 × 6
+   concept_id_1 concept_id_2 relationship_id valid_start_date valid_end_date
+          <int>        <int> <chr>           <date>           <date>        
+ 1     40791227      1175782 Component of    2019-12-13       2099-12-31    
+ 2     40791227      3046828 Component of    2019-12-13       2099-12-31    
+ 3     40791227     37048896 Subsumes        1970-01-01       2099-12-31    
+ 4     40791227     37051495 Subsumes        1970-01-01       2099-12-31    
+ 5     40791227     37055681 Subsumes        1970-01-01       2099-12-31    
+ 6     40791227     37063387 Subsumes        1970-01-01       2099-12-31    
+ 7     40791227     37073215 Subsumes        1970-01-01       2099-12-31    
+ 8     40791227     40766204 Component of    2019-12-13       2099-12-31    
+ 9     40791227     46234765 Component of    2019-12-13       2099-12-31    
+10     40791227     46236953 Component of    2019-12-13       2099-12-31    
+# ℹ 87 more rows
+# ℹ 1 more variable: invalid_reason <chr>

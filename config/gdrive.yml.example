@@ -1,0 +1,6 @@
+# Copy this file to config/gdrive.yml and fill in your own value.
+# config/gdrive.yml is gitignored -- do not commit it.
+
+# Google Drive folder ID to sync omop_cdm.duckdb and the vocabulary archive to/from.
+# Find it in the folder's URL: https://drive.google.com/drive/folders/<this-part>
+folder_id: "REPLACE_WITH_YOUR_DRIVE_FOLDER_ID"
