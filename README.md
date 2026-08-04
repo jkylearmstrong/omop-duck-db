@@ -1,6 +1,14 @@
 # omop-duck-db
 
 
+<!-- badges: start -->
+
+[![CI](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml)
+[![Test
+Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml)
+[![codecov](https://codecov.io/gh/jkylearmstrong/omop-duck-db/branch/main/graph/badge.svg)](https://codecov.io/gh/jkylearmstrong/omop-duck-db)
+<!-- badges: end -->
+
 Tools for building an [OMOP Common Data
 Model](https://ohdsi.github.io/CommonDataModel/) (CDM) v5.4 database in
 [DuckDB](https://duckdb.org/), loading the OHDSI Athena vocabulary, and
@@ -64,7 +72,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmpu8ytgr\file91e447b21db7.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmpu2y4mm\file7e487e42192b.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]

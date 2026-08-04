@@ -38,6 +38,13 @@ jobs:
           path: r_coverage.xml
           if-no-files-found: ignore
 
+      - name: Upload R Coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./r_coverage.xml
+          flags: r
+          fail_ci_if_error: false
+
   python-coverage:
     runs-on: ubuntu-latest
     env:
@@ -69,3 +76,10 @@ jobs:
           name: python-coverage-report
           path: py_coverage.xml
           if-no-files-found: ignore
+
+      - name: Upload Python Coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./py_coverage.xml
+          flags: python
+          fail_ci_if_error: false
