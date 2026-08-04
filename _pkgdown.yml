@@ -3,6 +3,10 @@ url: https://jkylearmstrong.github.io/omop-duck-db/
 development:
   mode: unreleased
 
+home:
+  sidebar:
+    structure: [license, community, authors, dev]
+
 template:
   bootstrap: 5
 
