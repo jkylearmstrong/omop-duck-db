@@ -58,8 +58,7 @@ jobs:
           use-public-rspm: true
 
       - name: Install R package + its hard dependencies
-        run: Rscript -e 'install.packages(c("DBI","duckdb","stringr","yaml")); install.packages(".", repos = NULL, type = "source")'
-        shell: Rscript {0}
+        run: Rscript -e "install.packages(c('DBI','duckdb','stringr','yaml')); install.packages('.', repos = NULL, type = 'source')"
 
       - name: Install Python package (+ dev extras)
         run: pip install -e ".[dev]"
