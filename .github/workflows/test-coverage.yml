@@ -28,7 +28,9 @@ jobs:
           needs: coverage
 
       - name: Calculate R Test Coverage
-        run: Rscript -e 'covr::to_sonarqube(covr::package_coverage(), file = "r_coverage.xml")'
+        run: |
+          cov <- covr::package_coverage()
+          covr::to_sonarqube(cov, file = "r_coverage.xml")
         shell: Rscript {0}
 
       - name: Upload R Coverage Report
@@ -62,8 +64,7 @@ jobs:
           use-public-rspm: true
 
       - name: Install R package (required by parity tests)
-        run: Rscript -e 'install.packages(c("DBI","duckdb","stringr","yaml")); install.packages(".", repos = NULL, type = "source")'
-        shell: Rscript {0}
+        run: Rscript -e "install.packages(c('DBI','duckdb','stringr','yaml')); install.packages('.', repos = NULL, type = 'source')"
 
       - name: Install Python package with dev dependencies
         run: pip install -e ".[dev]"
