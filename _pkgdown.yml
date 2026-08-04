@@ -1,5 +1,8 @@
 url: https://jkylearmstrong.github.io/omop-duck-db/
 
+development:
+  mode: unreleased
+
 template:
   bootstrap: 5
 
