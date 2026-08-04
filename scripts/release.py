@@ -114,7 +114,7 @@ def main():
 
         if not args.check_only:
             log("Step 5: Building pkgdown site...")
-            run_cmd(["Rscript", "-e", "if (requireNamespace('pkgdown', quietly=TRUE)) tryCatch(pkgdown::build_site(preview=FALSE), error=function(e) message('pkgdown build notice: ', e$message)) else message('pkgdown not installed')"], check=False)
+            run_cmd(["Rscript", "-e", "options(pkgdown.internet=FALSE); if (requireNamespace('pkgdown', quietly=TRUE)) tryCatch(pkgdown::build_site(new_process=FALSE, install=FALSE, preview=FALSE), error=function(e) message('pkgdown build notice: ', e$message)) else message('pkgdown not installed')"], check=False)
 
     # Step 6: Python Tests & Coverage
     if not args.skip_py:

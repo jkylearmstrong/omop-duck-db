@@ -46,7 +46,8 @@ release <- function(bump_version = NULL, check_only = TRUE) {
     system("python -m twine check dist/*")
 
     if (requireNamespace("pkgdown", quietly = TRUE)) {
-      pkgdown::build_site(preview = FALSE)
+      options(pkgdown.internet = FALSE)
+      pkgdown::build_site(new_process = FALSE, install = FALSE, preview = FALSE)
     }
   }
 
