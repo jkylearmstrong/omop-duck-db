@@ -1,3 +1,9 @@
+# omopduckdb 0.1.1
+
+- Added unified cross-language test coverage tracking (`covr` for R, `pytest-cov` for Python) and a dedicated `.github/workflows/test-coverage.yml` CI workflow.
+- Created consolidated developer release scripts (`scripts/release.py` and `scripts/release.R`) for automated dual-package version bumping, Quarto rendering, test suite execution, wheel building, and git tagging.
+- Enhanced Docker container configuration for multi-stage testing and deployment.
+
 # omopduckdb 0.1.0
 
 Initial packaged release.

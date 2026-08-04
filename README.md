@@ -64,7 +64,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmp08KKV0\fileeedc464a458d.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmpu8ytgr\file91e447b21db7.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]

@@ -8,6 +8,15 @@
 \description{
 Tools for building an OMOP Common Data Model (CDM) v5.4 schema in DuckDB, loading the OHDSI Athena vocabulary (from a local download or live from BigQuery), and mapping PCORnet-format source data into the CDM via parallel R and Python ETL implementations that share the same concept-mapping SQL. Also includes a Google Drive sync helper for the large generated database/vocabulary files.
 }
+\seealso{
+Useful links:
+\itemize{
+  \item \url{https://github.com/jkylearmstrong/omop-duck-db}
+  \item \url{https://jkylearmstrong.github.io/omop-duck-db}
+  \item Report bugs at \url{https://github.com/jkylearmstrong/omop-duck-db/issues}
+}
+
+}
 \author{
 \strong{Maintainer}: J Kyle Armstrong \email{j.kyle.armstrong@gmail.com} (\href{https://orcid.org/0000-0002-4269-0121}{ORCID})
 
