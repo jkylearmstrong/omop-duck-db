@@ -114,7 +114,7 @@ def main():
 
         if not args.check_only:
             log("Step 5: Building pkgdown site...")
-            run_cmd(["Rscript", "-e", "if (requireNamespace('pkgdown', quietly=TRUE)) pkgdown::build_site(preview=FALSE)"], check=False)
+            run_cmd(["Rscript", "-e", "if (requireNamespace('pkgdown', quietly=TRUE)) tryCatch(pkgdown::build_site(preview=FALSE), error=function(e) message('pkgdown build notice: ', e$message)) else message('pkgdown not installed')"], check=False)
 
     # Step 6: Python Tests & Coverage
     if not args.skip_py:
@@ -136,13 +136,17 @@ def main():
         tag_name = f"v{current_version}"
         log(f"Step 9: Committing changes and tagging {tag_name}...")
         run_cmd(["git", "add", "."])
-        run_cmd(["git", "commit", "-m", f"release: bump version to {current_version}"])
-        run_cmd(["git", "tag", "-a", tag_name, "-m", f"Release {tag_name}"])
+        status_check = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True).stdout.strip()
+        if status_check:
+            run_cmd(["git", "commit", "-m", f"release: bump version to {current_version}"])
+        else:
+            log("Working tree clean; skipping git commit.")
+        run_cmd(["git", "tag", "-a", "-f", tag_name, "-m", f"Release {tag_name}"])
 
         if args.push:
             log("Step 10: Pushing commits and tags to origin...")
             run_cmd(["git", "push", "origin", "main"])
-            run_cmd(["git", "push", "origin", tag_name])
+            run_cmd(["git", "push", "origin", tag_name, "--force"])
 
     # Step 11: PyPI Upload
     if args.publish and not args.skip_py:
