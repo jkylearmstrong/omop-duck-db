@@ -30,7 +30,7 @@ jobs:
       - name: Calculate R Test Coverage
         run: |
           cov <- covr::package_coverage()
-          covr::to_sonarqube(cov, file = "r_coverage.xml")
+          covr::to_cobertura(cov, filename = "r_coverage.xml")
         shell: Rscript {0}
 
       - name: Upload R Coverage Report

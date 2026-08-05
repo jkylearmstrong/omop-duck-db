@@ -6,7 +6,7 @@
 [![CI](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml)
 [![Test
 Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml)
-[![codecov](https://codecov.io/gh/jkylearmstrong/omop-duck-db/branch/main/graph/badge.svg)](https://codecov.io/gh/jkylearmstrong/omop-duck-db)
+[![codecov](https://img.shields.io/codecov/c/github/jkylearmstrong/omop-duck-db/main?logo=codecov.png)](https://codecov.io/gh/jkylearmstrong/omop-duck-db)
 <!-- badges: end -->
 
 Tools for building an [OMOP Common Data
@@ -72,7 +72,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmpu2y4mm\file7e487e42192b.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmpmo9cOr\filea8b4539272c.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]

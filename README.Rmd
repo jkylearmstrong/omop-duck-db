@@ -10,7 +10,7 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>", message = FALSE)
 <!-- badges: start -->
 [![CI](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml)
 [![Test Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml)
-[![codecov](https://codecov.io/gh/jkylearmstrong/omop-duck-db/branch/main/graph/badge.svg)](https://codecov.io/gh/jkylearmstrong/omop-duck-db)
+[![codecov](https://img.shields.io/codecov/c/github/jkylearmstrong/omop-duck-db/main?logo=codecov)](https://codecov.io/gh/jkylearmstrong/omop-duck-db)
 <!-- badges: end -->
 
 Tools for building an [OMOP Common Data Model](https://ohdsi.github.io/CommonDataModel/)
