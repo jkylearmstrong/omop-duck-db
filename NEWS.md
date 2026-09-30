@@ -1,3 +1,55 @@
+# omopduckdb 0.4.0
+
+### Generic Readmission Cohort & Outcome Builder
+- **Inpatient Readmission Cohort (`build_readmission_cohort`)**: Added reproducible, parameterized cohort generation in both Python (`omop_etl.cohort`) and R (`omopduckdb::build_readmission_cohort`) anchored on adult index inpatient stays (`visit_concept_id = 9201`, age >= 18, length of stay >= 1 day, discharged alive).
+- **Lost-to-Follow-Up / Right-Censoring Filter (`require_verified_followup`)**: Enforces verified observation by requiring either an inpatient readmission within post-discharge follow-up (e.g. 30 days) or confirmed subsequent clinical activity (IP, ED, OP, lab, vital) after the window, eliminating differential follow-up attrition.
+- **Reproducible Index Stay Selection**: Supports `'random'` sampling with reproducible random seed, `'first'`, or `'last'` eligible inpatient admission per patient.
+- **Leak-Free Temporal Scoping**: Guarantees strict temporal separation between baseline history ($t \le t_{\text{admit}}$) and readmission outcome window ($t > t_{\text{discharge}}$).
+- **Cohort Readmission SQL Macros (`inst/sql/cohort_readmission.sql`)**: Implements pure DuckDB macros `calc_los_days()`, `calc_age_at_date()`, `is_adult()`, `is_discharged_alive()`, `categorize_discharge()`, and `categorize_age_group()`.
+
+### Temporal Feature Extraction & Concept Rollup
+- **Temporal Historical Utilization (`extract_temporal_features`)**: Windowed baseline encounter counts (IP, ED, OP), days since prior encounter, days since prior IP/ED stay, prior 30-day readmissions in lookback window, index length of stay, discharge disposition, and demographics.
+- **Athena Transitive Closure Rollup (`aggregate_concept_sets`)**: Hierarchical rollup across condition and drug domains traversing `concept_ancestor` to extract binary or count indicators for clinical classes (e.g., insulins, metformin, sulfonylureas, statins, antihypertensives, RAAS inhibitors, beta blockers, systemic corticosteroids).
+- **Consolidated Lab & Vital Extraction (`extract_measurements`)**: Maps LOINC concept groups (albumin, ALT, AST, bicarbonate, BUN, creatinine, eGFR, glucose, HbA1c, hematocrit, WBC, sodium, BP, BMI) with configurable acute window aggregation strategies (`last_before_discharge`, `first_on_admission`, `mean`, `median`, `min`, `max`).
+
+### Baseline Table 1 Generation & Reconciliation Harness
+- **Comprehensive Baseline Summarizer (`generate_table1`)**: Generates publication-ready Table 1 baseline characteristics stratified by outcome (e.g., 30-day readmission status), reporting overall and stratified Mean (SD), Median [IQR], N (%), Standardized Mean Differences (SMD), and hypothesis test p-values. Emits Table 1b completeness and missingness matrix.
+- **Table 1 Aggregation SQL Macros (`inst/sql/table1_aggregations.sql`)**: In-engine computation of continuous and binary SMDs, BMI classification, and tobacco use categorization.
+- **Reconciliation & Drift Validation Harness (`validate_table1_reconciliation`)**: Validates prospective OMOP-derived Table 1 distributions against external benchmark extracts with configurable tolerance thresholds, flagging statistical drift, missingness discrepancy, and feature dropouts.
+
+# omopduckdb 0.3.0
+
+### Phase 1: Location & SDoH Address History Ingestion
+- **Address & Geography Ingestion (`load_location`)**: Added `load_location(con, source_dir, site_id)` in both Python (`omop_etl.build_omop_cdm`) and R (`omopduckdb::load_location`), ingesting PCORnet `lds_address_history.csv` into the OMOP `location` table. Uses deterministic surrogate keys (`location_id = pcornet_id(addressid)` or sequential numbering), deduplicates addresses, and retroactively populates `person.location_id` with each patient's primary residential address.
+- **Address Column Aliases**: Updated `DEFAULT_ALIASES` with `ADDRESS_CITY`, `ADDRESS_STATE`, `ADDRESS_ZIP5`, and `ADDRESS_PERIOD_START` for robust ingestion across PCORnet schema variants.
+
+### Phase 2: Concept Polyhierarchy & Cohort Definition Helpers
+- **Standard OHDSI Cohort Tables (`ensure_cohort_tables`)**: Ensures `cohort` and `cohort_definition` tables exist according to OMOP CDM v5.4 specifications.
+- **Polyhierarchy Traversal**: Added `get_concept_descendants()`, `get_concept_ancestors()`, and `get_concept_relationships()` to query transitive closures in `concept_ancestor` and relationship tables directly in DuckDB.
+- **Concept Set Resolution (`resolve_concept_set`)**: Resolves concept sets with full descendant expansion and exclusion logic using pure set-based SQL.
+- **Cohort Creation & Management (`create_cohort`)**: Ingests entry criterion SQL, supports fixed or event-based exit dates, and tracks metadata in `cohort_definition`.
+- **CONSORT Attrition Analysis (`compute_attrition`)**: Sequentially tracks patient counts and percentage retention across arbitrary phenotyping criteria.
+- **Cohort Set Operations (`combine_cohorts`)**: Combines cohorts using set algebra (`UNION`, `INTERSECT`, `DIFFERENCE`).
+- **Cohort Summarization (`get_cohort_summary`)**: Computes cohort statistics (unique subjects, total entries, min/max/mean/median observation duration).
+
+### Phase 3: Native DuckDB DataQualityDashboard (DQD) Engine
+- **Pure-SQL OHDSI DQD (`run_dqd`)**: Implemented a standalone, zero-dependency DataQualityDashboard engine that runs in seconds in DuckDB without Java/JDBC or DatabaseConnector.
+- **Four Core Check Levels**: Executes `TABLE` (presence & row count), `FIELD` (not-null violations & orphan foreign keys), `CONCEPT` (standard concept compliance), and `TEMPORAL` (event start before end, birth before event) checks.
+- **OHDSI DQD JSON Output**: Writes standard OHDSI DQD JSON files with complete `Overview`, `Metadata`, and `CheckResults` schemas compatible with OHDSI visualization frontends.
+
+### Phase 4: Machine Learning Feature Matrix Extractor
+- **Patient Feature Extraction (`extract_patient_features`)**: Generates temporal, ML-ready feature matrices anchored on cohort index dates ($T_0$).
+- **Retrospective Lookback Windows**: Aggregates condition, drug, procedure, and measurement occurrence counts across customizable lookback windows (e.g., 30, 90, 365 days).
+- **Demographics & Target Outcomes**: Extracts baseline patient demographics (age, gender, race, ethnicity) and optional binary outcome flags from target cohorts.
+- **Flexible Matrix Formats**: Exports as standard `df` (Pandas / R `data.frame`), Apache Arrow (`arrow`), or OHDSI FeatureExtraction sparse matrix format (`sparse`: `row_id`, `covariate_id`, `covariate_value`).
+
+### Phase 5: Enterprise Multi-Target Export
+- **High-Throughput CDM Exporter (`export_cdm`)**: Exports CDM tables to production data warehouses and analytical formats via DuckDB's vectorized copy engine:
+  - **Parquet**: Snappy/ZSTD compressed Parquet files with optional partition-by-year on clinical occurrence dates.
+  - **PostgreSQL**: Direct in-engine streaming into PostgreSQL via DuckDB's `postgres` extension.
+  - **Oracle**: Generates Oracle SQL*Loader control files (`.ctl`), Oracle DDL, and loader shell scripts.
+  - **Delimited Files**: Exports standard RFC 4180 CSV and TSV formats.
+
 # omopduckdb 0.2.2
 
 ### Multi-Site Consortium Provenance & Federation

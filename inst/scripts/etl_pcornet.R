@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# Usage: Rscript inst/scripts/etl_pcornet.R --source-dir "path/to/pcornet_extract" [--db-path omop_cdm.duckdb] [--central-vocab vocab.duckdb] [--site-id 1] [--site-anon "Site A"] [--site-name "Temple"] [--disambiguate-patids]
+# Usage: Rscript inst/scripts/etl_pcornet.R --source-dir "path/to/pcornet_extract" [--db-path omop_cdm.duckdb] [--central-vocab vocab.duckdb] [--site-id 1] [--site-anon "Site A"] [--site-name "Hospital System A"] [--disambiguate-patids]
 library(omopduckdb)
 
 args <- commandArgs(trailingOnly = TRUE)

@@ -49,6 +49,7 @@ TABLES = [
     "cdm_source",
     "condition_era",
     "drug_era",
+    "location",
 ]
 
 

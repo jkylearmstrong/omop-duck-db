@@ -15,7 +15,7 @@
 #'   to attach in read-only mode with zero-copy views.
 #' @param site_id Optional numeric site identifier (e.g. 1 to 5).
 #' @param site_anon Optional publication pseudonym (e.g. "Site A").
-#' @param site_name Optional institutional name or internal descriptor (e.g. "Temple").
+#' @param site_name Optional institutional name or internal descriptor (e.g. "Hospital System A").
 #' @param disambiguate_patids Logical. If `TRUE`, formats `person_source_value` as
 #'   `src.PATID || '-' || site_id` and derives surrogate keys via `pcornet_id(src.PATID || '-' || site_id)`.
 #' @return Invisibly, `db_path`.
@@ -51,6 +51,7 @@ etl_pcornet <- function(
   load_care_site(con, source_dir, site_id = site_id, site_anon = site_anon, site_name = site_name)
   .load_provider(con, source_dir)
   .load_person(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  load_location(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_visit_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_condition_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_procedure_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
@@ -320,6 +321,96 @@ load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, si
   ", person_id_expr, care_site_id_expr, person_src_expr))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_demographic;")
 }
+
+#' Maps `lds_address_history.csv` into OMOP CDM `location` table and updates `person.location_id`
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param source_dir Directory containing PCORnet CSV extracts.
+#' @param site_id Optional site ID.
+#' @param disambiguate_patids Logical.
+#' @return Invisibly NULL.
+#' @export
+load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
+  path <- find_source_file(source_dir, "lds_address_history")
+  if (is.null(path)) {
+    path <- find_source_file(source_dir, "address_history")
+  }
+  if (is.null(path)) {
+    cat("Skipping LOCATION - no lds_address_history.csv found (optional table)\n")
+    return(invisible(NULL))
+  }
+
+  prepare_source_view(
+    con, "_temp_address_history", path,
+    c("ADDRESSID", "PATID", "ADDRESS_USE", "ADDRESS_TYPE", "ADDRESS_PREFERRED",
+      "ADDRESS_CITY", "ADDRESS_STATE", "ADDRESS_ZIP5", "ADDRESS_ZIP9",
+      "ADDRESS_PERIOD_START", "ADDRESS_PERIOD_END")
+  )
+
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+
+  run_insert(con, "LOCATION (from LDS_ADDRESS_HISTORY)", "
+    INSERT INTO location (
+        location_id,
+        address_1,
+        address_2,
+        city,
+        state,
+        zip,
+        county,
+        location_source_value,
+        country_concept_id,
+        country_source_value,
+        latitude,
+        longitude
+    )
+    SELECT
+        pcornet_id(COALESCE(UPPER(ADDRESS_STATE), '') || '_' || COALESCE(ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(ADDRESS_CITY), '')) AS location_id,
+        NULL AS address_1,
+        NULL AS address_2,
+        ADDRESS_CITY AS city,
+        UPPER(ADDRESS_STATE) AS state,
+        COALESCE(ADDRESS_ZIP9, ADDRESS_ZIP5) AS zip,
+        NULL AS county,
+        COALESCE(ADDRESS_ZIP5, '') || ', ' || COALESCE(ADDRESS_STATE, '') AS location_source_value,
+        4330426 AS country_concept_id,
+        'US' AS country_source_value,
+        NULL AS latitude,
+        NULL AS longitude
+    FROM _temp_address_history
+    WHERE (ADDRESS_STATE IS NOT NULL OR ADDRESS_ZIP5 IS NOT NULL OR ADDRESS_CITY IS NOT NULL)
+      AND pcornet_id(COALESCE(UPPER(ADDRESS_STATE), '') || '_' || COALESCE(ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(ADDRESS_CITY), '')) NOT IN (
+          SELECT location_id FROM location
+      )
+    GROUP BY ADDRESS_CITY, ADDRESS_STATE, ADDRESS_ZIP5, ADDRESS_ZIP9;
+  ")
+
+  DBI::dbExecute(con, sprintf("
+    UPDATE person
+    SET location_id = loc.location_id
+    FROM (
+        SELECT 
+            %s AS patid_key,
+            pcornet_id(COALESCE(UPPER(src.ADDRESS_STATE), '') || '_' || COALESCE(src.ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(src.ADDRESS_CITY), '')) AS location_id
+        FROM _temp_address_history src
+        WHERE src.PATID IS NOT NULL
+          AND (src.ADDRESS_STATE IS NOT NULL OR src.ADDRESS_ZIP5 IS NOT NULL OR src.ADDRESS_CITY IS NOT NULL)
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY src.PATID 
+            ORDER BY 
+                CASE UPPER(COALESCE(src.ADDRESS_PREFERRED, 'N')) WHEN 'Y' THEN 1 ELSE 2 END,
+                src.ADDRESS_PERIOD_END DESC NULLS LAST,
+                src.ADDRESS_PERIOD_START DESC NULLS LAST,
+                src.ADDRESSID DESC
+        ) = 1
+    ) loc
+    WHERE person.person_source_value = loc.patid_key;
+  ", patid_expr))
+
+  DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_address_history;")
+  invisible(NULL)
+}
+.load_location <- load_location
 
 .load_visit_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "encounter")

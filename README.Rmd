@@ -150,6 +150,185 @@ When standard Athena vocabularies lack mappings for site-specific or unmapped co
 
 Equivalent functions are available in Python via `from omop_etl import remap_all, import_usagi_mappings`.
 
+## Readmission Cohorts & Table 1 Pipeline
+
+The package provides an end-to-end epidemiological pipeline for acute inpatient studies, featuring leak-free index stay sampling, temporal feature extraction, Athena concept hierarchy rollups, LOINC laboratory consolidation, stratified Table 1 generation, and data drift reconciliation.
+
+### 1. Build Inpatient Readmission Cohort
+
+Constructs index inpatient stays (`visit_concept_id = 9201`) among adult patients ($\ge 18$) with length of stay $\ge 1$ day, discharged alive, and verified 30-day follow-up (requiring either a readmission or confirmed clinical contact $\ge 30$ days post-discharge to prevent right-censoring):
+
+```r
+library(omopduckdb)
+
+con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
+
+# Build cohort into OMOP cohort table (cohort_definition_id = 1)
+cohort_df <- build_readmission_cohort(
+  con,
+  washin_days = 365,
+  followup_days = 30,
+  index_rule = "random",
+  random_seed = 42,
+  require_verified_followup = TRUE,
+  target_table = "cohort"
+)
+```
+
+In Python:
+```python
+import duckdb
+from omop_etl import build_readmission_cohort
+
+con = duckdb.connect("omop_cdm.duckdb")
+cohort_df = build_readmission_cohort(
+    con,
+    washin_days=365,
+    followup_days=30,
+    index_rule="random",
+    random_seed=42,
+    require_verified_followup=True,
+    target_table="cohort"
+)
+```
+
+### 2. Extract Temporal Utilization & Demographic Features
+
+Aggregates windowed baseline healthcare utilization (IP, ED, OP encounter counts, days since prior visit, prior 30-day readmissions in lookback), index length of stay, discharge disposition, and demographics:
+
+```r
+temporal_features <- extract_temporal_features(
+  con,
+  cohort_table = "cohort",
+  cohort_definition_id = 1,
+  lookback_days = 365
+)
+```
+
+In Python:
+```python
+from omop_etl import extract_temporal_features
+
+temporal_features = extract_temporal_features(
+    con,
+    cohort_table="cohort",
+    cohort_definition_id=1,
+    lookback_days=365
+)
+```
+
+### 3. Athena Concept Hierarchy Rollup & Consolidated Measurements
+
+Traverse Athena's `concept_ancestor` table to aggregate medication or condition classes, and extract consolidated lab panels and physical vitals using acute pre-discharge aggregation strategies:
+
+```r
+# Aggregate medication exposure using Athena ancestor traversal
+med_features <- aggregate_concept_sets(
+  con,
+  cohort_table = "cohort",
+  cohort_definition_id = 1,
+  domain = "drug",
+  concept_sets = DEFAULT_MEDICATION_CONCEPTS,
+  lookback_days = 365
+)
+
+# Extract acute pre-discharge laboratory and vital measurements
+lab_features <- extract_measurements(
+  con,
+  cohort_table = "cohort",
+  cohort_definition_id = 1,
+  loinc_map = DEFAULT_LAB_LOINCS,
+  strategy = "last_before_discharge"
+)
+```
+
+In Python:
+```python
+from omop_etl import (
+    aggregate_concept_sets,
+    extract_measurements,
+    DEFAULT_MEDICATION_CONCEPTS,
+    DEFAULT_LAB_LOINCS
+)
+
+med_features = aggregate_concept_sets(
+    con,
+    cohort_table="cohort",
+    cohort_definition_id=1,
+    domain="drug",
+    concept_sets=DEFAULT_MEDICATION_CONCEPTS,
+    lookback_days=365
+)
+
+lab_features = extract_measurements(
+    con,
+    cohort_table="cohort",
+    cohort_definition_id=1,
+    loinc_map=DEFAULT_LAB_LOINCS,
+    strategy="last_before_discharge"
+)
+```
+
+### 4. Stratified Table 1 Generation & Completeness Matrix
+
+Generates baseline descriptive tables (continuous: Mean +/- SD, Median [IQR]; categorical: N [%]) stratified by outcome (e.g., `readmitted_30d`), calculating Standardized Mean Differences (SMD) and statistical tests, along with a Table 1b completeness audit:
+
+```r
+table1_out <- generate_table1(
+  patient_df,
+  strata = "readmitted_30d",
+  continuous_vars = c("age_at_admission", "los_days", "prior_ed_visits"),
+  cat_vars = c("gender", "race", "tobacco_status")
+)
+
+# Baseline summary with SMD and p-values
+print(table1_out$table1)
+
+# Missingness and completeness audit
+print(table1_out$table1b_missingness)
+```
+
+In Python:
+```python
+from omop_etl import generate_table1
+
+t1_df, t1b_df = generate_table1(
+    patient_df,
+    strata="readmitted_30d",
+    continuous_vars=["age_at_admission", "los_days", "prior_ed_visits"],
+    cat_vars=["gender", "race", "tobacco_status"]
+)
+```
+
+### 5. Benchmark Reconciliation & Validation Harness
+
+Validates prospective OMOP Table 1 statistics against benchmark datasets with configurable absolute tolerance thresholds, flagging distribution drift and missing features:
+
+```r
+reconciliation <- validate_table1_reconciliation(
+  omop_table1 = table1_out$table1,
+  source_table1 = benchmark_table1,
+  tolerance = 0.05
+)
+
+if (!reconciliation$passed) {
+  warning("Table 1 discrepancy detected!")
+  print(reconciliation$discrepancies)
+}
+```
+
+In Python:
+```python
+from omop_etl import validate_table1_reconciliation
+
+reconciliation = validate_table1_reconciliation(
+    omop_table1=t1_df,
+    source_table1=benchmark_table1,
+    tolerance=0.05
+)
+print("Reconciliation Passed:", reconciliation["passed"])
+```
+
 ## Testing
 
 `tests/fixtures/pcornet_sample/` is a small set of fabricated (not real)

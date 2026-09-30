@@ -27,12 +27,18 @@ read_local_config <- function(filename) {
 #' @keywords internal
 #' @noRd
 load_mapping_macros <- function(con) {
-  macros_path <- system.file("sql", "mapping_macros.sql", package = "omopduckdb")
-  if (!file.exists(macros_path)) {
-    macros_path <- file.path(getwd(), "inst", "sql", "mapping_macros.sql")
+  macro_files <- c("mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql")
+  for (mf in macro_files) {
+    macros_path <- system.file("sql", mf, package = "omopduckdb")
+    if (!file.exists(macros_path)) {
+      macros_path <- file.path(getwd(), "inst", "sql", mf)
+    }
+    if (file.exists(macros_path)) {
+      DBI::dbExecute(con, paste(readLines(macros_path), collapse = "\n"))
+    }
   }
-  DBI::dbExecute(con, paste(readLines(macros_path), collapse = "\n"))
 }
+
 
 #' @keywords internal
 #' @noRd
@@ -56,7 +62,17 @@ load_mapping_macros <- function(con) {
   LAB_LOINC = c("LAB_LOINC", "LOINC"),
   FACILITYID = c("FACILITYID", "FACILITY_ID"),
   FACILITY_TYPE = c("FACILITY_TYPE", "FACILITY_LOCATION"),
-  FACILITY_LOCATION = c("FACILITY_LOCATION", "FACILITY_LOCATION_ZIP")
+  FACILITY_LOCATION = c("FACILITY_LOCATION", "FACILITY_LOCATION_ZIP"),
+  ADDRESSID = c("ADDRESSID", "ADDRESS_ID"),
+  ADDRESS_CITY = c("ADDRESS_CITY", "CITY"),
+  ADDRESS_STATE = c("ADDRESS_STATE", "STATE"),
+  ADDRESS_ZIP5 = c("ADDRESS_ZIP5", "ZIP5", "ZIP"),
+  ADDRESS_ZIP9 = c("ADDRESS_ZIP9", "ZIP9"),
+  ADDRESS_PREFERRED = c("ADDRESS_PREFERRED", "PREFERRED"),
+  ADDRESS_USE = c("ADDRESS_USE", "USE"),
+  ADDRESS_TYPE = c("ADDRESS_TYPE", "TYPE"),
+  ADDRESS_PERIOD_START = c("ADDRESS_PERIOD_START", "PERIOD_START"),
+  ADDRESS_PERIOD_END = c("ADDRESS_PERIOD_END", "PERIOD_END")
 )
 
 #' @keywords internal

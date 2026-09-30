@@ -1,4 +1,4 @@
-"""omop_etl: PCORnet to OMOP CDM v5.4 ETL, vocabulary loaders, and remapping tools in DuckDB."""
+"""omop_etl: PCORnet to OMOP CDM v5.4 ETL, vocabulary loaders, federation, cohort helpers, DQD, and ML feature extraction in DuckDB."""
 
 from omop_etl.build_omop_cdm import (
     attach_central_vocabulary,
@@ -8,6 +8,7 @@ from omop_etl.build_omop_cdm import (
     build_schema,
     etl_pcornet,
     load_care_site,
+    load_location,
     load_cdm_source,
     load_condition_occurrence,
     load_death,
@@ -18,6 +19,30 @@ from omop_etl.build_omop_cdm import (
     load_provider,
     load_visit_occurrence,
     load_vital,
+)
+from omop_etl.cohort import (
+    build_readmission_cohort,
+    combine_cohorts,
+    compute_attrition,
+    create_cohort,
+    ensure_cohort_tables,
+    get_cohort_summary,
+    get_concept_ancestors,
+    get_concept_descendants,
+    get_concept_relationships,
+    resolve_concept_set,
+)
+from omop_etl.dqd import (
+    run_dqd,
+)
+from omop_etl.export import (
+    export_cdm,
+)
+from omop_etl.features import (
+    aggregate_concept_sets,
+    extract_measurements,
+    extract_patient_features,
+    extract_temporal_features,
 )
 from omop_etl.federation import (
     create_federated_consortium,
@@ -31,6 +56,13 @@ from omop_etl.remapping import (
     remap_all,
     remap_cdm_table,
 )
+from omop_etl.table1 import (
+    DEFAULT_LAB_LOINCS,
+    DEFAULT_MEDICATION_CONCEPTS,
+    DEFAULT_VITAL_LOINCS,
+    generate_table1,
+    validate_table1_reconciliation,
+)
 from omop_etl.vocabulary import (
     check_vocabulary_version,
     load_vocabulary,
@@ -42,6 +74,7 @@ __all__ = [
     "create_federated_consortium",
     "etl_pcornet",
     "load_care_site",
+    "load_location",
     "load_provider",
     "load_person",
     "load_visit_occurrence",
@@ -62,7 +95,33 @@ __all__ = [
     "export_unmapped_codes",
     "remap_cdm_table",
     "remap_all",
+    # Cohort & Hierarchy Helpers
+    "ensure_cohort_tables",
+    "get_concept_descendants",
+    "get_concept_ancestors",
+    "get_concept_relationships",
+    "resolve_concept_set",
+    "create_cohort",
+    "compute_attrition",
+    "combine_cohorts",
+    "get_cohort_summary",
+    "build_readmission_cohort",
+    # DQD Engine
+    "run_dqd",
+    # Feature Extractors & Concept Aggregators
+    "extract_patient_features",
+    "extract_temporal_features",
+    "aggregate_concept_sets",
+    "extract_measurements",
+    # Table 1 & Reconciliation
+    "generate_table1",
+    "validate_table1_reconciliation",
+    "DEFAULT_LAB_LOINCS",
+    "DEFAULT_VITAL_LOINCS",
+    "DEFAULT_MEDICATION_CONCEPTS",
+    # Multi-Target Export
+    "export_cdm",
 ]
 
-__version__ = "0.2.2"
+__version__ = "0.4.0"
 

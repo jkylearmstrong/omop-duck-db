@@ -50,6 +50,16 @@ DEFAULT_ALIASES = {
     "FACILITYID": ["FACILITYID", "FACILITY_ID"],
     "FACILITY_TYPE": ["FACILITY_TYPE", "FACILITY_LOCATION"],
     "FACILITY_LOCATION": ["FACILITY_LOCATION", "FACILITY_LOCATION_ZIP"],
+    "ADDRESSID": ["ADDRESSID", "ADDRESS_ID"],
+    "ADDRESS_CITY": ["ADDRESS_CITY", "CITY"],
+    "ADDRESS_STATE": ["ADDRESS_STATE", "STATE"],
+    "ADDRESS_ZIP5": ["ADDRESS_ZIP5", "ZIP5", "ZIP"],
+    "ADDRESS_ZIP9": ["ADDRESS_ZIP9", "ZIP9"],
+    "ADDRESS_PREFERRED": ["ADDRESS_PREFERRED", "PREFERRED"],
+    "ADDRESS_USE": ["ADDRESS_USE", "USE"],
+    "ADDRESS_TYPE": ["ADDRESS_TYPE", "TYPE"],
+    "ADDRESS_PERIOD_START": ["ADDRESS_PERIOD_START", "PERIOD_START"],
+    "ADDRESS_PERIOD_END": ["ADDRESS_PERIOD_END", "PERIOD_END"],
 }
 
 
@@ -112,9 +122,11 @@ def build_schema(con):
 
 
 def load_macros(con):
-    macros_path = _resource_path("sql", "mapping_macros.sql")
-    with open(macros_path) as f:
-        con.execute(f.read())
+    for macro_file in ["mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql"]:
+        macros_path = _resource_path("sql", macro_file)
+        if os.path.exists(macros_path):
+            with open(macros_path) as f:
+                con.execute(f.read())
 
 
 def attach_central_vocabulary(con, vocab_db_path, temporary=True):
@@ -331,6 +343,88 @@ def load_person(con, source_dir, site_id=None, disambiguate_patids=False):
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PATID ORDER BY parse_omop_date(src.BIRTH_DATE) NULLS LAST) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_demographic;")
+
+
+def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
+    """Maps PCORnet lds_address_history.csv into OMOP location and updates person.location_id."""
+    path = find_source_file(source_dir, "lds_address_history")
+    if path is None:
+        path = find_source_file(source_dir, "address_history")
+    if path is None:
+        print("Skipping LOCATION - no lds_address_history.csv found (optional table)")
+        return
+
+    prepare_source_view(
+        con,
+        "_temp_address_history",
+        path,
+        [
+            "ADDRESSID", "PATID", "ADDRESS_USE", "ADDRESS_TYPE", "ADDRESS_PREFERRED",
+            "ADDRESS_CITY", "ADDRESS_STATE", "ADDRESS_ZIP5", "ADDRESS_ZIP9",
+            "ADDRESS_PERIOD_START", "ADDRESS_PERIOD_END"
+        ],
+    )
+
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+
+    run_insert(con, "LOCATION (from LDS_ADDRESS_HISTORY)", """
+        INSERT INTO location (
+            location_id,
+            address_1,
+            address_2,
+            city,
+            state,
+            zip,
+            county,
+            location_source_value,
+            country_concept_id,
+            country_source_value,
+            latitude,
+            longitude
+        )
+        SELECT
+            pcornet_id(COALESCE(UPPER(ADDRESS_STATE), '') || '_' || COALESCE(ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(ADDRESS_CITY), '')) AS location_id,
+            NULL AS address_1,
+            NULL AS address_2,
+            ADDRESS_CITY AS city,
+            UPPER(ADDRESS_STATE) AS state,
+            COALESCE(ADDRESS_ZIP9, ADDRESS_ZIP5) AS zip,
+            NULL AS county,
+            COALESCE(ADDRESS_ZIP5, '') || ', ' || COALESCE(ADDRESS_STATE, '') AS location_source_value,
+            4330426 AS country_concept_id,
+            'US' AS country_source_value,
+            NULL AS latitude,
+            NULL AS longitude
+        FROM _temp_address_history
+        WHERE (ADDRESS_STATE IS NOT NULL OR ADDRESS_ZIP5 IS NOT NULL OR ADDRESS_CITY IS NOT NULL)
+          AND pcornet_id(COALESCE(UPPER(ADDRESS_STATE), '') || '_' || COALESCE(ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(ADDRESS_CITY), '')) NOT IN (
+              SELECT location_id FROM location
+          )
+        GROUP BY ADDRESS_CITY, ADDRESS_STATE, ADDRESS_ZIP5, ADDRESS_ZIP9;
+    """)
+
+    con.execute(f"""
+        UPDATE person
+        SET location_id = loc.location_id
+        FROM (
+            SELECT 
+                {patid_expr} AS patid_key,
+                pcornet_id(COALESCE(UPPER(src.ADDRESS_STATE), '') || '_' || COALESCE(src.ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(src.ADDRESS_CITY), '')) AS location_id
+            FROM _temp_address_history src
+            WHERE src.PATID IS NOT NULL
+              AND (src.ADDRESS_STATE IS NOT NULL OR src.ADDRESS_ZIP5 IS NOT NULL OR src.ADDRESS_CITY IS NOT NULL)
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY src.PATID 
+                ORDER BY 
+                    CASE UPPER(COALESCE(src.ADDRESS_PREFERRED, 'N')) WHEN 'Y' THEN 1 ELSE 2 END,
+                    src.ADDRESS_PERIOD_END DESC NULLS LAST,
+                    src.ADDRESS_PERIOD_START DESC NULLS LAST,
+                    src.ADDRESSID DESC
+            ) = 1
+        ) loc
+        WHERE person.person_source_value = loc.patid_key;
+    """)
+    con.execute("DROP VIEW IF EXISTS _temp_address_history;")
 
 
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
@@ -1169,6 +1263,7 @@ def etl_pcornet(
     load_care_site(con, source_dir, site_id=site_id, site_anon=site_anon, site_name=site_name)
     load_provider(con, source_dir)
     load_person(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_location(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_visit_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_condition_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_procedure_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
@@ -1198,7 +1293,7 @@ def main():
     parser.add_argument("--temp-dir", default=None, help="DuckDB disk spill temporary directory")
     parser.add_argument("--site-id", type=int, default=None, help="Numeric site identifier (e.g. 1 to 5)")
     parser.add_argument("--site-anon", default=None, help="Publication pseudonym (e.g. 'Site A')")
-    parser.add_argument("--site-name", default=None, help="Optional institutional name or internal descriptor (e.g. 'Temple')")
+    parser.add_argument("--site-name", default=None, help="Optional institutional name or internal descriptor (e.g. 'Hospital System A')")
     parser.add_argument("--disambiguate-patids", action="store_true", help="Suffix PATID with -<site_id> to disambiguate patient IDs across sites")
     args = parser.parse_args()
 

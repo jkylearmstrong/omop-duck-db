@@ -31,7 +31,7 @@ to attach in read-only mode with zero-copy views.}
 
 \item{site_anon}{Optional publication pseudonym (e.g. "Site A").}
 
-\item{site_name}{Optional institutional name or internal descriptor (e.g. "Temple").}
+\item{site_name}{Optional institutional name or internal descriptor (e.g. "Hospital System A").}
 
 \item{disambiguate_patids}{Logical. If \code{TRUE}, formats \code{person_source_value} as
 \code{src.PATID || '-' || site_id} and derives surrogate keys via \code{pcornet_id(src.PATID || '-' || site_id)}.}
