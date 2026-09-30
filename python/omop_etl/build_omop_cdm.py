@@ -114,6 +114,31 @@ def load_macros(con):
         con.execute(f.read())
 
 
+def attach_central_vocabulary(con, vocab_db_path, temporary=True):
+    """Attach an external DuckDB database containing Athena vocabulary tables and
+    create zero-copy views, avoiding copying 10-15 GB of vocabulary data into the local database."""
+    if not os.path.exists(vocab_db_path):
+        raise FileNotFoundError(f"Central vocabulary database not found: {vocab_db_path}")
+
+    normalized_path = os.path.abspath(vocab_db_path).replace("\\", "/")
+    con.execute(f"ATTACH '{normalized_path}' AS central_vocab (READ_ONLY);")
+    vocab_tables = [
+        "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
+        "vocabulary", "relationship", "concept_class", "domain", "drug_strength"
+    ]
+    for tbl in vocab_tables:
+        has_tbl = con.execute(
+            f"SELECT 1 FROM information_schema.tables WHERE table_catalog = 'central_vocab' AND table_name = '{tbl}'"
+        ).fetchone()
+        if has_tbl:
+            if temporary:
+                con.execute(f"CREATE OR REPLACE TEMPORARY VIEW {tbl} AS SELECT * FROM central_vocab.{tbl};")
+            else:
+                con.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE;")
+                con.execute(f"CREATE OR REPLACE VIEW {tbl} AS SELECT * FROM central_vocab.{tbl};")
+    print(f"Attached central vocabulary from {vocab_db_path} with zero-copy views.")
+
+
 def load_provider(con, source_dir):
     path = find_source_file(source_dir, "provider")
     if path is None:
@@ -191,7 +216,14 @@ def load_person(con, source_dir):
         INSERT INTO person
         SELECT
             ROW_NUMBER() OVER (ORDER BY src.PATID) + (SELECT COALESCE(MAX(person_id), 0) FROM person) AS person_id,
-            CASE UPPER(src.SEX) WHEN 'M' THEN 8507 WHEN 'F' THEN 8532 ELSE 0 END AS gender_concept_id,
+            CASE UPPER(src.SEX)
+                WHEN 'M' THEN 8507  -- Male
+                WHEN 'F' THEN 8532  -- Female
+                WHEN 'OT' THEN 8521 -- Other
+                WHEN 'UN' THEN 8551 -- Unknown
+                WHEN 'NI' THEN 8551 -- No information
+                ELSE 0
+            END AS gender_concept_id,
             YEAR(parse_omop_date(src.BIRTH_DATE)) AS year_of_birth,
             MONTH(parse_omop_date(src.BIRTH_DATE)) AS month_of_birth,
             DAY(parse_omop_date(src.BIRTH_DATE)) AS day_of_birth,
@@ -245,9 +277,12 @@ def load_visit_occurrence(con, source_dir):
             COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
             CASE UPPER(src.ENC_TYPE)
                 WHEN 'IP' THEN 9201 -- Inpatient
+                WHEN 'OS' THEN 9201 -- Observation Services
                 WHEN 'ED' THEN 9203 -- Emergency
                 WHEN 'AV' THEN 9202 -- Outpatient
                 WHEN 'OA' THEN 9202 -- Outpatient
+                WHEN 'OT' THEN 9202 -- Other Ambulatory
+                WHEN 'TH' THEN 5083 -- Telehealth
                 ELSE 0
             END AS visit_concept_id,
             parse_omop_date(src.ADMIT_DATE) AS visit_start_date,
@@ -508,6 +543,144 @@ def load_measurement(con, source_dir):
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.LAB_RESULT_CM_ID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_lab_result;")
+
+
+def load_vital(con, source_dir):
+    path = find_source_file(source_dir, "vital")
+    if path is None:
+        print("Skipping VITAL - no vital.csv found (optional table)")
+        return
+
+    prepare_source_view(
+        con,
+        "_temp_vital",
+        path,
+        [
+            "VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
+            "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC"
+        ],
+    )
+
+    run_insert(con, "MEASUREMENT (from VITAL)", f"""
+        WITH unpivoted_vitals AS (
+          SELECT
+            VITALID || '_HT' AS vital_sub_id,
+            PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+            '8302-2' AS loinc_code,
+            TRY_CAST(HT AS DOUBLE) AS val_num,
+            '[in_us]' AS unit_str,
+            9326 AS unit_concept_id
+          FROM _temp_vital
+          WHERE HT IS NOT NULL AND TRY_CAST(HT AS DOUBLE) IS NOT NULL AND TRY_CAST(HT AS DOUBLE) > 0
+
+          UNION ALL
+
+          SELECT
+            VITALID || '_WT' AS vital_sub_id,
+            PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+            '29463-7' AS loinc_code,
+            TRY_CAST(WT AS DOUBLE) AS val_num,
+            '[lb_av]' AS unit_str,
+            8739 AS unit_concept_id
+          FROM _temp_vital
+          WHERE WT IS NOT NULL AND TRY_CAST(WT AS DOUBLE) IS NOT NULL AND TRY_CAST(WT AS DOUBLE) > 0
+
+          UNION ALL
+
+          SELECT
+            VITALID || '_BMI' AS vital_sub_id,
+            PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+            '39156-5' AS loinc_code,
+            TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) AS val_num,
+            'kg/m2' AS unit_str,
+            9531 AS unit_concept_id
+          FROM _temp_vital
+          WHERE COALESCE(ORIGINAL_BMI, BMI) IS NOT NULL
+            AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) IS NOT NULL
+            AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) > 0
+
+          UNION ALL
+
+          SELECT
+            VITALID || '_SYSTOLIC' AS vital_sub_id,
+            PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+            '8480-6' AS loinc_code,
+            TRY_CAST(SYSTOLIC AS DOUBLE) AS val_num,
+            'mm[Hg]' AS unit_str,
+            8876 AS unit_concept_id
+          FROM _temp_vital
+          WHERE SYSTOLIC IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) > 0
+
+          UNION ALL
+
+          SELECT
+            VITALID || '_DIASTOLIC' AS vital_sub_id,
+            PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+            '8462-4' AS loinc_code,
+            TRY_CAST(DIASTOLIC AS DOUBLE) AS val_num,
+            'mm[Hg]' AS unit_str,
+            8876 AS unit_concept_id
+          FROM _temp_vital
+          WHERE DIASTOLIC IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) > 0
+        )
+        INSERT INTO measurement
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY src.vital_sub_id) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
+            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(
+                stcm.target_concept_id,
+                cr.concept_id_2,
+                CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+                0
+            ) AS measurement_concept_id,
+            parse_omop_date(src.MEASURE_DATE) AS measurement_date,
+            parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS measurement_datetime,
+            src.MEASURE_TIME AS measurement_time,
+            {TYPE_CONCEPT_EHR_MEASUREMENT} AS measurement_type_concept_id,
+            0 AS operator_concept_id,
+            src.val_num AS value_as_number,
+            0 AS value_as_concept_id,
+            src.unit_concept_id AS unit_concept_id,
+            NULL AS range_low,
+            NULL AS range_high,
+            NULL AS provider_id,
+            COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
+            NULL AS visit_detail_id,
+            src.loinc_code AS measurement_source_value,
+            COALESCE(c.concept_id, 0) AS measurement_source_concept_id,
+            src.unit_str AS unit_source_value,
+            src.unit_concept_id AS unit_source_concept_id,
+            CAST(src.val_num AS VARCHAR) AS value_source_value,
+            NULL AS measurement_event_id,
+            0 AS meas_event_field_concept_id
+        FROM unpivoted_vitals src
+        LEFT JOIN person p
+          ON p.person_source_value = src.PATID
+        LEFT JOIN visit_occurrence vo
+          ON vo.visit_source_value = src.ENCOUNTERID
+        LEFT JOIN concept c
+          ON c.vocabulary_id = 'LOINC'
+         AND c.concept_code = src.loinc_code
+        LEFT JOIN (
+            SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
+            FROM concept_relationship
+            WHERE relationship_id = 'Maps to'
+            GROUP BY concept_id_1
+        ) cr
+          ON cr.concept_id_1 = c.concept_id
+        LEFT JOIN (
+            SELECT source_code, MIN(target_concept_id) AS target_concept_id
+            FROM source_to_concept_map
+            WHERE source_vocabulary_id = 'LOINC'
+              AND (invalid_reason IS NULL OR invalid_reason = '')
+              AND (valid_end_date IS NULL OR valid_end_date >= CURRENT_DATE)
+            GROUP BY source_code
+        ) stcm
+          ON stcm.source_code = src.loinc_code
+        WHERE src.vital_sub_id IS NOT NULL
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY src.vital_sub_id) = 1;
+    """)
+    con.execute("DROP VIEW IF EXISTS _temp_vital;")
 
 
 def load_drug_exposure(con, source_dir):
@@ -844,7 +1017,7 @@ def load_cdm_source(con, cdm_source_name="PCORnet -> DuckDB OMOP CDM", cdm_holde
     """)
 
 
-def etl_pcornet(source_dir, db_path="omop_cdm.duckdb", build_schema_flag=False, memory_limit=None, threads=None, temp_dir=None):
+def etl_pcornet(source_dir, db_path="omop_cdm.duckdb", build_schema_flag=False, memory_limit=None, threads=None, temp_dir=None, central_vocab=None):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline."""
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
@@ -858,6 +1031,9 @@ def etl_pcornet(source_dir, db_path="omop_cdm.duckdb", build_schema_flag=False, 
         os.makedirs(temp_dir, exist_ok=True)
         con.execute(f"SET temp_directory = '{temp_dir}';")
 
+    if central_vocab:
+        attach_central_vocabulary(con, central_vocab, temporary=True)
+
     if build_schema_flag:
         build_schema(con)
     load_macros(con)
@@ -868,6 +1044,7 @@ def etl_pcornet(source_dir, db_path="omop_cdm.duckdb", build_schema_flag=False, 
     load_condition_occurrence(con, source_dir)
     load_procedure_occurrence(con, source_dir)
     load_measurement(con, source_dir)
+    load_vital(con, source_dir)
     load_drug_exposure(con, source_dir)
     load_death(con, source_dir)
 
@@ -885,6 +1062,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", required=True, help="Directory containing PCORnet-format CSVs")
     parser.add_argument("--db-path", default="omop_cdm.duckdb", help="Path to the OMOP CDM DuckDB file")
+    parser.add_argument("--central-vocab", default=None, help="Optional path to central vocabulary DuckDB to attach with zero-copy views")
     parser.add_argument("--build-schema", action="store_true", help="(Re)create CDM tables before loading")
     parser.add_argument("--memory-limit", default=None, help="DuckDB memory limit (e.g. 16GB)")
     parser.add_argument("--threads", type=int, default=None, help="DuckDB worker threads")
@@ -898,6 +1076,7 @@ def main():
         memory_limit=args.memory_limit,
         threads=args.threads,
         temp_dir=args.temp_dir,
+        central_vocab=args.central_vocab,
     )
 
 

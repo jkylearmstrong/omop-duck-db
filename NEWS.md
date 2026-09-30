@@ -1,3 +1,17 @@
+# omopduckdb 0.2.1
+
+### Real-World Multi-Center Consortium Enhancements
+- **Extended Encounter Type Mapping**: Mapped additional high-volume PCORnet encounter types to standard OMOP visit concepts: Telehealth (`TH` $\rightarrow$ `5083`), Observation Services (`OS` $\rightarrow$ `9201`), and Other Ambulatory (`OT` $\rightarrow$ `9202`), preventing millions of clinical encounters from dropping to unmapped `0`.
+- **Gender Standardization**: Expanded PCORnet `SEX` mapping to standard OHDSI concepts for Other (`OT` $\rightarrow$ `8521`), Unknown (`UN` $\rightarrow$ `8551`), and No Information (`NI` $\rightarrow$ `8551`), reducing OHDSI DQD unmapped gender flags.
+- **Vital Signs Ingestion (`vital.csv`)**: Added modular `load_vital()` step unpivoting PCORnet vital signs into standard LOINC measurements in the `measurement` table:
+  - Height (`HT`) $\rightarrow$ LOINC `8302-2` (Body height, unit `[in_us]`, concept `9326`)
+  - Weight (`WT`) $\rightarrow$ LOINC `29463-7` (Body weight, unit `[lb_av]`, concept `8739`)
+  - Body Mass Index (`ORIGINAL_BMI` / `BMI`) $\rightarrow$ LOINC `39156-5` (BMI, unit `kg/m2`, concept `9531`)
+  - Systolic Blood Pressure (`SYSTOLIC`) $\rightarrow$ LOINC `8480-6` (Systolic BP, unit `mm[Hg]`, concept `8876`)
+  - Diastolic Blood Pressure (`DIASTOLIC`) $\rightarrow$ LOINC `8462-4` (Diastolic BP, unit `mm[Hg]`, concept `8876`)
+  - Skips gracefully if `vital.csv` is absent, preserving modular pipeline execution.
+- **Central Vocabulary Support (`attach_central_vocabulary`)**: Added `--central-vocab <path>` argument and helper function `attach_central_vocabulary()` enabling multi-site deployments to attach a shared, read-only 15 GB Athena vocabulary database via DuckDB zero-copy views, eliminating redundant disk duplication across consortium sites.
+
 # omopduckdb 0.2.0
 
 ### Architecture & Production Hardening

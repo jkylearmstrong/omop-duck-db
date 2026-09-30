@@ -16,6 +16,7 @@ reference:
   contents:
   - build_schema
   - load_vocabulary
+  - attach_central_vocabulary
   - load_from_bigquery
   - check_vocabulary_version
 - title: PCORnet ETL and synthesizers

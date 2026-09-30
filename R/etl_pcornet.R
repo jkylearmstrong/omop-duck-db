@@ -10,9 +10,11 @@
 #'   case-insensitively. Any table whose source file isn't found is skipped.
 #' @param db_path Path to the DuckDB database file (schema + vocabulary must
 #'   already exist).
+#' @param central_vocab Optional path to an existing central vocabulary DuckDB database
+#'   to attach in read-only mode with zero-copy views.
 #' @return Invisibly, `db_path`.
 #' @export
-etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb") {
+etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb", central_vocab = NULL) {
   if (!dir.exists(source_dir)) {
     stop("Source directory not found: ", source_dir)
   }
@@ -22,6 +24,11 @@ etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb") {
     try(DBI::dbDisconnect(con, shutdown = TRUE), silent = TRUE)
     gc()
   })
+
+  if (!is.null(central_vocab)) {
+    attach_central_vocabulary(con, central_vocab, temporary = TRUE)
+  }
+
   load_mapping_macros(con)
 
   .load_provider(con, source_dir)
@@ -30,6 +37,7 @@ etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb") {
   .load_condition_occurrence(con, source_dir)
   .load_procedure_occurrence(con, source_dir)
   .load_measurement(con, source_dir)
+  .load_vital(con, source_dir)
   .load_drug_exposure(con, source_dir)
   .load_death(con, source_dir)
 
@@ -40,6 +48,46 @@ etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb") {
 
   cat("PCORnet ETL complete.\n")
   invisible(db_path)
+}
+
+#' Attach a Central Vocabulary Database via DuckDB Zero-Copy Views
+#'
+#' Attaches an existing DuckDB database containing Athena vocabulary tables in
+#' read-only mode and registers zero-copy views, avoiding copying 10-15 GB of
+#' vocabulary tables into each site CDM database.
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param vocab_db_path Path to the existing DuckDB database containing vocabulary tables.
+#' @param temporary Logical. If `TRUE` (default), creates temporary views for the current
+#'   session. If `FALSE`, creates persistent views in the database.
+#' @return Invisibly, `con`.
+#' @export
+attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
+  if (!file.exists(vocab_db_path)) {
+    stop("Central vocabulary database not found: ", vocab_db_path)
+  }
+  normalized_path <- gsub("\\\\", "/", normalizePath(vocab_db_path, mustWork = TRUE))
+  DBI::dbExecute(con, sprintf("ATTACH '%s' AS central_vocab (READ_ONLY);", normalized_path))
+  vocab_tables <- c(
+    "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
+    "vocabulary", "relationship", "concept_class", "domain", "drug_strength"
+  )
+  for (tbl in vocab_tables) {
+    has_tbl <- DBI::dbGetQuery(
+      con,
+      sprintf("SELECT 1 FROM information_schema.tables WHERE table_catalog = 'central_vocab' AND table_name = '%s'", tbl)
+    )
+    if (nrow(has_tbl) > 0) {
+      if (temporary) {
+        DBI::dbExecute(con, sprintf("CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT * FROM central_vocab.%s;", tbl, tbl))
+      } else {
+        try(DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s CASCADE;", tbl)), silent = TRUE)
+        DBI::dbExecute(con, sprintf("CREATE OR REPLACE VIEW %s AS SELECT * FROM central_vocab.%s;", tbl, tbl))
+      }
+    }
+  }
+  cat("Attached central vocabulary from ", vocab_db_path, " with zero-copy views.\n", sep = "")
+  invisible(con)
 }
 
 # EHR-derived record, per the OMOP Type Concept vocabulary.
@@ -124,7 +172,14 @@ etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb") {
     INSERT INTO person
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.PATID) + (SELECT COALESCE(MAX(person_id), 0) FROM person) AS person_id,
-        CASE UPPER(src.SEX) WHEN 'M' THEN 8507 WHEN 'F' THEN 8532 ELSE 0 END AS gender_concept_id,
+        CASE UPPER(src.SEX)
+            WHEN 'M' THEN 8507  -- Male
+            WHEN 'F' THEN 8532  -- Female
+            WHEN 'OT' THEN 8521 -- Other
+            WHEN 'UN' THEN 8551 -- Unknown
+            WHEN 'NI' THEN 8551 -- No information
+            ELSE 0
+        END AS gender_concept_id,
         YEAR(parse_omop_date(src.BIRTH_DATE)) AS year_of_birth,
         MONTH(parse_omop_date(src.BIRTH_DATE)) AS month_of_birth,
         DAY(parse_omop_date(src.BIRTH_DATE)) AS day_of_birth,
@@ -173,9 +228,12 @@ etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb") {
         COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
         CASE UPPER(src.ENC_TYPE)
             WHEN 'IP' THEN 9201 -- Inpatient
+            WHEN 'OS' THEN 9201 -- Observation Services
             WHEN 'ED' THEN 9203 -- Emergency
             WHEN 'AV' THEN 9202 -- Outpatient
             WHEN 'OA' THEN 9202 -- Outpatient
+            WHEN 'OT' THEN 9202 -- Other Ambulatory
+            WHEN 'TH' THEN 5083 -- Telehealth
             ELSE 0
         END AS visit_concept_id,
         parse_omop_date(src.ADMIT_DATE) AS visit_start_date,
@@ -425,6 +483,139 @@ etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb") {
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.LAB_RESULT_CM_ID) = 1;
   ", .TYPE_CONCEPT_EHR_MEASUREMENT, .today_iso()))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_lab_result;")
+}
+
+.load_vital <- function(con, source_dir) {
+  path <- find_source_file(source_dir, "vital")
+  if (is.null(path)) {
+    cat("Skipping VITAL - no vital.csv found (optional table)\n")
+    return(invisible(NULL))
+  }
+  prepare_source_view(
+    con, "_temp_vital", path,
+    c("VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
+      "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC")
+  )
+  run_insert(con, "MEASUREMENT (from VITAL)", sprintf("
+    WITH unpivoted_vitals AS (
+      SELECT
+        VITALID || '_HT' AS vital_sub_id,
+        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+        '8302-2' AS loinc_code,
+        TRY_CAST(HT AS DOUBLE) AS val_num,
+        '[in_us]' AS unit_str,
+        9326 AS unit_concept_id
+      FROM _temp_vital
+      WHERE HT IS NOT NULL AND TRY_CAST(HT AS DOUBLE) IS NOT NULL AND TRY_CAST(HT AS DOUBLE) > 0
+
+      UNION ALL
+
+      SELECT
+        VITALID || '_WT' AS vital_sub_id,
+        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+        '29463-7' AS loinc_code,
+        TRY_CAST(WT AS DOUBLE) AS val_num,
+        '[lb_av]' AS unit_str,
+        8739 AS unit_concept_id
+      FROM _temp_vital
+      WHERE WT IS NOT NULL AND TRY_CAST(WT AS DOUBLE) IS NOT NULL AND TRY_CAST(WT AS DOUBLE) > 0
+
+      UNION ALL
+
+      SELECT
+        VITALID || '_BMI' AS vital_sub_id,
+        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+        '39156-5' AS loinc_code,
+        TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) AS val_num,
+        'kg/m2' AS unit_str,
+        9531 AS unit_concept_id
+      FROM _temp_vital
+      WHERE COALESCE(ORIGINAL_BMI, BMI) IS NOT NULL
+        AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) IS NOT NULL
+        AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) > 0
+
+      UNION ALL
+
+      SELECT
+        VITALID || '_SYSTOLIC' AS vital_sub_id,
+        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+        '8480-6' AS loinc_code,
+        TRY_CAST(SYSTOLIC AS DOUBLE) AS val_num,
+        'mm[Hg]' AS unit_str,
+        8876 AS unit_concept_id
+      FROM _temp_vital
+      WHERE SYSTOLIC IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) > 0
+
+      UNION ALL
+
+      SELECT
+        VITALID || '_DIASTOLIC' AS vital_sub_id,
+        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
+        '8462-4' AS loinc_code,
+        TRY_CAST(DIASTOLIC AS DOUBLE) AS val_num,
+        'mm[Hg]' AS unit_str,
+        8876 AS unit_concept_id
+      FROM _temp_vital
+      WHERE DIASTOLIC IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) > 0
+    )
+    INSERT INTO measurement
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY src.vital_sub_id) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
+        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(
+            stcm.target_concept_id,
+            cr.concept_id_2,
+            CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+            0
+        ) AS measurement_concept_id,
+        parse_omop_date(src.MEASURE_DATE) AS measurement_date,
+        parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS measurement_datetime,
+        src.MEASURE_TIME AS measurement_time,
+        %d AS measurement_type_concept_id,
+        0 AS operator_concept_id,
+        src.val_num AS value_as_number,
+        0 AS value_as_concept_id,
+        src.unit_concept_id AS unit_concept_id,
+        NULL AS range_low,
+        NULL AS range_high,
+        NULL AS provider_id,
+        COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
+        NULL AS visit_detail_id,
+        src.loinc_code AS measurement_source_value,
+        COALESCE(c.concept_id, 0) AS measurement_source_concept_id,
+        src.unit_str AS unit_source_value,
+        src.unit_concept_id AS unit_source_concept_id,
+        CAST(src.val_num AS VARCHAR) AS value_source_value,
+        NULL AS measurement_event_id,
+        0 AS meas_event_field_concept_id
+    FROM unpivoted_vitals src
+    LEFT JOIN person p
+      ON p.person_source_value = src.PATID
+    LEFT JOIN visit_occurrence vo
+      ON vo.visit_source_value = src.ENCOUNTERID
+    LEFT JOIN concept c
+      ON c.vocabulary_id = 'LOINC'
+     AND c.concept_code = src.loinc_code
+    LEFT JOIN (
+        SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
+        FROM concept_relationship
+        WHERE relationship_id = 'Maps to'
+        GROUP BY concept_id_1
+    ) cr
+      ON cr.concept_id_1 = c.concept_id
+    LEFT JOIN (
+        SELECT source_code, MIN(target_concept_id) AS target_concept_id
+        FROM source_to_concept_map
+        WHERE source_vocabulary_id = 'LOINC'
+          AND (invalid_reason IS NULL OR invalid_reason = '')
+          AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
+        GROUP BY source_code
+    ) stcm
+      ON stcm.source_code = src.loinc_code
+    WHERE src.vital_sub_id IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY src.vital_sub_id) = 1;
+  ", .TYPE_CONCEPT_EHR_MEASUREMENT, .today_iso()))
+  DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_vital;")
 }
 
 .load_drug_exposure <- function(con, source_dir) {

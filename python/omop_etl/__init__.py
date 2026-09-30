@@ -1,6 +1,7 @@
 """omop_etl: PCORnet to OMOP CDM v5.4 ETL, vocabulary loaders, and remapping tools in DuckDB."""
 
 from omop_etl.build_omop_cdm import (
+    attach_central_vocabulary,
     build_condition_era,
     build_drug_era,
     build_observation_period,
@@ -15,6 +16,7 @@ from omop_etl.build_omop_cdm import (
     load_procedure_occurrence,
     load_provider,
     load_visit_occurrence,
+    load_vital,
 )
 from omop_etl.mapping import (
     export_unmapped_codes,
@@ -31,6 +33,7 @@ from omop_etl.vocabulary import (
 )
 
 __all__ = [
+    "attach_central_vocabulary",
     "build_schema",
     "etl_pcornet",
     "load_provider",
@@ -39,6 +42,7 @@ __all__ = [
     "load_condition_occurrence",
     "load_procedure_occurrence",
     "load_measurement",
+    "load_vital",
     "load_drug_exposure",
     "load_death",
     "build_observation_period",

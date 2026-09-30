@@ -251,3 +251,93 @@ def test_column_heterogeneity_and_date_parsing():
         row = con.execute("SELECT person_id, year_of_birth, month_of_birth, day_of_birth, person_source_value FROM person").fetchone()
         assert row == (1, 1980, 1, 1, "SSN-1234")
         con.close()
+
+
+def test_python_extended_enc_type_and_sex_mappings():
+    from omop_etl import load_visit_occurrence
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "enc_sex_test.duckdb")
+        con = duckdb.connect(db_path)
+        build_schema(con)
+        load_macros(con)
+
+        src_dir = Path(tmp) / "src"
+        src_dir.mkdir()
+
+        demo_csv = src_dir / "demographic.csv"
+        with open(demo_csv, "w", newline="", encoding="utf-8") as f:
+            f.write("PATID,SEX,BIRTH_DATE,RACE,HISPANIC\n")
+            f.write("P1,OT,1990-01-01,05,N\n")
+            f.write("P2,UN,1985-05-05,05,N\n")
+            f.write("P3,NI,1980-10-10,05,N\n")
+
+        enc_csv = src_dir / "encounter.csv"
+        with open(enc_csv, "w", newline="", encoding="utf-8") as f:
+            f.write("ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,ADMIT_TIME,DISCHARGE_STATUS\n")
+            f.write("E1,P1,TH,2024-01-01,10:00,A\n")
+            f.write("E2,P2,OS,2024-01-02,11:00,A\n")
+            f.write("E3,P3,OT,2024-01-03,12:00,A\n")
+
+        load_person(con, str(src_dir))
+        load_visit_occurrence(con, str(src_dir))
+
+        genders = con.execute("SELECT person_source_value, gender_concept_id FROM person ORDER BY person_source_value").fetchall()
+        assert genders == [("P1", 8521), ("P2", 8551), ("P3", 8551)]
+
+        visits = con.execute("SELECT visit_source_value, visit_concept_id FROM visit_occurrence ORDER BY visit_source_value").fetchall()
+        assert visits == [("E1", 5083), ("E2", 9201), ("E3", 9202)]
+        con.close()
+
+
+def test_python_load_vital_unpivoting():
+    from omop_etl import load_vital
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "vital_test.duckdb")
+        con = duckdb.connect(db_path)
+        build_schema(con)
+        load_macros(con)
+
+        src_dir = Path(tmp) / "vital_src"
+        src_dir.mkdir()
+
+        # Person for foreign key
+        con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id, person_source_value) VALUES (1, 8507, 1990, 8527, 38003564, 'P1')")
+
+        vital_csv = src_dir / "vital.csv"
+        with open(vital_csv, "w", newline="", encoding="utf-8") as f:
+            f.write("VITALID,PATID,ENCOUNTERID,MEASURE_DATE,MEASURE_TIME,VITAL_SOURCE,HT,WT,ORIGINAL_BMI,SYSTOLIC,DIASTOLIC\n")
+            f.write("V1,P1,E1,2024-01-01,10:00,PR,70,180,25.8,120,80\n")
+
+        load_vital(con, str(src_dir))
+
+        meas = con.execute("SELECT measurement_source_value, value_as_number, unit_source_value, unit_concept_id FROM measurement ORDER BY measurement_source_value").fetchall()
+        assert len(meas) == 5
+        # 29463-7 (weight), 39156-5 (bmi), 8302-2 (height), 8462-4 (diastolic), 8480-6 (systolic)
+        assert [m[0] for m in meas] == ["29463-7", "39156-5", "8302-2", "8462-4", "8480-6"]
+        assert [m[1] for m in meas] == [180.0, 25.8, 70.0, 80.0, 120.0]
+        assert [m[2] for m in meas] == ["[lb_av]", "kg/m2", "[in_us]", "mm[Hg]", "mm[Hg]"]
+        assert [m[3] for m in meas] == [8739, 9531, 9326, 8876, 8876]
+        con.close()
+
+
+def test_python_attach_central_vocabulary():
+    from omop_etl import attach_central_vocabulary
+
+    with tempfile.TemporaryDirectory() as tmp:
+        vocab_path = str(Path(tmp) / "central_vocab.duckdb")
+        c_vocab = duckdb.connect(vocab_path)
+        c_vocab.execute("CREATE TABLE concept (concept_id INT, concept_name VARCHAR, vocabulary_id VARCHAR, concept_code VARCHAR, standard_concept VARCHAR);")
+        c_vocab.execute("INSERT INTO concept VALUES (3036277, 'Body height', 'LOINC', '8302-2', 'S');")
+        c_vocab.close()
+
+        cdm_path = str(Path(tmp) / "cdm.duckdb")
+        con = duckdb.connect(cdm_path)
+        build_schema(con)
+
+        attach_central_vocabulary(con, vocab_path, temporary=True)
+        res = con.execute("SELECT concept_id, concept_name FROM concept WHERE concept_code = '8302-2'").fetchall()
+        assert len(res) == 1
+        assert res[0] == (3036277, "Body height")
+        con.close()

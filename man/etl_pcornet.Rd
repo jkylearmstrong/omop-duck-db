@@ -4,7 +4,7 @@
 \alias{etl_pcornet}
 \title{Run the PCORnet -> OMOP CDM v5.4 ETL (R implementation)}
 \usage{
-etl_pcornet(source_dir, db_path = "omop_cdm.duckdb")
+etl_pcornet(source_dir, db_path = "omop_cdm.duckdb", central_vocab = NULL)
 }
 \arguments{
 \item{source_dir}{Directory containing PCORnet-format CSVs (\code{demographic.csv},
@@ -14,6 +14,9 @@ case-insensitively. Any table whose source file isn't found is skipped.}
 
 \item{db_path}{Path to the DuckDB database file (schema + vocabulary must
 already exist).}
+
+\item{central_vocab}{Optional path to an existing central vocabulary DuckDB database
+to attach in read-only mode with zero-copy views.}
 }
 \value{
 Invisibly, \code{db_path}.
