@@ -1,6 +1,6 @@
 Package: omopduckdb
 Title: Build and Populate an OMOP CDM v5.4 Database in DuckDB
-Version: 0.1.1
+Version: 0.2.0
 Authors@R: person("J Kyle", "Armstrong", email = "j.kyle.armstrong@gmail.com", role = c("aut", "cre"), comment = c(ORCID = "0000-0002-4269-0121"))
 Description: Tools for building an OMOP Common Data Model (CDM) v5.4 schema
     in DuckDB, loading the OHDSI Athena vocabulary (from a local download or
@@ -8,7 +8,7 @@ Description: Tools for building an OMOP Common Data Model (CDM) v5.4 schema
     via parallel R and Python ETL implementations that share the same
     concept-mapping SQL. Also includes a Google Drive sync helper for the
     large generated database/vocabulary files.
-License: MIT + file LICENSE
+License: GPL-3 | MIT + file LICENSE
 URL: https://github.com/jkylearmstrong/omop-duck-db, https://jkylearmstrong.github.io/omop-duck-db
 BugReports: https://github.com/jkylearmstrong/omop-duck-db/issues
 Encoding: UTF-8

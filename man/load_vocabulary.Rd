@@ -4,7 +4,12 @@
 \alias{load_vocabulary}
 \title{Load or refresh the OHDSI Athena vocabulary into the OMOP CDM database}
 \usage{
-load_vocabulary(vocab_dir, db_path = "omop_cdm.duckdb")
+load_vocabulary(
+  vocab_dir,
+  db_path = "omop_cdm.duckdb",
+  sanitize_cpt4 = TRUE,
+  sanitize_all_null_names = FALSE
+)
 }
 \arguments{
 \item{vocab_dir}{Path to an extracted Athena vocabulary download (a
@@ -12,6 +17,10 @@ directory of tab-delimited \verb{*.csv} files).}
 
 \item{db_path}{Path to the DuckDB database file (schema must already exist,
 see \code{\link[=build_schema]{build_schema()}}).}
+
+\item{sanitize_cpt4}{Automatically sanitize NULL concept_names for CPT4 concepts.}
+
+\item{sanitize_all_null_names}{Automatically sanitize any NULL concept_names.}
 }
 \value{
 \code{TRUE} if every matched table loaded successfully, \code{FALSE} if any
@@ -22,4 +31,11 @@ Each table is truncated and reloaded inside its own transaction, with a
 row-count sanity check before commit -- so a bad/partial download can only
 fail that one table (rolled back, left untouched), not half-clobber the
 rest of the vocabulary.
+}
+\details{
+Supports CPT4 sanitization: Athena downloads without a UMLS license
+output \code{CONCEPT_CPT4.csv} (or CPT4 concept entries) with NULL concept_names,
+which violates the NOT NULL constraint on \code{concept.concept_name}.
+When \code{sanitize_cpt4 = TRUE}, CPT4 concept names are automatically
+sanitized to \code{'CPT4 ' || concept_code}.
 }

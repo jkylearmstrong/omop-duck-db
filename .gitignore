@@ -42,3 +42,7 @@ venv/
 *credentials*.json
 config/*.yml
 !config/*.yml.example
+
+# Raw site data, manifests, and row samples (may contain PHI-adjacent
+# patient-level data) - never commit anything under here
+secrets/

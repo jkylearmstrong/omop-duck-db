@@ -12,14 +12,32 @@ template:
 
 reference:
 - title: Schema and vocabulary
+  desc: Initialize CDM tables and manage standard Athena vocabularies.
   contents:
   - build_schema
   - load_vocabulary
   - load_from_bigquery
-- title: ETL
+  - check_vocabulary_version
+- title: PCORnet ETL and synthesizers
+  desc: Ingest PCORnet extracts and generate required OHDSI eras and observation periods.
   contents:
   - etl_pcornet
+  - build_observation_period
+  - build_drug_era
+  - build_condition_era
+- title: Vocabulary mapping and Usagi
+  desc: Import custom crosswalks and audit unmapped source codes.
+  contents:
+  - import_source_to_concept_map
+  - import_usagi_mappings
+  - export_unmapped_codes
+- title: CDM table remapping
+  desc: Retroactively update existing CDM tables to new vocabulary concepts.
+  contents:
+  - remap_cdm_table
+  - remap_all
 - title: Large-file sync
+  desc: Synchronize DuckDB databases and vocabulary files via Google Drive.
   contents:
   - gdrive_upload_snapshot
   - gdrive_download_latest

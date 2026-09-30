@@ -1,0 +1,22 @@
+---
+title: "omop-duck-db"
+format:
+  gfm:
+    output-file: README_ecosystem.md
+---
+
+<!-- This renders to README_ecosystem.md, NOT README.md -- README.Rmd already
+     owns README.md for this package's usage documentation. Don't change
+     output-file to README.md, it will silently clobber that. -->
+
+# omop-duck-db
+
+**Status:** Public. **License:** dual `GPL-3 | MIT` (local only — not yet pushed). **Role:** generic, public OMOP CDM v5.4 build/load/ETL tooling (R + Python), deliberately free of any protected data or institution-specific detail.
+
+## Ecosystem position
+
+Part of Temple CBE's public layer, alongside `TempleCBE`, `pslongSim`, and `ML-PScore`. Consumed privately by **`kyle_out_zip`**, whose `omop_bridge/` subdirectory is the site-aware adapter that calls this package's real ETL entrypoint against real per-site data — this package itself never touches that data.
+
+## Where it's heading
+
+See `NOTES.md` for two confirmed upstream gaps (`VITAL` table mapping, Python-side vocabulary loading) and the licensing status.

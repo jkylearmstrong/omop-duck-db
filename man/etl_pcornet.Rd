@@ -9,8 +9,8 @@ etl_pcornet(source_dir, db_path = "omop_cdm.duckdb")
 \arguments{
 \item{source_dir}{Directory containing PCORnet-format CSVs (\code{demographic.csv},
 \code{encounter.csv}, \code{diagnosis.csv}, \code{procedures.csv}, \code{lab_result_cm.csv},
-\code{prescribing.csv}, \code{provider.csv}), matched case-insensitively. Any table
-whose source file isn't found is skipped.}
+\code{prescribing.csv}, \code{provider.csv}, and optionally \code{death.csv}), matched
+case-insensitively. Any table whose source file isn't found is skipped.}
 
 \item{db_path}{Path to the DuckDB database file (schema + vocabulary must
 already exist).}
@@ -20,18 +20,6 @@ Invisibly, \code{db_path}.
 }
 \description{
 Mirrors \code{python/omop_etl/build_omop_cdm.py} table-for-table. Both read the
-same PCORnet-format source directory and call the same
-\code{inst/sql/mapping_macros.sql} concept-resolution macros, so their output
-should be equivalent -- see \verb{tests/fixtures/pcornet_sample/} for the shared
-smoke-test fixture.
-}
-\details{
-Requires \code{\link[=build_schema]{build_schema()}} and \code{\link[=load_vocabulary]{load_vocabulary()}} to have been run first
-(the vocabulary must be loaded for the underlying \code{map_to_standard_concept_id()}/
-\code{source_concept_id()} SQL macros to resolve anything).
-
-The \verb{*_TYPE_CONCEPT} constants below are the commonly-used OMOP "Type
-Concept" vocabulary entries for EHR-derived data. Verify them against your
-own loaded vocabulary before trusting this for real data:
-\verb{SELECT concept_id, concept_name FROM concept WHERE vocabulary_id = 'Type Concept'}.
+same PCORnet-format source directory, share the same schema and concept-resolution
+logic, and generate 100\% deterministic surrogate keys and OHDSI v5.4 tables.
 }

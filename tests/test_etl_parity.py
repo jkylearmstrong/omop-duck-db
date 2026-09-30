@@ -44,6 +44,11 @@ TABLES = [
     "procedure_occurrence",
     "measurement",
     "drug_exposure",
+    "observation_period",
+    "death",
+    "cdm_source",
+    "condition_era",
+    "drug_era",
 ]
 
 

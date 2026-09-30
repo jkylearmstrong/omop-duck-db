@@ -50,3 +50,26 @@ CREATE OR REPLACE MACRO source_concept_id(source_vocabulary_id, source_code) AS 
 CREATE OR REPLACE MACRO pcornet_id(source_id) AS (
     (hash(source_id) % 2000000000)::INTEGER
 );
+
+-- Multi-format date parsing macro to prevent silent data loss (NULLs) across
+-- disparate PCORnet date formats (e.g. '01JAN2020', '2020-01-01', '01/01/2020').
+CREATE OR REPLACE MACRO parse_omop_date(col) AS (
+    COALESCE(
+        TRY_CAST(col AS DATE),
+        TRY_STRPTIME(col, '%d%b%Y'),
+        TRY_STRPTIME(col, '%d-%b-%Y'),
+        TRY_STRPTIME(col, '%Y-%m-%d'),
+        TRY_STRPTIME(col, '%m/%d/%Y'),
+        TRY_CAST(TRY_CAST(col AS TIMESTAMP) AS DATE)
+    )
+);
+
+-- Multi-format timestamp parsing macro
+CREATE OR REPLACE MACRO parse_omop_datetime(date_col, time_col) AS (
+    COALESCE(
+        TRY_CAST(date_col || ' ' || COALESCE(time_col, '00:00:00') AS TIMESTAMP),
+        TRY_STRPTIME(date_col || ' ' || COALESCE(time_col, '00:00:00'), '%d%b%Y %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || COALESCE(time_col, '00:00:00'), '%d%b%Y %H:%M'),
+        TRY_CAST(parse_omop_date(date_col) AS TIMESTAMP)
+    )
+);

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omop-duck-db"
-version = "0.1.1"
+version = "0.2.0"
 description = "Tools for building an OMOP CDM v5.4 DuckDB database and mapping PCORnet-format source data into it."
 readme = "README.md"
 license = { file = "LICENSE.md" }

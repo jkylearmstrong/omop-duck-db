@@ -72,7 +72,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmpmo9cOr\filea8b4539272c.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmp4aYvxf\file136a81c562f91.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]
@@ -139,6 +139,40 @@ e.g.
 
   The resulting token is cached and reused by later non-interactive
   runs.
+
+## Custom mapping and retroactive remapping
+
+When standard Athena vocabularies lack mappings for site-specific or
+unmapped codes:
+
+1.  **Audit unmapped codes**:
+
+    ``` r
+    export_unmapped_codes("omop_cdm.duckdb", "condition_occurrence", "unmapped_conditions.csv")
+    ```
+
+2.  **Import custom crosswalks or Usagi exports**:
+
+    ``` r
+    # Load custom source_to_concept_map CSV
+    import_source_to_concept_map("mappings.csv", "omop_cdm.duckdb")
+
+    # Or import OHDSI Usagi review export CSV
+    import_usagi_mappings("usagi_reviewed.csv", "omop_cdm.duckdb")
+    ```
+
+3.  **Retroactively remap populated CDM tables**:
+
+    ``` r
+    # Preview changes without modifying data (dry run)
+    remap_cdm_table("condition_occurrence", "omop_cdm.duckdb", dry_run = TRUE)
+
+    # Apply remapping across all tables and rebuild condition/drug eras
+    remap_all("omop_cdm.duckdb")
+    ```
+
+Equivalent functions are available in Python via
+`from omop_etl import remap_all, import_usagi_mappings`.
 
 ## Testing
 
