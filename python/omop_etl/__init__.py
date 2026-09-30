@@ -7,6 +7,7 @@ from omop_etl.build_omop_cdm import (
     build_observation_period,
     build_schema,
     etl_pcornet,
+    load_care_site,
     load_cdm_source,
     load_condition_occurrence,
     load_death,
@@ -17,6 +18,9 @@ from omop_etl.build_omop_cdm import (
     load_provider,
     load_visit_occurrence,
     load_vital,
+)
+from omop_etl.federation import (
+    create_federated_consortium,
 )
 from omop_etl.mapping import (
     export_unmapped_codes,
@@ -35,7 +39,9 @@ from omop_etl.vocabulary import (
 __all__ = [
     "attach_central_vocabulary",
     "build_schema",
+    "create_federated_consortium",
     "etl_pcornet",
+    "load_care_site",
     "load_provider",
     "load_person",
     "load_visit_occurrence",
@@ -57,3 +63,6 @@ __all__ = [
     "remap_cdm_table",
     "remap_all",
 ]
+
+__version__ = "0.2.2"
+

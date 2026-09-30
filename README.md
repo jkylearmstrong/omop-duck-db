@@ -4,9 +4,11 @@
 <!-- badges: start -->
 
 [![CI](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml)
-[![Test
-Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yml)
-[![codecov](https://img.shields.io/codecov/c/github/jkylearmstrong/omop-duck-db/main?logo=codecov.png)](https://codecov.io/gh/jkylearmstrong/omop-duck-db)
+[![R
+Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yaml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yaml)
+[![Python
+Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/python-test-coverage.yaml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/python-test-coverage.yaml)
+[![Codecov](https://codecov.io/gh/jkylearmstrong/omop-duck-db/graph/badge.svg)](https://app.codecov.io/gh/jkylearmstrong/omop-duck-db)
 <!-- badges: end -->
 
 Tools for building an [OMOP Common Data
@@ -72,7 +74,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmp4aYvxf\file136a81c562f91.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\RtmpUxRe4v\file158ac510dca8.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]

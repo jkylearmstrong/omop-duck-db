@@ -29,6 +29,10 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+cobertura*.xml
 
 # Python
 __pycache__/

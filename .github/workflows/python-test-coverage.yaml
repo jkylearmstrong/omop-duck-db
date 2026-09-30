@@ -1,0 +1,55 @@
+name: python-test-coverage.yaml
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  python-test-coverage:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      RENV_CONFIG_AUTOLOADER_ENABLED: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - name: Install R package (required by parity tests)
+        run: Rscript -e "install.packages(c('DBI','duckdb','stringr','yaml')); install.packages('.', repos = NULL, type = 'source')"
+
+      - name: Install Python package (+ dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run pytest with coverage
+        run: |
+          pytest tests/ --cov=python/omop_etl --cov-report=xml:cobertura-py.xml --cov-report=term
+
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        with:
+          fail_ci_if_error: ${{ github.event_name != 'pull_request' || secrets.CODECOV_TOKEN }}
+          files: ./cobertura-py.xml
+          flags: python
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-coverage-report
+          path: ./cobertura-py.xml
+          if-no-files-found: ignore

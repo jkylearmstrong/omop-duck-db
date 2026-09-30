@@ -47,6 +47,9 @@ DEFAULT_ALIASES = {
     "RAW_LAB_NAME": ["RAW_LAB_NAME", "LAB_NAME"],
     "RAW_LAB_CODE": ["RAW_LAB_CODE", "LAB_CODE"],
     "LAB_LOINC": ["LAB_LOINC", "LOINC"],
+    "FACILITYID": ["FACILITYID", "FACILITY_ID"],
+    "FACILITY_TYPE": ["FACILITY_TYPE", "FACILITY_LOCATION"],
+    "FACILITY_LOCATION": ["FACILITY_LOCATION", "FACILITY_LOCATION_ZIP"],
 }
 
 
@@ -139,6 +142,71 @@ def attach_central_vocabulary(con, vocab_db_path, temporary=True):
     print(f"Attached central vocabulary from {vocab_db_path} with zero-copy views.")
 
 
+def load_care_site(con, source_dir, site_id=None, site_anon=None, site_name=None):
+    """Loads care_site records from facility.csv if present and/or seeds root institutional care_site."""
+    path = find_source_file(source_dir, "facility")
+    loaded_facility = False
+
+    if path:
+        prepare_source_view(
+            con,
+            "_temp_facility",
+            path,
+            ["FACILITYID", "FACILITY_TYPE", "FACILITY_LOCATION"],
+        )
+        run_insert(con, "CARE_SITE (from FACILITY)", """
+            INSERT INTO care_site (
+                care_site_id,
+                care_site_name,
+                place_of_service_concept_id,
+                location_id,
+                care_site_source_value,
+                place_of_service_source_value
+            )
+            SELECT
+                pcornet_id(src.FACILITYID) AS care_site_id,
+                COALESCE(src.FACILITY_TYPE, 'Facility ' || src.FACILITYID) AS care_site_name,
+                0 AS place_of_service_concept_id,
+                NULL AS location_id,
+                src.FACILITYID AS care_site_source_value,
+                src.FACILITY_TYPE AS place_of_service_source_value
+            FROM _temp_facility src
+            WHERE src.FACILITYID IS NOT NULL
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY src.FACILITYID) = 1;
+        """)
+        con.execute("DROP VIEW IF EXISTS _temp_facility;")
+        loaded_facility = True
+
+    if site_id is not None:
+        root_name = site_anon if site_anon is not None else f"Site {site_id}"
+        root_source = site_name if site_name is not None else root_name
+        root_name_esc = str(root_name).replace("'", "''")
+        root_source_esc = str(root_source).replace("'", "''")
+
+        run_insert(con, "CARE_SITE (root institutional record)", f"""
+            INSERT INTO care_site (
+                care_site_id,
+                care_site_name,
+                place_of_service_concept_id,
+                location_id,
+                care_site_source_value,
+                place_of_service_source_value
+            )
+            SELECT
+                {int(site_id)} AS care_site_id,
+                '{root_name_esc}' AS care_site_name,
+                0 AS place_of_service_concept_id,
+                NULL AS location_id,
+                '{root_source_esc}' AS care_site_source_value,
+                NULL AS place_of_service_source_value
+            WHERE NOT EXISTS (
+                SELECT 1 FROM care_site WHERE care_site_id = {int(site_id)}
+            );
+        """)
+    elif not loaded_facility:
+        print("Skipping CARE_SITE - no facility.csv found and no site_id provided")
+
+
 def load_provider(con, source_dir):
     path = find_source_file(source_dir, "provider")
     if path is None:
@@ -199,7 +267,7 @@ def load_provider(con, source_dir):
     con.execute("DROP VIEW IF EXISTS _temp_provider;")
 
 
-def load_person(con, source_dir):
+def load_person(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "demographic")
     if path is None:
         print("Skipping PERSON - no demographic.csv found")
@@ -212,10 +280,21 @@ def load_person(con, source_dir):
         ["PATID", "SEX", "BIRTH_DATE", "RACE", "HISPANIC", "PROVIDERID"],
     )
 
-    run_insert(con, "PERSON (from DEMOGRAPHIC)", """
+    if disambiguate_patids:
+        if site_id is None:
+            raise ValueError("disambiguate_patids requires site_id to be specified.")
+        person_id_expr = f"pcornet_id(src.PATID || '-{site_id}')"
+        person_src_expr = f"src.PATID || '-{site_id}'"
+    else:
+        person_id_expr = "ROW_NUMBER() OVER (ORDER BY src.PATID) + (SELECT COALESCE(MAX(person_id), 0) FROM person)"
+        person_src_expr = "src.PATID"
+
+    care_site_id_expr = str(int(site_id)) if site_id is not None else "NULL"
+
+    run_insert(con, "PERSON (from DEMOGRAPHIC)", f"""
         INSERT INTO person
         SELECT
-            ROW_NUMBER() OVER (ORDER BY src.PATID) + (SELECT COALESCE(MAX(person_id), 0) FROM person) AS person_id,
+            {person_id_expr} AS person_id,
             CASE UPPER(src.SEX)
                 WHEN 'M' THEN 8507  -- Male
                 WHEN 'F' THEN 8532  -- Female
@@ -237,8 +316,8 @@ def load_person(con, source_dir):
             CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 ELSE 38003564 END AS ethnicity_concept_id,
             NULL AS location_id,
             COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
-            NULL AS care_site_id,
-            src.PATID AS person_source_value,
+            {care_site_id_expr} AS care_site_id,
+            {person_src_expr} AS person_source_value,
             src.SEX AS gender_source_value,
             0 AS gender_source_concept_id,
             src.RACE AS race_source_value,
@@ -254,7 +333,7 @@ def load_person(con, source_dir):
     con.execute("DROP VIEW IF EXISTS _temp_demographic;")
 
 
-def load_visit_occurrence(con, source_dir):
+def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "encounter")
     if path is None:
         print("Skipping VISIT_OCCURRENCE - no encounter.csv found")
@@ -270,11 +349,14 @@ def load_visit_occurrence(con, source_dir):
         ],
     )
 
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+    care_site_id_expr = str(int(site_id)) if site_id is not None else "NULL"
+
     run_insert(con, "VISIT_OCCURRENCE (from ENCOUNTER)", f"""
         INSERT INTO visit_occurrence
         SELECT
             ROW_NUMBER() OVER (ORDER BY src.ENCOUNTERID) + (SELECT COALESCE(MAX(visit_occurrence_id), 0) FROM visit_occurrence) AS visit_occurrence_id,
-            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             CASE UPPER(src.ENC_TYPE)
                 WHEN 'IP' THEN 9201 -- Inpatient
                 WHEN 'OS' THEN 9201 -- Observation Services
@@ -291,7 +373,7 @@ def load_visit_occurrence(con, source_dir):
             parse_omop_datetime(COALESCE(src.DISCHARGE_DATE, src.ADMIT_DATE), src.DISCHARGE_TIME) AS visit_end_datetime,
             {TYPE_CONCEPT_EHR_ENCOUNTER} AS visit_type_concept_id,
             COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
-            pcornet_id(src.FACILITYID) AS care_site_id,
+            COALESCE(cs.care_site_id, {care_site_id_expr}, pcornet_id(src.FACILITYID)) AS care_site_id,
             src.ENCOUNTERID AS visit_source_value,
             0 AS visit_source_concept_id,
             0 AS admitted_from_concept_id,
@@ -305,16 +387,18 @@ def load_visit_occurrence(con, source_dir):
             NULL AS preceding_visit_occurrence_id
         FROM _temp_encounter src
         LEFT JOIN person p
-          ON p.person_source_value = src.PATID
+          ON p.person_source_value = {patid_expr}
         LEFT JOIN provider pr
           ON pr.provider_source_value = src.PROVIDERID
+        LEFT JOIN care_site cs
+          ON cs.care_site_source_value = src.FACILITYID
         WHERE src.ENCOUNTERID IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.ENCOUNTERID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_encounter;")
 
 
-def load_condition_occurrence(con, source_dir):
+def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "diagnosis")
     if path is None:
         print("Skipping CONDITION_OCCURRENCE - no diagnosis.csv found")
@@ -327,11 +411,13 @@ def load_condition_occurrence(con, source_dir):
         ["DIAGNOSISID", "PATID", "DX_TYPE", "DX", "DX_DATE", "ADMIT_DATE", "PDX", "PROVIDERID", "ENCOUNTERID"],
     )
 
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+
     run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", f"""
         INSERT INTO condition_occurrence
         SELECT
             ROW_NUMBER() OVER (ORDER BY src.DIAGNOSISID) + (SELECT COALESCE(MAX(condition_occurrence_id), 0) FROM condition_occurrence) AS condition_occurrence_id,
-            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             COALESCE(
                 stcm.target_concept_id,
                 cr.concept_id_2,
@@ -357,7 +443,7 @@ def load_condition_occurrence(con, source_dir):
             FROM _temp_diagnosis
         ) src
         LEFT JOIN person p
-          ON p.person_source_value = src.PATID
+          ON p.person_source_value = {patid_expr}
         LEFT JOIN provider pr
           ON pr.provider_source_value = src.PROVIDERID
         LEFT JOIN visit_occurrence vo
@@ -387,7 +473,7 @@ def load_condition_occurrence(con, source_dir):
     con.execute("DROP VIEW IF EXISTS _temp_diagnosis;")
 
 
-def load_procedure_occurrence(con, source_dir):
+def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "procedures")
     if path is None:
         print("Skipping PROCEDURE_OCCURRENCE - no procedures.csv found")
@@ -400,11 +486,13 @@ def load_procedure_occurrence(con, source_dir):
         ["PROCEDURESID", "PATID", "PX_TYPE", "PX", "PX_DATE", "PROVIDERID", "ENCOUNTERID"],
     )
 
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+
     run_insert(con, "PROCEDURE_OCCURRENCE (from PROCEDURES)", f"""
         INSERT INTO procedure_occurrence
         SELECT
             ROW_NUMBER() OVER (ORDER BY src.PROCEDURESID) + (SELECT COALESCE(MAX(procedure_occurrence_id), 0) FROM procedure_occurrence) AS procedure_occurrence_id,
-            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             COALESCE(
                 stcm.target_concept_id,
                 cr.concept_id_2,
@@ -436,7 +524,7 @@ def load_procedure_occurrence(con, source_dir):
             FROM _temp_procedures
         ) src
         LEFT JOIN person p
-          ON p.person_source_value = src.PATID
+          ON p.person_source_value = {patid_expr}
         LEFT JOIN provider pr
           ON pr.provider_source_value = src.PROVIDERID
         LEFT JOIN visit_occurrence vo
@@ -466,7 +554,7 @@ def load_procedure_occurrence(con, source_dir):
     con.execute("DROP VIEW IF EXISTS _temp_procedures;")
 
 
-def load_measurement(con, source_dir):
+def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "lab_result_cm")
     if path is None:
         print("Skipping MEASUREMENT - no lab_result_cm.csv found")
@@ -482,11 +570,13 @@ def load_measurement(con, source_dir):
         ],
     )
 
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+
     run_insert(con, "MEASUREMENT (from LAB_RESULT_CM)", f"""
         INSERT INTO measurement
         SELECT
             ROW_NUMBER() OVER (ORDER BY src.LAB_RESULT_CM_ID) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
-            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             COALESCE(
                 stcm.target_concept_id,
                 cr.concept_id_2,
@@ -515,7 +605,7 @@ def load_measurement(con, source_dir):
             0 AS meas_event_field_concept_id
         FROM _temp_lab_result src
         LEFT JOIN person p
-          ON p.person_source_value = src.PATID
+          ON p.person_source_value = {patid_expr}
         LEFT JOIN provider pr
           ON pr.provider_source_value = src.PROVIDERID
         LEFT JOIN visit_occurrence vo
@@ -545,7 +635,7 @@ def load_measurement(con, source_dir):
     con.execute("DROP VIEW IF EXISTS _temp_lab_result;")
 
 
-def load_vital(con, source_dir):
+def load_vital(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "vital")
     if path is None:
         print("Skipping VITAL - no vital.csv found (optional table)")
@@ -560,6 +650,8 @@ def load_vital(con, source_dir):
             "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC"
         ],
     )
+
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
 
     run_insert(con, "MEASUREMENT (from VITAL)", f"""
         WITH unpivoted_vitals AS (
@@ -626,7 +718,7 @@ def load_vital(con, source_dir):
         INSERT INTO measurement
         SELECT
             ROW_NUMBER() OVER (ORDER BY src.vital_sub_id) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
-            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             COALESCE(
                 stcm.target_concept_id,
                 cr.concept_id_2,
@@ -655,7 +747,7 @@ def load_vital(con, source_dir):
             0 AS meas_event_field_concept_id
         FROM unpivoted_vitals src
         LEFT JOIN person p
-          ON p.person_source_value = src.PATID
+          ON p.person_source_value = {patid_expr}
         LEFT JOIN visit_occurrence vo
           ON vo.visit_source_value = src.ENCOUNTERID
         LEFT JOIN concept c
@@ -683,7 +775,7 @@ def load_vital(con, source_dir):
     con.execute("DROP VIEW IF EXISTS _temp_vital;")
 
 
-def load_drug_exposure(con, source_dir):
+def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "prescribing")
     if path is None:
         print("Skipping DRUG_EXPOSURE - no prescribing.csv found")
@@ -699,11 +791,13 @@ def load_drug_exposure(con, source_dir):
         ],
     )
 
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+
     run_insert(con, "DRUG_EXPOSURE (from PRESCRIBING)", f"""
         INSERT INTO drug_exposure
         SELECT
             ROW_NUMBER() OVER (ORDER BY src.PRESCRIBINGID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
-            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             COALESCE(
                 stcm.target_concept_id,
                 cr.concept_id_2,
@@ -732,7 +826,7 @@ def load_drug_exposure(con, source_dir):
             NULL AS dose_unit_source_value
         FROM _temp_prescribing src
         LEFT JOIN person p
-          ON p.person_source_value = src.PATID
+          ON p.person_source_value = {patid_expr}
         LEFT JOIN provider pr
           ON pr.provider_source_value = src.PROVIDERID
         LEFT JOIN visit_occurrence vo
@@ -762,7 +856,7 @@ def load_drug_exposure(con, source_dir):
     con.execute("DROP VIEW IF EXISTS _temp_prescribing;")
 
 
-def load_death(con, source_dir):
+def load_death(con, source_dir, site_id=None, disambiguate_patids=False):
     """Modular ingestion of PCORnet death.csv into OMOP death table.
     Gracefully skipped if death.csv is missing."""
     path = find_source_file(source_dir, "death")
@@ -777,6 +871,8 @@ def load_death(con, source_dir):
         ["PATID", "DEATH_DATE", "DEATH_DATE_IMPUTE", "DEATH_SOURCE", "DEATH_MATCH_CONFIDENCE"],
     )
 
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+
     run_insert(con, "DEATH", f"""
         INSERT INTO death (
             person_id,
@@ -788,7 +884,7 @@ def load_death(con, source_dir):
             cause_source_concept_id
         )
         SELECT
-            COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             parse_omop_date(src.DEATH_DATE) AS death_date,
             parse_omop_datetime(src.DEATH_DATE, NULL) AS death_datetime,
             {TYPE_CONCEPT_EHR_DEATH} AS death_type_concept_id,
@@ -797,10 +893,10 @@ def load_death(con, source_dir):
             0 AS cause_source_concept_id
         FROM _temp_death src
         LEFT JOIN person p
-          ON p.person_source_value = src.PATID
+          ON p.person_source_value = {patid_expr}
         WHERE src.PATID IS NOT NULL 
           AND src.DEATH_DATE IS NOT NULL
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PATID ORDER BY parse_omop_date(src.DEATH_DATE) DESC) = 1;
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY {patid_expr} ORDER BY parse_omop_date(src.DEATH_DATE) DESC) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_death;")
 
@@ -997,15 +1093,32 @@ def build_condition_era(con):
     """)
 
 
-def load_cdm_source(con, cdm_source_name="PCORnet -> DuckDB OMOP CDM", cdm_holder="omop-duck-db"):
+def load_cdm_source(con, cdm_source_name=None, cdm_holder=None, site_id=None, site_anon=None, site_name=None):
     """Populates the CDM_SOURCE metadata table with OMOP CDM v5.4.0 concept ID (756265)."""
     con.execute("DELETE FROM cdm_source;")
+    if cdm_source_name is None:
+        if site_anon is not None:
+            cdm_source_name = site_anon
+        elif site_name is not None:
+            cdm_source_name = site_name
+        else:
+            cdm_source_name = "PCORnet -> DuckDB OMOP CDM"
+
+    cdm_source_abbreviation = site_anon if site_anon is not None else "PCORNET"
+
+    if cdm_holder is None:
+        cdm_holder = site_name if site_name is not None else (site_anon if site_anon is not None else "omop-duck-db")
+
+    src_name_esc = str(cdm_source_name).replace("'", "''")
+    src_abbr_esc = str(cdm_source_abbreviation).replace("'", "''")
+    holder_esc = str(cdm_holder).replace("'", "''")
+
     run_insert(con, "CDM_SOURCE", f"""
         INSERT INTO cdm_source
         SELECT
-            '{cdm_source_name}' AS cdm_source_name,
-            'PCORNET' AS cdm_source_abbreviation,
-            '{cdm_holder}' AS cdm_holder,
+            '{src_name_esc}' AS cdm_source_name,
+            '{src_abbr_esc}' AS cdm_source_abbreviation,
+            '{holder_esc}' AS cdm_holder,
             'PCORnet extract mapped to OMOP CDM v5.4 in DuckDB' AS source_description,
             'https://github.com/jkylearmstrong/omop-duck-db' AS source_documentation_reference,
             'https://github.com/jkylearmstrong/omop-duck-db' AS cdm_etl_reference,
@@ -1017,10 +1130,25 @@ def load_cdm_source(con, cdm_source_name="PCORnet -> DuckDB OMOP CDM", cdm_holde
     """)
 
 
-def etl_pcornet(source_dir, db_path="omop_cdm.duckdb", build_schema_flag=False, memory_limit=None, threads=None, temp_dir=None, central_vocab=None):
+def etl_pcornet(
+    source_dir,
+    db_path="omop_cdm.duckdb",
+    build_schema_flag=False,
+    memory_limit=None,
+    threads=None,
+    temp_dir=None,
+    central_vocab=None,
+    site_id=None,
+    site_anon=None,
+    site_name=None,
+    disambiguate_patids=False,
+):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline."""
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
+
+    if disambiguate_patids and site_id is None:
+        raise ValueError("disambiguate_patids requires site_id to be specified.")
 
     con = duckdb.connect(db_path)
     if memory_limit:
@@ -1038,20 +1166,21 @@ def etl_pcornet(source_dir, db_path="omop_cdm.duckdb", build_schema_flag=False, 
         build_schema(con)
     load_macros(con)
 
+    load_care_site(con, source_dir, site_id=site_id, site_anon=site_anon, site_name=site_name)
     load_provider(con, source_dir)
-    load_person(con, source_dir)
-    load_visit_occurrence(con, source_dir)
-    load_condition_occurrence(con, source_dir)
-    load_procedure_occurrence(con, source_dir)
-    load_measurement(con, source_dir)
-    load_vital(con, source_dir)
-    load_drug_exposure(con, source_dir)
-    load_death(con, source_dir)
+    load_person(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_visit_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_condition_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_procedure_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_measurement(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_vital(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
 
     build_observation_period(con)
     build_drug_era(con)
     build_condition_era(con)
-    load_cdm_source(con)
+    load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
 
     con.close()
     print("PCORnet ETL complete.")
@@ -1067,6 +1196,10 @@ def main():
     parser.add_argument("--memory-limit", default=None, help="DuckDB memory limit (e.g. 16GB)")
     parser.add_argument("--threads", type=int, default=None, help="DuckDB worker threads")
     parser.add_argument("--temp-dir", default=None, help="DuckDB disk spill temporary directory")
+    parser.add_argument("--site-id", type=int, default=None, help="Numeric site identifier (e.g. 1 to 5)")
+    parser.add_argument("--site-anon", default=None, help="Publication pseudonym (e.g. 'Site A')")
+    parser.add_argument("--site-name", default=None, help="Optional institutional name or internal descriptor (e.g. 'Temple')")
+    parser.add_argument("--disambiguate-patids", action="store_true", help="Suffix PATID with -<site_id> to disambiguate patient IDs across sites")
     args = parser.parse_args()
 
     etl_pcornet(
@@ -1077,6 +1210,10 @@ def main():
         threads=args.threads,
         temp_dir=args.temp_dir,
         central_vocab=args.central_vocab,
+        site_id=args.site_id,
+        site_anon=args.site_anon,
+        site_name=args.site_name,
+        disambiguate_patids=args.disambiguate_patids,
     )
 
 

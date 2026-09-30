@@ -6,17 +6,34 @@
 #'
 #' @param source_dir Directory containing PCORnet-format CSVs (`demographic.csv`,
 #'   `encounter.csv`, `diagnosis.csv`, `procedures.csv`, `lab_result_cm.csv`,
-#'   `prescribing.csv`, `provider.csv`, and optionally `death.csv`), matched
-#'   case-insensitively. Any table whose source file isn't found is skipped.
+#'   `prescribing.csv`, `provider.csv`, optionally `vital.csv`, `facility.csv`,
+#'   and optionally `death.csv`), matched case-insensitively. Any table whose
+#'   source file isn't found is skipped.
 #' @param db_path Path to the DuckDB database file (schema + vocabulary must
 #'   already exist).
 #' @param central_vocab Optional path to an existing central vocabulary DuckDB database
 #'   to attach in read-only mode with zero-copy views.
+#' @param site_id Optional numeric site identifier (e.g. 1 to 5).
+#' @param site_anon Optional publication pseudonym (e.g. "Site A").
+#' @param site_name Optional institutional name or internal descriptor (e.g. "Temple").
+#' @param disambiguate_patids Logical. If `TRUE`, formats `person_source_value` as
+#'   `src.PATID || '-' || site_id` and derives surrogate keys via `pcornet_id(src.PATID || '-' || site_id)`.
 #' @return Invisibly, `db_path`.
 #' @export
-etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb", central_vocab = NULL) {
+etl_pcornet <- function(
+    source_dir,
+    db_path = "omop_cdm.duckdb",
+    central_vocab = NULL,
+    site_id = NULL,
+    site_anon = NULL,
+    site_name = NULL,
+    disambiguate_patids = FALSE
+) {
   if (!dir.exists(source_dir)) {
     stop("Source directory not found: ", source_dir)
+  }
+  if (isTRUE(disambiguate_patids) && is.null(site_id)) {
+    stop("disambiguate_patids requires site_id to be specified.")
   }
 
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
@@ -31,20 +48,21 @@ etl_pcornet <- function(source_dir, db_path = "omop_cdm.duckdb", central_vocab =
 
   load_mapping_macros(con)
 
+  load_care_site(con, source_dir, site_id = site_id, site_anon = site_anon, site_name = site_name)
   .load_provider(con, source_dir)
-  .load_person(con, source_dir)
-  .load_visit_occurrence(con, source_dir)
-  .load_condition_occurrence(con, source_dir)
-  .load_procedure_occurrence(con, source_dir)
-  .load_measurement(con, source_dir)
-  .load_vital(con, source_dir)
-  .load_drug_exposure(con, source_dir)
-  .load_death(con, source_dir)
+  .load_person(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  .load_visit_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  .load_condition_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  .load_procedure_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  .load_measurement(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  .load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
 
   build_observation_period(con)
   build_drug_era(con)
   build_condition_era(con)
-  .load_cdm_source(con)
+  .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name)
 
   cat("PCORnet ETL complete.\n")
   invisible(db_path)
@@ -100,6 +118,85 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
 .TYPE_CONCEPT_PRIMARY_DX <- 44786627 # "Primary admission diagnosis"
 
 .today_iso <- function() format(Sys.Date(), "%Y-%m-%d")
+
+#' Ingest PCORnet facility.csv and/or Seed Primary Institutional Care Site
+#'
+#' Maps `facility.csv` into the OMOP CDM `care_site` table if present and/or seeds
+#' a root care site for the institution if `site_id` is supplied.
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param source_dir Directory containing PCORnet source CSVs.
+#' @param site_id Optional numeric site identifier.
+#' @param site_anon Optional publication pseudonym (e.g. "Site A").
+#' @param site_name Optional institutional name or internal descriptor.
+#' @return Invisibly, `con`.
+#' @export
+load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, site_name = NULL) {
+  path <- find_source_file(source_dir, "facility")
+  loaded_facility <- FALSE
+
+  if (!is.null(path)) {
+    prepare_source_view(
+      con, "_temp_facility", path,
+      c("FACILITYID", "FACILITY_TYPE", "FACILITY_LOCATION")
+    )
+    run_insert(con, "CARE_SITE (from FACILITY)", "
+      INSERT INTO care_site (
+          care_site_id,
+          care_site_name,
+          place_of_service_concept_id,
+          location_id,
+          care_site_source_value,
+          place_of_service_source_value
+      )
+      SELECT
+          pcornet_id(src.FACILITYID) AS care_site_id,
+          COALESCE(src.FACILITY_TYPE, 'Facility ' || src.FACILITYID) AS care_site_name,
+          0 AS place_of_service_concept_id,
+          NULL AS location_id,
+          src.FACILITYID AS care_site_source_value,
+          src.FACILITY_TYPE AS place_of_service_source_value
+      FROM _temp_facility src
+      WHERE src.FACILITYID IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY src.FACILITYID) = 1;
+    ")
+    DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_facility;")
+    loaded_facility <- TRUE
+  }
+
+  if (!is.null(site_id)) {
+    root_name <- if (!is.null(site_anon)) site_anon else paste0("Site ", site_id)
+    root_source <- if (!is.null(site_name)) site_name else root_name
+    root_name_esc <- gsub("'", "''", root_name)
+    root_source_esc <- gsub("'", "''", root_source)
+
+    run_insert(con, "CARE_SITE (root institutional record)", sprintf("
+      INSERT INTO care_site (
+          care_site_id,
+          care_site_name,
+          place_of_service_concept_id,
+          location_id,
+          care_site_source_value,
+          place_of_service_source_value
+      )
+      SELECT
+          %d AS care_site_id,
+          '%s' AS care_site_name,
+          0 AS place_of_service_concept_id,
+          NULL AS location_id,
+          '%s' AS care_site_source_value,
+          NULL AS place_of_service_source_value
+      WHERE NOT EXISTS (
+          SELECT 1 FROM care_site WHERE care_site_id = %d
+      );
+    ", as.integer(site_id), root_name_esc, root_source_esc, as.integer(site_id)))
+  } else if (!loaded_facility) {
+    cat("Skipping CARE_SITE - no facility.csv found and no site_id provided\n")
+  }
+
+  invisible(con)
+}
+.load_care_site <- load_care_site
 
 .load_provider <- function(con, source_dir) {
   path <- find_source_file(source_dir, "provider")
@@ -158,7 +255,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_provider;")
 }
 
-.load_person <- function(con, source_dir) {
+.load_person <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "demographic")
   if (is.null(path)) {
     cat("Skipping PERSON - no demographic.csv found\n")
@@ -168,10 +265,24 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     con, "_temp_demographic", path,
     c("PATID", "SEX", "BIRTH_DATE", "RACE", "HISPANIC", "PROVIDERID")
   )
-  run_insert(con, "PERSON (from DEMOGRAPHIC)", "
+
+  if (isTRUE(disambiguate_patids)) {
+    if (is.null(site_id)) {
+      stop("disambiguate_patids requires site_id to be specified.")
+    }
+    person_id_expr <- sprintf("pcornet_id(src.PATID || '-%s')", site_id)
+    person_src_expr <- sprintf("src.PATID || '-%s'", site_id)
+  } else {
+    person_id_expr <- "ROW_NUMBER() OVER (ORDER BY src.PATID) + (SELECT COALESCE(MAX(person_id), 0) FROM person)"
+    person_src_expr <- "src.PATID"
+  }
+
+  care_site_id_expr <- if (!is.null(site_id)) as.character(as.integer(site_id)) else "NULL"
+
+  run_insert(con, "PERSON (from DEMOGRAPHIC)", sprintf("
     INSERT INTO person
     SELECT
-        ROW_NUMBER() OVER (ORDER BY src.PATID) + (SELECT COALESCE(MAX(person_id), 0) FROM person) AS person_id,
+        %s AS person_id,
         CASE UPPER(src.SEX)
             WHEN 'M' THEN 8507  -- Male
             WHEN 'F' THEN 8532  -- Female
@@ -193,8 +304,8 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 ELSE 38003564 END AS ethnicity_concept_id,
         NULL AS location_id,
         COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
-        NULL AS care_site_id,
-        src.PATID AS person_source_value,
+        %s AS care_site_id,
+        %s AS person_source_value,
         src.SEX AS gender_source_value,
         0 AS gender_source_concept_id,
         src.RACE AS race_source_value,
@@ -206,11 +317,11 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
       ON pr.provider_source_value = src.PROVIDERID
     WHERE src.PATID IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PATID ORDER BY parse_omop_date(src.BIRTH_DATE) NULLS LAST) = 1;
-  ")
+  ", person_id_expr, care_site_id_expr, person_src_expr))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_demographic;")
 }
 
-.load_visit_occurrence <- function(con, source_dir) {
+.load_visit_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "encounter")
   if (is.null(path)) {
     cat("Skipping VISIT_OCCURRENCE - no encounter.csv found\n")
@@ -221,11 +332,14 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     c("ENCOUNTERID", "PATID", "ENC_TYPE", "ADMIT_DATE", "ADMIT_TIME",
       "DISCHARGE_DATE", "DISCHARGE_TIME", "PROVIDERID", "FACILITYID", "DISCHARGE_STATUS")
   )
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+  care_site_id_expr <- if (!is.null(site_id)) as.character(as.integer(site_id)) else "NULL"
+
   run_insert(con, "VISIT_OCCURRENCE (from ENCOUNTER)", sprintf("
     INSERT INTO visit_occurrence
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.ENCOUNTERID) + (SELECT COALESCE(MAX(visit_occurrence_id), 0) FROM visit_occurrence) AS visit_occurrence_id,
-        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         CASE UPPER(src.ENC_TYPE)
             WHEN 'IP' THEN 9201 -- Inpatient
             WHEN 'OS' THEN 9201 -- Observation Services
@@ -242,7 +356,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         parse_omop_datetime(COALESCE(src.DISCHARGE_DATE, src.ADMIT_DATE), src.DISCHARGE_TIME) AS visit_end_datetime,
         %d AS visit_type_concept_id,
         COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
-        pcornet_id(src.FACILITYID) AS care_site_id,
+        COALESCE(cs.care_site_id, %s, pcornet_id(src.FACILITYID)) AS care_site_id,
         src.ENCOUNTERID AS visit_source_value,
         0 AS visit_source_concept_id,
         0 AS admitted_from_concept_id,
@@ -256,16 +370,18 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         NULL AS preceding_visit_occurrence_id
     FROM _temp_encounter src
     LEFT JOIN person p
-      ON p.person_source_value = src.PATID
+      ON p.person_source_value = %s
     LEFT JOIN provider pr
       ON pr.provider_source_value = src.PROVIDERID
+    LEFT JOIN care_site cs
+      ON cs.care_site_source_value = src.FACILITYID
     WHERE src.ENCOUNTERID IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.ENCOUNTERID) = 1;
-  ", .TYPE_CONCEPT_EHR_ENCOUNTER))
+  ", patid_expr, .TYPE_CONCEPT_EHR_ENCOUNTER, care_site_id_expr, patid_expr))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_encounter;")
 }
 
-.load_condition_occurrence <- function(con, source_dir) {
+.load_condition_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "diagnosis")
   if (is.null(path)) {
     cat("Skipping CONDITION_OCCURRENCE - no diagnosis.csv found\n")
@@ -275,11 +391,13 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     con, "_temp_diagnosis", path,
     c("DIAGNOSISID", "PATID", "DX_TYPE", "DX", "DX_DATE", "ADMIT_DATE", "PDX", "PROVIDERID", "ENCOUNTERID")
   )
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+
   run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", sprintf("
     INSERT INTO condition_occurrence
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.DIAGNOSISID) + (SELECT COALESCE(MAX(condition_occurrence_id), 0) FROM condition_occurrence) AS condition_occurrence_id,
-        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         COALESCE(
             stcm.target_concept_id,
             cr.concept_id_2,
@@ -305,7 +423,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         FROM _temp_diagnosis
     ) src
     LEFT JOIN person p
-      ON p.person_source_value = src.PATID
+      ON p.person_source_value = %s
     LEFT JOIN provider pr
       ON pr.provider_source_value = src.PROVIDERID
     LEFT JOIN visit_occurrence vo
@@ -331,11 +449,11 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
      AND stcm.source_code = src.DX
     WHERE src.DIAGNOSISID IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DIAGNOSISID) = 1;
-  ", .TYPE_CONCEPT_PRIMARY_DX, .today_iso()))
+  ", patid_expr, .TYPE_CONCEPT_PRIMARY_DX, patid_expr, .today_iso()))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_diagnosis;")
 }
 
-.load_procedure_occurrence <- function(con, source_dir) {
+.load_procedure_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "procedures")
   if (is.null(path)) {
     cat("Skipping PROCEDURE_OCCURRENCE - no procedures.csv found\n")
@@ -345,11 +463,13 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     con, "_temp_procedures", path,
     c("PROCEDURESID", "PATID", "PX_TYPE", "PX", "PX_DATE", "PROVIDERID", "ENCOUNTERID")
   )
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+
   run_insert(con, "PROCEDURE_OCCURRENCE (from PROCEDURES)", sprintf("
     INSERT INTO procedure_occurrence
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.PROCEDURESID) + (SELECT COALESCE(MAX(procedure_occurrence_id), 0) FROM procedure_occurrence) AS procedure_occurrence_id,
-        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         COALESCE(
             stcm.target_concept_id,
             cr.concept_id_2,
@@ -381,7 +501,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         FROM _temp_procedures
     ) src
     LEFT JOIN person p
-      ON p.person_source_value = src.PATID
+      ON p.person_source_value = %s
     LEFT JOIN provider pr
       ON pr.provider_source_value = src.PROVIDERID
     LEFT JOIN visit_occurrence vo
@@ -407,11 +527,11 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
      AND stcm.source_code = src.PX
     WHERE src.PROCEDURESID IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PROCEDURESID) = 1;
-  ", .TYPE_CONCEPT_EHR_PROCEDURE, .today_iso()))
+  ", patid_expr, .TYPE_CONCEPT_EHR_PROCEDURE, patid_expr, .today_iso()))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_procedures;")
 }
 
-.load_measurement <- function(con, source_dir) {
+.load_measurement <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "lab_result_cm")
   if (is.null(path)) {
     cat("Skipping MEASUREMENT - no lab_result_cm.csv found\n")
@@ -422,11 +542,13 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     c("LAB_RESULT_CM_ID", "PATID", "LAB_LOINC", "RESULT_DATE", "RESULT_TIME",
       "RESULT_NUM", "RESULT_UNIT", "PROVIDERID", "ENCOUNTERID", "RAW_LAB_NAME", "RAW_LAB_CODE")
   )
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+
   run_insert(con, "MEASUREMENT (from LAB_RESULT_CM)", sprintf("
     INSERT INTO measurement
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.LAB_RESULT_CM_ID) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
-        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         COALESCE(
             stcm.target_concept_id,
             cr.concept_id_2,
@@ -455,7 +577,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         0 AS meas_event_field_concept_id
     FROM _temp_lab_result src
     LEFT JOIN person p
-      ON p.person_source_value = src.PATID
+      ON p.person_source_value = %s
     LEFT JOIN provider pr
       ON pr.provider_source_value = src.PROVIDERID
     LEFT JOIN visit_occurrence vo
@@ -481,11 +603,11 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
       ON stcm.source_code = src.LAB_LOINC
     WHERE src.LAB_RESULT_CM_ID IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.LAB_RESULT_CM_ID) = 1;
-  ", .TYPE_CONCEPT_EHR_MEASUREMENT, .today_iso()))
+  ", patid_expr, .TYPE_CONCEPT_EHR_MEASUREMENT, patid_expr, .today_iso()))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_lab_result;")
 }
 
-.load_vital <- function(con, source_dir) {
+.load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "vital")
   if (is.null(path)) {
     cat("Skipping VITAL - no vital.csv found (optional table)\n")
@@ -496,6 +618,8 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     c("VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
       "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC")
   )
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+
   run_insert(con, "MEASUREMENT (from VITAL)", sprintf("
     WITH unpivoted_vitals AS (
       SELECT
@@ -561,7 +685,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     INSERT INTO measurement
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.vital_sub_id) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
-        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         COALESCE(
             stcm.target_concept_id,
             cr.concept_id_2,
@@ -590,7 +714,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         0 AS meas_event_field_concept_id
     FROM unpivoted_vitals src
     LEFT JOIN person p
-      ON p.person_source_value = src.PATID
+      ON p.person_source_value = %s
     LEFT JOIN visit_occurrence vo
       ON vo.visit_source_value = src.ENCOUNTERID
     LEFT JOIN concept c
@@ -614,11 +738,11 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
       ON stcm.source_code = src.loinc_code
     WHERE src.vital_sub_id IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.vital_sub_id) = 1;
-  ", .TYPE_CONCEPT_EHR_MEASUREMENT, .today_iso()))
+  ", patid_expr, .TYPE_CONCEPT_EHR_MEASUREMENT, patid_expr, .today_iso()))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_vital;")
 }
 
-.load_drug_exposure <- function(con, source_dir) {
+.load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "prescribing")
   if (is.null(path)) {
     cat("Skipping DRUG_EXPOSURE - no prescribing.csv found\n")
@@ -629,11 +753,13 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     c("PRESCRIBINGID", "PATID", "RXNORM_CUI", "RX_START_DATE", "RX_END_DATE",
       "RAW_RX_MED_NAME", "RAW_RX_NDC", "PROVIDERID", "ENCOUNTERID")
   )
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+
   run_insert(con, "DRUG_EXPOSURE (from PRESCRIBING)", sprintf("
     INSERT INTO drug_exposure
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.PRESCRIBINGID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
-        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         COALESCE(
             stcm.target_concept_id,
             cr.concept_id_2,
@@ -662,7 +788,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         NULL AS dose_unit_source_value
     FROM _temp_prescribing src
     LEFT JOIN person p
-      ON p.person_source_value = src.PATID
+      ON p.person_source_value = %s
     LEFT JOIN provider pr
       ON pr.provider_source_value = src.PROVIDERID
     LEFT JOIN visit_occurrence vo
@@ -688,11 +814,11 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
       ON stcm.source_code = src.RXNORM_CUI
     WHERE src.PRESCRIBINGID IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PRESCRIBINGID) = 1;
-  ", .TYPE_CONCEPT_EHR_DRUG, .today_iso()))
+  ", patid_expr, .TYPE_CONCEPT_EHR_DRUG, patid_expr, .today_iso()))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_prescribing;")
 }
 
-.load_death <- function(con, source_dir) {
+.load_death <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "death")
   if (is.null(path)) {
     cat("Skipping DEATH - no death.csv found (optional table)\n")
@@ -702,6 +828,8 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
     con, "_temp_death", path,
     c("PATID", "DEATH_DATE", "DEATH_DATE_IMPUTE", "DEATH_SOURCE", "DEATH_MATCH_CONFIDENCE")
   )
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+
   run_insert(con, "DEATH", sprintf("
     INSERT INTO death (
         person_id,
@@ -713,7 +841,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         cause_source_concept_id
     )
     SELECT
-        COALESCE(p.person_id, pcornet_id(src.PATID)) AS person_id,
+        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         parse_omop_date(src.DEATH_DATE) AS death_date,
         parse_omop_datetime(src.DEATH_DATE, NULL) AS death_datetime,
         %d AS death_type_concept_id,
@@ -722,11 +850,11 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
         0 AS cause_source_concept_id
     FROM _temp_death src
     LEFT JOIN person p
-      ON p.person_source_value = src.PATID
+      ON p.person_source_value = %s
     WHERE src.PATID IS NOT NULL 
       AND src.DEATH_DATE IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PATID ORDER BY parse_omop_date(src.DEATH_DATE) DESC) = 1;
-  ", .TYPE_CONCEPT_EHR_DEATH))
+  ", patid_expr, .TYPE_CONCEPT_EHR_DEATH, patid_expr))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_death;")
 }
 
@@ -928,14 +1056,43 @@ build_condition_era <- function(con) {
   ")
 }
 
-.load_cdm_source <- function(con, cdm_source_name = "PCORnet -> DuckDB OMOP CDM", cdm_holder = "omop-duck-db") {
+#' Populate CDM_SOURCE metadata table
+#'
+#' @param con Active DuckDB connection
+#' @param cdm_source_name Optional CDM source name
+#' @param cdm_holder Optional CDM data holder
+#' @param site_id Optional numeric site identifier
+#' @param site_anon Optional publication pseudonym (e.g. "Site A")
+#' @param site_name Optional institutional name
+#' @export
+load_cdm_source <- function(con, cdm_source_name = NULL, cdm_holder = NULL, site_id = NULL, site_anon = NULL, site_name = NULL) {
   DBI::dbExecute(con, "DELETE FROM cdm_source;")
+  if (is.null(cdm_source_name)) {
+    if (!is.null(site_anon)) {
+      cdm_source_name <- site_anon
+    } else if (!is.null(site_name)) {
+      cdm_source_name <- site_name
+    } else {
+      cdm_source_name <- "PCORnet -> DuckDB OMOP CDM"
+    }
+  }
+
+  cdm_source_abbreviation <- if (!is.null(site_anon)) site_anon else "PCORNET"
+
+  if (is.null(cdm_holder)) {
+    cdm_holder <- if (!is.null(site_name)) site_name else if (!is.null(site_anon)) site_anon else "omop-duck-db"
+  }
+
+  src_name_esc <- gsub("'", "''", as.character(cdm_source_name))
+  src_abbr_esc <- gsub("'", "''", as.character(cdm_source_abbreviation))
+  holder_esc <- gsub("'", "''", as.character(cdm_holder))
   today_str <- .today_iso()
+
   run_insert(con, "CDM_SOURCE", sprintf("
     INSERT INTO cdm_source
     SELECT
         '%s' AS cdm_source_name,
-        'PCORNET' AS cdm_source_abbreviation,
+        '%s' AS cdm_source_abbreviation,
         '%s' AS cdm_holder,
         'PCORnet extract mapped to OMOP CDM v5.4 in DuckDB' AS source_description,
         'https://github.com/jkylearmstrong/omop-duck-db' AS source_documentation_reference,
@@ -945,5 +1102,8 @@ build_condition_era <- function(con) {
         'v5.4' AS cdm_version,
         756265 AS cdm_version_concept_id,
         COALESCE((SELECT vocabulary_version FROM vocabulary WHERE vocabulary_id = 'None' LIMIT 1), 'Unknown') AS vocabulary_version;
-  ", cdm_source_name, cdm_holder, today_str, today_str))
+  ", src_name_esc, src_abbr_esc, holder_esc, today_str, today_str))
 }
+
+.load_cdm_source <- load_cdm_source
+

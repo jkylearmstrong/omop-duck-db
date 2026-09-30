@@ -4,19 +4,37 @@
 \alias{etl_pcornet}
 \title{Run the PCORnet -> OMOP CDM v5.4 ETL (R implementation)}
 \usage{
-etl_pcornet(source_dir, db_path = "omop_cdm.duckdb", central_vocab = NULL)
+etl_pcornet(
+  source_dir,
+  db_path = "omop_cdm.duckdb",
+  central_vocab = NULL,
+  site_id = NULL,
+  site_anon = NULL,
+  site_name = NULL,
+  disambiguate_patids = FALSE
+)
 }
 \arguments{
 \item{source_dir}{Directory containing PCORnet-format CSVs (\code{demographic.csv},
 \code{encounter.csv}, \code{diagnosis.csv}, \code{procedures.csv}, \code{lab_result_cm.csv},
-\code{prescribing.csv}, \code{provider.csv}, and optionally \code{death.csv}), matched
-case-insensitively. Any table whose source file isn't found is skipped.}
+\code{prescribing.csv}, \code{provider.csv}, optionally \code{vital.csv}, \code{facility.csv},
+and optionally \code{death.csv}), matched case-insensitively. Any table whose
+source file isn't found is skipped.}
 
 \item{db_path}{Path to the DuckDB database file (schema + vocabulary must
 already exist).}
 
 \item{central_vocab}{Optional path to an existing central vocabulary DuckDB database
 to attach in read-only mode with zero-copy views.}
+
+\item{site_id}{Optional numeric site identifier (e.g. 1 to 5).}
+
+\item{site_anon}{Optional publication pseudonym (e.g. "Site A").}
+
+\item{site_name}{Optional institutional name or internal descriptor (e.g. "Temple").}
+
+\item{disambiguate_patids}{Logical. If \code{TRUE}, formats \code{person_source_value} as
+\code{src.PATID || '-' || site_id} and derives surrogate keys via \code{pcornet_id(src.PATID || '-' || site_id)}.}
 }
 \value{
 Invisibly, \code{db_path}.

@@ -1,3 +1,11 @@
+# omopduckdb 0.2.2
+
+### Multi-Site Consortium Provenance & Federation
+- **Pluggable Site Identification**: Added `--site-id <int>`, `--site-anon <str>`, and `--site-name <str>` to `etl_pcornet()` and CLI scripts (`build_omop_cdm.py` and `inst/scripts/etl_pcornet.R`). Automatically populates `cdm_source` metadata (`cdm_source_name`, `cdm_source_abbreviation`, `cdm_holder`), seeds a primary institutional `care_site` record, and links `person.care_site_id = site_id` for downstream OHDSI tools (ATLAS, PLP, DQD).
+- **Patient ID Disambiguation (`--disambiguate-patids`)**: Formats `person_source_value` as `src.PATID || '-' || site_id` and derives deterministic surrogate keys via `pcornet_id(src.PATID || '-' || site_id)` across all CDM clinical occurrence tables (`person`, `visit_occurrence`, `condition_occurrence`, `procedure_occurrence`, `drug_exposure`, `measurement`, `death`), preventing cross-site key collisions when pooling extracts.
+- **Formal `CARE_SITE` Ingestion**: Added modular `load_care_site()` ingesting `facility.csv` (`care_site_id = pcornet_id(src.FACILITYID)`) and/or creating the root institution care site record, eliminating missing table and orphan key warnings in OHDSI DQD. In `visit_occurrence`, encounters gracefully link to their facility or fall back to the institutional site when facility records are absent.
+- **Zero-Copy Federated Consortium Views (`create_federated_consortium`)**: Added `create_federated_consortium(site_dbs, central_vocab_db=None, output_con=None)` in both Python (`omop_etl.federation`) and R (`omopduckdb::create_federated_consortium`). Attaches multiple site databases in `READ_ONLY` mode, optionally attaches a central Athena vocabulary, and constructs unified zero-copy `v_*` views (`v_person`, `v_visit_occurrence`, etc.) projecting `site_id` and `site_anon` provenance without duplicating data.
+
 # omopduckdb 0.2.1
 
 ### Real-World Multi-Center Consortium Enhancements
