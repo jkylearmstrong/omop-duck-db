@@ -1,3 +1,11 @@
+# omopduckdb 0.5.1
+
+### Bug Fixes & CI/CD Stability
+- **DuckDB Extension Autoloading**: Replaced dynamic `CURRENT_DATE` queries in cohort SQL with injected ISO date literals (`DATE 'YYYY-MM-DD'`), eliminating unexpected ICU extension autoloading failures on Linux runners.
+- **Pkgdown Documentation**: Added all exported reference topics to `_pkgdown.yml`, categorized into logical sections across cohort definitions, ML feature extraction, HADES/tidymodels bridges, and DQD.
+- **Docker Builder Dependencies**: Added missing suggested packages (`Matrix`, `arrow`, `jsonlite`, `dplyr`, `withr`) to the builder image.
+- **PyPI Release Workflow**: Configured `skip-existing: true` in `pypa/gh-action-pypi-publish` action to handle idempotent publishes gracefully.
+
 # omopduckdb 0.5.0
 
 ### End of Life & Mortality Cohort Suite
