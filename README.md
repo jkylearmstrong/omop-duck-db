@@ -1,5 +1,4 @@
-# omop-duck-db
-
+# omop-duck-db <a href="https://jkylearmstrong.github.io/omop-duck-db/"><img src="man/figures/logo.png" align="right" height="139" alt="omop-duck-db website" /></a>
 
 <!-- badges: start -->
 
