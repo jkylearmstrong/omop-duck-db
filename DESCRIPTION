@@ -1,6 +1,6 @@
 Package: omopduckdb
 Title: Build and Populate an OMOP CDM v5.4 Database in DuckDB
-Version: 0.5.1
+Version: 0.5.2
 Authors@R: person("J Kyle", "Armstrong", email = "j.kyle.armstrong@gmail.com", role = c("aut", "cre"), comment = c(ORCID = "0000-0002-4269-0121"))
 Description: Tools for building an OMOP Common Data Model (CDM) v5.4 schema
     in DuckDB, loading the OHDSI Athena vocabulary (from a local download or

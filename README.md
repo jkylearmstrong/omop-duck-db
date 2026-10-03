@@ -62,8 +62,15 @@ remotes::install_github("jkylearmstrong/omop-duck-db")
 Python:
 
 ``` bash
-pip install "omop-duck-db @ git+https://github.com/jkylearmstrong/omop-duck-db"
+pip install omop-duck-db
+# or for ML dependencies: pip install 'omop-duck-db[ml]'
 ```
+
+### Developer Note: `renv` Workflow
+
+This repository includes an `.Rprofile` that activates `renv` automatically (`renv/activate.R`).
+- **If working within the project's isolated environment**: Run `renv::restore()` to populate local package libraries.
+- **If using pre-installed system R packages**: Set `RENV_CONFIG_AUTOLOADER = FALSE` in `.Renviron` or invoke `Rscript --no-init-file` so standalone scripts do not fail looking for unpopulated local `renv` libraries.
 
 ## Example
 

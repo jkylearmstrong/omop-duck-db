@@ -15,7 +15,10 @@ materialize_concept_features(
   person_col = NULL,
   index_date_col = NULL,
   outcome_col = NULL,
-  temporary = FALSE
+  temporary = FALSE,
+  anchor_date = c("auto", "admit_date", "discharge_date"),
+  washin_buffer_days = 0,
+  washin_buffer_hours = 0
 )
 }
 \arguments{
@@ -41,6 +44,14 @@ subset returned by \code{\link[=model_concepts]{model_concepts()}}.}
 \item{person_col, index_date_col, outcome_col}{Optional explicit column names in the parquet.}
 
 \item{temporary}{Create a temporary table (default \code{FALSE}).}
+
+\item{anchor_date}{Strategy for selecting index date column from cohort parquet:
+\code{"auto"} (default), \code{"admit_date"} (prioritizes admission date to prevent in-hospital leakage),
+or \code{"discharge_date"} (prioritizes discharge date).}
+
+\item{washin_buffer_days}{Post-anchor observation buffer days to include in the window (default 0).}
+
+\item{washin_buffer_hours}{Post-anchor observation buffer hours (e.g. 24 for 24h post-admission, default 0).}
 }
 \value{
 Invisibly, a list with \code{table}, \code{features} (column names created) and \code{n_rows}.

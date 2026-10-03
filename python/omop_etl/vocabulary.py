@@ -38,11 +38,32 @@ def check_vocabulary_version(con):
     except Exception:
         total_relationships = 0
 
+    unmapped_discharge = []
+    try:
+        tables = [r[0].lower() for r in con.execute("SHOW TABLES").fetchall()]
+        if "visit_occurrence" in tables:
+            unmapped_discharge = [
+                {"source_value": r[0], "count": r[1]}
+                for r in con.execute("""
+                    SELECT discharged_to_source_value, COUNT(*) AS count
+                    FROM visit_occurrence
+                    WHERE discharged_to_concept_id = 0
+                      AND discharged_to_source_value IS NOT NULL
+                      AND TRIM(discharged_to_source_value) != ''
+                    GROUP BY discharged_to_source_value
+                    ORDER BY count DESC
+                    LIMIT 10
+                """).fetchall()
+            ]
+    except Exception:
+        pass
+
     return {
         "vocabulary_version": version,
         "total_concepts": total_concepts,
         "total_relationships": total_relationships,
         "vocabularies": {c[0]: c[1] for c in counts},
+        "unmapped_discharge_statuses": unmapped_discharge,
     }
 
 

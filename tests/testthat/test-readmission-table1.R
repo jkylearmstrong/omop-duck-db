@@ -284,3 +284,59 @@ test_that("generate_table1 and validate_table1_reconciliation produce valid summ
   expect_false(rec_drift$is_concordant)
   expect_equal(rec_drift$status, "DRIFT_DETECTED")
 })
+
+test_that("prepare_competing_risks_data computes 3-state competing risk outcomes", {
+  db_path <- tempfile(fileext = ".duckdb")
+  build_schema(db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  on.exit({
+    DBI::dbDisconnect(con, shutdown = TRUE)
+    unlink(db_path)
+  }, add = TRUE)
+
+  ensure_cohort_tables(con)
+
+  DBI::dbExecute(con, "
+    INSERT INTO person (person_id, gender_concept_id, year_of_birth, month_of_birth, day_of_birth, race_concept_id, ethnicity_concept_id)
+    VALUES 
+        (201, 8507, 1970, 1, 1, 8527, 38003564),
+        (202, 8532, 1965, 1, 1, 8516, 38003564),
+        (203, 8507, 1980, 1, 1, 8527, 38003564);
+
+    INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id)
+    VALUES 
+        (2001, 201, 9201, '2024-01-01', '2024-01-10', 44818518),
+        (2002, 202, 9201, '2024-01-01', '2024-01-10', 44818518),
+        (2003, 203, 9201, '2024-01-01', '2024-01-10', 44818518),
+        (2004, 201, 9201, '2024-01-20', '2024-01-25', 44818518);
+
+    INSERT INTO death (person_id, death_date, death_type_concept_id)
+    VALUES (202, '2024-01-25', 38003565);
+
+    INSERT INTO cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+    VALUES 
+        (50, 201, '2024-01-01', '2024-01-10'),
+        (50, 202, '2024-01-01', '2024-01-10'),
+        (50, 203, '2024-01-01', '2024-01-10');
+  ")
+
+  res <- prepare_competing_risks_data(con, cohort_table = "cohort", cohort_id = 50, followup_window_days = 30)
+  df <- res$data
+  summary <- res$summary
+
+  expect_equal(nrow(df), 3)
+  expect_equal(summary$total_patients, 3)
+  expect_equal(summary$n_readmissions, 1)
+  expect_equal(summary$n_competing_deaths, 1)
+  expect_equal(summary$n_censored, 1)
+  expect_equal(summary$n_composite_events, 2)
+  expect_equal(summary$composite_rate, 2 / 3)
+
+  # Check statuses
+  expect_equal(df$status[df$subject_id == 201], 1)
+  expect_equal(df$time_days[df$subject_id == 201], 10)
+  expect_equal(df$status[df$subject_id == 202], 2)
+  expect_equal(df$time_days[df$subject_id == 202], 15)
+  expect_equal(df$status[df$subject_id == 203], 0)
+  expect_equal(df$time_days[df$subject_id == 203], 30)
+})

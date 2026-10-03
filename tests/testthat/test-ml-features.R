@@ -125,3 +125,24 @@ test_that("the file also works when sourced on its own", {
   res <- env$extract_sparse_concept_matrix(fx$con, fx$parquet, min_patient_freq = 2)
   expect_setequal(res$concepts$concept_id, c(201, 301))
 })
+
+test_that("anchor_date and washin buffer bounds in R", {
+  fx <- make_ml_fixture()
+  pq <- tempfile(fileext = ".parquet")
+  on.exit(unlink(pq), add = TRUE)
+  write_cohort_parquet(fx$con, pq, "
+    SELECT 1 AS person_id, DATE '2021-05-30' AS admit_date, DATE '2021-06-05' AS discharge_date, 1 AS y
+  ")
+
+  # 1. With anchor_date='admit_date', 2021-06-01 (concept 202) is strictly after admit_date -> excluded
+  res_admit <- extract_sparse_concept_matrix(fx$con, pq, anchor_date = "admit_date", domains = "condition")
+  expect_false("202 - condition" %in% res_admit$concepts$token)
+
+  # 2. With anchor_date='discharge_date', 2021-06-01 is before discharge -> included
+  res_disch <- extract_sparse_concept_matrix(fx$con, pq, anchor_date = "discharge_date", domains = "condition")
+  expect_true("202 - condition" %in% res_disch$concepts$token)
+
+  # 3. With anchor_date='admit_date' and washin_buffer_hours = 48 (2 days), included
+  res_buf <- extract_sparse_concept_matrix(fx$con, pq, anchor_date = "admit_date", washin_buffer_hours = 48, domains = "condition")
+  expect_true("202 - condition" %in% res_buf$concepts$token)
+})

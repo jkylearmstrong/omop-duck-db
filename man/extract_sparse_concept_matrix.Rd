@@ -16,7 +16,10 @@ extract_sparse_concept_matrix(
   person_col = NULL,
   index_date_col = NULL,
   outcome_col = NULL,
-  concept_table = NULL
+  concept_table = NULL,
+  anchor_date = c("auto", "admit_date", "discharge_date"),
+  washin_buffer_days = 0,
+  washin_buffer_hours = 0
 )
 }
 \arguments{
@@ -46,6 +49,14 @@ order; \code{min_patient_freq} is then not applied and concepts outside it are d
 \item{person_col, index_date_col, outcome_col}{Optional explicit column names in the parquet.}
 
 \item{concept_table}{Concept table to read names from (default: \code{concept}, then \code{central_vocab}).}
+
+\item{anchor_date}{Strategy for selecting index date column from cohort parquet:
+\code{"auto"} (default), \code{"admit_date"} (prioritizes admission date to prevent in-hospital leakage),
+or \code{"discharge_date"} (prioritizes discharge date).}
+
+\item{washin_buffer_days}{Post-anchor observation buffer days to include in the window (default 0).}
+
+\item{washin_buffer_hours}{Post-anchor observation buffer hours (e.g. 24 for 24h post-admission, default 0).}
 }
 \value{
 A list with \code{X} (a \code{Matrix::dgCMatrix}, rows aligned to the parquet), \code{concepts} (one row per

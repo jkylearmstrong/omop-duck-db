@@ -294,3 +294,40 @@ dbDisconnect(con, shutdown = TRUE)
     py_cells = sorted(zip(coo.row.tolist(), coo.col.tolist(), coo.data.astype(float).tolist()))
     r_cells = sorted(zip(r_trip["i"].tolist(), r_trip["j"].tolist(), r_trip["x"].astype(float).tolist()))
     assert r_cells == py_cells                                            # identical cells
+
+
+def test_anchor_date_and_washin_buffer(cdm_and_cohort, tmp_path):
+    con, _ = cdm_and_cohort
+    # Person 1 has condition 201 on 2021-05-20, 2021-05-25; 202 on 2021-06-01
+    df = pd.DataFrame({
+        "person_id": [1],
+        "admit_date": ["2021-05-30"],
+        "discharge_date": ["2021-06-05"],
+        "y": [1],
+    })
+    pq_path = tmp_path / "cohort_admit_discharge.parquet"
+    df.to_parquet(pq_path)
+
+    # 1. With anchor_date='admit_date', index is 2021-05-30.
+    # 2021-06-01 (concept 202) is strictly after admit_date -> excluded.
+    res_admit = extract_sparse_concept_matrix(con, pq_path, anchor_date="admit_date", domains=["condition"])
+    cols_admit = _cols(res_admit)
+    X_admit = _dense(res_admit)
+    assert "202 - condition" not in cols_admit or X_admit[0, cols_admit["202 - condition"]] == 0
+
+    # 2. With anchor_date='discharge_date', index is 2021-06-05.
+    # 2021-06-01 (concept 202) is before discharge_date -> included.
+    res_disch = extract_sparse_concept_matrix(con, pq_path, anchor_date="discharge_date", domains=["condition"])
+    cols_disch = _cols(res_disch)
+    X_disch = _dense(res_disch)
+    assert "202 - condition" in cols_disch
+    assert X_disch[0, cols_disch["202 - condition"]] == 1
+
+    # 3. With anchor_date='admit_date' and washin_buffer_hours=48 (2 days),
+    # upper bound is admit_date + 2 days = 2021-06-01 (inclusive), so concept 202 is included!
+    res_buf = extract_sparse_concept_matrix(con, pq_path, anchor_date="admit_date", washin_buffer_hours=48, domains=["condition"])
+    cols_buf = _cols(res_buf)
+    X_buf = _dense(res_buf)
+    assert "202 - condition" in cols_buf
+    assert X_buf[0, cols_buf["202 - condition"]] == 1
+

@@ -32,6 +32,7 @@ from omop_etl.cohort import (
     get_concept_ancestors,
     get_concept_descendants,
     get_concept_relationships,
+    prepare_competing_risks_data,
     resolve_concept_set,
 )
 from omop_etl.dqd import (
@@ -122,6 +123,7 @@ __all__ = [
     "build_readmission_cohort",
     "build_end_of_life_cohort",
     "build_mortality_cohort",
+    "prepare_competing_risks_data",
     # DQD Engine
     "run_dqd",
     # Feature Extractors & Concept Aggregators
@@ -148,5 +150,5 @@ __all__ = [
     "export_cdm",
 ]
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 

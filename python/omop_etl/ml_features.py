@@ -55,6 +55,14 @@ _INDEX_DATE_ALIASES = (
     "index_date", "cohort_start_date", "end_date", "admit_date", "admission_date",
     "admit_dt", "visit_start_date",
 )
+_ADMIT_DATE_ALIASES = (
+    "admit_date", "admission_date", "cohort_start_date", "visit_start_date",
+    "admit_dt", "start_date", "index_date",
+)
+_DISCHARGE_DATE_ALIASES = (
+    "discharge_date", "disch_date", "cohort_end_date", "visit_end_date",
+    "end_date", "discharged_date", "index_date",
+)
 _OUTCOME_ALIASES = ("y", "outcome_flag", "label", "outcome")
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 
@@ -144,7 +152,8 @@ def _resolve_column(cols: dict, explicit: str | None, aliases: Sequence[str], wh
     return None
 
 
-def _load_cohort(con, features_parquet, person_col, index_date_col, outcome_col):
+def _load_cohort(con, features_parquet, person_col, index_date_col, outcome_col,
+                 anchor_date: str = "auto"):
     """Read the cohort parquet in file order. Returns ``(cohort_sql, cohort_df)``.
 
     ``cohort_sql`` assigns a 0-based ``row_idx`` from ``file_row_number`` so row ``i`` of every output
@@ -154,7 +163,16 @@ def _load_cohort(con, features_parquet, person_col, index_date_col, outcome_col)
     desc = con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()
     cols = {r[0].lower(): r[0] for r in desc}
     p = _resolve_column(cols, person_col, _PERSON_ALIASES, "person id", "person_col")
-    d = _resolve_column(cols, index_date_col, _INDEX_DATE_ALIASES, "index date", "index_date_col")
+
+    anchor = (anchor_date or "auto").lower().strip()
+    if anchor in ("admit_date", "admit", "admission", "admission_date", "cohort_start_date"):
+        aliases = _ADMIT_DATE_ALIASES
+    elif anchor in ("discharge_date", "discharge", "disch_date", "cohort_end_date"):
+        aliases = _DISCHARGE_DATE_ALIASES
+    else:
+        aliases = _INDEX_DATE_ALIASES
+
+    d = _resolve_column(cols, index_date_col, aliases, "index date", "index_date_col")
     y = _resolve_column(cols, outcome_col, _OUTCOME_ALIASES, "outcome", "outcome_col", required=False)
 
     y_sql = f", {_ident(y)} AS y" if y else ""
@@ -188,7 +206,8 @@ def _validate_options(domains, lookback_days, min_patient_freq):
     return domains
 
 
-def _events_ctes(cohort_sql, domains, lookback_days, include_index_date, min_patient_freq, filter_pairs):
+def _events_ctes(cohort_sql, domains, lookback_days, include_index_date, min_patient_freq, filter_pairs,
+                 buffer_days: int = 0):
     """CTE chain ``cohort -> ev0 -> ev``: windowed, vocabulary-filtered events for every cohort row."""
     unions = " UNION ALL ".join(
         f"SELECT person_id, {DOMAINS[d].concept_col} AS concept_id, {DOMAINS[d].date_col} AS event_date, "
@@ -196,7 +215,8 @@ def _events_ctes(cohort_sql, domains, lookback_days, include_index_date, min_pat
         for d in domains
     )
     lower = f"AND e.event_date >= c.index_date - {int(lookback_days)} " if lookback_days is not None else ""
-    upper = "<=" if include_index_date else "<"
+    upper = "<=" if (include_index_date or buffer_days > 0) else "<"
+    date_offset = f" + {int(buffer_days)}" if buffer_days > 0 else ""
     if filter_pairs:
         vocab = ("JOIN (SELECT unnest(?::VARCHAR[]) AS domain, unnest(?::BIGINT[]) AS concept_id) v "
                  "ON ev0.domain = v.domain AND ev0.concept_id = v.concept_id")
@@ -210,7 +230,7 @@ def _events_ctes(cohort_sql, domains, lookback_days, include_index_date, min_pat
         f"WITH cohort AS ({cohort_sql}), ev_all AS ({unions}), "
         "ev0 AS (SELECT c.row_idx, c.person_id, c.index_date, e.domain, e.concept_id, e.event_date, "
         "e.visit_occurrence_id FROM cohort c JOIN ev_all e ON e.person_id = c.person_id "
-        f"{lower}AND e.event_date {upper} c.index_date "
+        f"{lower}AND e.event_date {upper} c.index_date{date_offset} "
         "WHERE e.concept_id IS NOT NULL AND e.concept_id <> 0), "
         f"ev AS (SELECT ev0.* FROM ev0 {vocab})"
     )
@@ -307,18 +327,22 @@ def _pair_index(vocab: pd.DataFrame, column: str) -> pd.DataFrame:
 
 
 def _run(con, features_parquet, suffix_sql, *, domains, lookback_days, min_patient_freq,
-         include_index_date, tokenizer, person_col, index_date_col, outcome_col):
+         include_index_date, tokenizer, person_col, index_date_col, outcome_col,
+         anchor_date="auto", washin_buffer_days=0, washin_buffer_hours=0):
     """Shared driver. Returns ``(cohort_df, frame, params_dict)`` where ``frame`` is the suffix query result."""
     domains = _validate_options(domains, lookback_days, min_patient_freq)
-    cohort_sql, cohort_df = _load_cohort(con, features_parquet, person_col, index_date_col, outcome_col)
+    cohort_sql, cohort_df = _load_cohort(con, features_parquet, person_col, index_date_col, outcome_col,
+                                         anchor_date=anchor_date)
 
+    buffer_days = int(washin_buffer_days) + (int(washin_buffer_hours) // 24 if washin_buffer_hours else 0)
     query_params: list = []
     filter_pairs = tokenizer is not None
     if filter_pairs:
         v = _tokenizer_vocab(tokenizer).dropna(subset=["concept_id"])
         v = v[v["domain"].isin(domains)]
         query_params = [v["domain"].tolist(), v["concept_id"].astype("int64").tolist()]
-    sql = _events_ctes(cohort_sql, domains, lookback_days, include_index_date, min_patient_freq, filter_pairs)
+    sql = _events_ctes(cohort_sql, domains, lookback_days, include_index_date, min_patient_freq, filter_pairs,
+                       buffer_days=buffer_days)
     frame = con.execute(sql + " " + suffix_sql, query_params).df()
     return cohort_df, frame, domains
 
@@ -346,6 +370,9 @@ def extract_sparse_concept_matrix(
     outcome_col: str | None = None,
     concept_table: str | None = None,
     dtype: Any = np.float32,
+    anchor_date: str = "auto",
+    washin_buffer_days: int = 0,
+    washin_buffer_hours: int = 0,
 ) -> dict:
     """High-dimensional sparse concept matrix over a per-row lookback window.
 
@@ -371,6 +398,10 @@ def extract_sparse_concept_matrix(
         include_index_date: Also use events dated exactly on the index date (default excludes them).
         concept_table: Concept table to read names from (default: ``concept``, then ``central_vocab``).
         dtype: Matrix dtype (default float32).
+        anchor_date: Anchor date column strategy: ``"auto"`` (default), ``"admit_date"`` (prioritizes admission
+            date columns to prevent in-hospital leakage), or ``"discharge_date"`` (prioritizes discharge date).
+        washin_buffer_days: Post-anchor observation buffer days to include in the window (default 0).
+        washin_buffer_hours: Post-anchor observation buffer hours (e.g. 24 for 24h post-admission, default 0).
 
     Returns:
         dict with ``X`` (``scipy.sparse.csr_matrix``, N x V), ``concepts`` (one row per column, aligned to
@@ -390,6 +421,7 @@ def extract_sparse_concept_matrix(
         domains=domains, lookback_days=lookback_days, min_patient_freq=min_patient_freq,
         include_index_date=include_index_date, tokenizer=tokenizer, person_col=person_col,
         index_date_col=index_date_col, outcome_col=outcome_col,
+        anchor_date=anchor_date, washin_buffer_days=washin_buffer_days, washin_buffer_hours=washin_buffer_hours,
     )
     person_of_row = cohort_df["person_id"].to_numpy()
     vocab, tokenizer = _assemble_vocab(con, triples, person_of_row, tokenizer, concept_table)
@@ -408,7 +440,9 @@ def extract_sparse_concept_matrix(
     return {
         "X": X, "concepts": vocab, "tokenizer": tokenizer, "cohort": cohort, "y": y,
         "params": {"lookback_days": lookback_days, "min_patient_freq": min_patient_freq,
-                   "domains": domains, "value": value, "include_index_date": include_index_date},
+                   "domains": domains, "value": value, "include_index_date": include_index_date,
+                   "anchor_date": anchor_date, "washin_buffer_days": washin_buffer_days,
+                   "washin_buffer_hours": washin_buffer_hours},
     }
 
 
@@ -427,6 +461,9 @@ def extract_sard_visit_tensors(
     outcome_col: str | None = None,
     concept_table: str | None = None,
     dtype: Any = np.int64,
+    anchor_date: str = "auto",
+    washin_buffer_days: int = 0,
+    washin_buffer_hours: int = 0,
 ) -> dict:
     """Padded chronological visit tensors for SARD / omop-learn sequence models.
 
@@ -471,6 +508,7 @@ def extract_sard_visit_tensors(
         domains=domains, lookback_days=lookback_days, min_patient_freq=min_patient_freq,
         include_index_date=include_index_date, tokenizer=tokenizer, person_col=person_col,
         index_date_col=index_date_col, outcome_col=outcome_col,
+        anchor_date=anchor_date, washin_buffer_days=washin_buffer_days, washin_buffer_hours=washin_buffer_hours,
     )
     person_of_row = cohort_df["person_id"].to_numpy()
     vocab, tokenizer = _assemble_vocab(con, toks, person_of_row, tokenizer, concept_table)
@@ -525,7 +563,8 @@ def extract_sard_visit_tensors(
         "concepts": vocab, "tokenizer": tokenizer, "cohort": cohort, "y": y,
         "params": {"lookback_days": lookback_days, "min_patient_freq": min_patient_freq,
                    "domains": domains, "max_nvisits": n_slots, "max_visit_len": v_len,
-                   "include_index_date": include_index_date},
+                   "include_index_date": include_index_date, "anchor_date": anchor_date,
+                   "washin_buffer_days": washin_buffer_days, "washin_buffer_hours": washin_buffer_hours},
     }
 
 

@@ -1,3 +1,35 @@
+# omopduckdb 0.5.2
+
+### Feature Engineering & Data Leakage Prevention
+- **Formalized Anchor Date & Wash-in Buffers (`anchor_date`, `washin_buffer_days`, `washin_buffer_hours`)**:
+  - Added `anchor_date = c("discharge_date", "admit_date", "auto")` to `extract_sparse_concept_matrix`, `extract_sard_visit_tensors`, and `materialize_concept_features` across both Python and R.
+  - Automatically selects `discharge_date` for post-discharge readmission cohorts and `admit_date` for in-hospital mortality cohorts.
+  - Added configurable wash-in buffers (`washin_buffer_days`, `washin_buffer_hours`) allowing feature collection within a bounded window (e.g. first 24 hours of admission) while strictly preventing terminal resuscitative codes (CPR, palliative care, intubation) on the day of death from leaking into in-hospital mortality predictors.
+
+### Clinical Methodology & Competing Risks
+- **Fine-Gray Competing Risks Survival Helper (`prepare_competing_risks_data`)**:
+  - Implemented 1:1 cross-language competing risk dataset preparation in Python (`omop_etl.cohort.prepare_competing_risks_data`) and R (`omopduckdb::prepare_competing_risks_data`).
+  - Standardizes 3-state survival outcome formatting for consortium sites:
+    - Status 0: Censored alive without readmission within follow-up window.
+    - Status 1: Primary event of interest (acute inpatient readmission).
+    - Status 2: Competing terminal event (death prior to readmission).
+  - Emits `time_days` to first event or censoring, `status` (0, 1, 2), and `composite_event` (Mode 4 readmit-or-death) to eliminate survivor bias in standard readmission models.
+
+### Multi-Site Ingestion & PCORnet Mapping Parity
+- **PCORnet Discharge Status Mapping Expansion**:
+  - Updated PCORnet ETL across Python (`load_visit_occurrence`) and R (`etl_pcornet`) to comprehensively map standard 2-letter codes:
+    - `'EX'`, `'EXPIRED'`, `'DIED'`, `'DECEASED'` -> `4216643` (Died)
+    - `'AM'`, `'AMA'` -> `4155309` (Against medical advice)
+    - `'HO'`, `'HOSPICE'` -> `8546` (Hospice)
+    - `'SN'`, `'SNF'` -> `8863` (Skilled Nursing Facility)
+    - `'A'`, `'HOME'`, `'ROUTINE'` -> `8536` (Home)
+- **Proactive Vocabulary & Mapping Checks**:
+  - Embedded proactive checks in `load_visit_occurrence` and `check_vocabulary_version` to alert consortium sites if inpatient visits have unmapped discharge dispositions (`discharged_to_concept_id = 0`).
+
+### Repository & Developer Workflow
+- **`renv` Autoloader Documentation**:
+  - Documented `renv` activation behavior in `README.md` and `README.Rmd`, guiding consortium developers to run `renv::restore()` or set `RENV_CONFIG_AUTOLOADER = FALSE` in `.Renviron` when using system-installed R packages.
+
 # omopduckdb 0.5.1
 
 ### Bug Fixes & CI/CD Stability

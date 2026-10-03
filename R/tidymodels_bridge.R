@@ -119,7 +119,10 @@ materialize_concept_features <- function(con,
                                          person_col = NULL,
                                          index_date_col = NULL,
                                          outcome_col = NULL,
-                                         temporary = FALSE) {
+                                         temporary = FALSE,
+                                         anchor_date = c("auto", "admit_date", "discharge_date"),
+                                         washin_buffer_days = 0,
+                                         washin_buffer_hours = 0) {
   if (!is.data.frame(concepts) && !is.null(concepts$concepts)) concepts <- concepts$concepts
   if (!all(c("domain", "concept_id") %in% names(concepts))) {
     stop("`concepts` needs `domain` and `concept_id` columns (e.g. res$concepts).", call. = FALSE)
@@ -132,7 +135,9 @@ materialize_concept_features <- function(con,
   domains <- .mlf_validate_options(unique(concepts$domain), lookback_days, 1)
   concepts <- concepts[!duplicated(.mlf_pair_key(concepts$domain, concepts$concept_id)), c("domain", "concept_id")]
 
-  cohort <- .mlf_load_cohort(con, features_parquet, person_col, index_date_col, outcome_col)
+  anchor <- if (is.character(anchor_date)) anchor_date[1] else "auto"
+  buffer_days <- as.integer(washin_buffer_days) + as.integer(washin_buffer_hours %/% 24)
+  cohort <- .mlf_load_cohort(con, features_parquet, person_col, index_date_col, outcome_col, anchor_date = anchor)
   feature <- .mlf_feature_name(concepts$domain, concepts$concept_id)
   agg <- if (value == "count") "SUM(a.n)" else "MAX(1)"
   cells <- sprintf("CAST(COALESCE(%s FILTER (WHERE a.domain = '%s' AND a.concept_id = %.0f), 0) AS DOUBLE) AS %s",
@@ -146,7 +151,7 @@ materialize_concept_features <- function(con,
     "FROM cohort c LEFT JOIN agg a ON a.row_idx = c.row_idx ",
     "GROUP BY c.row_idx, c.person_id, c.index_date%s ORDER BY c.row_idx"),
     if (isTRUE(temporary)) "TEMPORARY" else "", table,
-    .mlf_events_ctes(cohort$sql, domains, lookback_days, include_index_date, 1, concepts),
+    .mlf_events_ctes(cohort$sql, domains, lookback_days, include_index_date, 1, concepts, buffer_days = buffer_days),
     if (has_y) ", c.y" else "", paste(cells, collapse = ", "), if (has_y) ", c.y" else "")
   DBI::dbExecute(con, sql)
   invisible(list(table = table, features = feature, n_rows = nrow(cohort$df)))

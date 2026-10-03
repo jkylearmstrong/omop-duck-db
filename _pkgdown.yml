@@ -49,6 +49,7 @@ reference:
   contents:
   - build_readmission_cohort
   - build_end_of_life_cohort
+  - prepare_competing_risks_data
   - create_cohort
   - combine_cohorts
   - compute_attrition

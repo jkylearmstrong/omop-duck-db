@@ -472,9 +472,12 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
             0 AS visit_source_concept_id,
             0 AS admitted_from_concept_id,
             NULL AS admitted_from_source_value,
-            CASE UPPER(src.DISCHARGE_STATUS)
-                WHEN 'A' THEN 8536   -- Home
-                WHEN 'E' THEN 4216643 -- Expired
+            CASE 
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('E', 'EX', 'EXPIRED', 'DIED', 'DECEASED') THEN 4216643 -- Expired
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 4155309 -- Left against medical advice
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HO', 'HOSPICE') THEN 8546 -- Hospice
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('SN', 'SNF') THEN 8863 -- Skilled Nursing Facility
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HOME', 'ROUTINE') THEN 8536 -- Home
                 ELSE 0
             END AS discharged_to_concept_id,
             src.DISCHARGE_STATUS AS discharged_to_source_value,
@@ -490,6 +493,23 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.ENCOUNTERID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_encounter;")
+
+    try:
+        unmapped_disch = con.execute("""
+            SELECT discharged_to_source_value, COUNT(*) AS count
+            FROM visit_occurrence
+            WHERE discharged_to_concept_id = 0
+              AND discharged_to_source_value IS NOT NULL
+              AND TRIM(discharged_to_source_value) != ''
+            GROUP BY discharged_to_source_value
+            ORDER BY count DESC
+            LIMIT 10;
+        """).fetchall()
+        if unmapped_disch:
+            unmapped_str = ", ".join(f"'{r[0]}' (n={r[1]})" for r in unmapped_disch)
+            print(f"Notice: Visit occurrence contains unmapped discharge statuses (concept_id = 0): {unmapped_str}")
+    except Exception:
+        pass
 
 
 def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):

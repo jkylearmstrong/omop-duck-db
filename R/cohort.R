@@ -1081,3 +1081,161 @@ build_end_of_life_cohort <- function(con,
 #' @export
 build_mortality_cohort <- build_end_of_life_cohort
 
+
+#' Prepare Competing Risk Survival Data for Readmission vs. Mortality
+#'
+#' Under CMS HRRP and traditional binary readmission models, patients who die post-discharge
+#' without an acute readmission are often either censored or mislabeled as non-events (survivors),
+#' introducing survivor bias into hospital benchmarking.
+#'
+#' This function formats index stays into a 3-state competing risk survival framework:
+#' \itemize{
+#'   \item Status 0: Censored (event-free throughout the entire follow-up window)
+#'   \item Status 1: Primary event of interest (acute hospital readmission)
+#'   \item Status 2: Competing event (all-cause mortality post-discharge without readmission)
+#' }
+#'
+#' @param con Active DuckDB connection.
+#' @param cohort_table Source cohort table name containing index stays (default `"cohort"`).
+#' @param cohort_id Optional `cohort_definition_id` to filter `cohort_table`.
+#' @param followup_window_days Observation horizon in days (default 30).
+#' @param grace_days Days post-discharge before outcome evaluation begins (default 0).
+#' @param outcome_visit_concept_ids Visit concept IDs for readmission (default `9201`).
+#' @return A list with two elements:
+#' \itemize{
+#'   \item `data`: A `data.frame` with columns `subject_id`, `visit_occurrence_id`, `cohort_start_date`,
+#'     `cohort_end_date`, `time_days`, `status`, `event_type`, and `composite_event`.
+#'   \item `summary`: A list of summary metrics (total patients, counts and crude rates for readmission,
+#'     competing mortality, censoring, and composite outcomes).
+#' }
+#' @export
+prepare_competing_risks_data <- function(con,
+                                         cohort_table = "cohort",
+                                         cohort_id = NULL,
+                                         followup_window_days = 30,
+                                         grace_days = 0,
+                                         outcome_visit_concept_ids = c(9201)) {
+  out_ids <- paste(as.integer(outcome_visit_concept_ids), collapse = ", ")
+  cohort_filter <- if (!is.null(cohort_id)) sprintf("WHERE c.cohort_definition_id = %d", as.integer(cohort_id)) else ""
+
+  cols <- tolower(DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s", cohort_table))$column_name)
+  vid_col <- if ("visit_occurrence_id" %in% cols) "c.visit_occurrence_id" else "v.visit_occurrence_id"
+
+  query <- sprintf("
+    WITH cohort_src AS (
+        SELECT 
+            c.subject_id,
+            c.cohort_start_date,
+            c.cohort_end_date,
+            %s AS visit_occurrence_id
+        FROM %s c
+        LEFT JOIN visit_occurrence v 
+          ON v.person_id = c.subject_id 
+         AND v.visit_start_date = c.cohort_start_date
+        %s
+    ),
+    earliest_readmit AS (
+        SELECT 
+            cs.subject_id,
+            cs.cohort_start_date,
+            cs.cohort_end_date,
+            cs.visit_occurrence_id,
+            MIN(ro.visit_start_date) AS readmit_date
+        FROM cohort_src cs
+        LEFT JOIN visit_occurrence ro
+          ON ro.person_id = cs.subject_id
+         AND ro.visit_occurrence_id != cs.visit_occurrence_id
+         AND ro.visit_concept_id IN (%s)
+         AND ro.visit_start_date > (cs.cohort_end_date + %d)
+         AND ro.visit_start_date <= (cs.cohort_end_date + %d)
+        GROUP BY cs.subject_id, cs.cohort_start_date, cs.cohort_end_date, cs.visit_occurrence_id
+    ),
+    earliest_death AS (
+        SELECT 
+            cs.subject_id,
+            cs.cohort_start_date,
+            cs.cohort_end_date,
+            cs.visit_occurrence_id,
+            MIN(d.death_date) AS death_date
+        FROM cohort_src cs
+        LEFT JOIN (
+            SELECT person_id, death_date FROM death
+            UNION
+            SELECT person_id, visit_end_date AS death_date 
+            FROM visit_occurrence 
+            WHERE discharged_to_concept_id = 4216643
+        ) d
+          ON d.person_id = cs.subject_id
+         AND d.death_date > cs.cohort_end_date
+         AND d.death_date <= (cs.cohort_end_date + %d)
+        GROUP BY cs.subject_id, cs.cohort_start_date, cs.cohort_end_date, cs.visit_occurrence_id
+    ),
+    combined AS (
+        SELECT 
+            r.subject_id,
+            r.cohort_start_date,
+            r.cohort_end_date,
+            r.visit_occurrence_id,
+            r.readmit_date,
+            d.death_date,
+            date_diff('day', r.cohort_end_date, r.readmit_date) AS days_to_readmit,
+            date_diff('day', r.cohort_end_date, d.death_date) AS days_to_death
+        FROM earliest_readmit r
+        JOIN earliest_death d
+          ON d.subject_id = r.subject_id
+         AND d.cohort_start_date = r.cohort_start_date
+         AND d.cohort_end_date = r.cohort_end_date
+         AND COALESCE(d.visit_occurrence_id, -1) = COALESCE(r.visit_occurrence_id, -1)
+    )
+    SELECT 
+        subject_id,
+        visit_occurrence_id,
+        cohort_start_date,
+        cohort_end_date,
+        CAST(CASE 
+            WHEN readmit_date IS NOT NULL AND (death_date IS NULL OR readmit_date <= death_date) THEN days_to_readmit
+            WHEN death_date IS NOT NULL AND (readmit_date IS NULL OR death_date < readmit_date) THEN days_to_death
+            ELSE %d
+        END AS INTEGER) AS time_days,
+        CAST(CASE 
+            WHEN readmit_date IS NOT NULL AND (death_date IS NULL OR readmit_date <= death_date) THEN 1
+            WHEN death_date IS NOT NULL AND (readmit_date IS NULL OR death_date < readmit_date) THEN 2
+            ELSE 0
+        END AS INTEGER) AS status,
+        CASE 
+            WHEN readmit_date IS NOT NULL AND (death_date IS NULL OR readmit_date <= death_date) THEN 'readmission'
+            WHEN death_date IS NOT NULL AND (readmit_date IS NULL OR death_date < readmit_date) THEN 'death_competing'
+            ELSE 'censored'
+        END AS event_type,
+        CAST(CASE 
+            WHEN (readmit_date IS NOT NULL OR death_date IS NOT NULL) THEN 1 
+            ELSE 0 
+        END AS INTEGER) AS composite_event
+    FROM combined
+    ORDER BY subject_id, cohort_start_date;
+  ", vid_col, cohort_table, cohort_filter, out_ids, as.integer(grace_days), as.integer(followup_window_days),
+     as.integer(followup_window_days), as.integer(followup_window_days))
+
+  df <- DBI::dbGetQuery(con, query)
+  n_total <- nrow(df)
+  n_readmit <- if (n_total > 0) sum(df$status == 1) else 0L
+  n_competing <- if (n_total > 0) sum(df$status == 2) else 0L
+  n_censored <- if (n_total > 0) sum(df$status == 0) else 0L
+  n_composite <- n_readmit + n_competing
+
+  summary <- list(
+    total_patients = n_total,
+    n_readmissions = n_readmit,
+    readmission_rate = if (n_total > 0) n_readmit / n_total else 0,
+    n_competing_deaths = n_competing,
+    competing_death_rate = if (n_total > 0) n_competing / n_total else 0,
+    n_censored = n_censored,
+    censored_rate = if (n_total > 0) n_censored / n_total else 0,
+    n_composite_events = n_composite,
+    composite_rate = if (n_total > 0) n_composite / n_total else 0,
+    followup_window_days = as.integer(followup_window_days)
+  )
+
+  list(data = df, summary = summary)
+}
+

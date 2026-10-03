@@ -162,10 +162,32 @@ check_vocabulary_version <- function(con) {
     error = function(e) 0
   )
 
+  unmapped_discharge <- tryCatch(
+    {
+      tables <- tolower(DBI::dbListTables(con))
+      if ("visit_occurrence" %in% tables) {
+        DBI::dbGetQuery(con, "
+          SELECT discharged_to_source_value, COUNT(*) AS count
+          FROM visit_occurrence
+          WHERE discharged_to_concept_id = 0
+            AND discharged_to_source_value IS NOT NULL
+            AND TRIM(discharged_to_source_value) != ''
+          GROUP BY discharged_to_source_value
+          ORDER BY count DESC
+          LIMIT 10;
+        ")
+      } else {
+        data.frame(discharged_to_source_value = character(), count = integer())
+      }
+    },
+    error = function(e) data.frame(discharged_to_source_value = character(), count = integer())
+  )
+
   list(
     vocabulary_version = version,
     total_concepts = total_concepts,
     total_relationships = total_rel,
-    vocabularies = stats::setNames(as.list(counts$count), counts$vocabulary_id)
+    vocabularies = stats::setNames(as.list(counts$count), counts$vocabulary_id),
+    unmapped_discharge_statuses = unmapped_discharge
   )
 }

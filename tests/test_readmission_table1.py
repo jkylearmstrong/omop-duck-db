@@ -19,6 +19,7 @@ from omop_etl import (
     extract_measurements,
     extract_temporal_features,
     generate_table1,
+    prepare_competing_risks_data,
     validate_table1_reconciliation,
 )
 from omop_etl.build_omop_cdm import load_macros
@@ -331,3 +332,70 @@ def test_generate_table1_and_reconciliation():
     rec_drift = validate_table1_reconciliation(t1, drifted_data, tolerance=0.05)
     assert rec_drift["is_concordant"] is False
     assert rec_drift["status"] == "DRIFT_DETECTED"
+
+
+def test_prepare_competing_risks_data(test_cdm):
+    con = test_cdm
+    ensure_cohort_tables(con)
+
+    # Seed 3 patients:
+    # Patient 1: Readmitted within 10 days post-discharge (Status 1)
+    # Patient 2: Dies 15 days post-discharge without readmission (Status 2 - Competing Risk)
+    # Patient 3: Alive and event-free through 30 days (Status 0 - Censored)
+    con.execute("""
+        INSERT INTO person (person_id, gender_concept_id, year_of_birth, month_of_birth, day_of_birth, race_concept_id, ethnicity_concept_id)
+        VALUES 
+            (201, 8507, 1970, 1, 1, 8527, 38003564),
+            (202, 8532, 1965, 1, 1, 8516, 38003564),
+            (203, 8507, 1980, 1, 1, 8527, 38003564);
+
+        INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id)
+        VALUES 
+            -- Index stays (discharge on 2024-01-10)
+            (2001, 201, 9201, '2024-01-01', '2024-01-10', 44818518),
+            (2002, 202, 9201, '2024-01-01', '2024-01-10', 44818518),
+            (2003, 203, 9201, '2024-01-01', '2024-01-10', 44818518),
+            -- Patient 201 readmission on 2024-01-20 (10 days post-discharge)
+            (2004, 201, 9201, '2024-01-20', '2024-01-25', 44818518);
+
+        -- Patient 202 dies post-discharge on 2024-01-25 (15 days post-discharge)
+        INSERT INTO death (person_id, death_date, death_type_concept_id)
+        VALUES (202, '2024-01-25', 38003565);
+
+        -- Materialize index cohort
+        INSERT INTO cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+        VALUES 
+            (50, 201, '2024-01-01', '2024-01-10'),
+            (50, 202, '2024-01-01', '2024-01-10'),
+            (50, 203, '2024-01-01', '2024-01-10');
+    """)
+
+    df, summary = prepare_competing_risks_data(con, cohort_table="cohort", cohort_id=50, followup_window_days=30)
+
+    assert len(df) == 3
+    assert summary["total_patients"] == 3
+    assert summary["n_readmissions"] == 1
+    assert summary["n_competing_deaths"] == 1
+    assert summary["n_censored"] == 1
+    assert summary["n_composite_events"] == 2
+    assert pytest.approx(summary["composite_rate"], 0.01) == 2 / 3
+
+    # Check row-level details
+    row_201 = df[df["subject_id"] == 201].iloc[0]
+    assert row_201["status"] == 1
+    assert row_201["time_days"] == 10
+    assert row_201["event_type"] == "readmission"
+    assert row_201["composite_event"] == 1
+
+    row_202 = df[df["subject_id"] == 202].iloc[0]
+    assert row_202["status"] == 2
+    assert row_202["time_days"] == 15
+    assert row_202["event_type"] == "death_competing"
+    assert row_202["composite_event"] == 1
+
+    row_203 = df[df["subject_id"] == 203].iloc[0]
+    assert row_203["status"] == 0
+    assert row_203["time_days"] == 30
+    assert row_203["event_type"] == "censored"
+    assert row_203["composite_event"] == 0
+

@@ -30,6 +30,11 @@
 #' @param include_index_date Also use events dated exactly on the index date (default `FALSE`).
 #' @param person_col,index_date_col,outcome_col Optional explicit column names in the parquet.
 #' @param concept_table Concept table to read names from (default: `concept`, then `central_vocab`).
+#' @param anchor_date Strategy for selecting index date column from cohort parquet:
+#'   `"auto"` (default), `"admit_date"` (prioritizes admission date to prevent in-hospital leakage),
+#'   or `"discharge_date"` (prioritizes discharge date).
+#' @param washin_buffer_days Post-anchor observation buffer days to include in the window (default 0).
+#' @param washin_buffer_hours Post-anchor observation buffer hours (e.g. 24 for 24h post-admission, default 0).
 #' @return A list with `X` (a `Matrix::dgCMatrix`, rows aligned to the parquet), `concepts` (one row per
 #'   column of `X`: `column_index` (1-based), `token`, `feature` (syntactic name `<domain>_<concept_id>` used by
 #'   [as_tidymodels_data()]), `domain`, `concept_id`, `concept_name`, `domain_id`,
@@ -54,14 +59,19 @@ extract_sparse_concept_matrix <- function(con,
                                           person_col = NULL,
                                           index_date_col = NULL,
                                           outcome_col = NULL,
-                                          concept_table = NULL) {
+                                          concept_table = NULL,
+                                          anchor_date = c("auto", "admit_date", "discharge_date"),
+                                          washin_buffer_days = 0,
+                                          washin_buffer_hours = 0) {
   if (!requireNamespace("Matrix", quietly = TRUE)) {
     stop("extract_sparse_concept_matrix() needs the 'Matrix' package.", call. = FALSE)
   }
   if (!value %in% c("count", "binary")) stop("value must be 'count' or 'binary'", call. = FALSE)
   domains <- .mlf_validate_options(domains, lookback_days, min_patient_freq)
 
-  cohort <- .mlf_load_cohort(con, features_parquet, person_col, index_date_col, outcome_col)
+  anchor <- if (is.character(anchor_date)) anchor_date[1] else "auto"
+  buffer_days <- as.integer(washin_buffer_days) + as.integer(washin_buffer_hours %/% 24)
+  cohort <- .mlf_load_cohort(con, features_parquet, person_col, index_date_col, outcome_col, anchor_date = anchor)
 
   pairs <- NULL
   if (!is.null(tokens)) {
@@ -70,7 +80,7 @@ extract_sparse_concept_matrix <- function(con,
     pairs <- parsed[keep, c("domain", "concept_id")]
   }
   sql <- paste(
-    .mlf_events_ctes(cohort$sql, domains, lookback_days, include_index_date, min_patient_freq, pairs),
+    .mlf_events_ctes(cohort$sql, domains, lookback_days, include_index_date, min_patient_freq, pairs, buffer_days = buffer_days),
     "SELECT row_idx, domain, concept_id, COUNT(*) AS n FROM ev GROUP BY row_idx, domain, concept_id"
   )
   triples <- DBI::dbGetQuery(con, sql)
@@ -104,7 +114,9 @@ extract_sparse_concept_matrix <- function(con,
     y = if ("y" %in% names(cohort_out)) cohort_out$y else NULL,
     params = list(
       lookback_days = lookback_days, min_patient_freq = min_patient_freq, domains = domains,
-      value = value, include_index_date = include_index_date
+      value = value, include_index_date = include_index_date,
+      anchor_date = anchor, washin_buffer_days = washin_buffer_days,
+      washin_buffer_hours = washin_buffer_hours
     )
   )
 }
@@ -122,6 +134,10 @@ extract_sparse_concept_matrix <- function(con,
 .mlf_person_aliases <- c("person_id", "subject_id", "patid", "patient_id")
 .mlf_index_aliases <- c("index_date", "cohort_start_date", "end_date", "admit_date", "admission_date",
                         "admit_dt", "visit_start_date")
+.mlf_admit_aliases <- c("admit_date", "admission_date", "cohort_start_date", "visit_start_date",
+                        "admit_dt", "start_date", "index_date")
+.mlf_discharge_aliases <- c("discharge_date", "disch_date", "cohort_end_date", "visit_end_date",
+                            "end_date", "discharged_date", "index_date")
 .mlf_outcome_aliases <- c("y", "outcome_flag", "label", "outcome")
 
 .mlf_ident <- function(x) paste0('"', gsub('"', '""', x, fixed = TRUE), '"')
@@ -184,11 +200,22 @@ extract_sparse_concept_matrix <- function(con,
 
 # Reads the cohort parquet in file order. `sql` assigns row_idx from file_row_number so row i of every
 # output is row i of the parquet (multi-file globs are ordered by filename, then row).
-.mlf_load_cohort <- function(con, features_parquet, person_col, index_date_col, outcome_col) {
+.mlf_load_cohort <- function(con, features_parquet, person_col, index_date_col, outcome_col,
+                             anchor_date = "auto") {
   src <- sprintf("read_parquet('%s', file_row_number = true, filename = true)", .mlf_quote_path(features_parquet))
   cols <- DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s", src))$column_name
   p <- .mlf_resolve_column(cols, person_col, .mlf_person_aliases, "person id", "person_col")
-  d <- .mlf_resolve_column(cols, index_date_col, .mlf_index_aliases, "index date", "index_date_col")
+
+  anchor <- tolower(trimws(if (is.null(anchor_date)) "auto" else anchor_date[1]))
+  aliases <- if (anchor %in% c("admit_date", "admit", "admission", "admission_date", "cohort_start_date")) {
+    .mlf_admit_aliases
+  } else if (anchor %in% c("discharge_date", "discharge", "disch_date", "cohort_end_date")) {
+    .mlf_discharge_aliases
+  } else {
+    .mlf_index_aliases
+  }
+
+  d <- .mlf_resolve_column(cols, index_date_col, aliases, "index date", "index_date_col")
   y <- .mlf_resolve_column(cols, outcome_col, .mlf_outcome_aliases, "outcome", "outcome_col", required = FALSE)
 
   y_sql <- if (!is.null(y)) sprintf(", %s AS y", .mlf_ident(y)) else ""
@@ -212,14 +239,16 @@ extract_sparse_concept_matrix <- function(con,
 }
 
 # CTE chain cohort -> ev0 -> ev: windowed, vocabulary-filtered events for every cohort row.
-.mlf_events_ctes <- function(cohort_sql, domains, lookback_days, include_index_date, min_patient_freq, pairs) {
+.mlf_events_ctes <- function(cohort_sql, domains, lookback_days, include_index_date, min_patient_freq, pairs,
+                             buffer_days = 0) {
   unions <- paste(vapply(domains, function(dm) {
     t <- .mlf_domains[[dm]]
     sprintf("SELECT person_id, %s AS concept_id, %s AS event_date, visit_occurrence_id, '%s' AS domain FROM %s",
             t$concept, t$date, dm, t$table)
   }, character(1)), collapse = " UNION ALL ")
   lower <- if (!is.null(lookback_days)) sprintf("AND e.event_date >= c.index_date - %d ", as.integer(lookback_days)) else ""
-  upper <- if (isTRUE(include_index_date)) "<=" else "<"
+  upper <- if (isTRUE(include_index_date) || buffer_days > 0) "<=" else "<"
+  date_offset <- if (buffer_days > 0) sprintf(" + %d", as.integer(buffer_days)) else ""
 
   vocab <- ""
   if (!is.null(pairs)) {
@@ -239,10 +268,10 @@ extract_sparse_concept_matrix <- function(con,
     "WITH cohort AS (%s), ev_all AS (%s), ",
     "ev0 AS (SELECT c.row_idx, c.person_id, c.index_date, e.domain, e.concept_id, e.event_date, ",
     "e.visit_occurrence_id FROM cohort c JOIN ev_all e ON e.person_id = c.person_id ",
-    "%sAND e.event_date %s c.index_date ",
+    "%sAND e.event_date %s c.index_date%s ",
     "WHERE e.concept_id IS NOT NULL AND e.concept_id <> 0), ",
     "ev AS (SELECT ev0.* FROM ev0 %s)"),
-    cohort_sql, unions, lower, upper, vocab)
+    cohort_sql, unions, lower, upper, date_offset, vocab)
 }
 
 # Best-effort concept_id -> name/domain/vocabulary. Tries `concept`, then the `central_vocab` catalog,
