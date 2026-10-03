@@ -47,6 +47,18 @@ from omop_etl.features import (
 from omop_etl.federation import (
     create_federated_consortium,
 )
+from omop_etl.ml_features import (
+    as_omop_learn_batch,
+    build_concept_tokenizer,
+    extract_sard_visit_tensors,
+    extract_sparse_concept_matrix,
+)
+from omop_etl.omop_learn_backend import (
+    DuckDBBackend,
+    cohort_frame_from_parquet,
+    cohort_from_parquet,
+    default_features,
+)
 from omop_etl.mapping import (
     export_unmapped_codes,
     import_source_to_concept_map,
@@ -113,6 +125,15 @@ __all__ = [
     "extract_temporal_features",
     "aggregate_concept_sets",
     "extract_measurements",
+    # omop-learn / SARD / PLP bridge: set-based sparse & sequence feature extraction
+    "extract_sparse_concept_matrix",
+    "extract_sard_visit_tensors",
+    "as_omop_learn_batch",
+    "build_concept_tokenizer",
+    "DuckDBBackend",
+    "default_features",
+    "cohort_from_parquet",
+    "cohort_frame_from_parquet",
     # Table 1 & Reconciliation
     "generate_table1",
     "validate_table1_reconciliation",

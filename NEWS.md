@@ -1,3 +1,26 @@
+# omopduckdb 0.5.0
+
+### Machine Learning Feature Representation & Ecosystem Bridges
+- **High-Dimensional Sparse Concept Matrices (`extract_sparse_concept_matrix`)**:
+  - Implemented set-based sparse concept matrix extraction in both Python (`scipy.sparse.csr_matrix`) and R (`Matrix::dgCMatrix`) driven by a cohort parquet.
+  - Generates condition, drug, and procedure concept features within lookback windows strictly before the index date (`[index - lookback_days, index)`), eliminating temporal feature leakage.
+  - Automatically drops concept `0`, ensures C-locale token string ordering matching `omop-learn`'s `ConceptTokenizer`, and supports train/test column stabilization via token preservation.
+- **Deep Sequential Visit Tensors for SARD (`extract_sard_visit_tensors`)**:
+  - Padded 3D visit arrays `(N, max_nvisits, max_visit_len)` for Transformer-based architectures (SARD, Kodialam et al., AAAI 2021).
+  - Emits visit lengths, chronological visit times (days since 1900-01-01), days before index, and tokenized concept IDs using standard omop-learn special tokens (`[BOS]=0`, `[EOS]=1`, `[SEP]=2`, `[PAD]=3`, `[UNK]=4`).
+  - Helper `as_omop_learn_batch` to format tensors directly for PyTorch collation.
+- **DuckDB Backend for `omop-learn` (`DuckDBBackend`)**:
+  - Added DuckDB backend implementing omop-learn's backend interface, replacing per-patient query loops with a single set-based `LATERAL` join (over 70x faster execution).
+  - Bundled DuckDB-dialect feature SQL macros under `inst/sql/omop_learn` for age, gender, conditions, drugs, and procedures.
+- **OHDSI HADES / PatientLevelPrediction / DeepPLP Bridge**:
+  - Added `hades_preflight()` to verify DuckDB CDM file readiness, table row counts, in-database vocabulary availability, and cross-process read-write exclusivity.
+  - Added `plp_database_details()` to wire DuckDB configurations into `PatientLevelPrediction::createDatabaseDetails()`.
+  - Added `as_plp_data()` to bridge sparse concept matrices directly into OHDSI `plpData` objects (covariate IDs `concept_id * 1000 + analysis_id` matching FeatureExtraction long-term analysis IDs 102/302/502).
+- **tidymodels Bridge & In-Database Scoring**:
+  - Added `as_tidymodels_data()` to convert sparse concept matrices into tidymodels-ready tibbles with `y` factor levels (`event_level = "first"`) and syntactic predictor names `<domain>_<concept_id>`, with sparse column support via `sparsevctrs`.
+  - Added `model_concepts()` to inspect fitted parsnip models or workflows and identify non-zero coefficient predictors.
+  - Added `materialize_concept_features()` to create wide feature tables inside DuckDB using identical windowing rules, enabling direct in-database scoring via `orbital::orbital()` or `tidypredict` without feature drift.
+
 # omopduckdb 0.4.0
 
 ### Generic Readmission Cohort & Outcome Builder

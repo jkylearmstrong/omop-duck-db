@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omop-duck-db"
-version = "0.4.0"
+version = "0.5.0"
 description = "Tools for building an OMOP CDM v5.4 DuckDB database and mapping PCORnet-format source data into it."
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,10 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0"]
+# ML bridge: scipy for sparse concept matrices. omop-learn itself is not on PyPI; install it from GitHub
+# (pip install git+https://github.com/clinicalml/omop-learn) to use DuckDBBackend with its models.
+ml = ["scipy>=1.10"]
+dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10"]
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
@@ -40,6 +43,7 @@ packages = ["python/omop_etl"]
 "inst/sql/mapping_macros.sql" = "omop_etl/resources/sql/mapping_macros.sql"
 "inst/sql/cohort_readmission.sql" = "omop_etl/resources/sql/cohort_readmission.sql"
 "inst/sql/table1_aggregations.sql" = "omop_etl/resources/sql/table1_aggregations.sql"
+"inst/sql/omop_learn" = "omop_etl/resources/sql/omop_learn"
 "inst/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql" = "omop_etl/resources/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql"
 
 [tool.pytest.ini_options]

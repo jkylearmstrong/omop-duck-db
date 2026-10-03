@@ -1,6 +1,6 @@
 Package: omopduckdb
 Title: Build and Populate an OMOP CDM v5.4 Database in DuckDB
-Version: 0.4.0
+Version: 0.5.0
 Authors@R: person("J Kyle", "Armstrong", email = "j.kyle.armstrong@gmail.com", role = c("aut", "cre"), comment = c(ORCID = "0000-0002-4269-0121"))
 Description: Tools for building an OMOP Common Data Model (CDM) v5.4 schema
     in DuckDB, loading the OHDSI Athena vocabulary (from a local download or
@@ -27,7 +27,23 @@ Suggests:
     covr,
     xml2,
     testthat (>= 3.0.0),
-    usethis (>= 3.2.1)
+    usethis (>= 3.2.1),
+    Matrix,
+    tibble,
+    rsample,
+    recipes,
+    parsnip,
+    workflows,
+    yardstick,
+    broom,
+    sparsevctrs,
+    orbital,
+    tidypredict,
+    glmnet,
+    Andromeda,
+    DatabaseConnector,
+    PatientLevelPrediction,
+    FeatureExtraction
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0
 Remotes:  
