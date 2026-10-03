@@ -1,5 +1,18 @@
 # omopduckdb 0.5.0
 
+### End of Life & Mortality Cohort Suite
+- **Standardized End of Life & Mortality Cohort Builder (`build_end_of_life_cohort`, alias `build_mortality_cohort`)**:
+  - Implemented 1:1 cross-language mortality cohort generation in Python (`omop_etl.cohort`) and R (`omopduckdb::build_end_of_life_cohort`).
+  - Supports four clinical mortality paradigms:
+    - `"in_hospital"`: Ascertains in-hospital mortality during the index stay via `death` table or discharge disposition (`discharged_to_concept_id IN (4216643, 4155309)`).
+    - `"post_discharge"`: Post-discharge mortality within `(t_discharge + gap_days, t_discharge + mortality_window_days]`, strictly excluding index stays resulting in death.
+    - `"fixed_window"`: SARD EOL prediction protocol (Kodialam et al., AAAI 2021) within `(t_index + gap_days, t_index + mortality_window_days]`.
+    - `"composite_readmit_or_death"`: Clinical composite of 30-day all-cause readmission or post-discharge mortality, capturing unfavorable discharge outcomes for eDERRI benchmarks and competing-risk adjustments.
+  - **Dual Death Source Ascertainment**: Simultaneously queries both the OMOP `death` table (`death_date`) and `visit_occurrence` discharge status (`discharged_to_concept_id IN (4216643, 4155309)`).
+  - **Right-Censoring Verification (`require_verified_followup`)**: Ensures non-deceased patients have confirmed observation or clinical contact at or beyond the follow-up window, preventing lost-to-follow-up bias.
+  - **Standardized Cohort Table Materialization**: Automatically materializes target cohort (e.g. ID 1) and optional outcome cohort (e.g. ID 2) in OMOP `cohort` and `cohort_definition` tables with reproducible sampling (`"random"`, `"first"`, `"last"`).
+  - Registered SQL macro `is_expired(discharged_to_concept_id)` in `inst/sql/cohort_mortality.sql`.
+
 ### Machine Learning Feature Representation & Ecosystem Bridges
 - **High-Dimensional Sparse Concept Matrices (`extract_sparse_concept_matrix`)**:
   - Implemented set-based sparse concept matrix extraction in both Python (`scipy.sparse.csr_matrix`) and R (`Matrix::dgCMatrix`) driven by a cohort parquet.

@@ -21,6 +21,8 @@ from omop_etl.build_omop_cdm import (
     load_vital,
 )
 from omop_etl.cohort import (
+    build_end_of_life_cohort,
+    build_mortality_cohort,
     build_readmission_cohort,
     combine_cohorts,
     compute_attrition,
@@ -118,6 +120,8 @@ __all__ = [
     "combine_cohorts",
     "get_cohort_summary",
     "build_readmission_cohort",
+    "build_end_of_life_cohort",
+    "build_mortality_cohort",
     # DQD Engine
     "run_dqd",
     # Feature Extractors & Concept Aggregators
@@ -144,5 +148,5 @@ __all__ = [
     "export_cdm",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 

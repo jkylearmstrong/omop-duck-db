@@ -122,7 +122,7 @@ def build_schema(con):
 
 
 def load_macros(con):
-    for macro_file in ["mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql"]:
+    for macro_file in ["mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql", "cohort_mortality.sql"]:
         macros_path = _resource_path("sql", macro_file)
         if os.path.exists(macros_path):
             with open(macros_path) as f:

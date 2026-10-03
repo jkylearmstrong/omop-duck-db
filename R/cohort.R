@@ -717,3 +717,366 @@ build_readmission_cohort <- function(con,
   res_df
 }
 
+#' Build End of Life / Mortality Cohort
+#'
+#' Constructs a standardized End of Life / Mortality cohort in DuckDB SQL.
+#' Supports four mortality ascertainment paradigms:
+#' \itemize{
+#'   \item \code{"in_hospital"}: Death during index stay (expired/died in hospital).
+#'   \item \code{"post_discharge"}: Death within (t_discharge + gap_days, t_discharge + mortality_window_days].
+#'   \item \code{"fixed_window"}: SARD-style EOL prediction within (t_index + gap_days, t_index + mortality_window_days].
+#'   \item \code{"composite_readmit_or_death"}: Clinical composite of acute readmission OR all-cause death post-discharge.
+#' }
+#' Resolves dual OMOP death sources:
+#' \itemize{
+#'   \item \code{death} table: \code{death_date} linked to \code{person_id}.
+#'   \item \code{visit_occurrence} table: \code{discharged_to_concept_id IN (4216643, 4155309)} (Expired / Hospice).
+#' }
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param cohort_id Target cohort definition ID in OMOP `cohort` table (default 1).
+#' @param outcome_cohort_id Optional outcome cohort definition ID (default 2). Set NULL to skip outcome cohort table population.
+#' @param cohort_name Display name for cohort_definition table.
+#' @param cohort_description Detailed description for cohort_definition table.
+#' @param mortality_type Mode of mortality ascertainment: \code{"in_hospital"}, \code{"post_discharge"}, \code{"fixed_window"}, or \code{"composite_readmit_or_death"}.
+#' @param target_visit_concept_ids Visit concept IDs defining qualifying index encounters (default 9201: Inpatient). Set NULL for any visit.
+#' @param outcome_visit_concept_ids Visit concept IDs defining readmissions for composite mode (default 9201).
+#' @param mortality_window_days Number of days for mortality outcome window (default 30).
+#' @param gap_days Days between index date / discharge and start of outcome window (default 0).
+#' @param min_age Minimum patient age at index encounter (default 18).
+#' @param washin_days Baseline continuous observation lookback requirement before index stay (default 365).
+#' @param require_verified_followup Logical. If TRUE, excludes lost-to-follow-up patients without confirmed survival follow-up (default TRUE).
+#' @param index_selection_rule \code{"random"} (reproducible seed), \code{"first"}, or \code{"last"}.
+#' @param random_state Seed for reproducible random sampling (default 42).
+#' @param table_name Optional custom table name in DuckDB to materialize cohort records with metadata.
+#' @param schema CDM schema containing tables (default "main").
+#' @param overwrite Logical. If TRUE, cleans existing cohort and cohort_definition entries for cohort_id and outcome_cohort_id (default TRUE).
+#' @return A \code{data.frame} containing qualifying cohort records with metadata.
+#' @export
+build_end_of_life_cohort <- function(con,
+                                    cohort_id = 1,
+                                    outcome_cohort_id = 2,
+                                    cohort_name = "End of Life Cohort",
+                                    cohort_description = NULL,
+                                    mortality_type = "post_discharge",
+                                    target_visit_concept_ids = 9201,
+                                    outcome_visit_concept_ids = 9201,
+                                    mortality_window_days = 30,
+                                    gap_days = 0,
+                                    min_age = 18,
+                                    washin_days = 365,
+                                    require_verified_followup = TRUE,
+                                    index_selection_rule = "random",
+                                    random_state = 42,
+                                    table_name = NULL,
+                                    schema = "main",
+                                    overwrite = TRUE) {
+  ensure_cohort_tables(con)
+
+  valid_types <- c("in_hospital", "post_discharge", "fixed_window", "composite_readmit_or_death")
+  m_type <- tolower(trimws(mortality_type))
+  if (!m_type %in% valid_types) {
+    stop(sprintf("Unsupported mortality_type '%s'. Must be one of: %s", mortality_type, paste(valid_types, collapse = ", ")))
+  }
+
+  tgt_clause <- if (is.null(target_visit_concept_ids)) {
+    "1=1"
+  } else {
+    tgt_ids <- as.integer(target_visit_concept_ids)
+    sprintf("v.visit_concept_id IN (%s)", paste(tgt_ids, collapse = ", "))
+  }
+
+  out_ids <- as.integer(outcome_visit_concept_ids)
+  out_in <- paste(out_ids, collapse = ", ")
+
+  rule <- tolower(trimws(index_selection_rule))
+  order_by <- if (rule == "random") {
+    sprintf("hash(f.visit_occurrence_id, %d), f.visit_occurrence_id", as.integer(random_state))
+  } else if (rule == "first") {
+    "f.visit_start_date ASC, f.visit_occurrence_id ASC"
+  } else if (rule == "last") {
+    "f.visit_start_date DESC, f.visit_occurrence_id DESC"
+  } else {
+    stop(sprintf("Unsupported index_selection_rule '%s'. Use 'random', 'first', or 'last'.", index_selection_rule))
+  }
+
+  washin_clause <- if (!is.null(washin_days) && washin_days > 0) {
+    sprintf("
+      AND (
+          EXISTS (
+              SELECT 1 FROM %s.observation_period op 
+              WHERE op.person_id = v.person_id 
+                AND op.observation_period_start_date <= (v.visit_start_date - %d)
+                AND op.observation_period_end_date >= v.visit_start_date
+          )
+          OR EXISTS (
+              SELECT 1 FROM %s.visit_occurrence pv 
+              WHERE pv.person_id = v.person_id 
+                AND pv.visit_occurrence_id != v.visit_occurrence_id
+                AND pv.visit_start_date <= (v.visit_start_date - %d)
+          )
+      )
+    ", schema, as.integer(washin_days), schema, as.integer(washin_days))
+  } else {
+    ""
+  }
+
+  if (m_type == "in_hospital") {
+    stay_criteria <- "AND date_diff('day', v.visit_start_date, v.visit_end_date) >= 0 AND (pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"
+    outcome_expr <- "
+      CASE WHEN COALESCE(e.discharged_to_concept_id, 0) IN (4216643, 4155309) 
+             OR (e.death_date IS NOT NULL AND e.death_date >= e.visit_start_date AND e.death_date <= e.visit_end_date)
+           THEN 1 ELSE 0 END AS outcome_flag,
+      CASE WHEN COALESCE(e.discharged_to_concept_id, 0) IN (4216643, 4155309) 
+             OR (e.death_date IS NOT NULL AND e.death_date >= e.visit_start_date AND e.death_date <= e.visit_end_date)
+           THEN CAST(COALESCE(e.death_date, e.visit_end_date) AS DATE) ELSE NULL END AS outcome_date
+    "
+    anchor_expr <- "e.visit_end_date"
+  } else if (m_type == "post_discharge") {
+    stay_criteria <- "
+      AND date_diff('day', v.visit_start_date, v.visit_end_date) >= 1
+      AND COALESCE(v.discharged_to_concept_id, 0) NOT IN (4216643, 4155309)
+      AND (pd.death_date IS NULL OR pd.death_date > v.visit_end_date)
+    "
+    outcome_expr <- sprintf("
+      CASE WHEN e.death_date IS NOT NULL 
+            AND e.death_date > (e.visit_end_date + %d) 
+            AND e.death_date <= (e.visit_end_date + %d)
+           THEN 1 ELSE 0 END AS outcome_flag,
+      CASE WHEN e.death_date IS NOT NULL 
+            AND e.death_date > (e.visit_end_date + %d) 
+            AND e.death_date <= (e.visit_end_date + %d)
+           THEN CAST(e.death_date AS DATE) ELSE NULL END AS outcome_date
+    ", as.integer(gap_days), as.integer(mortality_window_days),
+       as.integer(gap_days), as.integer(mortality_window_days))
+    anchor_expr <- "e.visit_end_date"
+  } else if (m_type == "fixed_window") {
+    stay_criteria <- "AND (pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"
+    outcome_expr <- sprintf("
+      CASE WHEN e.death_date IS NOT NULL 
+            AND e.death_date > (e.visit_start_date + %d) 
+            AND e.death_date <= (e.visit_start_date + %d)
+           THEN 1 ELSE 0 END AS outcome_flag,
+      CASE WHEN e.death_date IS NOT NULL 
+            AND e.death_date > (e.visit_start_date + %d) 
+            AND e.death_date <= (e.visit_start_date + %d)
+           THEN CAST(e.death_date AS DATE) ELSE NULL END AS outcome_date
+    ", as.integer(gap_days), as.integer(mortality_window_days),
+       as.integer(gap_days), as.integer(mortality_window_days))
+    anchor_expr <- "e.visit_start_date"
+  } else if (m_type == "composite_readmit_or_death") {
+    stay_criteria <- "
+      AND date_diff('day', v.visit_start_date, v.visit_end_date) >= 1
+      AND COALESCE(v.discharged_to_concept_id, 0) NOT IN (4216643, 4155309)
+      AND (pd.death_date IS NULL OR pd.death_date > v.visit_end_date)
+    "
+    outcome_expr <- sprintf("
+      CASE WHEN (
+          (e.death_date IS NOT NULL AND e.death_date > (e.visit_end_date + %d) AND e.death_date <= (e.visit_end_date + %d))
+          OR EXISTS (
+              SELECT 1 FROM %s.visit_occurrence ro
+              WHERE ro.person_id = e.subject_id
+                AND ro.visit_occurrence_id != e.visit_occurrence_id
+                AND ro.visit_concept_id IN (%s)
+                AND ro.visit_start_date > (e.visit_end_date + %d)
+                AND ro.visit_start_date <= (e.visit_end_date + %d)
+          )
+      ) THEN 1 ELSE 0 END AS outcome_flag,
+      CAST(LEAST(
+          CASE WHEN e.death_date IS NOT NULL AND e.death_date > (e.visit_end_date + %d) AND e.death_date <= (e.visit_end_date + %d) THEN e.death_date ELSE NULL END,
+          (SELECT MIN(ro.visit_start_date) FROM %s.visit_occurrence ro WHERE ro.person_id = e.subject_id AND ro.visit_occurrence_id != e.visit_occurrence_id AND ro.visit_concept_id IN (%s) AND ro.visit_start_date > (e.visit_end_date + %d) AND ro.visit_start_date <= (e.visit_end_date + %d))
+      ) AS DATE) AS outcome_date
+    ", as.integer(gap_days), as.integer(mortality_window_days),
+       schema, out_in, as.integer(gap_days), as.integer(mortality_window_days),
+       as.integer(gap_days), as.integer(mortality_window_days),
+       schema, out_in, as.integer(gap_days), as.integer(mortality_window_days))
+    anchor_expr <- "e.visit_end_date"
+  }
+
+  if (isTRUE(require_verified_followup) && m_type != "in_hospital") {
+    followup_check <- sprintf("
+      CASE WHEN (
+          EXISTS (
+              SELECT 1 FROM %s.observation_period op
+              WHERE op.person_id = e.subject_id
+                AND op.observation_period_end_date >= (%s + %d)
+          )
+          OR EXISTS (
+              SELECT 1 FROM %s.visit_occurrence sv
+              WHERE sv.person_id = e.subject_id
+                AND sv.visit_occurrence_id != e.visit_occurrence_id
+                AND sv.visit_start_date >= (%s + %d)
+          )
+          OR EXISTS (
+              SELECT 1 FROM %s.measurement sm
+              WHERE sm.person_id = e.subject_id
+                AND sm.measurement_date >= (%s + %d)
+          )
+          OR EXISTS (
+              SELECT 1 FROM %s.condition_occurrence sc
+              WHERE sc.person_id = e.subject_id
+                AND sc.condition_start_date >= (%s + %d)
+          )
+          OR EXISTS (
+              SELECT 1 FROM %s.drug_exposure sd
+              WHERE sd.person_id = e.subject_id
+                AND sd.drug_exposure_start_date >= (%s + %d)
+          )
+          OR (e.death_date IS NOT NULL AND e.death_date >= (%s + %d))
+      ) THEN 1 ELSE 0 END AS has_subsequent_event
+    ", schema, anchor_expr, as.integer(mortality_window_days),
+       schema, anchor_expr, as.integer(mortality_window_days),
+       schema, anchor_expr, as.integer(mortality_window_days),
+       schema, anchor_expr, as.integer(mortality_window_days),
+       schema, anchor_expr, as.integer(mortality_window_days),
+       anchor_expr, as.integer(mortality_window_days))
+    filter_clause <- "WHERE (outcome_flag = 1 OR has_subsequent_event = 1)"
+  } else {
+    followup_check <- "1 AS has_subsequent_event"
+    filter_clause <- ""
+  }
+
+  query <- sprintf("
+    CREATE OR REPLACE TEMP TABLE _temp_eol_cohort AS
+    WITH all_deaths AS (
+        SELECT person_id, CAST(death_date AS DATE) AS death_date
+        FROM %s.death
+        WHERE death_date IS NOT NULL
+        UNION ALL
+        SELECT person_id, CAST(visit_end_date AS DATE) AS death_date
+        FROM %s.visit_occurrence
+        WHERE discharged_to_concept_id IN (4216643, 4155309)
+          AND visit_end_date IS NOT NULL
+    ),
+    patient_death AS (
+        SELECT person_id, MIN(death_date) AS death_date
+        FROM all_deaths
+        GROUP BY person_id
+    ),
+    eligible_stays AS (
+        SELECT 
+            v.visit_occurrence_id,
+            v.person_id AS subject_id,
+            v.visit_start_date,
+            v.visit_end_date,
+            v.discharged_to_concept_id,
+            pd.death_date,
+            date_diff('day', v.visit_start_date, v.visit_end_date) AS los_days,
+            date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), v.visit_start_date) AS age_at_index
+        FROM %s.visit_occurrence v
+        JOIN %s.person p ON v.person_id = p.person_id
+        LEFT JOIN patient_death pd ON v.person_id = pd.person_id
+        WHERE %s
+          AND date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), v.visit_start_date) >= %d
+          %s
+          %s
+    ),
+    outcomes_and_followup AS (
+        SELECT 
+            e.*,
+            '%s' AS mortality_type,
+            %s,
+            %s
+        FROM eligible_stays e
+    ),
+    filtered_stays AS (
+        SELECT *
+        FROM outcomes_and_followup
+        %s
+    ),
+    ranked_stays AS (
+        SELECT 
+            f.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY f.subject_id 
+                ORDER BY %s
+            ) AS rnk
+        FROM filtered_stays f
+    )
+    SELECT 
+        %d AS cohort_definition_id,
+        subject_id,
+        visit_start_date AS cohort_start_date,
+        visit_end_date AS cohort_end_date,
+        visit_occurrence_id,
+        outcome_flag,
+        outcome_date,
+        mortality_type,
+        age_at_index,
+        los_days,
+        discharged_to_concept_id
+    FROM ranked_stays
+    WHERE rnk = 1;
+  ", schema, schema, schema, schema, tgt_clause, as.integer(min_age), stay_criteria, washin_clause,
+     m_type, outcome_expr, followup_check, filter_clause, order_by, as.integer(cohort_id))
+
+  DBI::dbExecute(con, query)
+
+  name_esc <- gsub("'", "''", cohort_name)
+  desc_esc <- gsub("'", "''", cohort_description %||% sprintf("%s (%s)", cohort_name, m_type))
+
+  if (isTRUE(overwrite)) {
+    DBI::dbExecute(con, sprintf("DELETE FROM %s.cohort WHERE cohort_definition_id = %d;", schema, as.integer(cohort_id)))
+    DBI::dbExecute(con, sprintf("DELETE FROM %s.cohort_definition WHERE cohort_definition_id = %d;", schema, as.integer(cohort_id)))
+    if (!is.null(outcome_cohort_id)) {
+      DBI::dbExecute(con, sprintf("DELETE FROM %s.cohort WHERE cohort_definition_id = %d;", schema, as.integer(outcome_cohort_id)))
+      DBI::dbExecute(con, sprintf("DELETE FROM %s.cohort_definition WHERE cohort_definition_id = %d;", schema, as.integer(outcome_cohort_id)))
+    }
+  }
+
+  DBI::dbExecute(con, sprintf("
+    INSERT INTO %s.cohort_definition (
+        cohort_definition_id, cohort_definition_name, cohort_definition_description,
+        definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
+    ) VALUES (
+        %d, '%s', '%s', 0, NULL, 0, CURRENT_DATE
+    );
+  ", schema, as.integer(cohort_id), name_esc, desc_esc))
+
+  DBI::dbExecute(con, sprintf("
+    INSERT INTO %s.cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+    SELECT DISTINCT
+        cohort_definition_id,
+        subject_id,
+        cohort_start_date,
+        cohort_end_date
+    FROM _temp_eol_cohort;
+  ", schema))
+
+  if (!is.null(outcome_cohort_id)) {
+    out_name_esc <- gsub("'", "''", paste(name_esc, "Outcome"))
+    DBI::dbExecute(con, sprintf("
+      INSERT INTO %s.cohort_definition (
+          cohort_definition_id, cohort_definition_name, cohort_definition_description,
+          definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
+      ) VALUES (
+          %d, '%s', 'Outcome events for %s', 0, NULL, 0, CURRENT_DATE
+      );
+    ", schema, as.integer(outcome_cohort_id), out_name_esc, name_esc))
+
+    DBI::dbExecute(con, sprintf("
+      INSERT INTO %s.cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+      SELECT DISTINCT
+          %d AS cohort_definition_id,
+          subject_id,
+          COALESCE(outcome_date, cohort_end_date) AS cohort_start_date,
+          COALESCE(outcome_date, cohort_end_date) AS cohort_end_date
+      FROM _temp_eol_cohort
+      WHERE outcome_flag = 1;
+    ", schema, as.integer(outcome_cohort_id)))
+  }
+
+  if (!is.null(table_name)) {
+    DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s;", table_name))
+    DBI::dbExecute(con, sprintf("CREATE TABLE %s AS SELECT * FROM _temp_eol_cohort;", table_name))
+  }
+
+  res_df <- DBI::dbGetQuery(con, "SELECT * FROM _temp_eol_cohort ORDER BY subject_id;")
+  DBI::dbExecute(con, "DROP TABLE IF EXISTS _temp_eol_cohort;")
+  res_df
+}
+
+#' @rdname build_end_of_life_cohort
+#' @export
+build_mortality_cohort <- build_end_of_life_cohort
+

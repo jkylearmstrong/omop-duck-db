@@ -1,6 +1,7 @@
 # Large generated/downloaded artifacts (synced via Google Drive instead, see R/gdrive_sync.R)
 *.duckdb
 *.duckdb.wal
+*.pdf
 vocabulary_download_v5_*/
 vocabulary_download_v5_*.zip
 out/

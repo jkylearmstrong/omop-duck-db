@@ -27,7 +27,7 @@ read_local_config <- function(filename) {
 #' @keywords internal
 #' @noRd
 load_mapping_macros <- function(con) {
-  macro_files <- c("mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql")
+  macro_files <- c("mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql", "cohort_mortality.sql")
   for (mf in macro_files) {
     macros_path <- system.file("sql", mf, package = "omopduckdb")
     if (!file.exists(macros_path)) {

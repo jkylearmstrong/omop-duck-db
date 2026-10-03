@@ -42,6 +42,7 @@ packages = ["python/omop_etl"]
 [tool.hatch.build.targets.wheel.force-include]
 "inst/sql/mapping_macros.sql" = "omop_etl/resources/sql/mapping_macros.sql"
 "inst/sql/cohort_readmission.sql" = "omop_etl/resources/sql/cohort_readmission.sql"
+"inst/sql/cohort_mortality.sql" = "omop_etl/resources/sql/cohort_mortality.sql"
 "inst/sql/table1_aggregations.sql" = "omop_etl/resources/sql/table1_aggregations.sql"
 "inst/sql/omop_learn" = "omop_etl/resources/sql/omop_learn"
 "inst/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql" = "omop_etl/resources/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql"

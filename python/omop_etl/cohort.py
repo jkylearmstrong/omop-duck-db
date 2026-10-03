@@ -729,3 +729,356 @@ def build_readmission_cohort(
     con.execute("DROP TABLE IF EXISTS _temp_readmission_cohort;")
     return res_df
 
+
+def build_end_of_life_cohort(
+    con: duckdb.DuckDBPyConnection,
+    cohort_id: int = 1,
+    outcome_cohort_id: int | None = 2,
+    cohort_name: str = "End of Life Cohort",
+    cohort_description: str | None = None,
+    mortality_type: str = "post_discharge",
+    target_visit_concept_ids: int | Sequence[int] | None = (9201,),
+    outcome_visit_concept_ids: int | Sequence[int] = (9201,),
+    mortality_window_days: int = 30,
+    gap_days: int = 0,
+    min_age: int = 18,
+    washin_days: int = 365,
+    require_verified_followup: bool = True,
+    index_selection_rule: str = "random",
+    random_state: int = 42,
+    table_name: str | None = None,
+    schema: str = "main",
+    overwrite: bool = True,
+) -> pd.DataFrame:
+    r"""Constructs a standardized End of Life / Mortality cohort in DuckDB.
+
+    Supports four mortality ascertainment paradigms:
+        1. "in_hospital": In-hospital mortality during the index stay (expired/died in hospital).
+        2. "post_discharge": Post-discharge mortality within (t_discharge + gap_days, t_discharge + mortality_window_days].
+        3. "fixed_window": SARD-style EOL prediction within (t_index + gap_days, t_index + mortality_window_days].
+        4. "composite_readmit_or_death": Clinical composite of acute readmission OR all-cause death post-discharge.
+
+    Resolves dual OMOP death sources:
+        - `death` table: `death_date` linked to `person_id`.
+        - `visit_occurrence` table: `discharged_to_concept_id IN (4216643, 4155309)` (Expired / Hospice).
+
+    Args:
+        con: Active DuckDB connection.
+        cohort_id: Target cohort definition ID in OMOP cohort table (default 1).
+        outcome_cohort_id: Optional outcome cohort definition ID (default 2). Set None to skip outcome cohort table population.
+        cohort_name: Display name for cohort_definition table.
+        cohort_description: Detailed description for cohort_definition table.
+        mortality_type: Mode of mortality ascertainment ('in_hospital', 'post_discharge', 'fixed_window', 'composite_readmit_or_death').
+        target_visit_concept_ids: Visit concept IDs defining qualifying index encounters (default 9201: Inpatient).
+        outcome_visit_concept_ids: Visit concept IDs defining readmissions for composite mode (default 9201).
+        mortality_window_days: Number of days for mortality outcome window (e.g. 30, 90, 180). Default 30.
+        gap_days: Days between index date / discharge and start of outcome window (default 0; e.g. 90 for SARD EOL).
+        min_age: Minimum patient age at index encounter (default 18).
+        washin_days: Baseline continuous observation lookback requirement before index stay (default 365).
+        require_verified_followup: If True, excludes lost-to-follow-up patients without confirmed survival follow-up (default True).
+        index_selection_rule: 'random' (reproducible seed), 'first', or 'last'.
+        random_state: Seed for reproducible random sampling (default 42).
+        table_name: Optional custom table name in DuckDB to materialize cohort records with metadata.
+        schema: CDM schema containing tables (default 'main').
+        overwrite: If True, cleans existing cohort and cohort_definition entries for cohort_id and outcome_cohort_id (default True).
+
+    Returns:
+        pd.DataFrame: Cohort records with metadata (cohort_definition_id, subject_id,
+                      cohort_start_date, cohort_end_date, visit_occurrence_id, outcome_flag,
+                      outcome_date, mortality_type, age_at_index, los_days, discharged_to_concept_id).
+    """
+    ensure_cohort_tables(con)
+
+    valid_types = ("in_hospital", "post_discharge", "fixed_window", "composite_readmit_or_death")
+    m_type = mortality_type.lower().strip()
+    if m_type not in valid_types:
+        raise ValueError(f"Unsupported mortality_type '{mortality_type}'. Must be one of {valid_types}.")
+
+    if target_visit_concept_ids is None:
+        tgt_clause = "1=1"
+    elif isinstance(target_visit_concept_ids, int):
+        tgt_clause = f"v.visit_concept_id = {int(target_visit_concept_ids)}"
+    else:
+        tgt_in = ", ".join(str(int(x)) for x in target_visit_concept_ids)
+        tgt_clause = f"v.visit_concept_id IN ({tgt_in})"
+
+    if isinstance(outcome_visit_concept_ids, int):
+        out_ids = [outcome_visit_concept_ids]
+    else:
+        out_ids = list(outcome_visit_concept_ids)
+    out_in = ", ".join(str(int(x)) for x in out_ids)
+
+    rule = index_selection_rule.lower().strip()
+    if rule == "random":
+        order_by = f"hash(f.visit_occurrence_id, {int(random_state)}), f.visit_occurrence_id"
+    elif rule == "first":
+        order_by = "f.visit_start_date ASC, f.visit_occurrence_id ASC"
+    elif rule == "last":
+        order_by = "f.visit_start_date DESC, f.visit_occurrence_id DESC"
+    else:
+        raise ValueError(f"Unsupported index_selection_rule '{index_selection_rule}'. Use 'random', 'first', or 'last'.")
+
+    washin_clause = ""
+    if washin_days and washin_days > 0:
+        washin_clause = f"""
+            AND (
+                EXISTS (
+                    SELECT 1 FROM {schema}.observation_period op 
+                    WHERE op.person_id = v.person_id 
+                      AND op.observation_period_start_date <= (v.visit_start_date - {int(washin_days)})
+                      AND op.observation_period_end_date >= v.visit_start_date
+                )
+                OR EXISTS (
+                    SELECT 1 FROM {schema}.visit_occurrence pv 
+                    WHERE pv.person_id = v.person_id 
+                      AND pv.visit_occurrence_id != v.visit_occurrence_id
+                      AND pv.visit_start_date <= (v.visit_start_date - {int(washin_days)})
+                )
+            )
+        """
+
+    # Stay filters and anchor configuration per mortality_type
+    if m_type == "in_hospital":
+        stay_criteria = "AND date_diff('day', v.visit_start_date, v.visit_end_date) >= 0 AND (pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"
+        outcome_expr = """
+            CASE WHEN COALESCE(e.discharged_to_concept_id, 0) IN (4216643, 4155309) 
+                   OR (e.death_date IS NOT NULL AND e.death_date >= e.visit_start_date AND e.death_date <= e.visit_end_date)
+                 THEN 1 ELSE 0 END AS outcome_flag,
+            CASE WHEN COALESCE(e.discharged_to_concept_id, 0) IN (4216643, 4155309) 
+                   OR (e.death_date IS NOT NULL AND e.death_date >= e.visit_start_date AND e.death_date <= e.visit_end_date)
+                 THEN CAST(COALESCE(e.death_date, e.visit_end_date) AS DATE) ELSE NULL END AS outcome_date
+        """
+        anchor_expr = "e.visit_end_date"
+    elif m_type == "post_discharge":
+        stay_criteria = """
+            AND date_diff('day', v.visit_start_date, v.visit_end_date) >= 1
+            AND COALESCE(v.discharged_to_concept_id, 0) NOT IN (4216643, 4155309)
+            AND (pd.death_date IS NULL OR pd.death_date > v.visit_end_date)
+        """
+        outcome_expr = f"""
+            CASE WHEN e.death_date IS NOT NULL 
+                  AND e.death_date > (e.visit_end_date + {int(gap_days)}) 
+                  AND e.death_date <= (e.visit_end_date + {int(mortality_window_days)})
+                 THEN 1 ELSE 0 END AS outcome_flag,
+            CASE WHEN e.death_date IS NOT NULL 
+                  AND e.death_date > (e.visit_end_date + {int(gap_days)}) 
+                  AND e.death_date <= (e.visit_end_date + {int(mortality_window_days)})
+                 THEN CAST(e.death_date AS DATE) ELSE NULL END AS outcome_date
+        """
+        anchor_expr = "e.visit_end_date"
+    elif m_type == "fixed_window":
+        stay_criteria = "AND (pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"
+        outcome_expr = f"""
+            CASE WHEN e.death_date IS NOT NULL 
+                  AND e.death_date > (e.visit_start_date + {int(gap_days)}) 
+                  AND e.death_date <= (e.visit_start_date + {int(mortality_window_days)})
+                 THEN 1 ELSE 0 END AS outcome_flag,
+            CASE WHEN e.death_date IS NOT NULL 
+                  AND e.death_date > (e.visit_start_date + {int(gap_days)}) 
+                  AND e.death_date <= (e.visit_start_date + {int(mortality_window_days)})
+                 THEN CAST(e.death_date AS DATE) ELSE NULL END AS outcome_date
+        """
+        anchor_expr = "e.visit_start_date"
+    elif m_type == "composite_readmit_or_death":
+        stay_criteria = """
+            AND date_diff('day', v.visit_start_date, v.visit_end_date) >= 1
+            AND COALESCE(v.discharged_to_concept_id, 0) NOT IN (4216643, 4155309)
+            AND (pd.death_date IS NULL OR pd.death_date > v.visit_end_date)
+        """
+        outcome_expr = f"""
+            CASE WHEN (
+                (e.death_date IS NOT NULL AND e.death_date > (e.visit_end_date + {int(gap_days)}) AND e.death_date <= (e.visit_end_date + {int(mortality_window_days)}))
+                OR EXISTS (
+                    SELECT 1 FROM {schema}.visit_occurrence ro
+                    WHERE ro.person_id = e.subject_id
+                      AND ro.visit_occurrence_id != e.visit_occurrence_id
+                      AND ro.visit_concept_id IN ({out_in})
+                      AND ro.visit_start_date > (e.visit_end_date + {int(gap_days)})
+                      AND ro.visit_start_date <= (e.visit_end_date + {int(mortality_window_days)})
+                )
+            ) THEN 1 ELSE 0 END AS outcome_flag,
+            CAST(LEAST(
+                CASE WHEN e.death_date IS NOT NULL AND e.death_date > (e.visit_end_date + {int(gap_days)}) AND e.death_date <= (e.visit_end_date + {int(mortality_window_days)}) THEN e.death_date ELSE NULL END,
+                (SELECT MIN(ro.visit_start_date) FROM {schema}.visit_occurrence ro WHERE ro.person_id = e.subject_id AND ro.visit_occurrence_id != e.visit_occurrence_id AND ro.visit_concept_id IN ({out_in}) AND ro.visit_start_date > (e.visit_end_date + {int(gap_days)}) AND ro.visit_start_date <= (e.visit_end_date + {int(mortality_window_days)}))
+            ) AS DATE) AS outcome_date
+        """
+        anchor_expr = "e.visit_end_date"
+
+    # Follow-up verification for censoring
+    if require_verified_followup and m_type != "in_hospital":
+        followup_check = f"""
+            CASE WHEN (
+                EXISTS (
+                    SELECT 1 FROM {schema}.observation_period op
+                    WHERE op.person_id = e.subject_id
+                      AND op.observation_period_end_date >= ({anchor_expr} + {int(mortality_window_days)})
+                )
+                OR EXISTS (
+                    SELECT 1 FROM {schema}.visit_occurrence sv
+                    WHERE sv.person_id = e.subject_id
+                      AND sv.visit_occurrence_id != e.visit_occurrence_id
+                      AND sv.visit_start_date >= ({anchor_expr} + {int(mortality_window_days)})
+                )
+                OR EXISTS (
+                    SELECT 1 FROM {schema}.measurement sm
+                    WHERE sm.person_id = e.subject_id
+                      AND sm.measurement_date >= ({anchor_expr} + {int(mortality_window_days)})
+                )
+                OR EXISTS (
+                    SELECT 1 FROM {schema}.condition_occurrence sc
+                    WHERE sc.person_id = e.subject_id
+                      AND sc.condition_start_date >= ({anchor_expr} + {int(mortality_window_days)})
+                )
+                OR EXISTS (
+                    SELECT 1 FROM {schema}.drug_exposure sd
+                    WHERE sd.person_id = e.subject_id
+                      AND sd.drug_exposure_start_date >= ({anchor_expr} + {int(mortality_window_days)})
+                )
+                OR (e.death_date IS NOT NULL AND e.death_date >= ({anchor_expr} + {int(mortality_window_days)}))
+            ) THEN 1 ELSE 0 END AS has_subsequent_event
+        """
+        filter_clause = "WHERE (outcome_flag = 1 OR has_subsequent_event = 1)"
+    else:
+        followup_check = "1 AS has_subsequent_event"
+        filter_clause = ""
+
+    query = f"""
+    CREATE OR REPLACE TEMP TABLE _temp_eol_cohort AS
+    WITH all_deaths AS (
+        SELECT person_id, CAST(death_date AS DATE) AS death_date
+        FROM {schema}.death
+        WHERE death_date IS NOT NULL
+        UNION ALL
+        SELECT person_id, CAST(visit_end_date AS DATE) AS death_date
+        FROM {schema}.visit_occurrence
+        WHERE discharged_to_concept_id IN (4216643, 4155309)
+          AND visit_end_date IS NOT NULL
+    ),
+    patient_death AS (
+        SELECT person_id, MIN(death_date) AS death_date
+        FROM all_deaths
+        GROUP BY person_id
+    ),
+    eligible_stays AS (
+        SELECT 
+            v.visit_occurrence_id,
+            v.person_id AS subject_id,
+            v.visit_start_date,
+            v.visit_end_date,
+            v.discharged_to_concept_id,
+            pd.death_date,
+            date_diff('day', v.visit_start_date, v.visit_end_date) AS los_days,
+            date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), v.visit_start_date) AS age_at_index
+        FROM {schema}.visit_occurrence v
+        JOIN {schema}.person p ON v.person_id = p.person_id
+        LEFT JOIN patient_death pd ON v.person_id = pd.person_id
+        WHERE {tgt_clause}
+          AND date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), v.visit_start_date) >= {int(min_age)}
+          {stay_criteria}
+          {washin_clause}
+    ),
+    outcomes_and_followup AS (
+        SELECT 
+            e.*,
+            '{m_type}' AS mortality_type,
+            {outcome_expr},
+            {followup_check}
+        FROM eligible_stays e
+    ),
+    filtered_stays AS (
+        SELECT *
+        FROM outcomes_and_followup
+        {filter_clause}
+    ),
+    ranked_stays AS (
+        SELECT 
+            f.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY f.subject_id 
+                ORDER BY {order_by}
+            ) AS rnk
+        FROM filtered_stays f
+    )
+    SELECT 
+        {int(cohort_id)} AS cohort_definition_id,
+        subject_id,
+        visit_start_date AS cohort_start_date,
+        visit_end_date AS cohort_end_date,
+        visit_occurrence_id,
+        outcome_flag,
+        outcome_date,
+        mortality_type,
+        age_at_index,
+        los_days,
+        discharged_to_concept_id
+    FROM ranked_stays
+    WHERE rnk = 1;
+    """
+    con.execute(query)
+
+    desc_esc = (cohort_description or f"{cohort_name} ({m_type})").replace("'", "''")
+    name_esc = cohort_name.replace("'", "''")
+
+    if overwrite:
+        con.execute(f"DELETE FROM {schema}.cohort WHERE cohort_definition_id = {int(cohort_id)};")
+        con.execute(f"DELETE FROM {schema}.cohort_definition WHERE cohort_definition_id = {int(cohort_id)};")
+        if outcome_cohort_id is not None:
+            con.execute(f"DELETE FROM {schema}.cohort WHERE cohort_definition_id = {int(outcome_cohort_id)};")
+            con.execute(f"DELETE FROM {schema}.cohort_definition WHERE cohort_definition_id = {int(outcome_cohort_id)};")
+
+    # Insert target cohort definition
+    con.execute(f"""
+        INSERT INTO {schema}.cohort_definition (
+            cohort_definition_id, cohort_definition_name, cohort_definition_description,
+            definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
+        ) VALUES (
+            {int(cohort_id)}, '{name_esc}', '{desc_esc}', 0, NULL, 0, CURRENT_DATE
+        );
+    """)
+
+    # Populate target cohort table
+    con.execute(f"""
+        INSERT INTO {schema}.cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+        SELECT DISTINCT
+            cohort_definition_id,
+            subject_id,
+            cohort_start_date,
+            cohort_end_date
+        FROM _temp_eol_cohort;
+    """)
+
+    # Populate outcome cohort table if requested
+    if outcome_cohort_id is not None:
+        out_name_esc = f"{name_esc} Outcome".replace("'", "''")
+        con.execute(f"""
+            INSERT INTO {schema}.cohort_definition (
+                cohort_definition_id, cohort_definition_name, cohort_definition_description,
+                definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
+            ) VALUES (
+                {int(outcome_cohort_id)}, '{out_name_esc}', 'Outcome events for {name_esc}', 0, NULL, 0, CURRENT_DATE
+            );
+        """)
+        con.execute(f"""
+            INSERT INTO {schema}.cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+            SELECT DISTINCT
+                {int(outcome_cohort_id)} AS cohort_definition_id,
+                subject_id,
+                COALESCE(outcome_date, cohort_end_date) AS cohort_start_date,
+                COALESCE(outcome_date, cohort_end_date) AS cohort_end_date
+            FROM _temp_eol_cohort
+            WHERE outcome_flag = 1;
+        """)
+
+    if table_name:
+        con.execute(f"DROP TABLE IF EXISTS {table_name};")
+        con.execute(f"CREATE TABLE {table_name} AS SELECT * FROM _temp_eol_cohort;")
+
+    res_df = con.execute("SELECT * FROM _temp_eol_cohort ORDER BY subject_id;").df()
+    con.execute("DROP TABLE IF EXISTS _temp_eol_cohort;")
+    return res_df
+
+
+# Alias for clinical consistency
+build_mortality_cohort = build_end_of_life_cohort
+
+
