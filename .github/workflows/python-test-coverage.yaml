@@ -16,7 +16,7 @@ jobs:
       RENV_CONFIG_AUTOLOADER_ENABLED: false
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -39,16 +39,20 @@ jobs:
         run: |
           pytest tests/ --cov=python/omop_etl --cov-report=xml:cobertura-py.xml --cov-report=term
 
-      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: jkylearmstrong/omop-duck-db
           files: ./cobertura-py.xml
           flags: python
-          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: python-coverage-report
           path: ./cobertura-py.xml
