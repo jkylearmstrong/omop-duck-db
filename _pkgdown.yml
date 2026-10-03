@@ -26,6 +26,13 @@ reference:
   - build_observation_period
   - build_drug_era
   - build_condition_era
+- title: Multi-site Consortium Federation
+  desc: Federated CDM queries and multi-site metadata initialization.
+  contents:
+  - create_federated_consortium
+  - load_care_site
+  - load_cdm_source
+  - load_location
 - title: Vocabulary mapping and Usagi
   desc: Import custom crosswalks and audit unmapped source codes.
   contents:
@@ -37,6 +44,46 @@ reference:
   contents:
   - remap_cdm_table
   - remap_all
+- title: Cohorts and concept algebra
+  desc: Parameterized cohort builders, set operations, and transitive hierarchy algebra.
+  contents:
+  - build_readmission_cohort
+  - build_end_of_life_cohort
+  - create_cohort
+  - combine_cohorts
+  - compute_attrition
+  - get_cohort_summary
+  - ensure_cohort_tables
+  - resolve_concept_set
+  - get_concept_ancestors
+  - get_concept_descendants
+- title: Machine learning feature extraction
+  desc: Extract patient-level sparse concept matrices, windowed temporal features, and measurements.
+  contents:
+  - extract_sparse_concept_matrix
+  - extract_patient_features
+  - extract_temporal_features
+  - aggregate_concept_sets
+  - extract_measurements
+- title: Ecosystem bridges (HADES & tidymodels)
+  desc: Interoperability with OHDSI HADES PatientLevelPrediction and R tidymodels / orbital scoring.
+  contents:
+  - hades_preflight
+  - plp_database_details
+  - as_plp_data
+  - as_tidymodels_data
+  - model_concepts
+  - materialize_concept_features
+- title: Data quality, Table 1, and Export
+  desc: Run Data Quality Dashboard checks, build publication-grade Table 1s, and export datasets.
+  contents:
+  - run_dqd
+  - generate_table1
+  - validate_table1_reconciliation
+  - export_cdm
+  - DEFAULT_LAB_LOINCS
+  - DEFAULT_MEDICATION_CONCEPTS
+  - DEFAULT_VITAL_LOINCS
 - title: Large-file sync
   desc: Synchronize DuckDB databases and vocabulary files via Google Drive.
   contents:

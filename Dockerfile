@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install R packages into a dedicated library
-RUN mkdir -p /rlib && Rscript -e 'install.packages(c("bigrquery", "CommonDataModel", "DBI", "duckdb", "googledrive", "quarto", "stringr", "testthat", "usethis", "yaml"), repos = "https://packagemanager.posit.co/cran/__linux__/noble/latest", lib = "/rlib")'
+RUN mkdir -p /rlib && Rscript -e 'install.packages(c("bigrquery", "CommonDataModel", "DBI", "duckdb", "googledrive", "quarto", "stringr", "testthat", "usethis", "yaml", "Matrix", "arrow", "jsonlite", "dplyr", "withr"), repos = "https://packagemanager.posit.co/cran/__linux__/noble/latest", lib = "/rlib")'
 
 # Build + test both packages in the builder stage, so a failing test fails
 # the image build, not just a later `docker run`.

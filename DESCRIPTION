@@ -43,7 +43,11 @@ Suggests:
     Andromeda,
     DatabaseConnector,
     PatientLevelPrediction,
-    FeatureExtraction
+    FeatureExtraction,
+    arrow,
+    jsonlite,
+    dplyr,
+    withr
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0
 Remotes:  

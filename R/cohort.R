@@ -5,6 +5,7 @@
 #'
 #' @param con Active DuckDB DBI connection.
 #' @return Invisibly NULL.
+#' @importFrom stats setNames
 #' @export
 ensure_cohort_tables <- function(con) {
   DBI::dbExecute(con, "
@@ -1029,9 +1030,9 @@ build_end_of_life_cohort <- function(con,
         cohort_definition_id, cohort_definition_name, cohort_definition_description,
         definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
     ) VALUES (
-        %d, '%s', '%s', 0, NULL, 0, CURRENT_DATE
+        %d, '%s', '%s', 0, NULL, 0, DATE '%s'
     );
-  ", schema, as.integer(cohort_id), name_esc, desc_esc))
+  ", schema, as.integer(cohort_id), name_esc, desc_esc, as.character(Sys.Date())))
 
   DBI::dbExecute(con, sprintf("
     INSERT INTO %s.cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
@@ -1050,9 +1051,9 @@ build_end_of_life_cohort <- function(con,
           cohort_definition_id, cohort_definition_name, cohort_definition_description,
           definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
       ) VALUES (
-          %d, '%s', 'Outcome events for %s', 0, NULL, 0, CURRENT_DATE
+          %d, '%s', 'Outcome events for %s', 0, NULL, 0, DATE '%s'
       );
-    ", schema, as.integer(outcome_cohort_id), out_name_esc, name_esc))
+    ", schema, as.integer(outcome_cohort_id), out_name_esc, name_esc, as.character(Sys.Date())))
 
     DBI::dbExecute(con, sprintf("
       INSERT INTO %s.cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)

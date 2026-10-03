@@ -7,6 +7,7 @@ and tracking patient attrition across CONSORT flowchart phenotyping criteria.
 
 from __future__ import annotations
 
+import datetime
 from typing import Any, Sequence
 import duckdb
 import pandas as pd
@@ -287,7 +288,7 @@ def create_cohort(
             0,
             NULL,
             0,
-            CURRENT_DATE
+            DATE '{datetime.date.today().isoformat()}'
         );
     """)
 
@@ -671,7 +672,7 @@ def build_readmission_cohort(
             0,
             NULL,
             0,
-            CURRENT_DATE
+            DATE '{datetime.date.today().isoformat()}'
         );
     """)
 
@@ -701,7 +702,7 @@ def build_readmission_cohort(
                 0,
                 NULL,
                 0,
-                CURRENT_DATE
+                DATE '{datetime.date.today().isoformat()}'
             );
         """)
         con.execute(f"DELETE FROM cohort WHERE cohort_definition_id = {int(outcome_cohort_id)};")
@@ -1032,7 +1033,7 @@ def build_end_of_life_cohort(
             cohort_definition_id, cohort_definition_name, cohort_definition_description,
             definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
         ) VALUES (
-            {int(cohort_id)}, '{name_esc}', '{desc_esc}', 0, NULL, 0, CURRENT_DATE
+            {int(cohort_id)}, '{name_esc}', '{desc_esc}', 0, NULL, 0, DATE '{datetime.date.today().isoformat()}'
         );
     """)
 
@@ -1055,7 +1056,7 @@ def build_end_of_life_cohort(
                 cohort_definition_id, cohort_definition_name, cohort_definition_description,
                 definition_type_concept_id, cohort_definition_syntax, subject_concept_id, cohort_initiation_date
             ) VALUES (
-                {int(outcome_cohort_id)}, '{out_name_esc}', 'Outcome events for {name_esc}', 0, NULL, 0, CURRENT_DATE
+                {int(outcome_cohort_id)}, '{out_name_esc}', 'Outcome events for {name_esc}', 0, NULL, 0, DATE '{datetime.date.today().isoformat()}'
             );
         """)
         con.execute(f"""

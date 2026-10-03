@@ -30,3 +30,4 @@
 ^Dockerfile$
 ^scripts$
 ^\.Renviron$
+^NOTES\.md$
