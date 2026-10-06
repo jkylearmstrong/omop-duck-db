@@ -73,3 +73,26 @@ CREATE OR REPLACE MACRO parse_omop_datetime(date_col, time_col) AS (
         TRY_CAST(parse_omop_date(date_col) AS TIMESTAMP)
     )
 );
+
+-- Recursive concept ancestry traversal macros (RFC 1.2)
+-- Resolves all descendant concept IDs for a given ancestor concept ID using concept_ancestor.
+CREATE OR REPLACE MACRO descendants_of(ancestor_id) AS TABLE
+SELECT descendant_concept_id AS concept_id
+FROM concept_ancestor
+WHERE ancestor_concept_id = ancestor_id;
+
+-- Resolves all ancestor concept IDs for a given descendant concept ID using concept_ancestor.
+CREATE OR REPLACE MACRO ancestors_of(descendant_id) AS TABLE
+SELECT ancestor_concept_id AS concept_id
+FROM concept_ancestor
+WHERE descendant_concept_id = descendant_id;
+
+-- Physiologic value clamping macro (RFC 6.1)
+CREATE OR REPLACE MACRO clamp_physiologic(val, min_val, max_val) AS (
+    CASE
+        WHEN val IS NULL THEN NULL
+        WHEN val < min_val THEN min_val
+        WHEN val > max_val THEN max_val
+        ELSE val
+    END
+);

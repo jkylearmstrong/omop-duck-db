@@ -191,3 +191,67 @@ check_vocabulary_version <- function(con) {
     unmapped_discharge_statuses = unmapped_discharge
   )
 }
+
+#' Connect to OMOP DuckDB Database with Transparent Central Vocabulary Search Path
+#'
+#' RFC 1.1: Attaches the central Athena vocabulary read-only and automatically sets
+#' DuckDB's search_path ('main,central_vocab.main'), allowing queries to reference
+#' concept, concept_ancestor, and concept_relationship directly without schema prefixing.
+#'
+#' @param db_path Character path to the primary OMOP DuckDB database or an existing DBI connection.
+#' @param vocab_db Character path to central_vocabulary.duckdb. If NULL and auto_attach_vocab is TRUE,
+#'   auto-discovers sibling vocabulary database files.
+#' @param read_only Logical; whether to open in read-only mode (default FALSE).
+#' @param auto_attach_vocab Logical; whether to automatically attach central vocabulary (default TRUE).
+#' @param load_macros Logical; whether to load SQL mapping macros (default TRUE).
+#' @return A DuckDB DBI connection with central_vocab attached and search_path configured.
+#' @export
+omop_connect <- function(db_path,
+                         vocab_db = NULL,
+                         read_only = FALSE,
+                         auto_attach_vocab = TRUE,
+                         load_macros = TRUE) {
+  if (inherits(db_path, "DBIConnection")) {
+    con <- db_path
+    db_file <- NULL
+  } else {
+    con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = read_only)
+    db_file <- if (db_path != ":memory:") normalizePath(db_path, mustWork = FALSE) else NULL
+  }
+
+  vocab_target <- NULL
+  if (!is.null(vocab_db)) {
+    vocab_target <- normalizePath(vocab_db, mustWork = FALSE)
+  } else if (isTRUE(auto_attach_vocab) && !is.null(db_file)) {
+    parent_dir <- dirname(db_file)
+    candidates <- c(
+      file.path(parent_dir, "central_vocabulary.duckdb"),
+      file.path(parent_dir, "vocabulary.duckdb"),
+      file.path(parent_dir, "vocab.duckdb"),
+      file.path(getwd(), "derived", "omop_duckdb", "central_vocabulary.duckdb"),
+      file.path(getwd(), "central_vocabulary.duckdb")
+    )
+    for (cand in candidates) {
+      if (file.exists(cand) && normalizePath(cand, mustWork = FALSE) != db_file) {
+        vocab_target <- normalizePath(cand, mustWork = FALSE)
+        break
+      }
+    }
+  }
+
+  if (!is.null(vocab_target) && file.exists(vocab_target)) {
+    attached_df <- tryCatch(DBI::dbGetQuery(con, "SELECT database_name FROM duckdb_databases();"), error = function(e) data.frame())
+    attached <- if (nrow(attached_df) > 0) attached_df$database_name else character()
+    if (!"central_vocab" %in% attached) {
+      posix_path <- gsub("\\\\", "/", vocab_target)
+      DBI::dbExecute(con, sprintf("ATTACH '%s' AS central_vocab (READ_ONLY);", posix_path))
+    }
+    tryCatch(DBI::dbExecute(con, "SET search_path = 'main,central_vocab.main';"), error = function(e) NULL)
+  }
+
+  if (isTRUE(load_macros)) {
+    tryCatch(load_mapping_macros(con), error = function(e) NULL)
+  }
+
+  con
+}

@@ -199,3 +199,85 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
 
     con.close()
     return all_ok
+
+
+def omop_connect(
+    db_path,
+    vocab_db_path=None,
+    read_only=False,
+    auto_attach_vocab=True,
+    load_sql_macros=True,
+):
+    """Connect to an OMOP CDM DuckDB database with transparent central vocabulary attachment.
+
+    RFC 1.1: Attaches the central Athena vocabulary read-only and automatically sets
+    DuckDB's search_path ('main,central_vocab.main'), allowing queries to reference
+    concept, concept_ancestor, and concept_relationship directly without schema prefixing.
+
+    Parameters
+    ----------
+    db_path : str, Path, or duckdb.DuckDBPyConnection
+        Path to the primary OMOP DuckDB database file or an existing connection.
+    vocab_db_path : str or Path, optional
+        Path to central_vocabulary.duckdb. If None and auto_attach_vocab is True,
+        searches for central_vocabulary.duckdb / vocabulary.duckdb in the same directory
+        as db_path, or in derived/omop_duckdb/.
+    read_only : bool, default False
+        Whether to open the database connection in read-only mode.
+    auto_attach_vocab : bool, default True
+        Whether to auto-discover and attach central vocabulary if vocab_db_path is not given.
+    load_sql_macros : bool, default True
+        Whether to load standard mapping and cohort SQL macros.
+
+    Returns
+    -------
+    duckdb.DuckDBPyConnection
+        Active DuckDB connection with central_vocab attached and search_path configured.
+    """
+    if isinstance(db_path, duckdb.DuckDBPyConnection):
+        con = db_path
+        db_file = None
+    else:
+        db_str = str(db_path)
+        con = duckdb.connect(db_str, read_only=read_only)
+        db_file = os.path.abspath(db_str) if db_str != ":memory:" else None
+
+    # Vocabulary discovery & attachment
+    vocab_target = None
+    if vocab_db_path is not None:
+        vocab_target = os.path.abspath(str(vocab_db_path))
+    elif auto_attach_vocab and db_file:
+        parent_dir = os.path.dirname(db_file)
+        candidates = [
+            os.path.join(parent_dir, "central_vocabulary.duckdb"),
+            os.path.join(parent_dir, "vocabulary.duckdb"),
+            os.path.join(parent_dir, "vocab.duckdb"),
+            os.path.join(os.getcwd(), "derived", "omop_duckdb", "central_vocabulary.duckdb"),
+            os.path.join(os.getcwd(), "central_vocabulary.duckdb"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c) and os.path.abspath(c) != db_file:
+                vocab_target = os.path.abspath(c)
+                break
+
+    if vocab_target and os.path.isfile(vocab_target):
+        try:
+            attached = [r[0] for r in con.execute("SELECT database_name FROM duckdb_databases();").fetchall()]
+        except Exception:
+            attached = []
+        if "central_vocab" not in attached:
+            norm_path = vocab_target.replace("\\", "/")
+            con.execute(f"ATTACH '{norm_path}' AS central_vocab (READ_ONLY);")
+        try:
+            con.execute("SET search_path = 'main,central_vocab.main';")
+        except Exception:
+            pass
+
+    if load_sql_macros:
+        try:
+            from omop_etl.build_omop_cdm import load_macros
+            load_macros(con)
+        except Exception:
+            pass
+
+    return con
