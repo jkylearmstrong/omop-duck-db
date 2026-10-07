@@ -6,6 +6,8 @@
 \alias{omopduckdb-package}
 \title{omopduckdb: Build and Populate an OMOP CDM v5.4 Database in DuckDB}
 \description{
+\if{html}{\figure{logo.png}{options: style='float: right' alt='logo' width='120'}}
+
 Tools for building an OMOP Common Data Model (CDM) v5.4 schema in DuckDB, loading the OHDSI Athena vocabulary (from a local download or live from BigQuery), and mapping PCORnet-format source data into the CDM via parallel R and Python ETL implementations that share the same concept-mapping SQL. Also includes a Google Drive sync helper for the large generated database/vocabulary files.
 }
 \seealso{

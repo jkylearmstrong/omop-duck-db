@@ -1,3 +1,6 @@
+omop-duck-db
+================
+
 # omop-duck-db <a href="https://jkylearmstrong.github.io/omop-duck-db/"><img src="man/figures/logo.png" align="right" height="139" alt="omop-duck-db website" /></a>
 
 <!-- badges: start -->
@@ -67,9 +70,13 @@ pip install omop-duck-db
 
 ### Developer Note: `renv` Workflow
 
-This repository includes an `.Rprofile` that activates `renv` automatically (`renv/activate.R`).
-- **If working within the project's isolated environment**: Run `renv::restore()` to populate local package libraries.
-- **If using pre-installed system R packages**: Set `RENV_CONFIG_AUTOLOADER = FALSE` in `.Renviron` or invoke `Rscript --no-init-file` so standalone scripts do not fail looking for unpopulated local `renv` libraries.
+This repository includes an `.Rprofile` that activates `renv`
+automatically (`renv/activate.R`). - **If working within the project’s
+isolated environment**: Run `renv::restore()` to populate local package
+libraries. - **If using pre-installed system R packages**: Set
+`RENV_CONFIG_AUTOLOADER = FALSE` in `.Renviron` or invoke
+`Rscript --no-init-file` so standalone scripts do not fail looking for
+unpopulated local `renv` libraries.
 
 ## Example
 
@@ -80,7 +87,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\RtmpSkaxb0\file86b0753d2af6.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmp8IgMZm\filebdd03b7b616a.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]
@@ -148,6 +155,32 @@ e.g.
   The resulting token is cached and reused by later non-interactive
   runs.
 
+## Transparent Central Vocabulary & Single-Store Architecture (`omop_connect`)
+
+Instead of duplicating 10–15 GB of Athena vocabulary tables inside every
+site-specific CDM database, `omop_connect()` attaches a shared central
+vocabulary database read-only (`central_vocab`) and automatically
+injects DuckDB’s `search_path = 'main,central_vocab'`. All queries
+seamlessly resolve `concept`, `concept_ancestor`, and vocabulary macros
+without schema qualification:
+
+``` r
+library(omopduckdb)
+
+# Auto-discovers sibling central_vocabulary.duckdb or connects with explicit path
+con <- omop_connect("omop_cdm.duckdb")
+DBI::dbGetQuery(con, "SELECT COUNT(*) FROM concept;")
+```
+
+In Python:
+
+``` python
+from omop_etl import omop_connect
+
+con = omop_connect("omop_cdm.duckdb")
+con.execute("SELECT COUNT(*) FROM concept").fetchone()
+```
+
 ## Custom mapping and retroactive remapping
 
 When standard Athena vocabularies lack mappings for site-specific or
@@ -182,15 +215,110 @@ unmapped codes:
 Equivalent functions are available in Python via
 `from omop_etl import remap_all, import_usagi_mappings`.
 
-## Readmission Cohorts & Table 1 Pipeline
+## Study Cohorts, Phenotyping & Clinical Pipeline
 
-The package provides an end-to-end epidemiological pipeline for acute
-inpatient studies, featuring leak-free index stay sampling, temporal
-feature extraction, Athena concept hierarchy rollups, LOINC laboratory
-consolidation, stratified Table 1 generation, and data drift
-reconciliation.
+The package provides an end-to-end epidemiological pipeline for
+observational studies, featuring flexible index stay definition,
+validated comorbidity profiling, physiologic range sanitization, Athena
+concept hierarchy rollups, LOINC laboratory consolidation, and
+publication Table 1 generation.
 
-### 1. Build Inpatient Readmission Cohort
+### 1. Unified Study Cohort Engine (`define_study_cohort`)
+
+Generalizes acute inpatient, emergency department, and outpatient index
+cohorts with customizable wash-in windows, right-censoring verification,
+and outcome definitions:
+
+``` r
+library(omopduckdb)
+
+con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
+
+# Build general study cohort (or specialized build_readmission_cohort / build_end_of_life_cohort)
+cohort_df <- define_study_cohort(
+  con,
+  visit_types = "inpatient",
+  washin_days = 365,
+  followup_days = 30,
+  min_age = 18,
+  min_los_days = 1,
+  sampling_rule = "first",
+  require_verified_followup = TRUE,
+  target_table = "cohort"
+)
+```
+
+In Python:
+
+``` python
+from omop_etl import define_study_cohort
+
+cohort_df = define_study_cohort(
+    con,
+    visit_types="inpatient",
+    washin_days=365,
+    followup_days=30,
+    min_age=18,
+    min_los_days=1,
+    sampling_rule="first",
+    require_verified_followup=True,
+    target_table="cohort"
+)
+```
+
+### 2. Comorbidity Profiling: 31 Elixhauser Domains & Charlson Index
+
+Computes validated comorbidity profiles in one set-based DuckDB query
+over the cohort with zero object leakage on read-only connections.
+Automatically evaluates both ICD-9/10 prefixes
+(`condition_source_value`) and SNOMED descendants
+(`condition_concept_id`):
+
+``` r
+# Extract 31 Elixhauser domains + composite van Walraven score
+elix_df <- extract_elixhauser_comorbidities(con, cohort_table = "cohort", lookback_days = 365)
+
+# Extract 17 Quan-Charlson categories + Charlson Comorbidity Index
+cci_df <- extract_charlson_index(con, cohort_table = "cohort", lookback_days = 365)
+```
+
+In Python:
+
+``` python
+from omop_etl import extract_elixhauser_comorbidities, extract_charlson_index
+
+elix_df = extract_elixhauser_comorbidities(con, cohort_table="cohort", lookback_days=365)
+cci_df = extract_charlson_index(con, cohort_table="cohort", lookback_days=365)
+```
+
+### 3. Physiologic Measurement Sanitization & Outlier Winsorization (`sanitize_measurements`)
+
+Cleans laboratory and vital measurements against 136 standard OHDSI
+DataQualityDashboard biological plausibility limits or statistical
+IQR/z-score winsorization:
+
+``` r
+# Clamps out-of-bounds measurements to DQD biological plausibility limits
+clean_labs <- sanitize_measurements(
+  con,
+  method = "dqd_biologic_limits",
+  action = "clamp"
+)
+```
+
+In Python:
+
+``` python
+from omop_etl import sanitize_measurements
+
+clean_labs = sanitize_measurements(
+    con,
+    method="dqd_biologic_limits",
+    action="clamp"
+)
+```
+
+### 4. Build Inpatient Readmission Cohort (`build_readmission_cohort`)
 
 Constructs index inpatient stays (`visit_concept_id = 9201`) among adult
 patients ($\ge 18$) with length of stay $\ge 1$ day, discharged alive,
@@ -233,7 +361,7 @@ cohort_df = build_readmission_cohort(
 )
 ```
 
-### 2. Extract Temporal Utilization & Demographic Features
+### 5. Extract Temporal Utilization & Demographic Features
 
 Aggregates windowed baseline healthcare utilization (IP, ED, OP
 encounter counts, days since prior visit, prior 30-day readmissions in
@@ -262,7 +390,7 @@ temporal_features = extract_temporal_features(
 )
 ```
 
-### 3. Athena Concept Hierarchy Rollup & Consolidated Measurements
+### 6. Athena Concept Hierarchy Rollup & Consolidated Measurements
 
 Traverse Athena’s `concept_ancestor` table to aggregate medication or
 condition classes, and extract consolidated lab panels and physical
@@ -317,7 +445,7 @@ lab_features = extract_measurements(
 )
 ```
 
-### 4. Stratified Table 1 Generation & Completeness Matrix
+### 7. Stratified Table 1 Generation & Completeness Matrix
 
 Generates baseline descriptive tables (continuous: Mean +/- SD, Median
 \[IQR\]; categorical: N \[%\]) stratified by outcome (e.g.,
@@ -352,7 +480,7 @@ t1_df, t1b_df = generate_table1(
 )
 ```
 
-### 5. Benchmark Reconciliation & Validation Harness
+### 8. Benchmark Reconciliation & Validation Harness
 
 Validates prospective OMOP Table 1 statistics against benchmark datasets
 with configurable absolute tolerance thresholds, flagging distribution
@@ -387,25 +515,26 @@ print("Reconciliation Passed:", reconciliation["passed"])
 ## ML bridge: omop-learn, scikit-learn, SARD & OHDSI PLP / DeepPLP
 
 omop-duck-db connects an OMOP-on-DuckDB database to three modelling
-ecosystems without ad-hoc SQL or per-patient query loops. Every extractor
-runs as one set-based DuckDB query over the whole cohort, and every window
-is **strictly before the index date** by default (`[index - lookback_days,
-index)`), so nothing at or after the index leaks into the features.
-Concept id `0` ("No matching concept") is always dropped.
+ecosystems without ad-hoc SQL or per-patient query loops. Every
+extractor runs as one set-based DuckDB query over the whole cohort, and
+every window is **strictly before the index date** by default
+(`[index - lookback_days, index)`), so nothing at or after the index
+leaks into the features. Concept id `0` (“No matching concept”) is
+always dropped.
 
 | You use | Entry point |
-|---|---|
+|----|----|
 | scikit-learn / glmnet / LASSO | `extract_sparse_concept_matrix()` (Python: `scipy.sparse.csr_matrix`; R: `Matrix::dgCMatrix`) |
 | SARD / sequence models | `extract_sard_visit_tensors()` (padded `(N, max_nvisits, max_visit_len)`) |
-| omop-learn (`OMOPDataset`, its torch / sparse / windowed datasets and models) | `DuckDBBackend`, a DuckDB implementation of omop-learn's backend interface |
+| omop-learn (`OMOPDataset`, its torch / sparse / windowed datasets and models) | `DuckDBBackend`, a DuckDB implementation of omop-learn’s backend interface |
 | OHDSI PatientLevelPrediction / DeepPatientLevelPrediction | `plp_database_details()`, `hades_preflight()`, `as_plp_data()` |
 | tidymodels / in-database scoring | `as_tidymodels_data()`, `model_concepts()`, `materialize_concept_features()` |
 
 ### 1. Sparse concept matrix and SARD visit tensors
 
 Both take a cohort parquet (one row per index event; person id and index
-date columns are auto-detected, an outcome column is carried through) and
-return arrays whose row `i` is parquet row `i`.
+date columns are auto-detected, an outcome column is carried through)
+and return arrays whose row `i` is parquet row `i`.
 
 ``` python
 import duckdb
@@ -433,19 +562,20 @@ dim(res$X)
 
 Conventions follow omop-learn so outputs drop into its models: special
 tokens `[BOS]=0 [EOS]=1 [SEP]=2 [PAD]=3 [UNK]=4`, concept tokens from 5
-(`"<concept_id> - <domain> - <concept_name>"`, sorted like omop-learn's
-`ConceptTokenizer`), visit times as days since 1900-01-01 with `-1` padding.
-Pass a train result's `tokenizer` (R: `tokens`) to a test cohort to get
-identical columns; pass explicit `max_nvisits` / `max_visit_len` for a fixed
-tensor shape. `pip install "omop-duck-db[ml]"` adds scipy.
+(`"<concept_id> - <domain> - <concept_name>"`, sorted like omop-learn’s
+`ConceptTokenizer`), visit times as days since 1900-01-01 with `-1`
+padding. Pass a train result’s `tokenizer` (R: `tokens`) to a test
+cohort to get identical columns; pass explicit `max_nvisits` /
+`max_visit_len` for a fixed tensor shape.
+`pip install "omop-duck-db[ml]"` adds scipy.
 
 ### 2. omop-learn backend
 
 omop-learn ships Postgres, BigQuery and Spark backends behind one
-interface; `DuckDBBackend` adds DuckDB. omop-learn's per-patient feature SQL
-runs as a single `LATERAL` join instead of one query per patient (about 70x
-faster in our benchmark), with DuckDB-dialect feature SQL bundled in
-`inst/sql/omop_learn`.
+interface; `DuckDBBackend` adds DuckDB. omop-learn’s per-patient feature
+SQL runs as a single `LATERAL` join instead of one query per patient
+(about 70x faster in our benchmark), with DuckDB-dialect feature SQL
+bundled in `inst/sql/omop_learn`.
 
 ``` python
 from pathlib import Path
@@ -465,12 +595,13 @@ omop-learn is not on PyPI:
 
 ### 3. OHDSI PatientLevelPrediction and DeepPatientLevelPrediction
 
-PLP, DeepPLP and FeatureExtraction read the CDM through DatabaseConnector,
-which opens the DuckDB file itself and **cannot `ATTACH` a central
-vocabulary**. The vocabulary tables must therefore be inside the file. It
-also opens the file read-write, so no *other process* (for example a Python
-session that still has the database open, even read-only) may hold it.
-`hades_preflight()` checks both, from a fresh connection:
+PLP, DeepPLP and FeatureExtraction read the CDM through
+DatabaseConnector, which opens the DuckDB file itself and **cannot
+`ATTACH` a central vocabulary**. The vocabulary tables must therefore be
+inside the file. It also opens the file read-write, so no *other
+process* (for example a Python session that still has the database open,
+even read-only) may hold it. `hades_preflight()` checks both, from a
+fresh connection:
 
 ``` r
 hades_preflight("omop_Temple.duckdb")
@@ -486,22 +617,24 @@ res <- extract_sparse_concept_matrix(con, cohort_parquet, value = "binary")
 plp <- as_plp_data(res, con, target_id = 1, outcome_id = 2)
 ```
 
-`as_plp_data()` uses covariate ids `concept_id * 1000 + analysis_id` with
-FeatureExtraction's long-term analysis ids (102 / 302 / 502), so they match natively extracted
-covariates for the 365-day window (verified against FeatureExtraction in the
-test suite).
+`as_plp_data()` uses covariate ids `concept_id * 1000 + analysis_id`
+with FeatureExtraction’s long-term analysis ids (102 / 302 / 502), so
+they match natively extracted covariates for the 365-day window
+(verified against FeatureExtraction in the test suite).
 
 ### 4. tidymodels and in-database scoring (orbital, tidypredict)
 
-`as_tidymodels_data()` bridges sparse concept matrices into a tibble ready for
-tidymodels (`rsample`, `recipes`, `parsnip`, `workflows`, `yardstick`), with outcome `y`
-formatted with the event as the first factor level (`event_level = "first"`), and concept
-predictors named `<domain>_<concept_id>`.
+`as_tidymodels_data()` bridges sparse concept matrices into a tibble
+ready for tidymodels (`rsample`, `recipes`, `parsnip`, `workflows`,
+`yardstick`), with outcome `y` formatted with the event as the first
+factor level (`event_level = "first"`), and concept predictors named
+`<domain>_<concept_id>`.
 
-Once a model or workflow is fitted, `model_concepts()` identifies which concepts
-have non-zero coefficients. `materialize_concept_features()` exports matching wide
-feature tables inside DuckDB using identical windowing logic. Scoring can then run
-directly in-database with `orbital::orbital()` or `tidypredict` without feature drift:
+Once a model or workflow is fitted, `model_concepts()` identifies which
+concepts have non-zero coefficients. `materialize_concept_features()`
+exports matching wide feature tables inside DuckDB using identical
+windowing logic. Scoring can then run directly in-database with
+`orbital::orbital()` or `tidypredict` without feature drift:
 
 ``` r
 library(tidymodels)
@@ -536,9 +669,9 @@ parity check that runs both ETLs against the fixture and diffs every row
 tests).
 
 The ML bridge tests skip what they cannot import: omop-learn (point
-`OMOP_LEARN_SRC` at a source checkout's `src/` directory, or install it) and
-the HADES packages (FeatureExtraction, PatientLevelPrediction, Andromeda,
-DatabaseConnector).
+`OMOP_LEARN_SRC` at a source checkout’s `src/` directory, or install it)
+and the HADES packages (FeatureExtraction, PatientLevelPrediction,
+Andromeda, DatabaseConnector).
 
 ## Large files (Google Drive)
 

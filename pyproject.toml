@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omop-duck-db"
-version = "0.5.2"
+version = "0.5.3"
 description = "Tools for building an OMOP CDM v5.4 DuckDB database and mapping PCORnet-format source data into it."
 readme = "README.md"
 license = "MIT"
@@ -46,6 +46,8 @@ packages = ["python/omop_etl"]
 "inst/sql/table1_aggregations.sql" = "omop_etl/resources/sql/table1_aggregations.sql"
 "inst/sql/omop_learn" = "omop_etl/resources/sql/omop_learn"
 "inst/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql" = "omop_etl/resources/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql"
+"inst/extdata/comorbidity" = "omop_etl/resources/extdata/comorbidity"
+"inst/extdata/physiologic_limits.csv" = "omop_etl/resources/extdata/physiologic_limits.csv"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

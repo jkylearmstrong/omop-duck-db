@@ -101,4 +101,6 @@ Resolves dual OMOP death sources:
 \item \code{death} table: \code{death_date} linked to \code{person_id}.
 \item \code{visit_occurrence} table: \code{discharged_to_concept_id IN (4216643, 4155309)} (Expired / Hospice).
 }
+This is a thin wrapper over the shared study-cohort engine (see \code{\link[=define_study_cohort]{define_study_cohort()}}, which generalises
+it); its legacy conventions are pinned here and covered by golden-file tests.
 }

@@ -29,6 +29,7 @@ doc/
 dist/
 build/
 *.egg-info/
+*.whl
 .pytest_cache/
 .coverage
 .coverage.*

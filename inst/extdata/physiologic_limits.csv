@@ -1,0 +1,137 @@
+concept_id,name,category,loinc_code,unit,unit_concept_id,min_value,max_value,source,note
+3004249,Systolic blood pressure,vital,8480-6,mm[Hg],8876,40,300,clinical_plausibility,Systolic BP; excludes artifacts such as 0 or 999
+3012888,Diastolic blood pressure,vital,8462-4,mm[Hg],8876,20,200,clinical_plausibility,Diastolic BP; excludes artifacts such as 0 or 999
+3027018,Heart rate,vital,8867-4,/min,8541,20,300,clinical_plausibility,Heart rate
+3024171,Respiratory rate,vital,9279-1,/min,8541,3,80,clinical_plausibility,Respiratory rate
+3020891,Body temperature,vital,8310-5,Cel,586323,25,45,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3020891,Body temperature,vital,8310-5,[degF],9289,77,113,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3006322,Oral temperature,vital,8331-1,Cel,586323,25,45,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3006322,Oral temperature,vital,8331-1,[degF],9289,77,113,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3025926,Body temperature - Core,vital,8329-5,Cel,586323,25,45,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3025926,Body temperature - Core,vital,8329-5,[degF],9289,77,113,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3022060,Rectal temperature,vital,8332-9,Cel,586323,25,45,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3022060,Rectal temperature,vital,8332-9,[degF],9289,77,113,clinical_plausibility,Body temperature; Fahrenheit bounds are the Celsius bounds converted
+3016502,Oxygen saturation in Arterial blood,vital,2708-6,%,8554,40,100,clinical_plausibility,Oxygen saturation; values above 100 percent are impossible
+40762499,Oxygen saturation in Arterial blood by Pulse oximetry,vital,59408-5,%,8554,40,100,clinical_plausibility,Oxygen saturation; values above 100 percent are impossible
+3013502,Oxygen saturation in Blood,vital,20564-1,%,8554,40,100,clinical_plausibility,Oxygen saturation; values above 100 percent are impossible
+3025315,Body weight,vital,29463-7,kg,9529,0.2,700,clinical_plausibility,Body weight; lower bound admits premature neonates
+3025315,Body weight,vital,29463-7,[lb_us],8739,0.5,1500,clinical_plausibility,Body weight; lower bound admits premature neonates
+3013762,Body weight Measured,vital,3141-9,kg,9529,0.2,700,clinical_plausibility,Body weight; lower bound admits premature neonates
+3013762,Body weight Measured,vital,3141-9,[lb_us],8739,0.5,1500,clinical_plausibility,Body weight; lower bound admits premature neonates
+3036277,Body height,vital,8302-2,cm,8582,25,275,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3036277,Body height,vital,8302-2,[in_us],9330,10,108,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3036277,Body height,vital,8302-2,[in_i],9327,10,108,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3036277,Body height,vital,8302-2,[in_br],9326,10,108,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3023540,Body height Measured,vital,3137-7,cm,8582,25,275,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3023540,Body height Measured,vital,3137-7,[in_us],9330,10,108,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3023540,Body height Measured,vital,3137-7,[in_i],9327,10,108,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3023540,Body height Measured,vital,3137-7,[in_br],9326,10,108,clinical_plausibility,Body height; inch-based units are listed per concept because the PCORnet ETL emits 9326
+3038553,Body mass index (BMI) [Ratio],vital,39156-5,kg/m2,9531,8,150,clinical_plausibility,Body mass index
+3024561,Albumin [Mass/volume] in Serum or Plasma,lab,1751-7,g/dL,8713,0.5,7,clinical_plausibility,Albumin
+3024561,Albumin [Mass/volume] in Serum or Plasma,lab,1751-7,g/L,8636,5,70,clinical_plausibility,Albumin
+3028286,Albumin [Mass/volume] in Serum or Plasma by Electrophoresis,lab,2862-1,g/dL,8713,0.5,7,clinical_plausibility,Albumin
+3028286,Albumin [Mass/volume] in Serum or Plasma by Electrophoresis,lab,2862-1,g/L,8636,5,70,clinical_plausibility,Albumin
+3006923,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,lab,1742-6,[U]/L,8645,0,20000,clinical_plausibility,ALT; upper bound admits acute liver failure
+3006923,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma,lab,1742-6,[iU]/L,8923,0,20000,clinical_plausibility,ALT; upper bound admits acute liver failure
+3005755,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P,lab,1743-4,[U]/L,8645,0,20000,clinical_plausibility,ALT; upper bound admits acute liver failure
+3005755,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P,lab,1743-4,[iU]/L,8923,0,20000,clinical_plausibility,ALT; upper bound admits acute liver failure
+3027388,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma by No addition of P-5'-P,lab,1744-2,[U]/L,8645,0,20000,clinical_plausibility,ALT; upper bound admits acute liver failure
+3027388,Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma by No addition of P-5'-P,lab,1744-2,[iU]/L,8923,0,20000,clinical_plausibility,ALT; upper bound admits acute liver failure
+3013721,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,lab,1920-8,[U]/L,8645,0,20000,clinical_plausibility,AST; upper bound admits acute liver failure
+3013721,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma,lab,1920-8,[iU]/L,8923,0,20000,clinical_plausibility,AST; upper bound admits acute liver failure
+3037081,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P,lab,30239-8,[U]/L,8645,0,20000,clinical_plausibility,AST; upper bound admits acute liver failure
+3037081,Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P,lab,30239-8,[iU]/L,8923,0,20000,clinical_plausibility,AST; upper bound admits acute liver failure
+3037278,Anion gap in Serum or Plasma by Calculated.4Ions,lab,1863-0,mmol/L,8753,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3037278,Anion gap in Serum or Plasma by Calculated.4Ions,lab,1863-0,10*-3.eq/L,9557,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3045716,Anion gap in Serum or Plasma by calculation,lab,33037-3,mmol/L,8753,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3045716,Anion gap in Serum or Plasma by calculation,lab,33037-3,10*-3.eq/L,9557,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3021391,Anion gap in Serum or Plasma by Calculated.3Ions,lab,10466-1,mmol/L,8753,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3021391,Anion gap in Serum or Plasma by Calculated.3Ions,lab,10466-1,10*-3.eq/L,9557,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3039000,Anion gap in Blood by calculation,lab,41276-7,mmol/L,8753,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3039000,Anion gap in Blood by calculation,lab,41276-7,10*-3.eq/L,9557,-20,80,clinical_plausibility,"Anion gap; calculated gap can be slightly negative (paraproteinemia, lithium)"
+3016293,Bicarbonate [Moles/volume] in Serum or Plasma,lab,1963-8,mmol/L,8753,2,60,clinical_plausibility,Bicarbonate / total CO2
+3016293,Bicarbonate [Moles/volume] in Serum or Plasma,lab,1963-8,10*-3.eq/L,9557,2,60,clinical_plausibility,Bicarbonate / total CO2
+3015632,"Carbon dioxide, total [Moles/volume] in Serum or Plasma",lab,2028-9,mmol/L,8753,2,60,clinical_plausibility,Bicarbonate / total CO2
+3015632,"Carbon dioxide, total [Moles/volume] in Serum or Plasma",lab,2028-9,10*-3.eq/L,9557,2,60,clinical_plausibility,Bicarbonate / total CO2
+3009609,"Carbon dioxide, total [Moles/volume] in Arterial blood",lab,2026-3,mmol/L,8753,2,60,clinical_plausibility,Bicarbonate / total CO2
+3009609,"Carbon dioxide, total [Moles/volume] in Arterial blood",lab,2026-3,10*-3.eq/L,9557,2,60,clinical_plausibility,Bicarbonate / total CO2
+3013682,Urea nitrogen [Mass/volume] in Serum or Plasma,lab,3094-0,mg/dL,8840,0,300,clinical_plausibility,BUN; mmol/L bound is the mg/dL bound as urea (x0.357)
+3013682,Urea nitrogen [Mass/volume] in Serum or Plasma,lab,3094-0,mmol/L,8753,0,110,clinical_plausibility,BUN; mmol/L bound is the mg/dL bound as urea (x0.357)
+3004295,Urea nitrogen [Mass/volume] in Blood,lab,6299-2,mg/dL,8840,0,300,clinical_plausibility,BUN; mmol/L bound is the mg/dL bound as urea (x0.357)
+3004295,Urea nitrogen [Mass/volume] in Blood,lab,6299-2,mmol/L,8753,0,110,clinical_plausibility,BUN; mmol/L bound is the mg/dL bound as urea (x0.357)
+3016723,Creatinine [Mass/volume] in Serum or Plasma,lab,2160-0,mg/dL,8840,0.1,30,clinical_plausibility,Creatinine (mass concentration); umol/L bound is mg/dL x88.4
+3016723,Creatinine [Mass/volume] in Serum or Plasma,lab,2160-0,umol/L,8749,8,2650,clinical_plausibility,Creatinine (mass concentration); umol/L bound is mg/dL x88.4
+3051825,Creatinine [Mass/volume] in Blood,lab,38483-4,mg/dL,8840,0.1,30,clinical_plausibility,Creatinine (mass concentration); umol/L bound is mg/dL x88.4
+3051825,Creatinine [Mass/volume] in Blood,lab,38483-4,umol/L,8749,8,2650,clinical_plausibility,Creatinine (mass concentration); umol/L bound is mg/dL x88.4
+3020564,Creatinine [Moles/volume] in Serum or Plasma,lab,14682-9,umol/L,8749,8,2650,clinical_plausibility,Creatinine (molar concentration)
+40762887,Creatinine [Moles/volume] in Blood,lab,59826-8,umol/L,8749,8,2650,clinical_plausibility,Creatinine (molar concentration)
+3049187,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among non black population",lab,48642-3,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+3049187,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among non black population",lab,48642-3,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+3053283,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among black population",lab,48643-1,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+3053283,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among black population",lab,48643-1,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+46236952,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M",lab,77147-7,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+46236952,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M",lab,77147-7,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+40764999,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M",lab,62238-1,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+40764999,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M",lab,62238-1,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+36306178,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M among black population",lab,88293-6,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+36306178,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M among black population",lab,88293-6,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+36303797,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M among non black population",lab,88294-4,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+36303797,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M among non black population",lab,88294-4,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+1619025,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI 2021)/1.73 sq M",lab,98979-8,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+1619025,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI 2021)/1.73 sq M",lab,98979-8,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+1619026,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine and Cystatin C-based formula (CKD-EPI 2021)/1.73 sq M",lab,98980-6,mL/min/(173.10*-2.m2),720870,0,250,clinical_plausibility,eGFR; negative values impossible
+1619026,"Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine and Cystatin C-based formula (CKD-EPI 2021)/1.73 sq M",lab,98980-6,mL/min,8795,0,250,clinical_plausibility,eGFR; negative values impossible
+3004501,Glucose [Mass/volume] in Serum or Plasma,lab,2345-7,mg/dL,8840,5,2000,clinical_plausibility,Glucose (mass concentration); mmol/L bound is mg/dL / 18
+3004501,Glucose [Mass/volume] in Serum or Plasma,lab,2345-7,mmol/L,8753,0.3,110,clinical_plausibility,Glucose (mass concentration); mmol/L bound is mg/dL / 18
+3000483,Glucose [Mass/volume] in Blood,lab,2339-0,mg/dL,8840,5,2000,clinical_plausibility,Glucose (mass concentration); mmol/L bound is mg/dL / 18
+3000483,Glucose [Mass/volume] in Blood,lab,2339-0,mmol/L,8753,0.3,110,clinical_plausibility,Glucose (mass concentration); mmol/L bound is mg/dL / 18
+3034962,Glucose [Mass/volume] in Capillary blood by Glucometer,lab,41653-7,mg/dL,8840,5,2000,clinical_plausibility,Glucose (mass concentration); mmol/L bound is mg/dL / 18
+3034962,Glucose [Mass/volume] in Capillary blood by Glucometer,lab,41653-7,mmol/L,8753,0.3,110,clinical_plausibility,Glucose (mass concentration); mmol/L bound is mg/dL / 18
+3020491,Glucose [Moles/volume] in Blood,lab,15074-8,mmol/L,8753,0.3,110,clinical_plausibility,Glucose (molar concentration)
+3004410,Hemoglobin A1c/Hemoglobin.total in Blood,lab,4548-4,%,8554,2,25,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+3004410,Hemoglobin A1c/Hemoglobin.total in Blood,lab,4548-4,mmol/mol,9579,5,250,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+3005673,Hemoglobin A1c/Hemoglobin.total in Blood by HPLC,lab,17856-6,%,8554,2,25,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+3005673,Hemoglobin A1c/Hemoglobin.total in Blood by HPLC,lab,17856-6,mmol/mol,9579,5,250,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+3007263,Hemoglobin A1c/Hemoglobin.total in Blood by calculation,lab,17855-8,%,8554,2,25,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+3007263,Hemoglobin A1c/Hemoglobin.total in Blood by calculation,lab,17855-8,mmol/mol,9579,5,250,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+40762352,Hemoglobin A1c/Hemoglobin.total in Blood by IFCC protocol,lab,59261-8,%,8554,2,25,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+40762352,Hemoglobin A1c/Hemoglobin.total in Blood by IFCC protocol,lab,59261-8,mmol/mol,9579,5,250,clinical_plausibility,HbA1c; mmol/mol (IFCC) bound is roughly 10.93 x (NGSP percent - 2.15)
+3023314,Hematocrit [Volume Fraction] of Blood by Automated count,lab,4544-3,%,8554,5,80,clinical_plausibility,Hematocrit; L/L bound is percent / 100
+3023314,Hematocrit [Volume Fraction] of Blood by Automated count,lab,4544-3,L/L,44777604,0.05,0.8,clinical_plausibility,Hematocrit; L/L bound is percent / 100
+3019909,Hematocrit [Volume Fraction] of Blood by Centrifugation,lab,4545-0,%,8554,5,80,clinical_plausibility,Hematocrit; L/L bound is percent / 100
+3019909,Hematocrit [Volume Fraction] of Blood by Centrifugation,lab,4545-0,L/L,44777604,0.05,0.8,clinical_plausibility,Hematocrit; L/L bound is percent / 100
+3009542,Hematocrit [Volume Fraction] of Blood by calculation,lab,20570-8,%,8554,5,80,clinical_plausibility,Hematocrit; L/L bound is percent / 100
+3009542,Hematocrit [Volume Fraction] of Blood by calculation,lab,20570-8,L/L,44777604,0.05,0.8,clinical_plausibility,Hematocrit; L/L bound is percent / 100
+3000963,Hemoglobin [Mass/volume] in Blood,lab,718-7,g/dL,8713,2,25,clinical_plausibility,Hemoglobin
+3000963,Hemoglobin [Mass/volume] in Blood,lab,718-7,g/L,8636,20,250,clinical_plausibility,Hemoglobin
+3027484,Hemoglobin [Mass/volume] in Blood by calculation,lab,20509-6,g/dL,8713,2,25,clinical_plausibility,Hemoglobin
+3027484,Hemoglobin [Mass/volume] in Blood by calculation,lab,20509-6,g/L,8636,20,250,clinical_plausibility,Hemoglobin
+3002173,Hemoglobin [Mass/volume] in Arterial blood,lab,30313-1,g/dL,8713,2,25,clinical_plausibility,Hemoglobin
+3002173,Hemoglobin [Mass/volume] in Arterial blood,lab,30313-1,g/L,8636,20,250,clinical_plausibility,Hemoglobin
+3028437,Cholesterol in LDL [Mass/volume] in Serum or Plasma,lab,2089-1,mg/dL,8840,0,1000,clinical_plausibility,LDL cholesterol; mmol/L bound is mg/dL / 38.67
+3028437,Cholesterol in LDL [Mass/volume] in Serum or Plasma,lab,2089-1,mmol/L,8753,0,26,clinical_plausibility,LDL cholesterol; mmol/L bound is mg/dL / 38.67
+3009966,Cholesterol in LDL [Mass/volume] in Serum or Plasma by Direct assay,lab,18262-6,mg/dL,8840,0,1000,clinical_plausibility,LDL cholesterol; mmol/L bound is mg/dL / 38.67
+3009966,Cholesterol in LDL [Mass/volume] in Serum or Plasma by Direct assay,lab,18262-6,mmol/L,8753,0,26,clinical_plausibility,LDL cholesterol; mmol/L bound is mg/dL / 38.67
+3028288,Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation,lab,13457-7,mg/dL,8840,0,1000,clinical_plausibility,LDL cholesterol (calculated); mmol/L bound is mg/dL / 38.67
+3028288,Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation,lab,13457-7,mg/dL{calc},9028,0,1000,clinical_plausibility,LDL cholesterol (calculated); mmol/L bound is mg/dL / 38.67
+3028288,Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation,lab,13457-7,mmol/L,8753,0,26,clinical_plausibility,LDL cholesterol (calculated); mmol/L bound is mg/dL / 38.67
+3007461,Platelets [#/volume] in Blood,lab,26515-7,10*3/uL,8848,0,3000,clinical_plausibility,Platelets; 10*3/uL and 10*9/L are numerically identical
+3007461,Platelets [#/volume] in Blood,lab,26515-7,10*9/L,9444,0,3000,clinical_plausibility,Platelets; 10*3/uL and 10*9/L are numerically identical
+3024929,Platelets [#/volume] in Blood by Automated count,lab,777-3,10*3/uL,8848,0,3000,clinical_plausibility,Platelets; 10*3/uL and 10*9/L are numerically identical
+3024929,Platelets [#/volume] in Blood by Automated count,lab,777-3,10*9/L,9444,0,3000,clinical_plausibility,Platelets; 10*3/uL and 10*9/L are numerically identical
+3031586,Platelets [#/volume] in Blood by Estimate,lab,49497-1,10*3/uL,8848,0,3000,clinical_plausibility,Platelets; 10*3/uL and 10*9/L are numerically identical
+3031586,Platelets [#/volume] in Blood by Estimate,lab,49497-1,10*9/L,9444,0,3000,clinical_plausibility,Platelets; 10*3/uL and 10*9/L are numerically identical
+3023103,Potassium [Moles/volume] in Serum or Plasma,lab,2823-3,mmol/L,8753,1,12,clinical_plausibility,Potassium; mmol/L and mEq/L are numerically identical
+3023103,Potassium [Moles/volume] in Serum or Plasma,lab,2823-3,10*-3.eq/L,9557,1,12,clinical_plausibility,Potassium; mmol/L and mEq/L are numerically identical
+3005456,Potassium [Moles/volume] in Blood,lab,6298-4,mmol/L,8753,1,12,clinical_plausibility,Potassium; mmol/L and mEq/L are numerically identical
+3005456,Potassium [Moles/volume] in Blood,lab,6298-4,10*-3.eq/L,9557,1,12,clinical_plausibility,Potassium; mmol/L and mEq/L are numerically identical
+46235078,"Potassium [Moles/volume] in Serum, Plasma or Blood",lab,77142-8,mmol/L,8753,1,12,clinical_plausibility,Potassium; mmol/L and mEq/L are numerically identical
+46235078,"Potassium [Moles/volume] in Serum, Plasma or Blood",lab,77142-8,10*-3.eq/L,9557,1,12,clinical_plausibility,Potassium; mmol/L and mEq/L are numerically identical
+3019550,Sodium [Moles/volume] in Serum or Plasma,lab,2951-2,mmol/L,8753,85,200,clinical_plausibility,Sodium; mmol/L and mEq/L are numerically identical
+3019550,Sodium [Moles/volume] in Serum or Plasma,lab,2951-2,10*-3.eq/L,9557,85,200,clinical_plausibility,Sodium; mmol/L and mEq/L are numerically identical
+3000285,Sodium [Moles/volume] in Blood,lab,2947-0,mmol/L,8753,85,200,clinical_plausibility,Sodium; mmol/L and mEq/L are numerically identical
+3000285,Sodium [Moles/volume] in Blood,lab,2947-0,10*-3.eq/L,9557,85,200,clinical_plausibility,Sodium; mmol/L and mEq/L are numerically identical
+3010813,Leukocytes [#/volume] in Blood,lab,26464-8,10*3/uL,8848,0,1000,clinical_plausibility,WBC; upper bound admits hyperleukocytosis
+3010813,Leukocytes [#/volume] in Blood,lab,26464-8,10*9/L,9444,0,1000,clinical_plausibility,WBC; upper bound admits hyperleukocytosis
+3000905,Leukocytes [#/volume] in Blood by Automated count,lab,6690-2,10*3/uL,8848,0,1000,clinical_plausibility,WBC; upper bound admits hyperleukocytosis
+3000905,Leukocytes [#/volume] in Blood by Automated count,lab,6690-2,10*9/L,9444,0,1000,clinical_plausibility,WBC; upper bound admits hyperleukocytosis

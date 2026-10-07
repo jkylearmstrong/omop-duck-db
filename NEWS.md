@@ -1,3 +1,42 @@
+# omopduckdb 0.5.3
+
+### Transparent Central Vocabulary Single-Store & Connection Engine
+- **`omop_connect()`**:
+  - Implemented unified connection helper in Python (`omop_etl.omop_connect`) and R (`omopduckdb::omop_connect`).
+  - Auto-discovers sibling or repository central vocabulary DuckDB instances (`central_vocabulary.duckdb` / `vocabulary.duckdb`).
+  - Attaches vocabulary read-only as `central_vocab` and automatically sets DuckDB's `search_path = 'main,central_vocab'`, allowing queries to reference `concept`, `concept_ancestor`, and other vocabulary tables directly without schema qualification.
+  - Automatically loads SQL macros into temporary session scope on read-only databases without throwing write errors.
+
+### Concept Ancestry & Physiologic Clamping SQL Macros
+- **Recursive Hierarchy & DQD Clamping Macros (`mapping_macros.sql`)**:
+  - `descendants_of(ancestor_id)`: Table macro returning all descendant concept IDs from `concept_ancestor` (including self rows).
+  - `ancestors_of(descendant_id)`: Table macro returning all ancestor concept IDs from `concept_ancestor` (including self rows).
+  - `clamp_physiologic(val, min_val, max_val)`: Scalar macro for in-engine SQL boundary clamping and outlier winsorization.
+  - Designed with name-capture protection and subquery correlation safety.
+
+### Standardized 31 Elixhauser Domains & Charlson Comorbidity Profiler
+- **Validated Comorbidity Profilers (`extract_elixhauser_comorbidities`, `extract_charlson_index`)**:
+  - Implemented 1:1 dual-language comorbidity profiling in Python (`omop_etl.comorbidity`) and R (`omopduckdb::comorbidity`).
+  - Covers all 31 Elixhauser domains (AHRQ / Quan et al.) and composite van Walraven score.
+  - Covers all 17 Quan-Charlson categories, hierarchical condition adjustment, and composite Charlson Comorbidity Index.
+  - Dual matching mode: evaluates normalized ICD-9/10 prefixes via `condition_source_value` and standard SNOMED descendants via `condition_concept_id`.
+  - Bundled curated mapping tables with documented provenance in `inst/extdata/comorbidity/` (`elixhauser_codes.csv`, `charlson_codes.csv`, `PROVENANCE.md`).
+
+### Physiologic Range Sanitization & Outlier Winsorization Engine
+- **DQD Measurement Range Sanitizer (`sanitize_measurements`)**:
+  - Implemented in Python (`omop_etl.sanitize_measurements`) and R (`omopduckdb::sanitize_measurements`).
+  - Bundles 136 standard biological plausibility limits derived from OHDSI DataQualityDashboard in `inst/extdata/physiologic_limits.csv`.
+  - Supports three sanitization methods: `dqd_biologic_limits`, `winsorize_iqr`, `z_score_cutoff`.
+  - Configurable actions: `nullify`, `clamp`, or `drop_row`.
+  - Tracks sanitization audit trail with `sanitize_status` and preserves raw values in `value_as_number_raw`.
+
+### Unified Study Cohort Template Engine
+- **General Study Cohort Builder (`define_study_cohort`)**:
+  - Implemented in Python (`omop_etl.cohort.define_study_cohort`) and R (`omopduckdb::define_study_cohort`).
+  - Parameterizes arbitrary visit types (`"inpatient"`, `"emergency"`, `"outpatient"`, or custom concept lists), prior wash-in window, follow-up window, minimum age, and minimum length of stay.
+  - Supports reproducible sampling rules (`"first"`, `"last"`, `"random"`) and verified follow-up right-censoring checks.
+  - Unifies and powers legacy `build_readmission_cohort()` and `build_end_of_life_cohort()` wrappers with row-for-row parity.
+
 # omopduckdb 0.5.2
 
 ### Feature Engineering & Data Leakage Prevention

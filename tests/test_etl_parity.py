@@ -65,6 +65,7 @@ def _run_r_etl(db_path):
     subprocess.run(
         [
             "Rscript",
+            "--vanilla",
             str(REPO_ROOT / "inst" / "scripts" / "etl_pcornet.R"),
             "--source-dir",
             str(FIXTURE_DIR),

@@ -59,3 +59,9 @@ Enforces adult inpatient stay, LOS >= 1 day, discharged alive, verified follow-u
 (filtering right-censored lost-to-follow-up stays), reproducible index admission sampling,
 and disjoint lookback vs post-discharge outcome scoping.
 }
+\details{
+This is a thin wrapper over the shared study-cohort engine (see \code{\link[=define_study_cohort]{define_study_cohort()}}, which generalises
+it): the legacy conventions (death from the death table and the index stay's own discharge disposition
+4216643; follow-up evidenced by later visits, measurements, conditions or drug exposures; age as
+calendar-year difference) are pinned here and covered by golden-file tests.
+}

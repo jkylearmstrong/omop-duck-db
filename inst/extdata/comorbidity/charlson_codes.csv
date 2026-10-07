@@ -1,0 +1,570 @@
+index,domain,column,label,weight,code_system,code,note
+charlson,mi,cci_mi,Myocardial infarction,1,ICD10CM,I21,
+charlson,mi,cci_mi,Myocardial infarction,1,ICD10CM,I22,
+charlson,mi,cci_mi,Myocardial infarction,1,ICD10CM,I252,
+charlson,mi,cci_mi,Myocardial infarction,1,ICD9CM,410,
+charlson,mi,cci_mi,Myocardial infarction,1,ICD9CM,412,
+charlson,mi,cci_mi,Myocardial infarction,1,SNOMED_ANCESTOR,4329847,Myocardial infarction
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I099,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I110,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I130,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I132,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I255,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I420,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I425,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I426,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I427,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I428,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I429,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I43,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,I50,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD10CM,P290,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,39891,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40201,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40211,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40291,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40401,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40403,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40411,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40413,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40491,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,40493,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,4254,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,4255,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,4257,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,4258,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,4259,
+charlson,chf,cci_chf,Congestive heart failure,1,ICD9CM,428,
+charlson,chf,cci_chf,Congestive heart failure,1,SNOMED_ANCESTOR,316139,Heart failure
+charlson,chf,cci_chf,Congestive heart failure,1,SNOMED_ANCESTOR,4163710,Dilated cardiomyopathy
+charlson,chf,cci_chf,Congestive heart failure,1,SNOMED_ANCESTOR,4190773,Restrictive cardiomyopathy
+charlson,chf,cci_chf,Congestive heart failure,1,SNOMED_ANCESTOR,1244114,Toxic cardiomyopathy
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,I70,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,I71,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,I731,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,I738,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,I739,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,I771,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,I790,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,K551,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,K558,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,K559,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,Z958,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD10CM,Z959,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,0930,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,4373,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,440,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,441,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,4431,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,4432,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,4438,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,4439,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,4471,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,5571,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,5579,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,ICD9CM,V434,
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,321052,Peripheral vascular disease
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,317585,Aortic aneurysm
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,320739,Dissection of aorta
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,312934,Atherosclerosis of aorta
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,315558,Atherosclerosis of arteries of the extremities
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,37110250,Atherosclerosis of artery of lower limb
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,35615018,Atherosclerosis of artery of right upper limb
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,35615019,Atherosclerosis of artery of left upper limb
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,40483538,Atherosclerosis of bypass graft of limb
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,37163036,Atherosclerosis of abdominal visceral artery
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,37163042,Atherosclerosis of iliac artery
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,321882,Generalized atherosclerosis
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,4030425,Atherosclerotic occlusive disease
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,4121623,Aortoiliac atherosclerosis
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,4176602,Atherosclerotic stenosis of brachiocephalic artery
+charlson,pvd,cci_pvd,Peripheral vascular disease,1,SNOMED_ANCESTOR,312939,Thromboangiitis obliterans
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,G45,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,G46,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,H340,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I60,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I61,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I62,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I63,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I65,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I66,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I67,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I68,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD10CM,I69,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,36234,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,430,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,431,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,432,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,433,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,434,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,435,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,436,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,437,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,ICD9CM,438,
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,381316,Cerebrovascular accident
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,443454,Cerebral infarction
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,42538062,Spontaneous intracranial hemorrhage
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4111709,Non-traumatic subdural hemorrhage
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,373503,Transient cerebral ischemia
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,434056,Late effects of cerebrovascular disease
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4102928,Obstruction of precerebral artery
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,372924,Cerebral artery occlusion
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,3654597,Stenosis of cerebral artery
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,761994,Stenosis of intracranial vessel
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,374371,Stenosis of precerebral artery
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4278243,Cerebral arteriosclerosis
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,433195,Transient arterial retinal occlusion
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,378774,Moyamoya disease
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4164092,Acute cerebrovascular insufficiency
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4029497,Aneurysm of cerebral artery
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,442615,Carotid artery stenosis
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4111720,Sequelae of subarachnoid hemorrhage
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4111721,Sequelae of intracerebral hemorrhage
+charlson,cevd,cci_cevd,Cerebrovascular disease,1,SNOMED_ANCESTOR,4112026,Sequelae of cerebral infarction
+charlson,dementia,cci_dementia,Dementia,1,ICD10CM,F01,
+charlson,dementia,cci_dementia,Dementia,1,ICD10CM,F02,
+charlson,dementia,cci_dementia,Dementia,1,ICD10CM,F03,
+charlson,dementia,cci_dementia,Dementia,1,ICD10CM,G30,
+charlson,dementia,cci_dementia,Dementia,1,ICD10CM,G311,
+charlson,dementia,cci_dementia,Dementia,1,ICD9CM,290,Quan 2005 enhanced ICD-9-CM omits 331.0 (Alzheimer disease) although ICD-10 includes G30
+charlson,dementia,cci_dementia,Dementia,1,ICD9CM,2941,
+charlson,dementia,cci_dementia,Dementia,1,ICD9CM,3312,
+charlson,dementia,cci_dementia,Dementia,1,SNOMED_ANCESTOR,4182210,Dementia
+charlson,dementia,cci_dementia,Dementia,1,SNOMED_ANCESTOR,378419,Alzheimer's disease
+charlson,dementia,cci_dementia,Dementia,1,SNOMED_ANCESTOR,373179,Senile degeneration of brain
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,I278,also matches ICD-10-CM I27.82 chronic pulmonary embolism by prefix
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,I279,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J40,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J41,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J42,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J43,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J44,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J45,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J47,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J60,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J61,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J62,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J63,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J64,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J65,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J66,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J67,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J684,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J701,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD10CM,J703,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,4168,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,4169,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,490,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,491,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,492,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,493,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,494,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,495,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,496,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,500,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,501,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,502,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,503,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,504,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,505,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,5064,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,5081,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,ICD9CM,5088,
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,255573,Chronic obstructive pulmonary disease
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,317009,Asthma
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,256449,Bronchiectasis
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,255841,Chronic bronchitis
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,261325,Pulmonary emphysema
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,259044,Pneumoconiosis
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,444084,Hypersensitivity pneumonitis
+charlson,copd,cci_copd,Chronic pulmonary disease,1,SNOMED_ANCESTOR,4195892,Chronic cor pulmonale
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M05,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M06,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M315,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M32,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M33,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M34,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M351,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M353,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD10CM,M360,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,4465,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7100,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7101,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7102,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7103,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7104,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7140,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7141,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7142,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,7148,
+charlson,rheum,cci_rheum,Rheumatic disease,1,ICD9CM,725,
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,80809,Rheumatoid arthritis
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,257628,Systemic lupus erythematosus
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,134442,Systemic sclerosis
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,80182,Dermatomyositis
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,80800,Polymyositis
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,255348,Polymyalgia rheumatica
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,314963,Giant cell arteritis
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,81097,Felty's syndrome
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,40400211,Rheumatoid nodule
+charlson,rheum,cci_rheum,Rheumatic disease,1,SNOMED_ANCESTOR,4134537,Connective tissue disease overlap syndrome
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD10CM,K25,
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD10CM,K26,
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD10CM,K27,
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD10CM,K28,
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD9CM,531,
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD9CM,532,
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD9CM,533,
+charlson,pud,cci_pud,Peptic ulcer disease,1,ICD9CM,534,
+charlson,pud,cci_pud,Peptic ulcer disease,1,SNOMED_ANCESTOR,4027663,Peptic ulcer
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,B18,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K700,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K701,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K702,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K703,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K709,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K713,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K714,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K715,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K717,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K73,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K74,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K760,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K762,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K763,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K764,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K768,also matches ICD-10-CM K76.82 hepatic encephalopathy by prefix
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,K769,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD10CM,Z944,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,07022,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,07023,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,07032,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,07033,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,07044,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,07054,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,0706,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,0709,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,570,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,571,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,5733,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,5734,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,5738,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,5739,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,ICD9CM,V427,
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,200763,Chronic hepatitis
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,4064161,Cirrhosis of liver
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,4340383,Alcoholic hepatitis
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,201612,Alcoholic liver damage
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,4012113,Chronic viral hepatitis
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,4267417,Hepatic fibrosis
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,4059290,Steatotic liver disease
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,200762,Autoimmune hepatitis
+charlson,mild_liver,cci_mild_liver,Mild liver disease,1,SNOMED_ANCESTOR,201613,Chronic nonalcoholic liver disease
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E101,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E106,other specified complications; counted as uncomplicated in Quan 2005
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E108,unspecified complications; counted as uncomplicated in Quan 2005
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E109,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E110,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E111,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E116,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E118,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E119,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E130,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E131,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E136,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E138,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD10CM,E139,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD9CM,2500,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD9CM,2501,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD9CM,2502,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD9CM,2503,
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD9CM,2508,other specified manifestations; counted as uncomplicated in Quan 2005
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,ICD9CM,2509,unspecified complication; counted as uncomplicated in Quan 2005
+charlson,dm_uncomp,cci_dm_uncomp,Diabetes without chronic complication,1,SNOMED_ANCESTOR,201820,Diabetes mellitus
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E102,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E103,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E104,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E105,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E112,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E113,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E114,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E115,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E132,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E133,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E134,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD10CM,E135,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD9CM,2504,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD9CM,2505,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD9CM,2506,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,ICD9CM,2507,
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,SNOMED_ANCESTOR,443767,Disorder of eye due to diabetes mellitus
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,SNOMED_ANCESTOR,192279,Disorder of kidney due to diabetes mellitus
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,SNOMED_ANCESTOR,443730,Disorder of nervous system due to diabetes mellitus
+charlson,dm_comp,cci_dm_comp,Diabetes with chronic complication,2,SNOMED_ANCESTOR,321822,Peripheral vascular disorder due to diabetes mellitus
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G041,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G114,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G801,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G802,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G81,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G82,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G830,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G831,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G832,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G833,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G834,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD10CM,G839,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3341,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,342,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,343,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3440,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3441,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3442,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3443,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3444,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3445,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3446,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,ICD9CM,3449,
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,374022,Hemiplegia
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,192606,Paraplegia
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,4277456,Diplegia
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,381548,Monoplegia
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,374914,Tetraplegia
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,44782711,Quadriplegia with quadriparesis
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,192901,Hereditary spastic paraplegia
+charlson,plegia,cci_plegia,Hemiplegia or paraplegia,2,SNOMED_ANCESTOR,43531639,Paralytic syndrome on one side of the body
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,I120,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,I131,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N032,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N033,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N034,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N035,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N036,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N037,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N052,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N053,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N054,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N055,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N056,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N057,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N18,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N19,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,N250,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,Z490,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,Z940,
+charlson,renal,cci_renal,Renal disease,2,ICD10CM,Z992,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40301,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40311,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40391,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40402,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40403,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40412,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40413,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40492,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,40493,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,582,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,5830,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,5831,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,5832,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,5834,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,5836,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,5837,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,585,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,586,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,5880,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,V420,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,V451,
+charlson,renal,cci_renal,Renal disease,2,ICD9CM,V56,
+charlson,renal,cci_renal,Renal disease,2,SNOMED_ANCESTOR,46271022,Chronic kidney disease
+charlson,renal,cci_renal,Renal disease,2,SNOMED_ANCESTOR,193782,End-stage renal disease
+charlson,renal,cci_renal,Renal disease,2,SNOMED_ANCESTOR,198185,Chronic renal failure
+charlson,renal,cci_renal,Renal disease,2,SNOMED_ANCESTOR,197921,Renal osteodystrophy
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C00,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C01,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C02,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C03,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C04,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C05,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C06,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C07,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C08,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C09,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C10,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C11,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C12,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C13,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C14,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C15,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C16,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C17,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C18,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C19,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C20,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C21,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C22,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C23,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C24,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C25,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C26,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C30,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C31,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C32,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C33,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C34,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C37,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C38,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C39,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C40,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C41,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C43,melanoma is included; non-melanoma skin cancer (C44) is excluded
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C45,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C46,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C47,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C48,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C49,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C50,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C51,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C52,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C53,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C54,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C55,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C56,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C57,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C58,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C60,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C61,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C62,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C63,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C64,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C65,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C66,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C67,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C68,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C69,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C70,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C71,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C72,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C73,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C74,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C75,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C76,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C81,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C82,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C83,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C84,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C85,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C88,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C90,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C91,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C92,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C93,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C94,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C95,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD10CM,C96,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,140,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,141,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,142,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,143,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,144,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,145,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,146,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,147,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,148,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,149,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,150,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,151,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,152,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,153,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,154,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,155,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,156,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,157,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,158,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,159,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,160,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,161,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,162,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,163,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,164,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,165,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,170,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,171,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,172,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,174,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,175,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,176,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,179,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,180,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,181,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,182,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,183,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,184,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,185,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,186,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,187,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,188,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,189,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,190,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,191,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,192,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,193,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,194,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,195,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,200,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,201,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,202,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,203,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,204,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,205,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,206,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,207,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,208,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,ICD9CM,2386,
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4147164,Malignant tumor of lymphoid hemopoietic and related tissue
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,40491001,Malignant neoplasm of digestive system
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,80665,Malignant neoplasm of thorax
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4154630,Malignant neoplasm of genitourinary organ
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,40493428,Malignant neoplasm of respiratory system
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4157331,Malignant neoplasm of nervous system
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,40482784,Malignant neoplasm of skeletal system
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,40488964,Malignant neoplasm of connective tissue
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4162276,Malignant melanoma
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4156115,Malignant neoplasm of endocrine gland
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4216273,"Primary malignant neoplasm of ear, nose AND/OR throat"
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4170421,Gastrointestinal stromal tumor
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,437233,Multiple myeloma
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,4181477,Malignant neoplasm of eye
+charlson,malignancy,cci_malignancy,"Any malignancy, including lymphoma and leukemia, except malignant neoplasm of skin",2,SNOMED_ANCESTOR,436045,"Malignant neoplasm of lip, oral cavity and pharynx"
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,I850,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,I864,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,K704,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,K711,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,K721,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,K729,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,K765,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,K766,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD10CM,K767,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD9CM,4560,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD9CM,4561,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD9CM,4562,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD9CM,5722,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD9CM,5723,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD9CM,5724,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,ICD9CM,5728,
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,SNOMED_ANCESTOR,4245975,Hepatic failure
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,SNOMED_ANCESTOR,192680,Portal hypertension
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,SNOMED_ANCESTOR,196455,Hepatorenal syndrome
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,SNOMED_ANCESTOR,24966,Esophageal varices
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,SNOMED_ANCESTOR,4237824,Gastric varices
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,SNOMED_ANCESTOR,377604,Hepatic coma
+charlson,mod_severe_liver,cci_mod_severe_liver,Moderate or severe liver disease,3,SNOMED_ANCESTOR,4029488,Hepatic encephalopathy
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD10CM,C77,
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD10CM,C78,
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD10CM,C79,
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD10CM,C80,
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD9CM,196,
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD9CM,197,
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD9CM,198,
+charlson,mets,cci_mets,Metastatic solid tumor,6,ICD9CM,199,
+charlson,hiv,cci_hiv,AIDS/HIV,6,ICD10CM,B20,
+charlson,hiv,cci_hiv,AIDS/HIV,6,ICD9CM,042,
+charlson,hiv,cci_hiv,AIDS/HIV,6,SNOMED_ANCESTOR,439727,Human immunodeficiency virus infection

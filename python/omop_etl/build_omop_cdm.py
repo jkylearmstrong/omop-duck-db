@@ -11,6 +11,7 @@ source directory, share the same schema and concept-resolution logic, and genera
 import argparse
 import os
 import re
+import warnings
 import duckdb
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -121,12 +122,77 @@ def build_schema(con):
     print("Schema built from", ddl_path)
 
 
-def load_macros(con):
-    for macro_file in ["mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql", "cohort_mortality.sql"]:
+MACRO_FILES = ["mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql", "cohort_mortality.sql"]
+_CREATE_MACRO_RE = re.compile(r"\bCREATE\s+OR\s+REPLACE\s+MACRO\b", re.IGNORECASE)
+
+
+def _connection_is_read_only(con):
+    """True when the connection's current database is attached read-only."""
+    row = con.execute(
+        "SELECT readonly FROM duckdb_databases() WHERE database_name = current_database()"
+    ).fetchone()
+    return bool(row[0]) if row else False
+
+
+def _split_sql_statements(sql):
+    """Split a macro file into statements. Sufficient for ``inst/sql``: no string literal in those
+    files contains ``--`` or ``;`` (tests/test_omop_connect.py checks the split against the file)."""
+    return [stmt.strip() for stmt in re.sub(r"--[^\r\n]*", "", sql).split(";") if stmt.strip()]
+
+
+def load_macros(con, temporary=None, skip_unresolved=False):
+    """Load the shared SQL macro files (``inst/sql``) into a connection.
+
+    DuckDB validates the body of some macros when it *creates* them, so a macro such as
+    ``map_to_standard_concept_id()`` cannot be created while a vocabulary table (or a column it
+    reads) is not visible on the connection. Others, like ``descendants_of()``, are created
+    regardless and look their table up when they are used.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+    temporary : bool, optional
+        ``True`` creates every macro as a ``TEMP`` macro (session-scoped, nothing is written to the
+        database file, works on read-only databases); ``False`` creates persistent macros stored in
+        the database. The default ``None`` picks ``True`` only when the connection's current database
+        is read-only, so ETL runs on a writable database persist macros exactly as before.
+    skip_unresolved : bool, default False
+        If False, a macro that cannot be created because a table or column it reads is missing
+        raises, as always. If True, such macros are skipped (all others are still created) and
+        reported in the return value. Only DuckDB's catalog and binder errors are skipped; any other
+        error still raises.
+
+    Returns
+    -------
+    list of str
+        Names of the macros skipped because a table or column they read is not available (always
+        empty unless ``skip_unresolved``); the caller decides how to report them.
+    """
+    if temporary is None:
+        temporary = _connection_is_read_only(con)
+    skipped = []
+    for macro_file in MACRO_FILES:
         macros_path = _resource_path("sql", macro_file)
-        if os.path.exists(macros_path):
-            with open(macros_path) as f:
-                con.execute(f.read())
+        if not os.path.exists(macros_path):
+            warnings.warn(
+                f"SQL macro file '{macro_file}' was not found; the macros it defines are not available.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
+        with open(macros_path, encoding="utf-8") as f:
+            sql = f.read()
+        if temporary:
+            sql = _CREATE_MACRO_RE.sub("CREATE OR REPLACE TEMP MACRO", sql)
+        if not skip_unresolved:
+            con.execute(sql)
+            continue
+        for stmt in _split_sql_statements(sql):
+            try:
+                con.execute(stmt)
+            except (duckdb.CatalogException, duckdb.BinderException):
+                skipped.append(re.search(r"\bMACRO\s+(\w+)", stmt).group(1))
+    return skipped
 
 
 def attach_central_vocabulary(con, vocab_db_path, temporary=True):

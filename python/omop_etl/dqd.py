@@ -2,16 +2,25 @@
 
 Executes pure-SQL, high-throughput OHDSI DQD checks (conformance, completeness,
 plausibility, temporal logic) directly in DuckDB and serializes to standard
-OHDSI DQD JSON format.
+OHDSI DQD JSON format. Also provides ``sanitize_measurements()``, which screens
+measurement values against physiologic limits or statistical outliers.
 """
 
 from __future__ import annotations
 
+import csv
 import datetime
 import json
+import math
+import numbers
+import os
+import warnings
 from pathlib import Path
 from typing import Any, Sequence
 import duckdb
+import pandas as pd
+
+from omop_etl.build_omop_cdm import _resource_path
 
 
 def run_dqd(
@@ -346,3 +355,628 @@ def run_dqd(
             json.dump(dqd_dict, f, indent=2)
 
     return dqd_dict
+
+# ----------------------------------------------------------------------------------------
+# sanitize_measurements: physiologic-range and outlier sanitization (RFC 6.1)
+# ----------------------------------------------------------------------------------------
+_SANITIZE_METHODS = ("dqd_biologic_limits", "winsorize_iqr", "z_score_cutoff")
+_SANITIZE_ACTIONS = ("nullify", "clamp", "drop_row")
+_SANITIZE_FORMATS = ("df", "arrow", "pyarrow", "polars")
+# Statistical methods need at least this many finite values in a (concept, unit) group.
+_SANITIZE_MIN_GROUP_ROWS = 3
+_SANITIZE_LIMITS_FILE = "physiologic_limits.csv"
+# z_score_cutoff computes its statistics on values divided by the group's largest magnitude when that
+# magnitude exceeds this, so that squaring a ~1e154+ artifact cannot overflow the variance. Below it the
+# divisor is exactly 1.0 and the arithmetic is unchanged.
+_SANITIZE_Z_RESCALE_ABOVE = "1e100"
+_SANITIZE_REQUIRED_MEASUREMENT_COLS = (
+    "measurement_id", "person_id", "measurement_concept_id", "measurement_date",
+    "unit_concept_id", "value_as_number",
+)
+# Passed through when the measurement table has them (needed to aggregate per visit downstream).
+_SANITIZE_OPTIONAL_MEASUREMENT_COLS = ("measurement_datetime", "visit_occurrence_id")
+_SANITIZE_REPORT_COLUMNS = (
+    "measurement_concept_id", "unit_concept_id", "n", "n_ok", "n_below", "n_above", "n_invalid",
+    "n_changed", "n_dropped", "n_no_limit", "n_unit_skipped", "n_insufficient_data",
+)
+
+
+def _sanitize_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _sanitize_table_ref(name: Any, arg: str) -> str:
+    """Quote a (possibly ``schema.table`` / ``catalog.schema.table``) table name."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"{arg} must be a non-empty table or view name; got {name!r}")
+    parts = name.strip().split(".")
+    if len(parts) > 3 or any(not p for p in parts):
+        raise ValueError(f"{arg} must look like 'table', 'schema.table' or 'catalog.schema.table'; got {name!r}")
+    return ".".join(_sanitize_ident(p) for p in parts)
+
+
+def _sanitize_num(x: float) -> str:
+    """Round-trip-exact decimal text for a finite float (identical to the R implementation)."""
+    return format(float(x), ".17g")
+
+
+def _sanitize_positive(value: Any, arg: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{arg} must be a single positive, finite number; got {value!r}")
+    v = float(value)
+    if not math.isfinite(v) or v <= 0:
+        raise ValueError(f"{arg} must be a single positive, finite number; got {value!r}")
+    return v
+
+
+def _sanitize_int(value: Any, what: str) -> int:
+    """Strict integer: ints and integral floats are accepted; bool, text, NaN and fractions are not."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise ValueError(f"{what} must be a whole number; got {value!r}")
+    f = float(value)
+    if not math.isfinite(f) or f != math.floor(f):
+        raise ValueError(f"{what} must be a whole number; got {value!r}")
+    return int(f)
+
+
+def _sanitize_concept_ids(values: Any) -> list[int]:
+    if isinstance(values, (str, bytes)):
+        raise ValueError(f"measurement_concept_ids must be a sequence of integer concept ids; got {values!r}")
+    if isinstance(values, numbers.Real):
+        values = [values]
+    try:
+        items = list(values)
+    except TypeError as e:
+        raise ValueError(f"measurement_concept_ids must be a sequence of integer concept ids; got {values!r}") from e
+    if not items:
+        raise ValueError("measurement_concept_ids is empty; pass None to sanitize every concept")
+    return sorted({_sanitize_int(v, "measurement_concept_ids entries") for v in items})
+
+
+def _sanitize_bound(value: Any, what: str) -> float | None:
+    """A limit bound: a finite number, or missing (None/NaN/NA) for 'no bound on this side'."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{what} must be numeric or missing; got {value!r}") from e
+    if not math.isfinite(f):
+        raise ValueError(f"{what} must be finite (use a missing value for an open bound); got {value!r}")
+    return f
+
+
+def _sanitize_limit_rows(limits: Any) -> list[tuple]:
+    """Validate a user ``limits`` frame -> ``[(concept_id, unit_concept_id | None, min | None, max | None)]``."""
+    if not isinstance(limits, pd.DataFrame):
+        try:
+            limits = pd.DataFrame(limits)
+        except (TypeError, ValueError) as e:
+            raise ValueError("limits must be a DataFrame with columns concept_id, min_value, max_value "
+                             "(and optionally unit_concept_id)") from e
+    cols = {str(c).lower(): c for c in limits.columns}
+    missing = [c for c in ("concept_id", "min_value", "max_value") if c not in cols]
+    if missing:
+        raise ValueError(f"limits is missing required column(s) {missing}; got columns {list(limits.columns)}")
+    units = limits[cols["unit_concept_id"]].tolist() if "unit_concept_id" in cols else [None] * len(limits)
+    rows, seen = [], set()
+    for i, (cid, uid, lo, hi) in enumerate(zip(
+            limits[cols["concept_id"]].tolist(), units,
+            limits[cols["min_value"]].tolist(), limits[cols["max_value"]].tolist()), start=1):
+        where = f"limits row {i}"
+        if cid is None or (not isinstance(cid, str) and pd.isna(cid)):
+            raise ValueError(f"{where}: concept_id is missing")
+        cid = _sanitize_int(cid, f"{where}: concept_id")
+        uid = None if (uid is None or (not isinstance(uid, str) and pd.isna(uid))) \
+            else _sanitize_int(uid, f"{where}: unit_concept_id")
+        lo, hi = _sanitize_bound(lo, f"{where}: min_value"), _sanitize_bound(hi, f"{where}: max_value")
+        if lo is None and hi is None:
+            raise ValueError(f"{where}: min_value and max_value are both missing, so it would limit nothing")
+        if lo is not None and hi is not None and lo > hi:
+            raise ValueError(f"{where}: min_value ({lo}) is greater than max_value ({hi})")
+        if (cid, uid) in seen:
+            raise ValueError(f"{where}: duplicate (concept_id, unit_concept_id) = ({cid}, {uid})")
+        seen.add((cid, uid))
+        rows.append((cid, uid, lo, hi))
+    return rows
+
+
+def _sanitize_bundled_limits(path: str | os.PathLike | None = None) -> list[tuple]:
+    """The bundled table ``inst/extdata/physiologic_limits.csv`` -> ``[(concept_id, unit_concept_id, min, max)]``.
+
+    ``path`` overrides the bundled file location (used by the tests to feed a malformed table).
+    """
+    if path is None:
+        path = _resource_path("extdata", _SANITIZE_LIMITS_FILE)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Bundled physiologic limits table not found at {path}. A source checkout needs "
+            f"inst/extdata/{_SANITIZE_LIMITS_FILE}; an installed wheel ships it as "
+            f"omop_etl/resources/extdata/{_SANITIZE_LIMITS_FILE}.")
+    rows, seen = [], set()
+    with open(path, newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        need = ("concept_id", "unit_concept_id", "min_value", "max_value")
+        absent = [c for c in need if c not in (reader.fieldnames or [])]
+        if absent:
+            raise ValueError(f"{path} is missing column(s) {absent}")
+        for rec in reader:
+            where = f"{path} line {reader.line_num}"
+            try:
+                row = (int(rec["concept_id"]), int(rec["unit_concept_id"]),
+                       float(rec["min_value"]), float(rec["max_value"]))
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"{where}: non-numeric concept_id/unit_concept_id/min_value/max_value") from e
+            if not (math.isfinite(row[2]) and math.isfinite(row[3]) and row[2] < row[3]):
+                raise ValueError(f"{where}: min_value must be finite and less than max_value")
+            if row[:2] in seen:
+                raise ValueError(f"{where}: duplicate (concept_id, unit_concept_id) = {row[:2]}")
+            seen.add(row[:2])
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"{path} contains no limits")
+    return rows
+
+
+def _sanitize_effective_limits(user_rows: list[tuple] | None) -> list[tuple]:
+    """Bundled table with the user's rows applied on top.
+
+    A user row naming a unit replaces the bundled row for that (concept, unit); a user row without a
+    unit is an any-unit limit that replaces every bundled row of its concept.
+    """
+    bundled = _sanitize_bundled_limits()
+    if not user_rows:
+        return bundled
+    any_unit = {r[0] for r in user_rows if r[1] is None}
+    by_unit = {(r[0], r[1]) for r in user_rows if r[1] is not None}
+    kept = [r for r in bundled if r[0] not in any_unit and (r[0], r[1]) not in by_unit]
+    return kept + list(user_rows)
+
+
+def _sanitize_limits_cte(rows: list[tuple]) -> str:
+    """``lim`` CTE: the limits as an inline literal (no temporary table, nothing registered)."""
+    def lit(v, as_int):
+        if v is None:
+            return "NULL"
+        return f"'{int(v)}'" if as_int else f"'{_sanitize_num(v)}'"
+
+    values = ",\n      ".join(
+        f"({lit(c, True)}, {lit(u, True)}, {lit(lo, False)}, {lit(hi, False)})" for c, u, lo, hi in rows)
+    return (
+        "lim AS (\n"
+        "  SELECT CAST(concept_id AS BIGINT) AS concept_id, CAST(unit_concept_id AS BIGINT) AS unit_concept_id,\n"
+        "         CAST(min_value AS DOUBLE) AS min_value, CAST(max_value AS DOUBLE) AS max_value\n"
+        f"  FROM (VALUES\n      {values}\n  ) AS v(concept_id, unit_concept_id, min_value, max_value)\n"
+        ")"
+    )
+
+
+def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, concept_ids, limit_rows,
+                        iqr_multiplier, z_threshold):
+    """Compose ``(rows_sql, report_sql)``; both share one classification CTE chain.
+
+    Every row of the in-scope measurements gets a ``sanitize_status`` and a cleaned value in SQL, so the
+    rows and the per-concept report are computed by the same text and always reconcile.
+    """
+    where = ["m.value_as_number IS NOT NULL"]
+    if cohort_ref is not None:
+        where.append(f"m.person_id IN (SELECT TRY_CAST(c.{person_ref} AS BIGINT) FROM {cohort_ref} AS c)")
+    if concept_ids is not None:
+        where.append("m.measurement_concept_id IN (" + ", ".join(str(int(c)) for c in concept_ids) + ")")
+    extra_select = "".join(f", m.{_sanitize_ident(c)}" for c in extras)
+    ctes = [
+        "base AS (\n"
+        "  SELECT m.measurement_id, m.person_id, m.measurement_concept_id, m.measurement_date,\n"
+        f"         m.unit_concept_id, CAST(m.value_as_number AS DOUBLE) AS value_raw{extra_select}\n"
+        "  FROM measurement AS m\n"
+        f"  WHERE {' AND '.join(where)}\n"
+        ")"
+    ]
+
+    if method == "dqd_biologic_limits":
+        ctes += [
+            _sanitize_limits_cte(limit_rows),
+            "lim_unit AS (SELECT * FROM lim WHERE unit_concept_id IS NOT NULL)",
+            "lim_any AS (SELECT * FROM lim WHERE unit_concept_id IS NULL)",
+            "lim_concept AS (SELECT DISTINCT concept_id FROM lim)",
+            # a unit-specific row wins over an any-unit row; a concept with limits only in other units is
+            # 'unit_skipped', a concept with no limit row at all is 'no_limit'
+            "joined AS (\n"
+            "  SELECT b.*,\n"
+            "         CASE WHEN lu.concept_id IS NOT NULL THEN lu.min_value ELSE la.min_value END AS lo,\n"
+            "         CASE WHEN lu.concept_id IS NOT NULL THEN lu.max_value ELSE la.max_value END AS hi,\n"
+            "         (lu.concept_id IS NOT NULL OR la.concept_id IS NOT NULL) AS limit_applies,\n"
+            "         (lc.concept_id IS NOT NULL) AS concept_has_limit\n"
+            "  FROM base AS b\n"
+            "  LEFT JOIN lim_unit AS lu ON lu.concept_id = b.measurement_concept_id"
+            " AND lu.unit_concept_id = b.unit_concept_id\n"
+            "  LEFT JOIN lim_any AS la ON la.concept_id = b.measurement_concept_id\n"
+            "  LEFT JOIN lim_concept AS lc ON lc.concept_id = b.measurement_concept_id\n"
+            ")",
+            "cls AS (\n"
+            "  SELECT joined.*, CASE\n"
+            "    WHEN NOT isfinite(value_raw) THEN 'invalid_number'\n"
+            "    WHEN NOT limit_applies THEN CASE WHEN concept_has_limit THEN 'unit_skipped' ELSE 'no_limit' END\n"
+            "    WHEN lo IS NOT NULL AND value_raw < lo THEN 'below_min'\n"
+            "    WHEN hi IS NOT NULL AND value_raw > hi THEN 'above_max'\n"
+            "    ELSE 'ok' END AS sanitize_status\n"
+            "  FROM joined\n"
+            ")",
+        ]
+    elif method == "winsorize_iqr":
+        k = f"CAST('{_sanitize_num(iqr_multiplier)}' AS DOUBLE)"
+        usable = f"s.s_n >= {_SANITIZE_MIN_GROUP_ROWS} AND s.s_q3 > s.s_q1"
+        ctes += [
+            # statistics come from the finite in-scope values only; concept 0 (unmapped) is never pooled
+            "stats AS (\n"
+            "  SELECT measurement_concept_id AS s_concept_id, unit_concept_id AS s_unit_concept_id,\n"
+            "         COUNT(*) AS s_n, quantile_cont(value_raw, 0.25) AS s_q1, quantile_cont(value_raw, 0.75) AS s_q3\n"
+            "  FROM base\n"
+            "  WHERE isfinite(value_raw) AND measurement_concept_id <> 0\n"
+            "  GROUP BY measurement_concept_id, unit_concept_id\n"
+            ")",
+            "joined AS (\n"
+            f"  SELECT b.*, CASE WHEN {usable} THEN s.s_q1 - {k} * (s.s_q3 - s.s_q1) END AS lo,\n"
+            f"         CASE WHEN {usable} THEN s.s_q3 + {k} * (s.s_q3 - s.s_q1) END AS hi\n"
+            "  FROM base AS b\n"
+            "  LEFT JOIN stats AS s ON s.s_concept_id = b.measurement_concept_id"
+            " AND s.s_unit_concept_id IS NOT DISTINCT FROM b.unit_concept_id\n"
+            ")",
+            "cls AS (\n"
+            "  SELECT joined.*, CASE\n"
+            "    WHEN NOT isfinite(value_raw) THEN 'invalid_number'\n"
+            "    WHEN measurement_concept_id = 0 THEN 'no_limit'\n"
+            "    WHEN lo IS NULL THEN 'insufficient_data'\n"
+            "    WHEN value_raw < lo THEN 'below_min'\n"
+            "    WHEN value_raw > hi THEN 'above_max'\n"
+            "    ELSE 'ok' END AS sanitize_status\n"
+            "  FROM joined\n"
+            ")",
+        ]
+    else:
+        k = f"CAST('{_sanitize_num(z_threshold)}' AS DOUBLE)"
+        usable = f"s.s_n >= {_SANITIZE_MIN_GROUP_ROWS} AND s.s_sd > 0"
+        ctes += [
+            # statistics come from the finite in-scope values only; concept 0 (unmapped) is never pooled.
+            # Mean and sd are taken on value / s_scale (s_scale is 1.0 unless the group holds a value above
+            # 1e100) because DuckDB raises on STDDEV_SAMP overflow, and a single 1e160 artifact would abort
+            # the whole call. The z test is made on the scaled value against the scaled fences; lo/hi are the
+            # unscaled fences, only used to clamp (a flagged value's fence is always finite).
+            "zscale AS (\n"
+            "  SELECT measurement_concept_id AS s_concept_id, unit_concept_id AS s_unit_concept_id,\n"
+            "         COUNT(*) AS s_n,\n"
+            f"         CASE WHEN MAX(abs(value_raw)) > {_SANITIZE_Z_RESCALE_ABOVE} THEN MAX(abs(value_raw)) "
+            "ELSE 1.0 END AS s_scale\n"
+            "  FROM base\n"
+            "  WHERE isfinite(value_raw) AND measurement_concept_id <> 0\n"
+            "  GROUP BY measurement_concept_id, unit_concept_id\n"
+            ")",
+            "stats AS (\n"
+            "  SELECT z.s_concept_id, z.s_unit_concept_id, z.s_n, z.s_scale,\n"
+            "         avg(b.value_raw / z.s_scale) AS s_mean, stddev_samp(b.value_raw / z.s_scale) AS s_sd\n"
+            "  FROM base AS b\n"
+            "  JOIN zscale AS z ON z.s_concept_id = b.measurement_concept_id"
+            " AND z.s_unit_concept_id IS NOT DISTINCT FROM b.unit_concept_id\n"
+            "  WHERE isfinite(b.value_raw)\n"
+            "  GROUP BY z.s_concept_id, z.s_unit_concept_id, z.s_n, z.s_scale\n"
+            ")",
+            "joined AS (\n"
+            "  SELECT b.*, s.s_scale,\n"
+            f"         CASE WHEN {usable} THEN s.s_mean - {k} * s.s_sd END AS lo_s,\n"
+            f"         CASE WHEN {usable} THEN s.s_mean + {k} * s.s_sd END AS hi_s\n"
+            "  FROM base AS b\n"
+            "  LEFT JOIN stats AS s ON s.s_concept_id = b.measurement_concept_id"
+            " AND s.s_unit_concept_id IS NOT DISTINCT FROM b.unit_concept_id\n"
+            ")",
+            "cls AS (\n"
+            "  SELECT joined.*, lo_s * s_scale AS lo, hi_s * s_scale AS hi, CASE\n"
+            "    WHEN NOT isfinite(value_raw) THEN 'invalid_number'\n"
+            "    WHEN measurement_concept_id = 0 THEN 'no_limit'\n"
+            "    WHEN lo_s IS NULL THEN 'insufficient_data'\n"
+            "    WHEN value_raw / s_scale < lo_s THEN 'below_min'\n"
+            "    WHEN value_raw / s_scale > hi_s THEN 'above_max'\n"
+            "    ELSE 'ok' END AS sanitize_status\n"
+            "  FROM joined\n"
+            ")",
+        ]
+
+    if action == "clamp":
+        out_of_range = "CASE WHEN sanitize_status = 'below_min' THEN lo ELSE hi END"
+        # +/-Inf go to the nearest finite bound when there is one; NaN (and any value with no finite bound,
+        # e.g. an IQR fence that overflowed) is nullified
+        invalid = ("CASE WHEN isinf(value_raw) AND value_raw > 0 AND isfinite(hi) THEN hi "
+                   "WHEN isinf(value_raw) AND value_raw < 0 AND isfinite(lo) THEN lo ELSE NULL END")
+    else:
+        out_of_range = invalid = "NULL"
+    ctes.append(
+        "fin AS (\n"
+        "  SELECT cls.*,\n"
+        "         (sanitize_status IN ('below_min', 'above_max', 'invalid_number')) AS flagged,\n"
+        "         CASE WHEN sanitize_status IN ('below_min', 'above_max') THEN " + out_of_range + "\n"
+        "              WHEN sanitize_status = 'invalid_number' THEN " + invalid + "\n"
+        "              ELSE value_raw END AS value_clean\n"
+        "  FROM cls\n"
+        ")"
+    )
+    with_clause = "WITH " + ",\n".join(ctes)
+
+    out_cols = ("measurement_id, person_id, measurement_concept_id, measurement_date, unit_concept_id, "
+                "value_clean AS value_as_number, value_raw AS value_as_number_raw, sanitize_status"
+                + "".join(f", {_sanitize_ident(c)}" for c in extras))
+    rows_sql = (
+        f"{with_clause}\nSELECT {out_cols}\nFROM fin\n"
+        + ("WHERE NOT flagged\n" if action == "drop_row" else "")
+        + "ORDER BY measurement_id, person_id, measurement_concept_id, measurement_date"
+    )
+
+    def n_of(status):
+        return f"COUNT(*) FILTER (WHERE sanitize_status = '{status}')"
+
+    changed, dropped = ("CAST(0 AS BIGINT)", "COUNT(*) FILTER (WHERE flagged)") if action == "drop_row" \
+        else ("COUNT(*) FILTER (WHERE flagged)", "CAST(0 AS BIGINT)")
+    report_sql = (
+        f"{with_clause}\n"
+        "SELECT measurement_concept_id, unit_concept_id, COUNT(*) AS n,\n"
+        f"       {n_of('ok')} AS n_ok, {n_of('below_min')} AS n_below, {n_of('above_max')} AS n_above,\n"
+        f"       {n_of('invalid_number')} AS n_invalid, {changed} AS n_changed, {dropped} AS n_dropped,\n"
+        f"       {n_of('no_limit')} AS n_no_limit, {n_of('unit_skipped')} AS n_unit_skipped,\n"
+        f"       {n_of('insufficient_data')} AS n_insufficient_data\n"
+        "FROM fin\n"
+        "GROUP BY measurement_concept_id, unit_concept_id\n"
+        "ORDER BY measurement_concept_id, unit_concept_id NULLS LAST"
+    )
+    return rows_sql, report_sql
+
+
+def _sanitize_arrow(result) -> Any:
+    reader = result.arrow()
+    return reader.read_all() if hasattr(reader, "read_all") else reader
+
+
+def _sanitize_warn_unscreened(report: pd.DataFrame) -> None:
+    """Warn when most of a limit-bearing concept's rows lack a unit and so were not screened at all.
+
+    The package's own ETL writes ``unit_concept_id = 0`` for lab results, and ``dqd_biologic_limits`` never
+    guesses a unit, so such labs come back as ``unit_skipped`` with their artifacts intact.
+    """
+    if report.empty:
+        return
+    no_unit = report["unit_concept_id"].isna() | (report["unit_concept_id"] == 0)
+    by_concept = report["measurement_concept_id"]
+    total = report["n"].groupby(by_concept).sum()
+    unknown = report["n_unit_skipped"].where(no_unit, 0).groupby(by_concept).sum()
+    bad = sorted(int(c) for c in total.index[2 * unknown.reindex(total.index) > total])
+    if not bad:
+        return
+    shown = ", ".join(str(c) for c in bad[:5]) + (f", ... ({len(bad)} in all)" if len(bad) > 5 else "")
+    warnings.warn(
+        f"sanitize_measurements: more than half of the measurements of {len(bad)} concept(s) with physiologic "
+        f"limits have no unit (unit_concept_id is NULL or 0) and were NOT screened (sanitize_status "
+        f"'unit_skipped'): concept_id {shown}. Map the units in the ETL, or pass `limits` rows without "
+        f"unit_concept_id to apply a limit whatever the unit.",
+        UserWarning, stacklevel=3)
+
+
+def sanitize_measurements(
+    con: duckdb.DuckDBPyConnection,
+    cohort_table: str | None = None,
+    method: str = "dqd_biologic_limits",
+    action: str = "nullify",
+    measurement_concept_ids: Sequence[int] | None = None,
+    limits: pd.DataFrame | None = None,
+    iqr_multiplier: float = 3.0,
+    z_threshold: float = 4.0,
+    person_col: str = "subject_id",
+    format: str = "df",
+) -> Any:
+    r"""Sanitize implausible numeric measurements (RFC 6.1): physiologic limits or statistical outliers.
+
+    Screens ``measurement.value_as_number`` for artifacts such as a systolic blood pressure of 0 or 999,
+    negative lab values, or NaN/Inf, and returns the numeric measurements with a sanitized value, the
+    raw value and a per-row status. Everything is computed in DuckDB SQL (no temporary or persistent
+    objects are created and the database is only read), so it works on a read-only connection and
+    gives the same result as ``omopduckdb::sanitize_measurements()`` in R.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        Connection to the OMOP CDM database (read-only is fine).
+    cohort_table : str, optional
+        Table or view (``name`` or ``schema.name``) restricting the scope to the persons listed in its
+        ``person_col``. Duplicate cohort rows do not duplicate measurements. ``None`` = everyone.
+    method : {'dqd_biologic_limits', 'winsorize_iqr', 'z_score_cutoff'}
+        ``'dqd_biologic_limits'`` compares each value with the bundled per-concept, per-unit plausibility
+        limits (``inst/extdata/physiologic_limits.csv``, see Notes) or with ``limits``.
+        ``'winsorize_iqr'`` flags values outside the Tukey fences ``Q1 - k*IQR .. Q3 + k*IQR`` of their
+        (concept, unit) group (``k = iqr_multiplier``). ``'z_score_cutoff'`` flags values with
+        ``|z| > z_threshold`` using the group mean and sample standard deviation. The two statistical
+        methods assume roughly symmetric data; see Notes before using them on skewed labs.
+    action : {'nullify', 'clamp', 'drop_row'}
+        What to do with a flagged value: set it to NULL, move it to the violated bound (for
+        ``'winsorize_iqr'`` the fence, for ``'z_score_cutoff'`` ``mean +/- z_threshold*sd``), or remove
+        the row from the result. ``'nullify'`` is the right choice for artifacts; see Notes on
+        ``'clamp'``.
+    measurement_concept_ids : sequence of int, optional
+        Only sanitize these ``measurement_concept_id`` values. ``None`` = all concepts.
+    limits : pandas.DataFrame, optional
+        Custom limits for ``'dqd_biologic_limits'`` with columns ``concept_id``, ``min_value``,
+        ``max_value`` and optionally ``unit_concept_id`` (names are case-insensitive, extra columns are
+        ignored). A row with a ``unit_concept_id`` replaces the bundled row for that concept and unit (or
+        adds one). A row without a unit (missing value or no such column) is an any-unit limit: it
+        replaces every bundled row of the concept and applies whatever unit the measurement has,
+        including NULL/0. A missing ``min_value`` or ``max_value`` leaves that side open. Passing
+        ``limits`` with another method warns and is ignored.
+    iqr_multiplier : float, default 3.0
+        Fence width ``k`` for ``'winsorize_iqr'`` (3.0 = "far out" outliers; 1.5 = classic Tukey). Must be
+        positive and finite.
+    z_threshold : float, default 4.0
+        Cut-off for ``'z_score_cutoff'``. Must be positive and finite.
+    person_col : str, default 'subject_id'
+        Person id column of ``cohort_table``. It must exist; there is no fallback to another column.
+    format : {'df', 'arrow', 'polars'}, default 'df'
+        ``'df'`` returns a pandas DataFrame with the report in ``df.attrs['sanitization_report']``.
+        ``'arrow'`` (pyarrow Table) and ``'polars'`` return the rows only: the report is **not**
+        attached to them. If polars is not installed ``'polars'`` warns and returns the Arrow table.
+
+    Returns
+    -------
+    pandas.DataFrame or pyarrow.Table or polars.DataFrame
+        One row per in-scope measurement (rows whose ``value_as_number`` is NULL are not part of the
+        result), ordered by ``measurement_id``, with columns ``measurement_id``, ``person_id``,
+        ``measurement_concept_id``, ``measurement_date``, ``unit_concept_id``, ``value_as_number``
+        (sanitized), ``value_as_number_raw``, ``sanitize_status`` and, when the measurement table has
+        them, ``measurement_datetime`` and ``visit_occurrence_id``.
+
+        ``sanitize_status`` is one of ``'ok'``, ``'below_min'``, ``'above_max'``, ``'invalid_number'``
+        (NaN or +/-Inf), ``'no_limit'``, ``'unit_skipped'`` or ``'insufficient_data'``.
+
+        The per-concept report is a DataFrame in ``df.attrs['sanitization_report']``, one row per
+        ``measurement_concept_id`` and ``unit_concept_id`` (NULL unit = NaN, listed last within a concept)
+        with columns ``measurement_concept_id``, ``unit_concept_id``, ``n``, ``n_ok``, ``n_below``,
+        ``n_above``, ``n_invalid``, ``n_changed``, ``n_dropped``, ``n_no_limit``, ``n_unit_skipped`` and
+        ``n_insufficient_data`` (the status counts the spec's other columns cannot hold: it is 0 for
+        ``'dqd_biologic_limits'``). It counts every in-scope row, including dropped ones, and reconciles
+        exactly:
+        ``n = n_ok + n_below + n_above + n_invalid + n_no_limit + n_unit_skipped + n_insufficient_data``
+        and ``n_changed + n_dropped = n_below + n_above + n_invalid``.
+
+    Raises
+    ------
+    ValueError
+        For an unknown ``method``/``action``/``format``, a non-positive ``iqr_multiplier`` or
+        ``z_threshold``, bad ``measurement_concept_ids`` or ``limits``, a missing ``measurement``
+        table/column, or a ``cohort_table`` that cannot be read or lacks ``person_col``.
+
+    Notes
+    -----
+    **Invalid numbers.** NaN and +/-Inf are invalid under every method, whether or not a limit exists
+    (``'invalid_number'``). ``'nullify'`` and ``'drop_row'`` behave as usual. ``'clamp'`` moves
+    +Inf/-Inf to the group's upper/lower bound when there is one, and falls back to NULL for NaN and
+    whenever no finite bound applies.
+
+    **Inclusive bounds.** A value equal to a bound is ``'ok'``.
+
+    **Bundled limits.** ``physiologic_limits.csv`` holds clinical-plausibility limits curated for this
+    package (every row has ``source = clinical_plausibility``; see its ``note`` column). They follow
+    the idea of the OHDSI Data Quality Dashboard plausibility checks but are not copied from DQD
+    thresholds. They are deliberately wide: they remove physiologically impossible values and sensor or
+    data-entry artifacts (a systolic pressure of 0 or 999), not abnormal ones. Pass ``limits`` to use
+    your own.
+
+    **Units (dqd_biologic_limits).** A limit row applies only when the measurement's
+    ``unit_concept_id`` equals the row's. A concept that has limits only in other units, or a
+    measurement with a NULL/0 unit, is left untouched and reported as ``'unit_skipped'`` (a creatinine in
+    umol/L is never compared with the mg/dL bounds). A concept with no limit row at all is
+    ``'no_limit'``. No unit is ever guessed, so an ETL that leaves ``unit_concept_id`` at 0 (this
+    package's PCORnet ETL does for lab results: the text stays in ``unit_source_value``) gets no
+    screening of those rows. A ``UserWarning`` is raised when more than half of the measurements of a
+    concept with limits are skipped for that reason. Map the units in the ETL, or pass ``limits`` rows
+    without ``unit_concept_id`` (an any-unit limit) for the concepts you want screened.
+
+    **Choosing an action.** ``'nullify'`` (or ``'drop_row'``) is the right action for the artifacts
+    ``'dqd_biologic_limits'`` finds: a blood pressure of 0 or 999 is a sentinel, not an extreme
+    measurement, and ``'clamp'`` would turn it into 40 or 300, a plausible-looking value that downstream
+    models treat as real. Use ``'clamp'`` (winsorization) only for values that are extreme but real.
+
+    **The report and pandas.** pandas stores ``attrs`` as is, and it cannot serialize or merge a DataFrame
+    kept there: ``df.to_parquet()`` raises ``TypeError`` and ``pandas.concat`` of two frames that both carry
+    a report raises ``ValueError``. Take the report out first, e.g.
+    ``report = df.attrs.pop('sanitization_report')``, before writing or concatenating the frame. Slicing,
+    ``copy()`` and ``assign()`` keep it. The ``'arrow'`` and ``'polars'`` formats carry no report at all.
+
+    **Skewed data.** ``'winsorize_iqr'`` and ``'z_score_cutoff'`` assume a roughly symmetric
+    distribution. Right-skewed labs (creatinine, ALT, CRP, ...) have a long valid tail: at the defaults
+    about 0.5% of a log-normal creatinine (median 1 mg/dL, sigma 0.45) is flagged, and clinically
+    important values (an AKI creatinine of 3-6 mg/dL) are nullified or clamped. Prefer
+    ``'dqd_biologic_limits'`` for such labs, or transform them first. ``'z_score_cutoff'`` is also not
+    robust: the outliers themselves inflate the mean and standard deviation, and with a sample standard
+    deviation no value of a group of ``n`` can have ``|z|`` above ``(n - 1) / sqrt(n)``, so the default
+    ``z_threshold = 4`` cannot flag anything in a group of fewer than 18 values.
+
+    **Statistical methods.** Statistics are computed per ``(measurement_concept_id, unit_concept_id)``
+    (a NULL unit is its own group) over the finite, in-scope values, i.e. after the cohort and concept
+    restrictions. A group with fewer than 3 finite values, a zero IQR (``'winsorize_iqr'``) or a zero or
+    undefined standard deviation (``'z_score_cutoff'``) has no usable spread: its values are kept and
+    reported as ``'insufficient_data'``. ``measurement_concept_id = 0`` (unmapped) is never pooled into
+    a group and is reported as ``'no_limit'``. Quartiles use linear interpolation (DuckDB
+    ``quantile_cont``, the same as numpy's default and R's ``quantile(type = 7)``). Values of any finite
+    magnitude are accepted: ``'z_score_cutoff'`` rescales a group that holds a value above 1e100 so the
+    variance cannot overflow.
+
+    Examples
+    --------
+    >>> clean = sanitize_measurements(con, cohort_table="index_cohort",
+    ...                               method="dqd_biologic_limits", action="nullify")
+    >>> clean.attrs["sanitization_report"]
+    """
+    method_k = str(method).lower().strip()
+    action_k = str(action).lower().strip()
+    fmt = str(format).lower().strip()
+    if method_k not in _SANITIZE_METHODS:
+        raise ValueError(f"method must be one of {list(_SANITIZE_METHODS)}; got {method!r}")
+    if action_k not in _SANITIZE_ACTIONS:
+        raise ValueError(f"action must be one of {list(_SANITIZE_ACTIONS)}; got {action!r}")
+    if fmt not in _SANITIZE_FORMATS:
+        raise ValueError(f"format must be one of 'df', 'arrow' or 'polars'; got {format!r}")
+    k_iqr = _sanitize_positive(iqr_multiplier, "iqr_multiplier")
+    k_z = _sanitize_positive(z_threshold, "z_threshold")
+    concept_ids = None if measurement_concept_ids is None else _sanitize_concept_ids(measurement_concept_ids)
+
+    limit_rows = None
+    if method_k == "dqd_biologic_limits":
+        user_rows = None if limits is None else _sanitize_limit_rows(limits)
+        limit_rows = _sanitize_effective_limits(user_rows)
+    elif limits is not None:
+        warnings.warn(f"limits is only used by method='dqd_biologic_limits' and is ignored for method={method_k!r}.",
+                      stacklevel=2)
+
+    try:
+        meas_cols = {r[0].lower(): r[0] for r in con.execute("DESCRIBE SELECT * FROM measurement LIMIT 0").fetchall()}
+    except duckdb.Error as e:
+        raise ValueError(f"sanitize_measurements() needs a CDM 'measurement' table on this connection: {e}") from e
+    absent = [c for c in _SANITIZE_REQUIRED_MEASUREMENT_COLS if c not in meas_cols]
+    if absent:
+        raise ValueError(f"The measurement table is missing required column(s) {absent}")
+    extras = [meas_cols[c] for c in _SANITIZE_OPTIONAL_MEASUREMENT_COLS if c in meas_cols]
+
+    cohort_ref = person_ref = None
+    if cohort_table is not None:
+        cohort_ref = _sanitize_table_ref(cohort_table, "cohort_table")
+        if not isinstance(person_col, str) or not person_col.strip():
+            raise ValueError(f"person_col must be a non-empty column name; got {person_col!r}")
+        try:
+            cohort_cols = {r[0].lower(): r[0]
+                           for r in con.execute(f"DESCRIBE SELECT * FROM {cohort_ref} LIMIT 0").fetchall()}
+        except duckdb.Error as e:
+            raise ValueError(f"cohort_table {cohort_table!r} could not be read: {e}") from e
+        if person_col.strip().lower() not in cohort_cols:
+            raise ValueError(f"person_col {person_col!r} not found in cohort_table {cohort_table!r}. "
+                             f"Available columns: {list(cohort_cols.values())}. Pass person_col=... explicitly.")
+        person_ref = _sanitize_ident(cohort_cols[person_col.strip().lower()])
+
+    rows_sql, report_sql = _sanitize_build_sql(
+        method=method_k, action=action_k, extras=extras, cohort_ref=cohort_ref, person_ref=person_ref,
+        concept_ids=concept_ids, limit_rows=limit_rows, iqr_multiplier=k_iqr, z_threshold=k_z)
+
+    out = None
+    if fmt == "df":
+        out = con.execute(rows_sql).df()
+    else:
+        table = _sanitize_arrow(con.execute(rows_sql))
+    # the report is also the input of the unscreened-unit warning, so the limits method always computes it
+    report = None
+    if fmt == "df" or method_k == "dqd_biologic_limits":
+        report = con.execute(report_sql).df()
+    if method_k == "dqd_biologic_limits":
+        _sanitize_warn_unscreened(report)
+    if out is not None:
+        out.attrs["sanitization_report"] = report
+        return out
+    if fmt == "polars":
+        try:
+            import polars as pl
+        except ImportError:
+            warnings.warn("polars is not installed; returning a pyarrow Table instead.", stacklevel=2)
+            return table
+        return pl.from_arrow(table)
+    return table

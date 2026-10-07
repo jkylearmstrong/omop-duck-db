@@ -17,6 +17,7 @@ reference:
   - build_schema
   - load_vocabulary
   - attach_central_vocabulary
+  - omop_connect
   - load_from_bigquery
   - check_vocabulary_version
 - title: PCORnet ETL and synthesizers
@@ -47,6 +48,7 @@ reference:
 - title: Cohorts and concept algebra
   desc: Parameterized cohort builders, set operations, and transitive hierarchy algebra.
   contents:
+  - define_study_cohort
   - build_readmission_cohort
   - build_end_of_life_cohort
   - prepare_competing_risks_data
@@ -58,6 +60,11 @@ reference:
   - resolve_concept_set
   - get_concept_ancestors
   - get_concept_descendants
+- title: Comorbidity profiling and phenotyping
+  desc: Validated 31 Elixhauser domains, Charlson comorbidity index, and composite risk scoring.
+  contents:
+  - extract_elixhauser_comorbidities
+  - extract_charlson_index
 - title: Machine learning feature extraction
   desc: Extract patient-level sparse concept matrices, windowed temporal features, and measurements.
   contents:
@@ -79,6 +86,7 @@ reference:
   desc: Run Data Quality Dashboard checks, build publication-grade Table 1s, and export datasets.
   contents:
   - run_dqd
+  - sanitize_measurements
   - generate_table1
   - validate_table1_reconciliation
   - export_cdm

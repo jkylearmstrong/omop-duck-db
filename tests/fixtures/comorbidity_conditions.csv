@@ -1,0 +1,199 @@
+condition_occurrence_id,person_id,condition_concept_id,condition_start_date,condition_source_value,scenario
+1,10,0,2021-05-31,I50.9,window: index-1 in
+2,11,0,2021-06-01,I50.9,window: index day out
+3,12,0,2020-06-01,I50.9,window: index-365 in
+4,13,0,2020-05-31,I50.9,window: index-366 out
+5,14,0,2021-06-02,I50.9,window: after index out
+6,15,0,2015-01-01,I50.9,window: 2015 only in all-history
+7,20,0,2021-05-01,i50.9,normalise: lower case
+8,21,0,2021-05-01, I 50 . 9 ,normalise: spaces and dots
+9,22,0,2021-05-01,428.0,normalise: ICD-9 with and without dot
+10,22,0,2021-05-02,4280,normalise: ICD-9 with and without dot
+11,23,0,2021-05-01,,normalise: NULL source value
+12,24,0,2021-05-01,,normalise: empty source value
+13,30,0,2021-05-01,Z00.00,negative: unrelated codes
+14,30,0,2021-05-02,J01.90,negative: unrelated codes
+15,31,0,2021-05-01,I5,negative: shorter than the prefix
+16,32,0,2021-05-01,XI50.9,"negative: contains, does not start with"
+17,33,0,2021-05-01,I51.9,negative: neighbouring codes
+18,33,0,2021-05-02,429.9,negative: neighbouring codes
+19,40,0,2021-05-01,I50.9,hierarchy: everything
+20,40,0,2021-05-02,E11.22,hierarchy: everything
+21,40,0,2021-05-03,E11.9,hierarchy: everything
+22,40,0,2021-05-04,C78.0,hierarchy: everything
+23,40,0,2021-05-05,C50.9,hierarchy: everything
+24,40,0,2021-05-06,I12.9,hierarchy: everything
+25,40,0,2021-05-07,I10,hierarchy: everything
+26,40,0,2021-05-08,K72.9,hierarchy: everything
+27,40,0,2021-05-09,K73.9,hierarchy: everything
+28,40,0,2021-05-10,I21.9,hierarchy: everything
+29,41,0,2021-05-01,E11.22,hierarchy: diabetes
+30,41,0,2021-05-02,E11.9,hierarchy: diabetes
+31,42,0,2021-05-01,E66.9,hierarchy: negative weights
+32,42,0,2021-05-02,F11.20,hierarchy: negative weights
+33,42,0,2021-05-03,F32.9,hierarchy: negative weights
+34,42,0,2021-05-04,E03.9,hierarchy: negative weights
+35,43,0,2021-05-01,C78.0,hierarchy: mets and solid tumour
+36,43,0,2021-05-02,C50.9,hierarchy: mets and solid tumour
+37,44,0,2021-05-01,K73.9,hierarchy: liver
+38,44,0,2021-05-02,K72.9,hierarchy: liver
+39,45,0,2021-05-01,I10,hierarchy: hypertension
+40,45,0,2021-05-02,I12.9,hierarchy: hypertension
+41,50,0,2021-01-10,I50.9,multi index: chf then copd
+42,50,0,2021-08-15,J44.9,multi index: chf then copd
+43,51,0,2021-05-01,I50.9,duplicate cohort row
+44,60,0,2021-05-01,I50.9,cohort 2 only: chf
+45,62,0,2021-05-01,J44.9,cohort 1 and 2: copd
+46,71,0,2021-07-01,I50.9,none: only after the index
+47,80,9000001,2021-05-01,,standard: child
+48,81,9000002,2021-05-01,ZZZ,standard: grandchild
+49,82,316139,2021-05-01,,standard: the ancestor itself
+50,83,9000003,2021-05-01,,standard: under two ancestors
+51,84,9000099,2021-05-01,ZZZ,standard: unrelated concept
+52,85,9000001,2021-05-01,I50.9,"standard and source, same domain"
+53,86,9000001,2021-05-01,J44.9,standard chf and source copd on one row
+54,87,9000001,2021-06-01,,standard: on the index day
+55,88,0,2021-05-01,J44.9,standard: concept 0 with a source value
+56,1000,0,2021-05-01,I09.9,probe elixhauser chf icd10
+57,1001,0,2021-05-01,398.91,probe elixhauser chf icd9
+58,1002,8000001,2021-05-01,,probe elixhauser chf standard
+59,1003,0,2021-05-01,i44.1,probe elixhauser arrhythmia icd10
+60,1004,0,2021-05-01,426.0,probe elixhauser arrhythmia icd9
+61,1005,8000002,2021-05-01,ZZZ,probe elixhauser arrhythmia standard
+62,1006,0,2021-05-01,A52.0,probe elixhauser valvular icd10
+63,1007,0,2021-05-01,093.2,probe elixhauser valvular icd9
+64,1008,8000003,2021-05-01,,probe elixhauser valvular standard
+65,1009,0,2021-05-01,i26.9,probe elixhauser pulm_circ icd10
+66,1010,0,2021-05-01,415.0,probe elixhauser pulm_circ icd9
+67,1011,8000004,2021-05-01,ZZZ,probe elixhauser pulm_circ standard
+68,1012,0,2021-05-01,I70.9,probe elixhauser pvd icd10
+69,1013,0,2021-05-01,093.0,probe elixhauser pvd icd9
+70,1014,8000005,2021-05-01,,probe elixhauser pvd standard
+71,1015,0,2021-05-01,i10.9,probe elixhauser htn_uncomp icd10
+72,1016,0,2021-05-01,401.9,probe elixhauser htn_uncomp icd9
+73,1017,8000006,2021-05-01,ZZZ,probe elixhauser htn_uncomp standard
+74,1018,0,2021-05-01,I11.9,probe elixhauser htn_comp icd10
+75,1019,0,2021-05-01,402.9,probe elixhauser htn_comp icd9
+76,1020,8000007,2021-05-01,,probe elixhauser htn_comp standard
+77,1021,0,2021-05-01,g04.1,probe elixhauser paralysis icd10
+78,1022,0,2021-05-01,334.1,probe elixhauser paralysis icd9
+79,1023,8000008,2021-05-01,ZZZ,probe elixhauser paralysis standard
+80,1024,0,2021-05-01,G10.9,probe elixhauser neuro_other icd10
+81,1025,0,2021-05-01,331.9,probe elixhauser neuro_other icd9
+82,1026,8000009,2021-05-01,,probe elixhauser neuro_other standard
+83,1027,0,2021-05-01,i27.8,probe elixhauser copd icd10
+84,1028,0,2021-05-01,416.8,probe elixhauser copd icd9
+85,1029,8000010,2021-05-01,ZZZ,probe elixhauser copd standard
+86,1030,0,2021-05-01,E10.1,probe elixhauser dm_uncomp icd10
+87,1031,0,2021-05-01,250.0,probe elixhauser dm_uncomp icd9
+88,1032,8000011,2021-05-01,,probe elixhauser dm_uncomp standard
+89,1033,0,2021-05-01,e10.2,probe elixhauser dm_comp icd10
+90,1034,0,2021-05-01,250.4,probe elixhauser dm_comp icd9
+91,1035,8000012,2021-05-01,ZZZ,probe elixhauser dm_comp standard
+92,1036,0,2021-05-01,E00.9,probe elixhauser hypothyroid icd10
+93,1037,0,2021-05-01,240.9,probe elixhauser hypothyroid icd9
+94,1038,8000013,2021-05-01,,probe elixhauser hypothyroid standard
+95,1039,0,2021-05-01,i12.0,probe elixhauser renal_failure icd10
+96,1040,0,2021-05-01,403.01,probe elixhauser renal_failure icd9
+97,1041,8000014,2021-05-01,ZZZ,probe elixhauser renal_failure standard
+98,1042,0,2021-05-01,B18.9,probe elixhauser liver_disease icd10
+99,1043,0,2021-05-01,070.22,probe elixhauser liver_disease icd9
+100,1044,8000015,2021-05-01,,probe elixhauser liver_disease standard
+101,1045,0,2021-05-01,k25.7,probe elixhauser pud icd10
+102,1046,0,2021-05-01,531.7,probe elixhauser pud icd9
+103,1047,8000016,2021-05-01,ZZZ,probe elixhauser pud standard
+104,1048,0,2021-05-01,B20.9,probe elixhauser hiv icd10
+105,1049,0,2021-05-01,042.9,probe elixhauser hiv icd9
+106,1050,8000017,2021-05-01,,probe elixhauser hiv standard
+107,1051,0,2021-05-01,c81.9,probe elixhauser lymphoma icd10
+108,1052,0,2021-05-01,200.9,probe elixhauser lymphoma icd9
+109,1053,8000018,2021-05-01,ZZZ,probe elixhauser lymphoma standard
+110,1054,0,2021-05-01,C77.9,probe elixhauser mets icd10
+111,1055,0,2021-05-01,196.9,probe elixhauser mets icd9
+112,1056,8000019,2021-05-01,,probe elixhauser mets standard
+113,1057,0,2021-05-01,c00.9,probe elixhauser solid_tumor icd10
+114,1058,0,2021-05-01,140.9,probe elixhauser solid_tumor icd9
+115,1059,8000020,2021-05-01,ZZZ,probe elixhauser solid_tumor standard
+116,1060,0,2021-05-01,L94.0,probe elixhauser rheumatic icd10
+117,1061,0,2021-05-01,446.9,probe elixhauser rheumatic icd9
+118,1062,8000021,2021-05-01,,probe elixhauser rheumatic standard
+119,1063,0,2021-05-01,d65.9,probe elixhauser coagulopathy icd10
+120,1064,0,2021-05-01,286.9,probe elixhauser coagulopathy icd9
+121,1065,8000022,2021-05-01,ZZZ,probe elixhauser coagulopathy standard
+122,1066,0,2021-05-01,E66.9,probe elixhauser obesity icd10
+123,1067,0,2021-05-01,278.0,probe elixhauser obesity icd9
+124,1068,8000023,2021-05-01,,probe elixhauser obesity standard
+125,1069,0,2021-05-01,e40.9,probe elixhauser weight_loss icd10
+126,1070,0,2021-05-01,260.9,probe elixhauser weight_loss icd9
+127,1071,8000024,2021-05-01,ZZZ,probe elixhauser weight_loss standard
+128,1072,0,2021-05-01,E22.2,probe elixhauser fluid_electrolyte icd10
+129,1073,0,2021-05-01,253.6,probe elixhauser fluid_electrolyte icd9
+130,1074,8000025,2021-05-01,,probe elixhauser fluid_electrolyte standard
+131,1075,0,2021-05-01,d50.0,probe elixhauser blood_loss_anemia icd10
+132,1076,0,2021-05-01,280.0,probe elixhauser blood_loss_anemia icd9
+133,1077,8000026,2021-05-01,ZZZ,probe elixhauser blood_loss_anemia standard
+134,1078,0,2021-05-01,D50.8,probe elixhauser deficiency_anemia icd10
+135,1079,0,2021-05-01,280.1,probe elixhauser deficiency_anemia icd9
+136,1080,8000027,2021-05-01,,probe elixhauser deficiency_anemia standard
+137,1081,0,2021-05-01,f10.9,probe elixhauser alcohol_abuse icd10
+138,1082,0,2021-05-01,265.2,probe elixhauser alcohol_abuse icd9
+139,1083,8000028,2021-05-01,ZZZ,probe elixhauser alcohol_abuse standard
+140,1084,0,2021-05-01,F11.9,probe elixhauser drug_abuse icd10
+141,1085,0,2021-05-01,292.9,probe elixhauser drug_abuse icd9
+142,1086,8000029,2021-05-01,,probe elixhauser drug_abuse standard
+143,1087,0,2021-05-01,f20.9,probe elixhauser psychoses icd10
+144,1088,0,2021-05-01,293.8,probe elixhauser psychoses icd9
+145,1089,8000030,2021-05-01,ZZZ,probe elixhauser psychoses standard
+146,1090,0,2021-05-01,F31.3,probe elixhauser depression icd10
+147,1091,0,2021-05-01,296.2,probe elixhauser depression icd9
+148,1092,8000031,2021-05-01,,probe elixhauser depression standard
+149,2000,0,2021-05-01,I21.9,probe charlson mi icd10
+150,2001,0,2021-05-01,410.9,probe charlson mi icd9
+151,2002,8000032,2021-05-01,,probe charlson mi standard
+152,2003,0,2021-05-01,i09.9,probe charlson chf icd10
+153,2004,0,2021-05-01,398.91,probe charlson chf icd9
+154,2005,8000033,2021-05-01,ZZZ,probe charlson chf standard
+155,2006,0,2021-05-01,I70.9,probe charlson pvd icd10
+156,2007,0,2021-05-01,093.0,probe charlson pvd icd9
+157,2008,8000034,2021-05-01,,probe charlson pvd standard
+158,2009,0,2021-05-01,g45.9,probe charlson cevd icd10
+159,2010,0,2021-05-01,362.34,probe charlson cevd icd9
+160,2011,8000035,2021-05-01,ZZZ,probe charlson cevd standard
+161,2012,0,2021-05-01,F01.9,probe charlson dementia icd10
+162,2013,0,2021-05-01,290.9,probe charlson dementia icd9
+163,2014,8000036,2021-05-01,,probe charlson dementia standard
+164,2015,0,2021-05-01,i27.8,probe charlson copd icd10
+165,2016,0,2021-05-01,416.8,probe charlson copd icd9
+166,2017,8000037,2021-05-01,ZZZ,probe charlson copd standard
+167,2018,0,2021-05-01,M05.9,probe charlson rheum icd10
+168,2019,0,2021-05-01,446.5,probe charlson rheum icd9
+169,2020,8000038,2021-05-01,,probe charlson rheum standard
+170,2021,0,2021-05-01,k25.9,probe charlson pud icd10
+171,2022,0,2021-05-01,531.9,probe charlson pud icd9
+172,2023,8000039,2021-05-01,ZZZ,probe charlson pud standard
+173,2024,0,2021-05-01,B18.9,probe charlson mild_liver icd10
+174,2025,0,2021-05-01,070.22,probe charlson mild_liver icd9
+175,2026,8000040,2021-05-01,,probe charlson mild_liver standard
+176,2027,0,2021-05-01,e10.1,probe charlson dm_uncomp icd10
+177,2028,0,2021-05-01,250.0,probe charlson dm_uncomp icd9
+178,2029,8000041,2021-05-01,ZZZ,probe charlson dm_uncomp standard
+179,2030,0,2021-05-01,E10.2,probe charlson dm_comp icd10
+180,2031,0,2021-05-01,250.4,probe charlson dm_comp icd9
+181,2032,8000042,2021-05-01,,probe charlson dm_comp standard
+182,2033,0,2021-05-01,g04.1,probe charlson plegia icd10
+183,2034,0,2021-05-01,334.1,probe charlson plegia icd9
+184,2035,8000043,2021-05-01,ZZZ,probe charlson plegia standard
+185,2036,0,2021-05-01,I12.0,probe charlson renal icd10
+186,2037,0,2021-05-01,403.01,probe charlson renal icd9
+187,2038,8000044,2021-05-01,,probe charlson renal standard
+188,2039,0,2021-05-01,c00.9,probe charlson malignancy icd10
+189,2040,0,2021-05-01,140.9,probe charlson malignancy icd9
+190,2041,8000045,2021-05-01,ZZZ,probe charlson malignancy standard
+191,2042,0,2021-05-01,I85.0,probe charlson mod_severe_liver icd10
+192,2043,0,2021-05-01,456.0,probe charlson mod_severe_liver icd9
+193,2044,8000046,2021-05-01,,probe charlson mod_severe_liver standard
+194,2045,0,2021-05-01,c77.9,probe charlson mets icd10
+195,2046,0,2021-05-01,196.9,probe charlson mets icd9
+196,2048,0,2021-05-01,B20.9,probe charlson hiv icd10
+197,2049,0,2021-05-01,042.9,probe charlson hiv icd9
+198,2050,8000047,2021-05-01,,probe charlson hiv standard

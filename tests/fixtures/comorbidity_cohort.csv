@@ -1,0 +1,185 @@
+cohort_definition_id,subject_id,cohort_start_date,scenario
+1,10,2021-06-01,window: index-1 in
+1,11,2021-06-01,window: index day out
+1,12,2021-06-01,window: index-365 in
+1,13,2021-06-01,window: index-366 out
+1,14,2021-06-01,window: after index out
+1,15,2021-06-01,window: 2015 only in all-history
+1,20,2021-06-01,normalise: lower case
+1,21,2021-06-01,normalise: spaces and dots
+1,22,2021-06-01,normalise: ICD-9 with and without dot
+1,23,2021-06-01,normalise: NULL source value
+1,24,2021-06-01,normalise: empty source value
+1,30,2021-06-01,negative: unrelated codes
+1,31,2021-06-01,negative: shorter than the prefix
+1,32,2021-06-01,"negative: contains, does not start with"
+1,33,2021-06-01,negative: neighbouring codes
+1,40,2021-06-01,hierarchy: everything
+1,41,2021-06-01,hierarchy: diabetes
+1,42,2021-06-01,hierarchy: negative weights
+1,43,2021-06-01,hierarchy: mets and solid tumour
+1,44,2021-06-01,hierarchy: liver
+1,45,2021-06-01,hierarchy: hypertension
+1,50,2021-02-01,multi index: chf then copd
+1,50,2021-09-01,multi index: chf then copd
+1,50,2022-09-20,multi index: chf then copd
+1,51,2021-06-01,duplicate cohort row
+1,51,2021-06-01,duplicate cohort row
+2,60,2021-06-01,cohort 2 only: chf
+2,61,2021-06-01,cohort 2 only: no conditions
+1,62,2021-06-01,cohort 1 and 2: copd
+2,62,2021-06-01,cohort 1 and 2: copd
+1,70,2021-06-01,none: no condition rows
+1,71,2021-06-01,none: only after the index
+1,80,2021-06-01,standard: child
+1,81,2021-06-01,standard: grandchild
+1,82,2021-06-01,standard: the ancestor itself
+1,83,2021-06-01,standard: under two ancestors
+1,84,2021-06-01,standard: unrelated concept
+1,85,2021-06-01,"standard and source, same domain"
+1,86,2021-06-01,standard chf and source copd on one row
+1,87,2021-06-01,standard: on the index day
+1,88,2021-06-01,standard: concept 0 with a source value
+1,1000,2021-06-01,probe elixhauser chf icd10
+1,1001,2021-06-01,probe elixhauser chf icd9
+1,1002,2021-06-01,probe elixhauser chf standard
+1,1003,2021-06-01,probe elixhauser arrhythmia icd10
+1,1004,2021-06-01,probe elixhauser arrhythmia icd9
+1,1005,2021-06-01,probe elixhauser arrhythmia standard
+1,1006,2021-06-01,probe elixhauser valvular icd10
+1,1007,2021-06-01,probe elixhauser valvular icd9
+1,1008,2021-06-01,probe elixhauser valvular standard
+1,1009,2021-06-01,probe elixhauser pulm_circ icd10
+1,1010,2021-06-01,probe elixhauser pulm_circ icd9
+1,1011,2021-06-01,probe elixhauser pulm_circ standard
+1,1012,2021-06-01,probe elixhauser pvd icd10
+1,1013,2021-06-01,probe elixhauser pvd icd9
+1,1014,2021-06-01,probe elixhauser pvd standard
+1,1015,2021-06-01,probe elixhauser htn_uncomp icd10
+1,1016,2021-06-01,probe elixhauser htn_uncomp icd9
+1,1017,2021-06-01,probe elixhauser htn_uncomp standard
+1,1018,2021-06-01,probe elixhauser htn_comp icd10
+1,1019,2021-06-01,probe elixhauser htn_comp icd9
+1,1020,2021-06-01,probe elixhauser htn_comp standard
+1,1021,2021-06-01,probe elixhauser paralysis icd10
+1,1022,2021-06-01,probe elixhauser paralysis icd9
+1,1023,2021-06-01,probe elixhauser paralysis standard
+1,1024,2021-06-01,probe elixhauser neuro_other icd10
+1,1025,2021-06-01,probe elixhauser neuro_other icd9
+1,1026,2021-06-01,probe elixhauser neuro_other standard
+1,1027,2021-06-01,probe elixhauser copd icd10
+1,1028,2021-06-01,probe elixhauser copd icd9
+1,1029,2021-06-01,probe elixhauser copd standard
+1,1030,2021-06-01,probe elixhauser dm_uncomp icd10
+1,1031,2021-06-01,probe elixhauser dm_uncomp icd9
+1,1032,2021-06-01,probe elixhauser dm_uncomp standard
+1,1033,2021-06-01,probe elixhauser dm_comp icd10
+1,1034,2021-06-01,probe elixhauser dm_comp icd9
+1,1035,2021-06-01,probe elixhauser dm_comp standard
+1,1036,2021-06-01,probe elixhauser hypothyroid icd10
+1,1037,2021-06-01,probe elixhauser hypothyroid icd9
+1,1038,2021-06-01,probe elixhauser hypothyroid standard
+1,1039,2021-06-01,probe elixhauser renal_failure icd10
+1,1040,2021-06-01,probe elixhauser renal_failure icd9
+1,1041,2021-06-01,probe elixhauser renal_failure standard
+1,1042,2021-06-01,probe elixhauser liver_disease icd10
+1,1043,2021-06-01,probe elixhauser liver_disease icd9
+1,1044,2021-06-01,probe elixhauser liver_disease standard
+1,1045,2021-06-01,probe elixhauser pud icd10
+1,1046,2021-06-01,probe elixhauser pud icd9
+1,1047,2021-06-01,probe elixhauser pud standard
+1,1048,2021-06-01,probe elixhauser hiv icd10
+1,1049,2021-06-01,probe elixhauser hiv icd9
+1,1050,2021-06-01,probe elixhauser hiv standard
+1,1051,2021-06-01,probe elixhauser lymphoma icd10
+1,1052,2021-06-01,probe elixhauser lymphoma icd9
+1,1053,2021-06-01,probe elixhauser lymphoma standard
+1,1054,2021-06-01,probe elixhauser mets icd10
+1,1055,2021-06-01,probe elixhauser mets icd9
+1,1056,2021-06-01,probe elixhauser mets standard
+1,1057,2021-06-01,probe elixhauser solid_tumor icd10
+1,1058,2021-06-01,probe elixhauser solid_tumor icd9
+1,1059,2021-06-01,probe elixhauser solid_tumor standard
+1,1060,2021-06-01,probe elixhauser rheumatic icd10
+1,1061,2021-06-01,probe elixhauser rheumatic icd9
+1,1062,2021-06-01,probe elixhauser rheumatic standard
+1,1063,2021-06-01,probe elixhauser coagulopathy icd10
+1,1064,2021-06-01,probe elixhauser coagulopathy icd9
+1,1065,2021-06-01,probe elixhauser coagulopathy standard
+1,1066,2021-06-01,probe elixhauser obesity icd10
+1,1067,2021-06-01,probe elixhauser obesity icd9
+1,1068,2021-06-01,probe elixhauser obesity standard
+1,1069,2021-06-01,probe elixhauser weight_loss icd10
+1,1070,2021-06-01,probe elixhauser weight_loss icd9
+1,1071,2021-06-01,probe elixhauser weight_loss standard
+1,1072,2021-06-01,probe elixhauser fluid_electrolyte icd10
+1,1073,2021-06-01,probe elixhauser fluid_electrolyte icd9
+1,1074,2021-06-01,probe elixhauser fluid_electrolyte standard
+1,1075,2021-06-01,probe elixhauser blood_loss_anemia icd10
+1,1076,2021-06-01,probe elixhauser blood_loss_anemia icd9
+1,1077,2021-06-01,probe elixhauser blood_loss_anemia standard
+1,1078,2021-06-01,probe elixhauser deficiency_anemia icd10
+1,1079,2021-06-01,probe elixhauser deficiency_anemia icd9
+1,1080,2021-06-01,probe elixhauser deficiency_anemia standard
+1,1081,2021-06-01,probe elixhauser alcohol_abuse icd10
+1,1082,2021-06-01,probe elixhauser alcohol_abuse icd9
+1,1083,2021-06-01,probe elixhauser alcohol_abuse standard
+1,1084,2021-06-01,probe elixhauser drug_abuse icd10
+1,1085,2021-06-01,probe elixhauser drug_abuse icd9
+1,1086,2021-06-01,probe elixhauser drug_abuse standard
+1,1087,2021-06-01,probe elixhauser psychoses icd10
+1,1088,2021-06-01,probe elixhauser psychoses icd9
+1,1089,2021-06-01,probe elixhauser psychoses standard
+1,1090,2021-06-01,probe elixhauser depression icd10
+1,1091,2021-06-01,probe elixhauser depression icd9
+1,1092,2021-06-01,probe elixhauser depression standard
+1,2000,2021-06-01,probe charlson mi icd10
+1,2001,2021-06-01,probe charlson mi icd9
+1,2002,2021-06-01,probe charlson mi standard
+1,2003,2021-06-01,probe charlson chf icd10
+1,2004,2021-06-01,probe charlson chf icd9
+1,2005,2021-06-01,probe charlson chf standard
+1,2006,2021-06-01,probe charlson pvd icd10
+1,2007,2021-06-01,probe charlson pvd icd9
+1,2008,2021-06-01,probe charlson pvd standard
+1,2009,2021-06-01,probe charlson cevd icd10
+1,2010,2021-06-01,probe charlson cevd icd9
+1,2011,2021-06-01,probe charlson cevd standard
+1,2012,2021-06-01,probe charlson dementia icd10
+1,2013,2021-06-01,probe charlson dementia icd9
+1,2014,2021-06-01,probe charlson dementia standard
+1,2015,2021-06-01,probe charlson copd icd10
+1,2016,2021-06-01,probe charlson copd icd9
+1,2017,2021-06-01,probe charlson copd standard
+1,2018,2021-06-01,probe charlson rheum icd10
+1,2019,2021-06-01,probe charlson rheum icd9
+1,2020,2021-06-01,probe charlson rheum standard
+1,2021,2021-06-01,probe charlson pud icd10
+1,2022,2021-06-01,probe charlson pud icd9
+1,2023,2021-06-01,probe charlson pud standard
+1,2024,2021-06-01,probe charlson mild_liver icd10
+1,2025,2021-06-01,probe charlson mild_liver icd9
+1,2026,2021-06-01,probe charlson mild_liver standard
+1,2027,2021-06-01,probe charlson dm_uncomp icd10
+1,2028,2021-06-01,probe charlson dm_uncomp icd9
+1,2029,2021-06-01,probe charlson dm_uncomp standard
+1,2030,2021-06-01,probe charlson dm_comp icd10
+1,2031,2021-06-01,probe charlson dm_comp icd9
+1,2032,2021-06-01,probe charlson dm_comp standard
+1,2033,2021-06-01,probe charlson plegia icd10
+1,2034,2021-06-01,probe charlson plegia icd9
+1,2035,2021-06-01,probe charlson plegia standard
+1,2036,2021-06-01,probe charlson renal icd10
+1,2037,2021-06-01,probe charlson renal icd9
+1,2038,2021-06-01,probe charlson renal standard
+1,2039,2021-06-01,probe charlson malignancy icd10
+1,2040,2021-06-01,probe charlson malignancy icd9
+1,2041,2021-06-01,probe charlson malignancy standard
+1,2042,2021-06-01,probe charlson mod_severe_liver icd10
+1,2043,2021-06-01,probe charlson mod_severe_liver icd9
+1,2044,2021-06-01,probe charlson mod_severe_liver standard
+1,2045,2021-06-01,probe charlson mets icd10
+1,2046,2021-06-01,probe charlson mets icd9
+1,2048,2021-06-01,probe charlson hiv icd10
+1,2049,2021-06-01,probe charlson hiv icd9
+1,2050,2021-06-01,probe charlson hiv standard

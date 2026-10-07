@@ -27,6 +27,7 @@ from omop_etl.cohort import (
     combine_cohorts,
     compute_attrition,
     create_cohort,
+    define_study_cohort,
     ensure_cohort_tables,
     get_cohort_summary,
     get_concept_ancestors,
@@ -35,8 +36,13 @@ from omop_etl.cohort import (
     prepare_competing_risks_data,
     resolve_concept_set,
 )
+from omop_etl.comorbidity import (
+    extract_charlson_index,
+    extract_elixhauser_comorbidities,
+)
 from omop_etl.dqd import (
     run_dqd,
+    sanitize_measurements,
 )
 from omop_etl.export import (
     export_cdm,
@@ -81,10 +87,12 @@ from omop_etl.table1 import (
 from omop_etl.vocabulary import (
     check_vocabulary_version,
     load_vocabulary,
+    omop_connect,
 )
 
 __all__ = [
     "attach_central_vocabulary",
+    "omop_connect",
     "build_schema",
     "create_federated_consortium",
     "etl_pcornet",
@@ -117,6 +125,7 @@ __all__ = [
     "get_concept_relationships",
     "resolve_concept_set",
     "create_cohort",
+    "define_study_cohort",
     "compute_attrition",
     "combine_cohorts",
     "get_cohort_summary",
@@ -126,6 +135,10 @@ __all__ = [
     "prepare_competing_risks_data",
     # DQD Engine
     "run_dqd",
+    "sanitize_measurements",
+    # Comorbidity Profilers
+    "extract_elixhauser_comorbidities",
+    "extract_charlson_index",
     # Feature Extractors & Concept Aggregators
     "extract_patient_features",
     "extract_temporal_features",
@@ -150,5 +163,5 @@ __all__ = [
     "export_cdm",
 ]
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
 
