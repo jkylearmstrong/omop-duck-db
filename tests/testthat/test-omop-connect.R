@@ -389,10 +389,11 @@ test_that("attaching is idempotent", {
   for (i in 1:3) omop_connect(con, vocab_db = s$vocab)
   expect_equal(sum(names(oc_dbs(con)) == "central_vocab"), 1)
   expect_equal(oc_n(con, "concept"), nrow(OC_CONCEPTS))
-  # the same file spelled differently (relative / backslashes) is the same attachment
+  # the same file spelled differently (relative / backslashes on Windows) is the same attachment
   withr::local_dir(s$dir)
   omop_connect(con, vocab_db = "central_vocabulary.duckdb")
-  omop_connect(con, vocab_db = gsub("/", "\\\\", s$vocab))
+  alt_vocab <- if (.Platform$OS.type == "windows") gsub("/", "\\\\", s$vocab) else s$vocab
+  omop_connect(con, vocab_db = alt_vocab)
   omop_connect(con) # auto-discovery on an already-attached connection is a no-op too
   expect_equal(sum(names(oc_dbs(con)) == "central_vocab"), 1)
 })

@@ -206,7 +206,14 @@ check_vocabulary_version <- function(con) {
 
 #' @keywords internal
 #' @noRd
-vocab_abs_path <- function(path) normalizePath(path, winslash = "/", mustWork = FALSE)
+vocab_abs_path <- function(path) {
+  if (is.character(path) && length(path) == 1L && !is.na(path)) {
+    if (.Platform$OS.type != "windows" && grepl("\\\\", path) && !file.exists(path)) {
+      path <- gsub("\\\\", "/", path)
+    }
+  }
+  normalizePath(path, winslash = "/", mustWork = FALSE)
+}
 
 #' @keywords internal
 #' @noRd
