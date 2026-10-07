@@ -591,6 +591,32 @@ def validate_table1_reconciliation(
     }
 
 
+def _format_markdown_table(df: pd.DataFrame) -> str:
+    try:
+        return df.to_markdown(index=False)
+    except Exception:
+        cols = [str(c) for c in df.columns]
+        header = "| " + " | ".join(cols) + " |"
+        sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+        rows = []
+        for row in df.itertuples(index=False):
+            rows.append("| " + " | ".join(str(val) if val is not None and not pd.isna(val) else "" for val in row) + " |")
+        return "\n".join([header, sep] + rows)
+
+
+def _format_latex_table(df: pd.DataFrame) -> str:
+    try:
+        return df.to_latex(index=False)
+    except Exception:
+        cols = [str(c) for c in df.columns]
+        align = "l" * len(cols)
+        header = " & ".join(cols) + " \\\\"
+        rows = []
+        for row in df.itertuples(index=False):
+            rows.append(" & ".join(str(val) if val is not None and not pd.isna(val) else "" for val in row) + " \\\\")
+        return "\\begin{tabular}{" + align + "}\n\\toprule\n" + header + "\n\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}\n"
+
+
 def export_table1(
     table1_result: dict[str, pd.DataFrame] | pd.DataFrame,
     output_path: str | Path | None = None,
@@ -615,11 +641,11 @@ def export_table1(
 
     fmt = format.lower().strip()
     if fmt in ("md", "markdown"):
-        content = df.to_markdown(index=False)
+        content = _format_markdown_table(df)
     elif fmt in ("tex", "latex"):
-        content = df.to_latex(index=False)
+        content = _format_latex_table(df)
     elif fmt in ("qmd", "quarto"):
-        md_text = df.to_markdown(index=False)
+        md_text = _format_markdown_table(df)
         content = f"```{{=markdown}}\n{md_text}\n```"
     elif fmt == "csv":
         content = df.to_csv(index=False)

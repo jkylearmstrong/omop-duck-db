@@ -1880,7 +1880,16 @@ class ConsortAttrition:
         return self.df
 
     def to_markdown(self) -> str:
-        return self.df.to_markdown(index=False)
+        try:
+            return self.df.to_markdown(index=False)
+        except Exception:
+            cols = [str(c) for c in self.df.columns]
+            header = "| " + " | ".join(cols) + " |"
+            sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+            rows = []
+            for row in self.df.itertuples(index=False):
+                rows.append("| " + " | ".join(str(val) if val is not None and not pd.isna(val) else "" for val in row) + " |")
+            return "\n".join([header, sep] + rows)
 
     def to_mermaid(self) -> str:
         """Render a Mermaid flowchart diagram (flowchart TD)."""
@@ -1903,7 +1912,16 @@ class ConsortAttrition:
 
     def to_latex(self, output_path: str | Path | None = None) -> str:
         """Render a LaTeX tabular representation."""
-        latex_str = self.df.to_latex(index=False)
+        try:
+            latex_str = self.df.to_latex(index=False)
+        except Exception:
+            cols = [str(c) for c in self.df.columns]
+            align = "l" * len(cols)
+            header = " & ".join(cols) + " \\\\"
+            rows = []
+            for row in self.df.itertuples(index=False):
+                rows.append(" & ".join(str(val) if val is not None and not pd.isna(val) else "" for val in row) + " \\\\")
+            latex_str = "\\begin{tabular}{" + align + "}\n\\toprule\n" + header + "\n\\midrule\n" + "\n".join(rows) + "\n\\bottomrule\n\\end{tabular}\n"
         if output_path:
             Path(output_path).write_text(latex_str, encoding="utf-8")
         return latex_str

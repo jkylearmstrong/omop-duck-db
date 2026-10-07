@@ -14,9 +14,14 @@ test_that("Phenotype bundles are correctly exposed", {
 })
 
 test_that("Bedside clinical risk scores compute correctly", {
-  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit({
+    unlink(db_path)
+    gc()
+  }, add = TRUE)
+  build_schema(db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
-  build_schema(con = con)
 
   DBI::dbExecute(con, "
     INSERT INTO person (person_id, gender_concept_id, year_of_birth, month_of_birth, day_of_birth, race_concept_id, ethnicity_concept_id)
@@ -69,9 +74,14 @@ test_that("Bedside clinical risk scores compute correctly", {
 })
 
 test_that("Core lab panel harmonizer extracts and winsorizes values", {
-  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit({
+    unlink(db_path)
+    gc()
+  }, add = TRUE)
+  build_schema(db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
-  build_schema(con = con)
 
   DBI::dbExecute(con, "
     INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)
@@ -101,9 +111,14 @@ test_that("Core lab panel harmonizer extracts and winsorizes values", {
 })
 
 test_that("CONSORT attrition generation and exporters work", {
-  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit({
+    unlink(db_path)
+    gc()
+  }, add = TRUE)
+  build_schema(db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
-  build_schema(con = con)
 
   DBI::dbExecute(con, "
     INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)
@@ -137,9 +152,14 @@ test_that("CONSORT attrition generation and exporters work", {
 })
 
 test_that("Treatment episodes collapse longitudinal exposures", {
-  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit({
+    unlink(db_path)
+    gc()
+  }, add = TRUE)
+  build_schema(db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
-  build_schema(con = con)
 
   DBI::dbExecute(con, "
     INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)
@@ -219,9 +239,14 @@ test_that("Cell suppression and cross-database discrepancy check work", {
 })
 
 test_that("Native CIRCE compiler compiles and executes cohort JSON", {
-  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit({
+    unlink(db_path)
+    gc()
+  }, add = TRUE)
+  build_schema(db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
-  build_schema(con = con)
 
   DBI::dbExecute(con, "
     INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)

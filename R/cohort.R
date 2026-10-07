@@ -1864,6 +1864,11 @@ generate_consort_attrition <- function(con = NULL,
   structure(df, class = c("consort_attrition", "data.frame"))
 }
 
+#' Convert Object to Mermaid Diagram
+#'
+#' @param x Object to convert.
+#' @param ... Additional arguments passed to methods.
+#' @return Character string containing the Mermaid diagram definition.
 #' @export
 to_mermaid <- function(x, ...) UseMethod("to_mermaid")
 
@@ -1890,6 +1895,11 @@ to_mermaid.consort_attrition <- function(x, ...) {
   paste(lines, collapse = "\n")
 }
 
+#' Convert Object to LaTeX Table
+#'
+#' @param x Object to convert.
+#' @param ... Additional arguments passed to methods.
+#' @return Character string containing the LaTeX code.
 #' @export
 to_latex <- function(x, ...) UseMethod("to_latex")
 
@@ -1918,6 +1928,11 @@ to_latex.default <- function(x, ...) {
   to_latex.data.frame(as.data.frame(x), ...)
 }
 
+#' Convert Object to Markdown Table
+#'
+#' @param x Object to convert.
+#' @param ... Additional arguments passed to methods.
+#' @return Character string containing the Markdown table.
 #' @export
 to_markdown <- function(x, ...) UseMethod("to_markdown")
 
