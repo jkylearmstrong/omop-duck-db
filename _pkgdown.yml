@@ -31,6 +31,8 @@ reference:
   desc: Federated CDM queries and multi-site metadata initialization.
   contents:
   - create_federated_consortium
+  - check_cross_database_discrepancy
+  - with_cell_suppression
   - load_care_site
   - load_cdm_source
   - load_location
@@ -40,6 +42,7 @@ reference:
   - import_source_to_concept_map
   - import_usagi_mappings
   - export_unmapped_codes
+  - auto_remap_unmapped
 - title: CDM table remapping
   desc: Retroactively update existing CDM tables to new vocabulary concepts.
   contents:
@@ -51,6 +54,9 @@ reference:
   - define_study_cohort
   - build_readmission_cohort
   - build_end_of_life_cohort
+  - build_treatment_episodes
+  - generate_consort_attrition
+  - to_mermaid
   - prepare_competing_risks_data
   - create_cohort
   - combine_cohorts
@@ -60,11 +66,21 @@ reference:
   - resolve_concept_set
   - get_concept_ancestors
   - get_concept_descendants
+- title: Native CIRCE cohort compiler
+  desc: In-process compilation and execution of OHDSI ATLAS / CIRCE JSON definitions in DuckDB.
+  contents:
+  - circe
+  - compile_circe_to_duckdb
+  - execute_circe_cohort
 - title: Comorbidity profiling and phenotyping
   desc: Validated 31 Elixhauser domains, Charlson comorbidity index, and composite risk scoring.
   contents:
   - extract_elixhauser_comorbidities
   - extract_charlson_index
+  - calculate_bedside_scores
+  - list_available_phenotypes
+  - get_phenotype_concept_set
+  - phenotypes
 - title: Machine learning feature extraction
   desc: Extract patient-level sparse concept matrices, windowed temporal features, and measurements.
   contents:
@@ -73,11 +89,14 @@ reference:
   - extract_temporal_features
   - aggregate_concept_sets
   - extract_measurements
+  - extract_standard_labs
+  - CORE_14_LAB_PANEL
 - title: Ecosystem bridges (HADES & tidymodels)
   desc: Interoperability with OHDSI HADES PatientLevelPrediction and R tidymodels / orbital scoring.
   contents:
   - hades_preflight
   - plp_database_details
+  - cm_database_details
   - as_plp_data
   - as_tidymodels_data
   - model_concepts
@@ -88,6 +107,9 @@ reference:
   - run_dqd
   - sanitize_measurements
   - generate_table1
+  - export_table1
+  - to_markdown
+  - to_latex
   - validate_table1_reconciliation
   - export_cdm
   - DEFAULT_LAB_LOINCS
