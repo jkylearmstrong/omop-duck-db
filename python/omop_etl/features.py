@@ -657,3 +657,110 @@ def extract_measurements(
         except ImportError:
             return res_df
     return res_df
+
+
+CORE_14_LAB_PANEL: dict[str, list[str]] = {
+    "bun": ["3094-0", "6299-2"],
+    "creatinine": ["2160-0", "38483-4"],
+    "sodium": ["2951-2", "2947-0"],
+    "potassium": ["2823-3", "6298-4"],
+    "chloride": ["2075-0"],
+    "bicarbonate": ["1963-8", "2028-9"],
+    "glucose": ["2345-7", "2339-0"],
+    "calcium": ["17861-6"],
+    "albumin": ["1751-7"],
+    "bilirubin_total": ["1975-2"],
+    "ast": ["1920-8"],
+    "alt": ["1742-6"],
+    "wbc": ["6690-2", "26464-8"],
+    "hemoglobin": ["718-7", "59260-0"],
+    "platelets": ["777-3", "26515-7"],
+    "hba1c": ["4548-4"],
+}
+
+PHYSIOLOGIC_LAB_BOUNDS: dict[str, tuple[float, float]] = {
+    "bun": (1.0, 250.0),
+    "creatinine": (0.1, 30.0),
+    "sodium": (100.0, 180.0),
+    "potassium": (1.5, 10.0),
+    "chloride": (60.0, 150.0),
+    "bicarbonate": (5.0, 60.0),
+    "glucose": (10.0, 1500.0),
+    "calcium": (2.0, 20.0),
+    "albumin": (0.5, 7.0),
+    "bilirubin_total": (0.1, 40.0),
+    "ast": (1.0, 5000.0),
+    "alt": (1.0, 5000.0),
+    "wbc": (0.1, 200.0),
+    "hemoglobin": (1.0, 25.0),
+    "platelets": (5.0, 2000.0),
+    "hba1c": (3.0, 25.0),
+}
+
+
+def extract_standard_labs(
+    con: duckdb.DuckDBPyConnection,
+    cohort_table: str = "cohort",
+    cohort_id: int | None = None,
+    panel: str = "core_14",
+    aggregation: str = "last_before_discharge",
+    window: str = "stay",
+    winsorize: bool | tuple[float, float] = True,
+    format: str = "df",
+) -> Any:
+    """Extract harmonized inpatient lab panels with outlier sanitization.
+
+    Args:
+        con: Active DuckDB connection.
+        cohort_table: Name of cohort table (default 'cohort').
+        cohort_id: Optional cohort definition ID filter.
+        panel: Standard lab panel to extract ('core_14').
+        aggregation: Aggregation strategy ('last_before_discharge', 'first_on_admission',
+                     'mean', 'median', 'min', 'max').
+        window: Windowing scope ('stay', 'lookback', 'all').
+        winsorize: True to clamp to physiologic bounds; tuple (low_q, high_q) for percentile
+                   winsorization; or False for raw values.
+        format: Output format ('df', 'arrow', 'polars').
+
+    Returns:
+        pd.DataFrame, pyarrow.Table, or polars.DataFrame.
+    """
+    if panel.lower() not in ("core_14", "core14", "default"):
+        raise ValueError(f"Unknown panel '{panel}'. Available panels: 'core_14'.")
+
+    df = extract_measurements(
+        con=con,
+        cohort_table=cohort_table,
+        cohort_id=cohort_id,
+        loinc_map=CORE_14_LAB_PANEL,
+        strategy=aggregation,
+        window=window,
+        format="df",
+    )
+
+    if winsorize is True:
+        for lab_col, (low, high) in PHYSIOLOGIC_LAB_BOUNDS.items():
+            if lab_col in df.columns:
+                df[lab_col] = df[lab_col].clip(lower=low, upper=high)
+    elif isinstance(winsorize, (tuple, list)) and len(winsorize) == 2:
+        low_q, high_q = winsorize
+        for col in df.columns:
+            if col not in ("subject_id", "cohort_start_date") and pd.api.types.is_numeric_dtype(df[col]):
+                series = df[col].dropna()
+                if len(series) > 0:
+                    q_min = series.quantile(low_q)
+                    q_max = series.quantile(high_q)
+                    df[col] = df[col].clip(lower=q_min, upper=q_max)
+
+    fmt = format.lower().strip()
+    if fmt in ("arrow", "pyarrow"):
+        import pyarrow as pa
+        return pa.Table.from_pandas(df)
+    if fmt == "polars":
+        try:
+            import polars as pl
+            return pl.from_pandas(df)
+        except ImportError:
+            return df
+    return df
+

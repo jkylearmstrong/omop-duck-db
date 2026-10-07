@@ -207,3 +207,93 @@ remap_all <- function(con, dry_run = FALSE, rebuild_eras = TRUE) {
 
   invisible(results)
 }
+
+#' Heuristic Remapping and Diagnostic Repair for Unmapped Records
+#'
+#' @param con Active DuckDB connection (DBI::dbConnect).
+#' @param table_name Clinical table name (e.g. `"condition_occurrence"`, `"measurement"`, `"drug_exposure"`).
+#' @param strip_formatting Logical indicating whether to strip periods and spaces (default `TRUE`).
+#' @param dry_run Logical indicating whether to calculate without updating (default `FALSE`).
+#' @return A list with `table`, `total_unmapped`, `remapped`, `remappable_rows`, and `dry_run`.
+#' @export
+auto_remap_unmapped <- function(con, table_name, strip_formatting = TRUE, dry_run = FALSE) {
+  tbl <- tolower(trimws(table_name))
+  if (!tbl %in% names(.TABLE_REMAP_CONFIG)) {
+    stop(sprintf("Unsupported table: %s. Choose from: %s", table_name,
+                 paste(names(.TABLE_REMAP_CONFIG), collapse = ", ")), call. = FALSE)
+  }
+
+  cfg <- .TABLE_REMAP_CONFIG[[tbl]]
+  concept_col <- cfg$concept_col
+  src_val_col <- cfg$source_value_col
+  src_concept_col <- cfg$source_concept_col
+  vocabs_str <- paste(sprintf("'%s'", cfg$default_vocabs), collapse = ", ")
+
+  clean_expr <- if (isTRUE(strip_formatting)) sprintf("UPPER(TRIM(REPLACE(%s, '.', '')))", src_val_col) else sprintf("UPPER(TRIM(%s))", src_val_col)
+  clean_code <- if (isTRUE(strip_formatting)) "UPPER(TRIM(REPLACE(c.concept_code, '.', '')))" else "UPPER(TRIM(c.concept_code))"
+
+  diag_sql <- sprintf("
+    CREATE OR REPLACE TEMPORARY VIEW _heuristic_remap_%s AS
+    WITH unmapped AS (
+        SELECT DISTINCT %s AS raw_source_val, %s AS clean_val
+        FROM %s
+        WHERE %s = 0 AND %s IS NOT NULL AND TRIM(%s) != ''
+    ),
+    matched AS (
+        SELECT
+            u.raw_source_val,
+            COALESCE(cr.concept_id_2, c.concept_id) AS target_concept_id,
+            c.concept_id AS source_concept_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY u.raw_source_val
+                ORDER BY CASE WHEN cr.concept_id_2 IS NOT NULL THEN 1 ELSE 2 END, c.concept_id
+            ) AS rn
+        FROM unmapped u
+        JOIN concept c ON %s = u.clean_val AND c.vocabulary_id IN (%s)
+        LEFT JOIN concept_relationship cr ON cr.concept_id_1 = c.concept_id AND cr.relationship_id = 'Maps to'
+    )
+    SELECT raw_source_val, target_concept_id, source_concept_id
+    FROM matched
+    WHERE rn = 1;
+  ", tbl, src_val_col, clean_expr, tbl, concept_col, src_val_col, src_val_col, clean_code, vocabs_str)
+
+  DBI::dbExecute(con, diag_sql)
+
+  counts <- DBI::dbGetQuery(con, sprintf("
+    SELECT
+        (SELECT COUNT(*) FROM %s WHERE %s = 0) AS total_unmapped,
+        COUNT(t.%s) AS remappable_rows
+    FROM %s t
+    JOIN _heuristic_remap_%s m ON t.%s = m.raw_source_val
+    WHERE t.%s = 0;
+  ", tbl, concept_col, concept_col, tbl, tbl, src_val_col, concept_col))
+
+  total_unmapped <- as.integer(counts$total_unmapped[[1]])
+  remappable_rows <- as.integer(counts$remappable_rows[[1]])
+
+  if (!dry_run && remappable_rows > 0) {
+    DBI::dbExecute(con, sprintf("
+      UPDATE %s
+      SET
+          %s = m.target_concept_id,
+          %s = CASE
+              WHEN m.source_concept_id IS NOT NULL AND m.source_concept_id != 0 THEN m.source_concept_id
+              ELSE %s
+          END
+      FROM _heuristic_remap_%s m
+      WHERE %s.%s = m.raw_source_val
+        AND %s.%s = 0;
+    ", tbl, concept_col, src_concept_col, src_concept_col, tbl, tbl, src_val_col, tbl, concept_col))
+  }
+
+  DBI::dbExecute(con, sprintf("DROP VIEW IF EXISTS _heuristic_remap_%s;", tbl))
+
+  list(
+    table = tbl,
+    total_unmapped = total_unmapped,
+    remapped = if (!dry_run) remappable_rows else 0L,
+    remappable_rows = remappable_rows,
+    dry_run = dry_run
+  )
+}
+

@@ -148,3 +148,124 @@ def create_federated_consortium(
             con.execute(view_sql)
 
     return con
+
+
+def with_cell_suppression(
+    con: duckdb.DuckDBPyConnection,
+    view_name: str,
+    output_view: Optional[str] = None,
+    min_cell_size: int = 10,
+    count_columns: Optional[list[str]] = None,
+    fill_value: str = "<10",
+) -> str:
+    """Creates a privacy-preserving view suppressing counts below min_cell_size.
+
+    Args:
+        con: Active DuckDB connection.
+        view_name: Source table or view to wrap.
+        output_view: Target view name (default: f"safe_{view_name}").
+        min_cell_size: Minimum cell threshold to display (default 10).
+        count_columns: List of count columns to redact (if None, auto-detects 'count' or 'n' columns).
+        fill_value: Replacement string for suppressed values (default '<10').
+
+    Returns:
+        str: Name of created privacy view.
+    """
+    target = output_view or f"safe_{view_name}"
+    cols_info = con.execute(f"DESCRIBE SELECT * FROM {view_name} LIMIT 0;").fetchall()
+    col_names = [c[0] for c in cols_info]
+
+    if count_columns is None:
+        target_counts = [
+            c for c in col_names if any(k in c.lower() for k in ("count", "n_patients", "n_subjects", "_n", "subjects"))
+        ]
+    else:
+        target_counts = count_columns
+
+    select_exprs = []
+    for col in col_names:
+        if col in target_counts:
+            select_exprs.append(
+                f"CASE WHEN CAST({col} AS DOUBLE) < {int(min_cell_size)} THEN '{fill_value}' "
+                f"ELSE CAST({col} AS VARCHAR) END AS {col}"
+            )
+        else:
+            select_exprs.append(col)
+
+    sql = f"""
+    CREATE OR REPLACE VIEW {target} AS
+    SELECT {', '.join(select_exprs)}
+    FROM {view_name};
+    """
+    con.execute(sql)
+    return target
+
+
+def check_cross_database_discrepancy(
+    con: duckdb.DuckDBPyConnection,
+    table_name: str = "condition_occurrence",
+    concept_col: str = "condition_concept_id",
+    top_n: int = 25,
+) -> dict:
+    """Compares concept prevalence and missingness divergence across federated sites.
+
+    Args:
+        con: Federated DuckDB connection with v_* views.
+        table_name: CDM table name (e.g. 'condition_occurrence', 'drug_exposure').
+        concept_col: Concept ID column to evaluate.
+        top_n: Number of top concepts to compare.
+
+    Returns:
+        dict: Summary containing cross_site_prevalence DataFrame and divergence metrics.
+    """
+    view = f"v_{table_name}"
+    # Calculate top overall concepts
+    top_concepts_df = con.execute(f"""
+        SELECT 
+            {concept_col} AS concept_id,
+            COUNT(*) AS total_count
+        FROM {view}
+        WHERE {concept_col} IS NOT NULL AND {concept_col} != 0
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT {int(top_n)}
+    """).df()
+
+    if len(top_concepts_df) == 0:
+        import pandas as pd
+        return {"prevalence": pd.DataFrame(), "sites": [], "evaluated_concepts": 0}
+
+    cids_str = ", ".join(str(int(c)) for c in top_concepts_df["concept_id"])
+
+    # Calculate site-stratified prevalence percentages
+    cross_df = con.execute(f"""
+        WITH site_totals AS (
+            SELECT site_anon, COUNT(*) AS site_total_rows
+            FROM {view}
+            GROUP BY 1
+        ),
+        site_concepts AS (
+            SELECT site_anon, {concept_col} AS concept_id, COUNT(*) AS concept_count
+            FROM {view}
+            WHERE {concept_col} IN ({cids_str})
+            GROUP BY 1, 2
+        )
+        SELECT 
+            sc.concept_id,
+            sc.site_anon,
+            sc.concept_count,
+            st.site_total_rows,
+            ROUND(sc.concept_count * 100.0 / st.site_total_rows, 3) AS prevalence_pct
+        FROM site_concepts sc
+        JOIN site_totals st ON sc.site_anon = st.site_anon
+        ORDER BY sc.concept_id, sc.site_anon;
+    """).df()
+
+    sites = sorted(list(cross_df["site_anon"].unique())) if len(cross_df) > 0 else []
+
+    return {
+        "prevalence": cross_df,
+        "sites": sites,
+        "evaluated_concepts": len(top_concepts_df),
+    }
+

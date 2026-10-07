@@ -589,3 +589,44 @@ def validate_table1_reconciliation(
         "feature_comparisons": pd.DataFrame(comparisons),
         "missing_features": missing_features,
     }
+
+
+def export_table1(
+    table1_result: dict[str, pd.DataFrame] | pd.DataFrame,
+    output_path: str | Path | None = None,
+    format: str = "markdown",
+    which_table: str = "table1",
+) -> str:
+    """Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, or CSV.
+
+    Args:
+        table1_result: Result dictionary from generate_table1 (or a DataFrame).
+        output_path: Optional file path to write to.
+        format: Export format: 'markdown', 'latex', 'quarto', 'csv'.
+        which_table: Key to export if dict: 'table1' or 'table1b'.
+
+    Returns:
+        str: Formatted text representation of the table.
+    """
+    if isinstance(table1_result, dict):
+        df = table1_result.get(which_table, next(iter(table1_result.values())))
+    else:
+        df = table1_result
+
+    fmt = format.lower().strip()
+    if fmt in ("md", "markdown"):
+        content = df.to_markdown(index=False)
+    elif fmt in ("tex", "latex"):
+        content = df.to_latex(index=False)
+    elif fmt in ("qmd", "quarto"):
+        md_text = df.to_markdown(index=False)
+        content = f"```{{=markdown}}\n{md_text}\n```"
+    elif fmt == "csv":
+        content = df.to_csv(index=False)
+    else:
+        raise ValueError(f"Unsupported format '{format}'. Use 'markdown', 'latex', 'quarto', or 'csv'.")
+
+    if output_path:
+        Path(output_path).write_text(content, encoding="utf-8")
+    return content
+

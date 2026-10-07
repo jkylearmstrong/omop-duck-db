@@ -499,3 +499,45 @@ validate_table1_reconciliation <- function(omop_table1,
     missing_features = missing_features
   )
 }
+
+#' Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, or CSV
+#'
+#' @param table1_result Result list from `generate_table1()` or a `data.frame`.
+#' @param output_path Optional file path to write output.
+#' @param format Output format (`"markdown"`, `"latex"`, `"quarto"`, `"csv"`).
+#' @param which_table Name of table to export (`"table1"` or `"table1b"`).
+#' @return Formatted character string.
+#' @export
+export_table1 <- function(table1_result,
+                          output_path = NULL,
+                          format = "markdown",
+                          which_table = "table1") {
+  df <- if (is.list(table1_result) && !is.data.frame(table1_result)) {
+    if (!is.null(table1_result[[which_table]])) table1_result[[which_table]] else table1_result[[1]]
+  } else {
+    table1_result
+  }
+
+  fmt <- tolower(trimws(format))
+  content <- if (fmt %in% c("md", "markdown")) {
+    to_markdown(df)
+  } else if (fmt %in% c("tex", "latex")) {
+    to_latex(df)
+  } else if (fmt %in% c("qmd", "quarto")) {
+    sprintf("```{=markdown}\n%s\n```", to_markdown(df))
+  } else if (fmt == "csv") {
+    raw_conn <- textConnection(NULL, "w")
+    utils::write.csv(df, raw_conn, row.names = FALSE)
+    txt <- textConnectionValue(raw_conn)
+    close(raw_conn)
+    paste(txt, collapse = "\n")
+  } else {
+    stop(sprintf("Unsupported format '%s'. Use 'markdown', 'latex', 'quarto', or 'csv'.", format), call. = FALSE)
+  }
+
+  if (!is.null(output_path)) {
+    writeLines(content, output_path)
+  }
+  content
+}
+

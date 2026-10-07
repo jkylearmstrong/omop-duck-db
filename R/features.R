@@ -602,3 +602,108 @@ extract_measurements <- function(con,
   res_df
 }
 
+#' Curated Core 14 Inpatient Lab Panel LOINCs
+#' @export
+CORE_14_LAB_PANEL <- list(
+  bun = c("3094-0", "6299-2"),
+  creatinine = c("2160-0", "38483-4"),
+  sodium = c("2951-2", "2947-0"),
+  potassium = c("2823-3", "6298-4"),
+  chloride = "2075-0",
+  bicarbonate = c("1963-8", "2028-9"),
+  glucose = c("2345-7", "2339-0"),
+  calcium = "17861-6",
+  albumin = "1751-7",
+  bilirubin_total = "1975-2",
+  ast = "1920-8",
+  alt = "1742-6",
+  wbc = c("6690-2", "26464-8"),
+  hemoglobin = c("718-7", "59260-0"),
+  platelets = c("777-3", "26515-7"),
+  hba1c = "4548-4"
+)
+
+.PHYSIOLOGIC_LAB_BOUNDS <- list(
+  bun = c(1.0, 250.0),
+  creatinine = c(0.1, 30.0),
+  sodium = c(100.0, 180.0),
+  potassium = c(1.5, 10.0),
+  chloride = c(60.0, 150.0),
+  bicarbonate = c(5.0, 60.0),
+  glucose = c(10.0, 1500.0),
+  calcium = c(2.0, 20.0),
+  albumin = c(0.5, 7.0),
+  bilirubin_total = c(0.1, 40.0),
+  ast = c(1.0, 5000.0),
+  alt = c(1.0, 5000.0),
+  wbc = c(0.1, 200.0),
+  hemoglobin = c(1.0, 25.0),
+  platelets = c(5.0, 2000.0),
+  hba1c = c(3.0, 25.0)
+)
+
+#' Extract Harmonized Inpatient Lab Panels with Outlier Sanitization
+#'
+#' @param con Active DuckDB connection (DBI::dbConnect).
+#' @param cohort_table Name of cohort table (default `"cohort"`).
+#' @param cohort_id Optional cohort definition ID filter.
+#' @param panel Standard lab panel to extract (default `"core_14"`).
+#' @param aggregation Aggregation strategy (`"last_before_discharge"`, `"first_on_admission"`,
+#'   `"mean"`, `"median"`, `"min"`, `"max"`).
+#' @param window Windowing scope (`"stay"`, `"lookback"`, `"all"`).
+#' @param winsorize Logical `TRUE` to clamp to physiologic bounds, numeric vector `c(low_q, high_q)`
+#'   for percentile winsorization, or `FALSE` for raw values.
+#' @param format Output format (`"df"`, `"arrow"`).
+#' @return A `data.frame` or `arrow::Table` of harmonized laboratory values.
+#' @export
+extract_standard_labs <- function(con,
+                                  cohort_table = "cohort",
+                                  cohort_id = NULL,
+                                  panel = "core_14",
+                                  aggregation = "last_before_discharge",
+                                  window = "stay",
+                                  winsorize = TRUE,
+                                  format = "df") {
+  if (!tolower(panel) %in% c("core_14", "core14", "default")) {
+    stop(sprintf("Unknown panel '%s'. Available: 'core_14'.", panel), call. = FALSE)
+  }
+
+  df <- extract_measurements(
+    con = con,
+    cohort_table = cohort_table,
+    cohort_id = cohort_id,
+    loinc_map = CORE_14_LAB_PANEL,
+    strategy = aggregation,
+    window = window,
+    format = "df"
+  )
+
+  if (isTRUE(winsorize)) {
+    for (nm in names(.PHYSIOLOGIC_LAB_BOUNDS)) {
+      if (nm %in% names(df) && is.numeric(df[[nm]])) {
+        b <- .PHYSIOLOGIC_LAB_BOUNDS[[nm]]
+        df[[nm]] <- pmax(b[1], pmin(b[2], df[[nm]]))
+      }
+    }
+  } else if (is.numeric(winsorize) && length(winsorize) == 2) {
+    low_q <- winsorize[1]
+    high_q <- winsorize[2]
+    for (col in names(df)) {
+      if (!col %in% c("subject_id", "cohort_start_date") && is.numeric(df[[col]])) {
+        v <- df[[col]][!is.na(df[[col]])]
+        if (length(v) > 0) {
+          qs <- stats::quantile(v, probs = c(low_q, high_q), na.rm = TRUE)
+          df[[col]] <- pmax(qs[1], pmin(qs[2], df[[col]]))
+        }
+      }
+    }
+  }
+
+  fmt <- tolower(trimws(format))
+  if (fmt == "arrow" && requireNamespace("arrow", quietly = TRUE)) {
+    return(arrow::as_arrow_table(df))
+  }
+  df
+}
+
+

@@ -1833,3 +1833,209 @@ prepare_competing_risks_data <- function(con,
   list(data = df, summary = summary)
 }
 
+#' Generate CONSORT Attrition Flowchart Object
+#'
+#' @param con Active DuckDB connection (optional if `cohort_data` carries attrition).
+#' @param cohort_data A data.frame with an `"attrition"` attribute, or an attrition table.
+#' @param cohort_id Evaluated cohort definition ID.
+#' @param steps Optional list of `list(step_name, query)` pairs.
+#' @return An object of class `consort_attrition` with methods `to_mermaid()`, `to_latex()`, `to_markdown()`.
+#' @export
+generate_consort_attrition <- function(con = NULL,
+                                       cohort_data = NULL,
+                                       cohort_id = 1L,
+                                       steps = NULL) {
+  df <- NULL
+  if (!is.null(steps)) {
+    if (is.null(con)) stop("Must provide `con` when `steps` is specified.", call. = FALSE)
+    df <- compute_attrition(con, cohort_id, steps)
+  } else if (!is.null(cohort_data)) {
+    if (!is.null(attr(cohort_data, "attrition"))) {
+      df <- attr(cohort_data, "attrition")
+    } else if (is.data.frame(cohort_data) && all(c("step_name", "subjects_retained") %in% names(cohort_data))) {
+      df <- cohort_data
+    }
+  }
+
+  if (is.null(df)) {
+    stop("Could not determine attrition data. Provide `steps` with `con`, or a data.frame with an 'attrition' attribute.", call. = FALSE)
+  }
+
+  structure(df, class = c("consort_attrition", "data.frame"))
+}
+
+#' @export
+to_mermaid <- function(x, ...) UseMethod("to_mermaid")
+
+#' @export
+to_mermaid.consort_attrition <- function(x, ...) {
+  lines <- c("flowchart TD")
+  for (i in seq_len(nrow(x))) {
+    idx <- as.integer(x$step_number[i])
+    name <- gsub('"', "'", as.character(x$step_name[i]))
+    retained <- format(as.numeric(x$subjects_retained[i]), big.mark = ",")
+    pct <- sprintf("%.1f", as.numeric(x$percent_retained[i]))
+    dropped <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+
+    lines <- c(lines, sprintf('    S%d["%d. %s<br/>(N = %s, %s%%)"]', idx, idx, name, retained, pct))
+    if (idx > 1) {
+      prev <- idx - 1L
+      lines <- c(lines, sprintf("    S%d --> S%d", prev, idx))
+      if (dropped > 0) {
+        lines <- c(lines, sprintf('    E%d["Excluded: %s"]', idx, format(dropped, big.mark = ",")))
+        lines <- c(lines, sprintf("    S%d -.-> E%d", prev, idx))
+      }
+    }
+  }
+  paste(lines, collapse = "\n")
+}
+
+#' @export
+to_latex <- function(x, ...) UseMethod("to_latex")
+
+#' @export
+to_latex.consort_attrition <- function(x, ...) {
+  cols <- names(x)
+  align <- paste(rep("l", length(cols)), collapse = "")
+  header <- paste(cols, collapse = " & ")
+  rows <- apply(x, 1, function(r) paste(r, collapse = " & "))
+  sprintf("\\begin{tabular}{%s}\n\\hline\n%s \\\\\n\\hline\n%s \\\\\n\\hline\n\\end{tabular}",
+          align, header, paste(rows, collapse = " \\\\\n"))
+}
+
+#' @export
+to_latex.data.frame <- function(x, ...) {
+  cols <- names(x)
+  align <- paste(rep("l", length(cols)), collapse = "")
+  header <- paste(cols, collapse = " & ")
+  rows <- apply(x, 1, function(r) paste(r, collapse = " & "))
+  sprintf("\\begin{table}[h!]\n\\centering\n\\begin{tabular}{%s}\n\\hline\n%s \\\\\n\\hline\n%s \\\\\n\\hline\n\\end{tabular}\n\\end{table}",
+          align, header, paste(rows, collapse = " \\\\\n"))
+}
+
+#' @export
+to_latex.default <- function(x, ...) {
+  to_latex.data.frame(as.data.frame(x), ...)
+}
+
+#' @export
+to_markdown <- function(x, ...) UseMethod("to_markdown")
+
+#' @export
+to_markdown.consort_attrition <- function(x, ...) {
+  cols <- names(x)
+  header <- paste0("| ", paste(cols, collapse = " | "), " |")
+  sep <- paste0("| ", paste(rep("---", length(cols)), collapse = " | "), " |")
+  rows <- apply(x, 1, function(r) paste0("| ", paste(r, collapse = " | "), " |"))
+  paste(c(header, sep, rows), collapse = "\n")
+}
+
+#' @export
+to_markdown.data.frame <- function(x, ...) {
+  cols <- names(x)
+  header <- paste0("| ", paste(cols, collapse = " | "), " |")
+  sep <- paste0("| ", paste(rep("---", length(cols)), collapse = " | "), " |")
+  rows <- apply(x, 1, function(r) paste0("| ", paste(r, collapse = " | "), " |"))
+  paste(c(header, sep, rows), collapse = "\n")
+}
+
+#' @export
+to_markdown.default <- function(x, ...) {
+  to_markdown.data.frame(as.data.frame(x), ...)
+}
+
+#' Collapse Longitudinal Medication Exposures into Continuous Treatment Episodes
+#'
+#' @param con Active DuckDB connection (DBI::dbConnect).
+#' @param target_table Source table (default `"drug_exposure"`).
+#' @param person_id_col Person ID column.
+#' @param concept_id_col Concept ID column.
+#' @param start_date_col Exposure start date column.
+#' @param end_date_col Exposure end date column.
+#' @param max_gap_days Maximum allowed gap days between refills (default 30).
+#' @param output_table Optional table to write to.
+#' @return A `data.frame` of continuous episodes.
+#' @export
+build_treatment_episodes <- function(con,
+                                     target_table = "drug_exposure",
+                                     person_id_col = "person_id",
+                                     concept_id_col = "drug_concept_id",
+                                     start_date_col = "drug_exposure_start_date",
+                                     end_date_col = "drug_exposure_end_date",
+                                     max_gap_days = 30L,
+                                     output_table = NULL) {
+  if (!inherits(con, "duckdb_connection")) stop("`con` must be a DuckDB connection.", call. = FALSE)
+
+  sql <- sprintf("
+    WITH clean_exposures AS (
+        SELECT
+            %s AS person_id,
+            %s AS concept_id,
+            CAST(%s AS DATE) AS start_date,
+            CAST(COALESCE(%s, %s) AS DATE) AS end_date
+        FROM %s
+        WHERE %s IS NOT NULL AND %s != 0
+    ),
+    ordered_exposures AS (
+        SELECT
+            person_id,
+            concept_id,
+            start_date,
+            end_date,
+            MAX(end_date) OVER (
+                PARTITION BY person_id, concept_id
+                ORDER BY start_date, end_date
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prev_max_end
+        FROM clean_exposures
+    ),
+    episode_flags AS (
+        SELECT
+            person_id,
+            concept_id,
+            start_date,
+            end_date,
+            CASE
+                WHEN prev_max_end IS NULL THEN 1
+                WHEN date_diff('day', prev_max_end, start_date) > %d THEN 1
+                ELSE 0
+            END AS is_new_episode
+        FROM ordered_exposures
+    ),
+    episode_numbered AS (
+        SELECT
+            person_id,
+            concept_id,
+            start_date,
+            end_date,
+            SUM(is_new_episode) OVER (
+                PARTITION BY person_id, concept_id
+                ORDER BY start_date, end_date
+            ) AS episode_id
+        FROM episode_flags
+    ),
+    episodes AS (
+        SELECT
+            person_id,
+            concept_id,
+            episode_id AS episode_number,
+            MIN(start_date) AS episode_start_date,
+            MAX(end_date) AS episode_end_date,
+            CAST(date_diff('day', MIN(start_date), MAX(end_date)) + 1 AS INTEGER) AS duration_days,
+            COUNT(*) AS exposure_count
+        FROM episode_numbered
+        GROUP BY person_id, concept_id, episode_id
+    )
+    SELECT * FROM episodes
+    ORDER BY person_id, concept_id, episode_number;
+  ", person_id_col, concept_id_col, start_date_col, end_date_col, start_date_col, target_table,
+     concept_id_col, concept_id_col, as.integer(max_gap_days))
+
+  if (!is.null(output_table)) {
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
+  }
+  DBI::dbGetQuery(con, sql)
+}
+
+

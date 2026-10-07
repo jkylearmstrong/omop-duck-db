@@ -1,3 +1,31 @@
+# omopduckdb 0.5.4
+
+### Pre-compiled OHDSI Phenotype Bundles & Native CIRCE Compiler
+- **Phenotype Library (`get_phenotype_concept_set`, `list_available_phenotypes`)**:
+  - Pre-compiled OHDSI-standard concept sets and ICD-10 source prefixes for core clinical conditions: Type 2 Diabetes, Heart Failure, Sepsis, COPD, Acute Kidney Injury, Atrial Fibrillation, Hypertension, and Ischemic Stroke.
+- **Native CIRCE Compiler (`compile_circe_to_duckdb`, `execute_circe_cohort`)**:
+  - Compiles ATLAS/CIRCE JSON cohort definitions directly to native DuckDB SQL without requiring Java or WebAPI runtime dependencies.
+
+### Bedside Clinical Risk Scores & Core Inpatient Lab Harmonizer
+- **Clinical Risk Scores (`calculate_bedside_scores`)**:
+  - Implemented in-engine computation for LACE Index, HOSPITAL Score, SOFA Score, and CHA2DS2-VASc risk stratifications directly from OMOP CDM tables.
+- **Core 14 Inpatient Lab Harmonizer (`extract_standard_labs`, `CORE_14_LAB_PANEL`)**:
+  - Standardized measurement extraction covering the 14 essential inpatient acute labs with physiologic outlier winsorization.
+
+### Study Attrition Reporting & Longitudinal Treatment Episodes
+- **CONSORT Flow Generator (`generate_consort_attrition`)**:
+  - Generates reproducible patient attrition funnels from sequential SQL criteria with automated rendering to Mermaid flowcharts, LaTeX tables, Markdown, and tabular data.
+- **Treatment Episode Collapser (`build_treatment_episodes`)**:
+  - Collapses longitudinal drug dispensing/exposure records into persistent treatment episodes with customizable gap thresholds (`max_gap_days`).
+
+### Reporting Exporters, Heuristic Remapping & Federation Auditing
+- **Publication Table 1 / Table 2 Exporters (`export_table1`)**:
+  - Multi-format exporter rendering baseline demographic and comorbidity comparison tables to Markdown, LaTeX, Quarto, and CSV formats.
+- **Heuristic Concept Remapping (`auto_remap_unmapped`)**:
+  - Automated repair and normalization for unmapped source values (dot stripping, spacing normalization, Athena mapping table lookups).
+- **Consortium Privacy & Discrepancy Auditing (`with_cell_suppression`, `check_cross_database_discrepancy`)**:
+  - Small-cell suppression wrapper for privacy-preserving federated analytics and cross-site vocabulary discrepancy auditing.
+
 # omopduckdb 0.5.3
 
 ### Transparent Central Vocabulary Single-Store & Connection Engine

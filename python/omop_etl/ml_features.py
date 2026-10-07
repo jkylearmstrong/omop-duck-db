@@ -464,6 +464,7 @@ def extract_sard_visit_tensors(
     anchor_date: str = "auto",
     washin_buffer_days: int = 0,
     washin_buffer_hours: int = 0,
+    dense_features: Any = None,
 ) -> dict:
     """Padded chronological visit tensors for SARD / omop-learn sequence models.
 
@@ -557,7 +558,7 @@ def extract_sard_visit_tensors(
         n_visits = np.zeros(n_rows, dtype=np.int32)
 
     cohort, y = _cohort_outputs(cohort_df)
-    return {
+    res = {
         "concept_tensor": tensor, "visit_lengths": visit_lengths, "n_visits": n_visits,
         "times": times, "visit_days_before_index": days_before,
         "concepts": vocab, "tokenizer": tokenizer, "cohort": cohort, "y": y,
@@ -566,6 +567,15 @@ def extract_sard_visit_tensors(
                    "include_index_date": include_index_date, "anchor_date": anchor_date,
                    "washin_buffer_days": washin_buffer_days, "washin_buffer_hours": washin_buffer_hours},
     }
+    if dense_features is not None:
+        if isinstance(dense_features, pd.DataFrame):
+            dense_arr = dense_features.to_numpy(dtype=np.float32)
+        else:
+            dense_arr = np.asarray(dense_features, dtype=np.float32)
+        if len(dense_arr) != n_rows:
+            raise ValueError(f"dense_features length ({len(dense_arr)}) must match cohort rows ({n_rows}).")
+        res["dense_features"] = dense_arr
+    return res
 
 
 def as_omop_learn_batch(result: dict) -> dict:
@@ -578,4 +588,65 @@ def as_omop_learn_batch(result: dict) -> dict:
              "lengths": result["n_visits"].astype(np.float32)}
     if result.get("y") is not None:
         batch["y"] = result["y"]
+    if result.get("dense_features") is not None:
+        batch["dense_features"] = result["dense_features"]
     return batch
+
+
+def arrow_to_pytorch(
+    query_or_table: Any,
+    con: duckdb.DuckDBPyConnection | None = None,
+    batch_size: int = 1024,
+    target_col: str | None = None,
+    feature_cols: Sequence[str] | None = None,
+) -> Any:
+    """Zero-copy stream from DuckDB via PyArrow directly into PyTorch TensorDataset or DataLoader.
+
+    Args:
+        query_or_table: SQL query string, PyArrow Table, RecordBatchReader, or DuckDB relation.
+        con: Active DuckDB connection (required if query_or_table is a SQL query).
+        batch_size: Batch size for DataLoader (default 1024).
+        target_col: Optional outcome/target column name.
+        feature_cols: Optional subset of feature column names.
+
+    Returns:
+        torch.utils.data.DataLoader: DataLoader yielding (X, y) or (X,) batches.
+    """
+    try:
+        import pyarrow as pa
+    except ImportError as exc:
+        raise ImportError("arrow_to_pytorch requires pyarrow: pip install pyarrow") from exc
+
+    try:
+        import torch
+        from torch.utils.data import DataLoader, TensorDataset
+    except ImportError as exc:
+        raise ImportError("arrow_to_pytorch requires torch: pip install torch") from exc
+
+    if isinstance(query_or_table, str):
+        if con is None:
+            raise ValueError("Must provide active DuckDB connection `con` when query_or_table is a SQL query.")
+        pa_table = con.execute(query_or_table).arrow()
+    elif hasattr(query_or_table, "arrow"):
+        pa_table = query_or_table.arrow()
+    elif isinstance(query_or_table, pa.Table):
+        pa_table = query_or_table
+    else:
+        raise TypeError(f"Unsupported query_or_table type: {type(query_or_table)}")
+
+    df = pa_table.to_pandas()
+    if target_col and target_col in df.columns:
+        y_vals = df[target_col].to_numpy()
+        y_tensor = torch.as_tensor(y_vals, dtype=torch.float32)
+        f_cols = [c for c in (feature_cols or df.columns) if c != target_col]
+        X_vals = df[f_cols].to_numpy(dtype=np.float32)
+        X_tensor = torch.as_tensor(X_vals, dtype=torch.float32)
+        dataset = TensorDataset(X_tensor, y_tensor)
+    else:
+        f_cols = list(feature_cols or df.columns)
+        X_vals = df[f_cols].to_numpy(dtype=np.float32)
+        X_tensor = torch.as_tensor(X_vals, dtype=torch.float32)
+        dataset = TensorDataset(X_tensor)
+
+    return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+

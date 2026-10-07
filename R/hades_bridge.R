@@ -173,6 +173,43 @@ plp_database_details <- function(db_path,
   )
 }
 
+#' CohortMethod database connection details for an omop-duck-db DuckDB file
+#'
+#' Provides native DuckDB DatabaseConnector details and schemas for OHDSI CohortMethod:
+#' `DatabaseConnector::createConnectionDetails(dbms = "duckdb", server = db_path)`.
+#'
+#' @param db_path Path to the DuckDB database file.
+#' @param cdm_database_schema Schema holding the CDM tables (default `"main"`).
+#' @param cohort_database_schema Schema holding the cohort table (default: the CDM schema).
+#' @param cohort_table Cohort table name in OHDSI format (default `"cohort"`).
+#' @param preflight Run [hades_preflight()] first and stop on failure (default `TRUE`).
+#' @return A list with `connectionDetails`, `cdmDatabaseSchema`, `cohortDatabaseSchema`, `cohortTable`.
+#' @export
+cm_database_details <- function(db_path,
+                                cdm_database_schema = "main",
+                                cohort_database_schema = cdm_database_schema,
+                                cohort_table = "cohort",
+                                preflight = TRUE) {
+  if (!requireNamespace("DatabaseConnector", quietly = TRUE)) {
+    stop("cm_database_details() needs the 'DatabaseConnector' package.", call. = FALSE)
+  }
+  if (isTRUE(preflight)) {
+    pf <- hades_preflight(db_path, cdm_database_schema, cohort_database_schema, cohort_table)
+    if (!isTRUE(attr(pf, "all_ok"))) {
+      bad <- pf[!pf$ok, ]
+      stop(sprintf("'%s' is not ready for HADES:\n%s\n(Use preflight = FALSE to skip this check.)", db_path,
+                   paste(sprintf("  - %s: %s", bad$check, bad$detail), collapse = "\n")), call. = FALSE)
+    }
+  }
+  list(
+    connectionDetails = DatabaseConnector::createConnectionDetails(dbms = "duckdb", server = db_path),
+    cdmDatabaseSchema = cdm_database_schema,
+    cohortDatabaseSchema = cohort_database_schema,
+    cohortTable = cohort_table
+  )
+}
+
+
 # FeatureExtraction analysis ids for the long-term occurrence analyses; reusing them makes covariate ids
 # (concept_id * 1000 + analysis_id) identical to natively extracted ones when the window matches.
 .plp_analysis <- list(

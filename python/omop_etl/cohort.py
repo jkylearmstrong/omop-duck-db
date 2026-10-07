@@ -1866,3 +1866,185 @@ def prepare_competing_risks_data(
     return df, summary
 
 
+class ConsortAttrition:
+    """Represents a CONSORT/STROBE participant attrition flow with multi-format exporters."""
+
+    def __init__(self, df: pd.DataFrame):
+        self.df = df.copy()
+
+    @property
+    def summary_table(self) -> pd.DataFrame:
+        return self.df
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return self.df
+
+    def to_markdown(self) -> str:
+        return self.df.to_markdown(index=False)
+
+    def to_mermaid(self) -> str:
+        """Render a Mermaid flowchart diagram (flowchart TD)."""
+        lines = ["flowchart TD"]
+        for _, row in self.df.iterrows():
+            idx = int(row["step_number"])
+            name = str(row["step_name"]).replace('"', "'")
+            retained = int(row["subjects_retained"])
+            pct = float(row.get("percent_retained", 100.0))
+            dropped = int(row.get("subjects_dropped", 0))
+
+            lines.append(f'    S{idx}["{idx}. {name}<br/>(N = {retained:,}, {pct:.1f}%)"]')
+            if idx > 1:
+                prev = idx - 1
+                lines.append(f"    S{prev} --> S{idx}")
+                if dropped > 0:
+                    lines.append(f'    E{idx}["Excluded: {dropped:,}"]')
+                    lines.append(f"    S{prev} -.-> E{idx}")
+        return "\n".join(lines)
+
+    def to_latex(self, output_path: str | Path | None = None) -> str:
+        """Render a LaTeX tabular representation."""
+        latex_str = self.df.to_latex(index=False)
+        if output_path:
+            Path(output_path).write_text(latex_str, encoding="utf-8")
+        return latex_str
+
+
+def generate_consort_attrition(
+    con: duckdb.DuckDBPyConnection | None = None,
+    cohort_data: Any = None,
+    cohort_id: int = 1,
+    steps: Sequence[tuple[str, str]] | None = None,
+) -> ConsortAttrition:
+    """Generate CONSORT attrition flowchart object with Mermaid and LaTeX exporters.
+
+    Args:
+        con: Active DuckDB connection (required if steps are provided).
+        cohort_data: Either a DataFrame with an 'attrition' attribute, an existing
+            attrition DataFrame, or a Cohort object.
+        cohort_id: Cohort ID evaluated when evaluating raw steps.
+        steps: Optional list of (step_name, query) tuples evaluated via compute_attrition.
+
+    Returns:
+        ConsortAttrition: Object with .to_mermaid(), .to_latex(), .to_markdown(), and .to_dataframe().
+    """
+    if steps is not None:
+        if con is None:
+            raise ValueError("Must provide active DuckDB connection `con` when `steps` is provided.")
+        df = compute_attrition(con, cohort_id, steps)
+        return ConsortAttrition(df)
+
+    if isinstance(cohort_data, pd.DataFrame):
+        if "attrition" in getattr(cohort_data, "attrs", {}):
+            return ConsortAttrition(cohort_data.attrs["attrition"])
+        if "step_name" in cohort_data.columns and "subjects_retained" in cohort_data.columns:
+            return ConsortAttrition(cohort_data)
+
+    if hasattr(cohort_data, "attrition"):
+        att = getattr(cohort_data, "attrition")
+        if isinstance(att, pd.DataFrame):
+            return ConsortAttrition(att)
+
+    raise ValueError(
+        "Could not extract attrition data. Provide `steps` with `con`, or a cohort DataFrame with an 'attrition' attribute."
+    )
+
+
+def build_treatment_episodes(
+    con: duckdb.DuckDBPyConnection,
+    target_table: str = "drug_exposure",
+    person_id_col: str = "person_id",
+    concept_id_col: str = "drug_concept_id",
+    start_date_col: str = "drug_exposure_start_date",
+    end_date_col: str = "drug_exposure_end_date",
+    max_gap_days: int = 30,
+    output_table: str | None = None,
+) -> pd.DataFrame:
+    """Collapses discrete medication exposures into continuous treatment episodes (eras).
+
+    Allows a configurable grace period (max_gap_days) between consecutive refills.
+
+    Args:
+        con: Active DuckDB connection.
+        target_table: Source table (default 'drug_exposure').
+        person_id_col: Person identifier column.
+        concept_id_col: Concept identifier column (e.g. drug_concept_id).
+        start_date_col: Exposure start date column.
+        end_date_col: Exposure end date column.
+        max_gap_days: Maximum permissible gap between exposure end and subsequent start (default 30).
+        output_table: Optional name of temporary or permanent table to create with results.
+
+    Returns:
+        pd.DataFrame: Table with columns [person_id, concept_id, episode_number,
+            episode_start_date, episode_end_date, duration_days, exposure_count].
+    """
+    sql = f"""
+    WITH clean_exposures AS (
+        SELECT 
+            {person_id_col} AS person_id,
+            {concept_id_col} AS concept_id,
+            CAST({start_date_col} AS DATE) AS start_date,
+            CAST(COALESCE({end_date_col}, {start_date_col}) AS DATE) AS end_date
+        FROM {target_table}
+        WHERE {concept_id_col} IS NOT NULL AND {concept_id_col} != 0
+    ),
+    ordered_exposures AS (
+        SELECT 
+            person_id,
+            concept_id,
+            start_date,
+            end_date,
+            MAX(end_date) OVER (
+                PARTITION BY person_id, concept_id 
+                ORDER BY start_date, end_date
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prev_max_end
+        FROM clean_exposures
+    ),
+    episode_flags AS (
+        SELECT 
+            person_id,
+            concept_id,
+            start_date,
+            end_date,
+            CASE 
+                WHEN prev_max_end IS NULL THEN 1
+                WHEN date_diff('day', prev_max_end, start_date) > {int(max_gap_days)} THEN 1
+                ELSE 0
+            END AS is_new_episode
+        FROM ordered_exposures
+    ),
+    episode_numbered AS (
+        SELECT 
+            person_id,
+            concept_id,
+            start_date,
+            end_date,
+            SUM(is_new_episode) OVER (
+                PARTITION BY person_id, concept_id 
+                ORDER BY start_date, end_date
+            ) AS episode_id
+        FROM episode_flags
+    ),
+    episodes AS (
+        SELECT 
+            person_id,
+            concept_id,
+            episode_id AS episode_number,
+            MIN(start_date) AS episode_start_date,
+            MAX(end_date) AS episode_end_date,
+            CAST(date_diff('day', MIN(start_date), MAX(end_date)) + 1 AS INTEGER) AS duration_days,
+            COUNT(*) AS exposure_count
+        FROM episode_numbered
+        GROUP BY person_id, concept_id, episode_id
+    )
+    SELECT * FROM episodes
+    ORDER BY person_id, concept_id, episode_number;
+    """
+
+    if output_table:
+        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        return con.execute(f"SELECT * FROM {output_table}").df()
+    return con.execute(sql).df()
+
+
+

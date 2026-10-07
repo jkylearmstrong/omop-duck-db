@@ -206,3 +206,99 @@ def remap_all(con, dry_run=False, rebuild_eras=True):
         build_drug_era(con)
 
     return results
+
+
+def auto_remap_unmapped(
+    con,
+    table_name: str,
+    strip_formatting: bool = True,
+    dry_run: bool = False,
+) -> dict:
+    """Heuristic remapping and diagnostic repair for unmapped (concept_id = 0) records.
+
+    Normalizes source code strings (stripping periods, spaces, punctuation) and searches
+    Athena concept codes and relationships for matching standard concepts.
+
+    Args:
+        con: Active DuckDB connection.
+        table_name: Clinical table name (e.g. 'condition_occurrence', 'measurement', 'drug_exposure').
+        strip_formatting: Whether to strip periods and whitespace for fuzzy matching (default True).
+        dry_run: If True, returns diagnostic counts without executing the update.
+
+    Returns:
+        dict: Summary of unmapped rows inspected and remapped.
+    """
+    tbl = table_name.lower().strip()
+    if tbl not in TABLE_REMAP_CONFIG:
+        raise ValueError(f"Unsupported table: {table_name}. Choose from: {list(TABLE_REMAP_CONFIG.keys())}")
+
+    cfg = TABLE_REMAP_CONFIG[tbl]
+    concept_col = cfg["concept_col"]
+    src_val_col = cfg["source_value_col"]
+    src_concept_col = cfg["source_concept_col"]
+    vocabs_str = ", ".join(f"'{v}'" for v in cfg["default_vocabs"])
+
+    clean_expr = f"UPPER(TRIM(REPLACE({src_val_col}, '.', '')))" if strip_formatting else f"UPPER(TRIM({src_val_col}))"
+    clean_code = "UPPER(TRIM(REPLACE(c.concept_code, '.', '')))" if strip_formatting else "UPPER(TRIM(c.concept_code))"
+
+    diag_sql = f"""
+    CREATE OR REPLACE TEMPORARY VIEW _heuristic_remap_{tbl} AS
+    WITH unmapped AS (
+        SELECT DISTINCT {src_val_col} AS raw_source_val, {clean_expr} AS clean_val
+        FROM {tbl}
+        WHERE {concept_col} = 0 AND {src_val_col} IS NOT NULL AND TRIM({src_val_col}) != ''
+    ),
+    matched AS (
+        SELECT 
+            u.raw_source_val,
+            COALESCE(cr.concept_id_2, c.concept_id) AS target_concept_id,
+            c.concept_id AS source_concept_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY u.raw_source_val 
+                ORDER BY CASE WHEN cr.concept_id_2 IS NOT NULL THEN 1 ELSE 2 END, c.concept_id
+            ) AS rn
+        FROM unmapped u
+        JOIN concept c ON {clean_code} = u.clean_val AND c.vocabulary_id IN ({vocabs_str})
+        LEFT JOIN concept_relationship cr ON cr.concept_id_1 = c.concept_id AND cr.relationship_id = 'Maps to'
+    )
+    SELECT raw_source_val, target_concept_id, source_concept_id
+    FROM matched
+    WHERE rn = 1;
+    """
+    con.execute(diag_sql)
+
+    counts = con.execute(f"""
+        SELECT 
+            (SELECT COUNT(*) FROM {tbl} WHERE {concept_col} = 0) AS total_unmapped,
+            COUNT(t.{concept_col}) AS remappable_rows
+        FROM {tbl} t
+        JOIN _heuristic_remap_{tbl} m ON t.{src_val_col} = m.raw_source_val
+        WHERE t.{concept_col} = 0;
+    """).fetchone()
+
+    total_unmapped, remappable_rows = counts[0], counts[1]
+
+    if not dry_run and remappable_rows > 0:
+        con.execute(f"""
+            UPDATE {tbl}
+            SET 
+                {concept_col} = m.target_concept_id,
+                {src_concept_col} = CASE 
+                    WHEN m.source_concept_id IS NOT NULL AND m.source_concept_id != 0 THEN m.source_concept_id 
+                    ELSE {src_concept_col} 
+                END
+            FROM _heuristic_remap_{tbl} m
+            WHERE {tbl}.{src_val_col} = m.raw_source_val
+              AND {tbl}.{concept_col} = 0;
+        """)
+
+    con.execute(f"DROP VIEW IF EXISTS _heuristic_remap_{tbl};")
+
+    return {
+        "table": tbl,
+        "total_unmapped": total_unmapped,
+        "remapped": remappable_rows if not dry_run else 0,
+        "remappable_rows": remappable_rows,
+        "dry_run": dry_run,
+    }
+
