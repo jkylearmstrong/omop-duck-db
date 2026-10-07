@@ -72,38 +72,69 @@ etl_pcornet <- function(
 #' Attach a Central Vocabulary Database via DuckDB Zero-Copy Views
 #'
 #' Attaches an existing DuckDB database containing Athena vocabulary tables in
-#' read-only mode and registers zero-copy views, avoiding copying 10-15 GB of
-#' vocabulary tables into each site CDM database.
+#' read-only mode as `central_vocab` and registers zero-copy views, avoiding copying
+#' 10-15 GB of vocabulary tables into each site CDM database.
+#'
+#' The function is idempotent: when that same file is already attached on `con` (by an
+#' earlier call, or by [omop_connect()]) the `ATTACH` is skipped and the views are
+#' (re)created, so it can be called before or after [omop_connect()] on one connection.
+#' A *different* database already attached as `central_vocab` is an error.
 #'
 #' @param con Active DuckDB DBI connection.
-#' @param vocab_db_path Path to the existing DuckDB database containing vocabulary tables.
+#' @param vocab_db_path Path to the existing DuckDB database containing vocabulary tables
+#'   (a leading `~` is expanded).
 #' @param temporary Logical. If `TRUE` (default), creates temporary views for the current
-#'   session. If `FALSE`, creates persistent views in the database.
+#'   session. If `FALSE`, replaces a local table of the same name in the connection's
+#'   current schema by a persistent view stored in the database (an existing view is simply
+#'   replaced, so re-running is safe).
 #' @return Invisibly, `con`.
+#' @seealso [omop_connect()]
 #' @export
 attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
   if (!file.exists(vocab_db_path)) {
     stop("Central vocabulary database not found: ", vocab_db_path)
   }
-  normalized_path <- gsub("\\\\", "/", normalizePath(vocab_db_path, mustWork = TRUE))
-  DBI::dbExecute(con, sprintf("ATTACH '%s' AS central_vocab (READ_ONLY);", normalized_path))
-  vocab_tables <- c(
-    "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
-    "vocabulary", "relationship", "concept_class", "domain", "drug_strength"
-  )
-  for (tbl in vocab_tables) {
-    has_tbl <- DBI::dbGetQuery(
-      con,
-      sprintf("SELECT 1 FROM information_schema.tables WHERE table_catalog = 'central_vocab' AND table_name = '%s'", tbl)
+  normalized_path <- vocab_abs_path(vocab_db_path)
+  attached <- attached_central_vocab(con)
+  if (is.null(attached)) {
+    DBI::dbExecute(con, sprintf(
+      "ATTACH %s AS %s (READ_ONLY);", DBI::dbQuoteString(con, normalized_path), .CENTRAL_VOCAB_ALIAS
+    ))
+  } else if (!same_file(attached, normalized_path)) {
+    stop(
+      "A different database is already attached as '", .CENTRAL_VOCAB_ALIAS, "' (",
+      if (nzchar(attached)) attached else "no file path", "); cannot attach ", normalized_path,
+      " under the same name.",
+      call. = FALSE
     )
-    if (nrow(has_tbl) > 0) {
-      if (temporary) {
-        DBI::dbExecute(con, sprintf("CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT * FROM central_vocab.%s;", tbl, tbl))
-      } else {
-        try(DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s CASCADE;", tbl)), silent = TRUE)
-        DBI::dbExecute(con, sprintf("CREATE OR REPLACE VIEW %s AS SELECT * FROM central_vocab.%s;", tbl, tbl))
-      }
+  }
+  where <- DBI::dbGetQuery(con, "SELECT current_database() AS db, current_schema() AS sch")
+  for (tbl in .CENTRAL_VOCAB_TABLES) {
+    has_tbl <- DBI::dbGetQuery(con, sprintf(
+      "SELECT 1 FROM information_schema.tables WHERE table_catalog = %s AND table_name = %s",
+      DBI::dbQuoteString(con, .CENTRAL_VOCAB_ALIAS), DBI::dbQuoteString(con, tbl)
+    ))
+    if (nrow(has_tbl) == 0) next
+    central_rel <- paste0(.CENTRAL_VOCAB_ALIAS, ".", DBI::dbQuoteIdentifier(con, tbl))
+    if (temporary) {
+      DBI::dbExecute(con, sprintf(
+        "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT * FROM %s;", DBI::dbQuoteIdentifier(con, tbl), central_rel
+      ))
+      next
     }
+    # Persistent: swap a local table for a view. The target is named in full, so a TEMP view of the same name
+    # (e.g. one omop_connect() added) can neither be hit by the DROP nor hide the persistent view, and a view
+    # left by an earlier call is replaced (DROP TABLE would reject it).
+    target <- paste(
+      vapply(c(where$db[[1]], where$sch[[1]], tbl), function(x) as.character(DBI::dbQuoteIdentifier(con, x)), ""),
+      collapse = "."
+    )
+    is_table <- DBI::dbGetQuery(con, sprintf(
+      "SELECT 1 FROM duckdb_tables() WHERE database_name = %s AND schema_name = %s AND lower(table_name) = %s",
+      DBI::dbQuoteString(con, where$db[[1]]), DBI::dbQuoteString(con, where$sch[[1]]), DBI::dbQuoteString(con, tbl)
+    ))
+    if (nrow(is_table) > 0) DBI::dbExecute(con, sprintf("DROP TABLE %s CASCADE;", target))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE VIEW %s AS SELECT * FROM %s;", target, central_rel))
   }
   cat("Attached central vocabulary from ", vocab_db_path, " with zero-copy views.\n", sep = "")
   invisible(con)

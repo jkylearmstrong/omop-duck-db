@@ -474,36 +474,43 @@ def get_cohort_summary(
 #
 # One parameterised SQL generator shared by define_study_cohort, build_readmission_cohort and
 # build_end_of_life_cohort. The two legacy builders are thin wrappers that pin the conventions they have
-# always used (see _READMISSION_CONVENTIONS / _END_OF_LIFE_CONVENTIONS); the golden-file tests in
-# tests/test_define_study_cohort.py guarantee their results did not change.
+# always used (see _READMISSION_CONVENTIONS / _END_OF_LIFE_CONVENTIONS and the legacy option values passed in
+# build_readmission_cohort / build_end_of_life_cohort); the golden-file tests in tests/test_define_study_cohort.py
+# guarantee their results did not change, apart from the 0.5.3 death-concept fix.
+# define_study_cohort defaults to the corrected behaviour of every option that differs from the legacy one.
 # ======================================================================================================
 
 _VISIT_TYPE_CONCEPTS = {"inpatient": (9201,), "emergency": (9203,), "outpatient": (9202,)}
 _SAMPLING_RULES = ("first", "last", "random")
 _AGE_METHODS = ("year_difference", "completed_years")
+_WASHIN_FALLBACKS = ("no_observation_period", "always", "never")
 _DEATH_SOURCES = ("death_table", "discharge_disposition")
 _FOLLOWUP_EVIDENCE = ("observation_period", "visit", "measurement", "condition", "drug", "death")
 _MORTALITY_TYPES = ("in_hospital", "post_discharge", "fixed_window", "composite_readmit_or_death")
 _STUDY_TMP_TABLE = "_study_cohort_tmp"
+_INPATIENT_CONCEPT = 9201
+# SNOMED 'Patient died'. 4155309 (written by this package's PCORnet ETL for discharge against medical advice) is
+# 'Ileal part' in Athena and is NOT a death: it is deliberately absent from every default death-disposition set.
+_DEATH_DISCHARGE_CONCEPT = 4216643
 
 # Conventions of build_readmission_cohort: only the index stay's own discharge disposition ('Patient died')
 # and the death table count as death; follow-up is evidenced by later encounters or clinical records.
 _READMISSION_CONVENTIONS = {
-    "death_ids": (4216643,),
+    "death_ids": (_DEATH_DISCHARGE_CONCEPT,),
     "death_sources": ("death_table",),
     "evidence": ("visit", "measurement", "condition", "drug"),
 }
 # Conventions of build_end_of_life_cohort: death is the earliest date across the death table and every
 # visit discharged to a death concept; follow-up is also evidenced by observation periods and by a death
-# at/after the horizon. NOTE: 4155309 is kept for backwards compatibility only. In the Athena vocabulary it is
-# 'Ileal part' (an anatomic site), while this package's PCORnet ETL writes it for 'discharged against medical
-# advice'. Pass death_discharge_concept_ids=(4216643,) to count only 'Patient died'.
+# at/after the horizon. Before 0.5.3 the death concepts also included 4155309; that was a bug (see above). Pass
+# death_ids=(4216643, 4155309) to reproduce the old results.
 _END_OF_LIFE_CONVENTIONS = {
-    "death_ids": (4216643, 4155309),
+    "death_ids": (_DEATH_DISCHARGE_CONCEPT,),
     "death_sources": _DEATH_SOURCES,
     "evidence": _FOLLOWUP_EVIDENCE,
 }
-# (outcome family) -> (min_los_days, exclude_in_hospital_death) used when the caller passes "auto"
+# (outcome family) -> (min_los_days, exclude_in_hospital_death) used when the caller passes "auto". The minimum
+# length of stay only applies to inpatient index stays: see _auto_min_los.
 _AUTO_STAY_RULES = {
     "none": (1, True),
     "readmission": (1, True),
@@ -513,6 +520,7 @@ _AUTO_STAY_RULES = {
     "fixed_window": (None, False),
 }
 _MORTALITY_FAMILIES = ("in_hospital", "post_discharge", "fixed_window", "composite")
+_EARLY_DEATH_FAMILIES = ("post_discharge", "fixed_window", "composite")
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -521,7 +529,12 @@ _ALL_CAUSE_RE = re.compile(r"^all_cause_readmission(?:_(\d+)d)?$")
 
 @dataclass(frozen=True)
 class _StudySpec:
-    """Fully resolved, validated definition handed to the SQL generators."""
+    """Fully resolved, validated definition handed to the SQL generators.
+
+    The defaults are the corrected 0.5.3 behaviour of ``define_study_cohort``; the legacy builders pin the
+    pre-0.5.3 value of every option that differs (``age_method="year_difference"``, ``washin_fallback="always"``,
+    ``death_verifies_followup=False``, ``exclude_early_death=False``) so their results stay identical.
+    """
 
     cohort_id: int
     outcome: str  # none | readmission | in_hospital | post_discharge | fixed_window | composite
@@ -532,16 +545,20 @@ class _StudySpec:
     study_start: str | None = None
     study_end: str | None = None
     min_age: int | None = 18
-    age_method: str = "year_difference"
+    age_method: str = "completed_years"
     min_los_days: int | None = 1
     washin_days: int = 365
+    washin_fallback: str = "no_observation_period"
     exclude_death: bool = True
-    death_ids: tuple[int, ...] = (4216643,)
+    exclude_early_death: bool = True
+    death_ids: tuple[int, ...] = (_DEATH_DISCHARGE_CONCEPT,)
     death_sources: tuple[str, ...] = ("death_table",)
     window_days: int | None = 30
     gap_days: int = 0
     verified: bool = True
+    death_verifies_followup: bool = True
     evidence: tuple[str, ...] = _FOLLOWUP_EVIDENCE
+    episode_merge_days: int | None = None
     rule: str = "random"
     seed: int = 42
 
@@ -584,6 +601,18 @@ def _study_order_by(rule: str, seed: int) -> str:
     raise ValueError(f"Unsupported sampling rule '{rule}'. Use 'first', 'last', or 'random'.")
 
 
+def _auto_min_los(outcome: str, visit_ids: tuple[int, ...] | None) -> int | None:
+    """The ``"auto"`` minimum length of stay: the outcome family's rule for inpatient index stays, 0 otherwise.
+
+    A 1-day minimum is what makes a visit an admission; applying it to emergency, outpatient or mixed index visit
+    types would remove every same-day visit and silently return an empty cohort.
+    """
+    base = _AUTO_STAY_RULES[outcome][0]
+    if not base:  # None (fixed-window mortality: no restriction) or 0 (in-hospital mortality)
+        return base
+    return base if visit_ids is not None and tuple(visit_ids) == (_INPATIENT_CONCEPT,) else 0
+
+
 def _study_age_expr(spec: _StudySpec) -> str:
     dob = "make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1))"
     fn = "date_diff" if spec.age_method == "year_difference" else "date_sub"
@@ -598,6 +627,27 @@ def _study_anchor(spec: _StudySpec) -> str:
 def _study_followup_applicable(spec: _StudySpec) -> bool:
     """Verified follow-up needs a horizon and is not defined for in-hospital outcomes."""
     return spec.outcome != "in_hospital" and spec.window_days is not None
+
+
+def _study_stay_death_expr(spec: _StudySpec) -> str:
+    """The index stay's death date: the patient's earliest known death, or the stay's own discharge date when its
+    disposition says the patient died (whatever ``death_sources`` is), whichever is earlier."""
+    return (
+        "LEAST(pd.death_date, CASE WHEN COALESCE(v.discharged_to_concept_id, 0) IN "
+        f"({_int_list(spec.death_ids)}) THEN CAST(v.visit_end_date AS DATE) END)"
+    )
+
+
+def _study_early_death_applies(spec: _StudySpec) -> bool:
+    """Whether the 'death before the outcome window opens' exclusion adds anything for this definition.
+
+    Post-discharge and composite outcomes already drop deaths on or before discharge (an in-hospital death), so
+    the rule only matters there when a gap separates discharge from the window; for fixed-window mortality it also
+    removes a death on the index start day.
+    """
+    if not spec.exclude_early_death or spec.outcome not in _EARLY_DEATH_FAMILIES:
+        return False
+    return spec.outcome == "fixed_window" or int(spec.gap_days) > 0
 
 
 def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
@@ -633,23 +683,36 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
     if spec.washin_days and int(spec.washin_days) > 0:
         w = int(spec.washin_days)
         op, vo = _tbl(spec, "observation_period"), _tbl(spec, "visit_occurrence")
-        conds.append((
-            f"Prior observation >= {w} days (wash-in)",
-            f"""(
-                EXISTS (
+        covered = f"""EXISTS (
                     SELECT 1 FROM {op} op
                     WHERE op.person_id = v.person_id
                       AND op.observation_period_start_date <= (v.visit_start_date - {w})
                       AND op.observation_period_end_date >= v.visit_start_date
-                )
-                OR EXISTS (
+                )"""
+        prior_visit = f"""EXISTS (
                     SELECT 1 FROM {vo} pv
                     WHERE pv.person_id = v.person_id
                       AND pv.visit_occurrence_id != v.visit_occurrence_id
                       AND pv.visit_start_date <= (v.visit_start_date - {w})
+                )"""
+        if spec.washin_fallback == "always":
+            body = f"""(
+                {covered}
+                OR {prior_visit}
+            )"""
+        elif spec.washin_fallback == "never":
+            body = f"""(
+                {covered}
+            )"""
+        else:  # no_observation_period: a prior visit only stands in for observation periods that do not exist
+            body = f"""(
+                {covered}
+                OR (
+                    NOT EXISTS (SELECT 1 FROM {op} anyop WHERE anyop.person_id = v.person_id)
+                    AND {prior_visit}
                 )
-            )""",
-        ))
+            )"""
+        conds.append((f"Prior observation >= {w} days (wash-in)", body))
 
     if spec.exclude_death:
         d = _int_list(spec.death_ids)
@@ -659,6 +722,16 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
         ))
     else:
         conds.append(("Alive at index admission", "(pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"))
+
+    if _study_early_death_applies(spec):
+        death = _study_stay_death_expr(spec)
+        fixed = spec.outcome == "fixed_window"
+        anchor_v = "v.visit_start_date" if fixed else "v.visit_end_date"
+        g = int(spec.gap_days)
+        conds.append((
+            f"No death before the outcome window opens (death after {'index start' if fixed else 'discharge'} + {g} d)",
+            f"({death} IS NULL OR {death} > ({anchor_v} + {g}))",
+        ))
     return conds
 
 
@@ -684,8 +757,67 @@ def _study_death_ctes(spec: _StudySpec) -> str:
     )"""
 
 
+def _study_episode_ctes(spec: _StudySpec) -> str:
+    """Merges index-type stays that overlap, or start within ``episode_merge_days`` of the previous stay's end, into
+    one episode per run (a transfer between wards is one hospitalisation). The episode starts with its earliest stay
+    (which supplies ``visit_occurrence_id`` / ``visit_concept_id``), ends with the latest end date, and takes the
+    discharge disposition of the stay that ends last."""
+    n = int(spec.episode_merge_days)
+    vo = _tbl(spec, "visit_occurrence")
+    type_filter = "1=1" if spec.visit_ids is None else f"v.visit_concept_id IN ({_int_list(spec.visit_ids)})"
+    return f"""episode_src AS (
+        SELECT
+            v.visit_occurrence_id, v.person_id, v.visit_concept_id, v.visit_start_date, v.visit_end_date,
+            v.discharged_to_concept_id,
+            MAX(v.visit_end_date) OVER (
+                PARTITION BY v.person_id ORDER BY v.visit_start_date, v.visit_occurrence_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS previous_end
+        FROM {vo} v
+        WHERE {type_filter}
+    ),
+    episode_runs AS (
+        SELECT
+            *,
+            SUM(CASE WHEN previous_end IS NULL OR visit_start_date > (previous_end + {n}) THEN 1 ELSE 0 END) OVER (
+                PARTITION BY person_id ORDER BY visit_start_date, visit_occurrence_id
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS episode_no
+        FROM episode_src
+    ),
+    index_episodes AS (
+        SELECT
+            person_id,
+            first_stay.id AS visit_occurrence_id,
+            first_stay.concept AS visit_concept_id,
+            episode_start AS visit_start_date,
+            episode_end AS visit_end_date,
+            last_stay.disposition AS discharged_to_concept_id
+        FROM (
+            SELECT
+                person_id,
+                MIN(visit_start_date) AS episode_start,
+                MAX(visit_end_date) AS episode_end,
+                MIN(struct_pack(s := visit_start_date, id := visit_occurrence_id, concept := visit_concept_id)) AS first_stay,
+                MAX(struct_pack(e := visit_end_date, s := visit_start_date, id := visit_occurrence_id,
+                                disposition := discharged_to_concept_id)) AS last_stay
+            FROM episode_runs
+            GROUP BY person_id, episode_no
+        ) episodes
+    )"""
+
+
+def _study_base_ctes(spec: _StudySpec) -> str:
+    """The CTEs every eligibility / attrition query starts with: death dates and, when merging, the episodes."""
+    head = _study_death_ctes(spec)
+    if spec.episode_merge_days is not None:
+        head += ",\n    " + _study_episode_ctes(spec)
+    return head
+
+
 def _study_eligible_select(spec: _StudySpec, conditions: list[tuple[str, str]]) -> str:
     where = "\n          AND ".join(c for _, c in conditions)
+    stays = "index_episodes" if spec.episode_merge_days is not None else _tbl(spec, "visit_occurrence")
     return f"""SELECT
             v.visit_occurrence_id,
             v.person_id AS subject_id,
@@ -693,10 +825,10 @@ def _study_eligible_select(spec: _StudySpec, conditions: list[tuple[str, str]]) 
             v.visit_start_date,
             v.visit_end_date,
             v.discharged_to_concept_id,
-            pd.death_date,
+            {_study_stay_death_expr(spec)} AS death_date,
             date_diff('day', v.visit_start_date, v.visit_end_date) AS los_days,
             {_study_age_expr(spec)} AS age_at_index
-        FROM {_tbl(spec, 'visit_occurrence')} v
+        FROM {stays} v
         JOIN {_tbl(spec, 'person')} p ON v.person_id = p.person_id
         LEFT JOIN patient_death pd ON v.person_id = pd.person_id
         WHERE {where}"""
@@ -726,6 +858,8 @@ def _study_outcome_sql(spec: _StudySpec) -> str:
         )
     d = _int_list(spec.death_ids)
     if spec.outcome == "in_hospital":
+        # e.death_date already includes the stay's own disposition death (its discharge date), so the outcome date
+        # never falls after the stay even when the death table dates the death later
         cond = (
             f"(COALESCE(e.discharged_to_concept_id, 0) IN ({d}) "
             "OR (e.death_date IS NOT NULL AND e.death_date >= e.visit_start_date AND e.death_date <= e.visit_end_date))"
@@ -754,12 +888,21 @@ def _study_outcome_sql(spec: _StudySpec) -> str:
 
 
 def _study_followup_sql(spec: _StudySpec) -> str:
-    """The has_subsequent_event select-list item: evidence of observation at / after anchor + horizon."""
+    """The has_subsequent_event / died_in_followup select-list items.
+
+    ``has_subsequent_event``: evidence of observation at / after anchor + horizon. With
+    ``death_verifies_followup`` a record dated after the patient's death date is not evidence (a lagged or
+    mis-dated record of a deceased patient). ``died_in_followup``: the patient's death date is on or before
+    anchor + horizon, i.e. the stay itself or the follow-up window ended in death.
+    """
     if not _study_followup_applicable(spec):
-        return "CAST(NULL AS INTEGER) AS has_subsequent_event"
+        return "CAST(NULL AS INTEGER) AS has_subsequent_event, CAST(NULL AS INTEGER) AS died_in_followup"
     h = int(spec.window_days)
     anchor = _study_anchor(spec)
     t = lambda name: _tbl(spec, name)  # noqa: E731
+    alive = lambda col: (  # noqa: E731
+        f" AND (e.death_date IS NULL OR {col} <= e.death_date)" if spec.death_verifies_followup else ""
+    )
     clauses = {
         "observation_period": (
             f"EXISTS (SELECT 1 FROM {t('observation_period')} op WHERE op.person_id = e.subject_id "
@@ -767,40 +910,44 @@ def _study_followup_sql(spec: _StudySpec) -> str:
         ),
         "visit": (
             f"EXISTS (SELECT 1 FROM {t('visit_occurrence')} sv WHERE sv.person_id = e.subject_id "
-            f"AND sv.visit_occurrence_id != e.visit_occurrence_id AND sv.visit_start_date >= ({anchor} + {h}))"
+            f"AND sv.visit_occurrence_id != e.visit_occurrence_id AND sv.visit_start_date >= ({anchor} + {h})"
+            f"{alive('sv.visit_start_date')})"
         ),
         "measurement": (
             f"EXISTS (SELECT 1 FROM {t('measurement')} sm WHERE sm.person_id = e.subject_id "
-            f"AND sm.measurement_date >= ({anchor} + {h}))"
+            f"AND sm.measurement_date >= ({anchor} + {h}){alive('sm.measurement_date')})"
         ),
         "condition": (
             f"EXISTS (SELECT 1 FROM {t('condition_occurrence')} sc WHERE sc.person_id = e.subject_id "
-            f"AND sc.condition_start_date >= ({anchor} + {h}))"
+            f"AND sc.condition_start_date >= ({anchor} + {h}){alive('sc.condition_start_date')})"
         ),
         "drug": (
             f"EXISTS (SELECT 1 FROM {t('drug_exposure')} sd WHERE sd.person_id = e.subject_id "
-            f"AND sd.drug_exposure_start_date >= ({anchor} + {h}))"
+            f"AND sd.drug_exposure_start_date >= ({anchor} + {h}){alive('sd.drug_exposure_start_date')})"
         ),
         "death": f"(e.death_date IS NOT NULL AND e.death_date >= ({anchor} + {h}))",
     }
     ors = "\n                OR ".join(clauses[k] for k in _FOLLOWUP_EVIDENCE if k in spec.evidence)
     return f"""CASE WHEN (
                 {ors}
-            ) THEN 1 ELSE 0 END AS has_subsequent_event"""
+            ) THEN 1 ELSE 0 END AS has_subsequent_event,
+            CASE WHEN (e.death_date IS NOT NULL AND e.death_date <= ({anchor} + {h})) THEN 1 ELSE 0 END AS died_in_followup"""
 
 
 def _study_verified_sql(spec: _StudySpec) -> str:
     if not _study_followup_applicable(spec):
         return "CAST(NULL AS INTEGER)"
-    if spec.outcome == "none":
-        return "CASE WHEN o.has_subsequent_event = 1 THEN 1 ELSE 0 END"
-    return "CASE WHEN (o.outcome_flag = 1 OR o.has_subsequent_event = 1) THEN 1 ELSE 0 END"
+    parts = [] if spec.outcome == "none" else ["o.outcome_flag = 1"]
+    parts.append("o.has_subsequent_event = 1")
+    if spec.death_verifies_followup:
+        parts.append("o.died_in_followup = 1")
+    return f"CASE WHEN ({' OR '.join(parts)}) THEN 1 ELSE 0 END"
 
 
 def _study_ctes(spec: _StudySpec, through: str = "ranked_stays") -> str:
     """The WITH clause, ending at CTE ``through`` (verified_stays for attrition, ranked_stays for the cohort)."""
     ctes = [
-        _study_death_ctes(spec),
+        _study_base_ctes(spec),
         f"eligible_stays AS (\n        {_study_eligible_select(spec, _study_conditions(spec))}\n    )",
         f"""outcomes_and_followup AS (
         SELECT
@@ -840,6 +987,7 @@ def _study_query_sql(spec: _StudySpec) -> str:
         outcome_flag,
         outcome_date,
         followup_verified,
+        died_in_followup,
         age_at_index,
         los_days,
         discharged_to_concept_id,
@@ -852,7 +1000,7 @@ def _study_query_sql(spec: _StudySpec) -> str:
 def _study_attrition_steps(spec: _StudySpec) -> list[tuple[str, str]]:
     """Cumulative CONSORT steps for compute_attrition, built from the same predicates as the cohort query."""
     conds = _study_conditions(spec)
-    head = _study_death_ctes(spec)
+    head = _study_base_ctes(spec)
     steps = []
     for k in range(1, len(conds) + 1):
         sql = (
@@ -862,8 +1010,9 @@ def _study_attrition_steps(spec: _StudySpec) -> list[tuple[str, str]]:
         steps.append((conds[k - 1][0], sql))
     if spec.verified and _study_followup_applicable(spec):
         anchor_label = "index start" if spec.outcome == "fixed_window" else "discharge"
+        by_death = ", or death by then" if spec.death_verifies_followup else ""
         steps.append((
-            f"Verified follow-up (evidence >= {int(spec.window_days)} days after {anchor_label})",
+            f"Verified follow-up (evidence >= {int(spec.window_days)} days after {anchor_label}{by_death})",
             f"{_study_ctes(spec, through='verified_stays')}\n    SELECT subject_id, visit_occurrence_id FROM verified_stays WHERE followup_verified = 1",
         ))
     return steps
@@ -951,7 +1100,8 @@ def _materialize_study_cohort(
 
 _STUDY_COLUMNS = (
     "cohort_definition_id, subject_id, cohort_start_date, cohort_end_date, visit_occurrence_id, visit_concept_id, "
-    "outcome_flag, outcome_date, followup_verified, age_at_index, los_days, discharged_to_concept_id, target_outcome"
+    "outcome_flag, outcome_date, followup_verified, died_in_followup, age_at_index, los_days, "
+    "discharged_to_concept_id, target_outcome"
 )
 
 
@@ -1148,6 +1298,10 @@ def _describe_study(spec: _StudySpec) -> str:
     bits.append(f"outcome {spec.label}")
     if spec.window_days is not None and spec.outcome != "in_hospital":
         bits.append(f"window ({spec.gap_days}, {spec.window_days}] d")
+    if _study_early_death_applies(spec):
+        bits.append("deaths before the outcome window excluded")
+    if spec.episode_merge_days is not None:
+        bits.append(f"stays merged into episodes (<= {spec.episode_merge_days} d apart)")
     bits.append("verified follow-up required" if (spec.verified and _study_followup_applicable(spec)) else "verified follow-up not required")
     bits.append(f"sampling {spec.rule}" + (f" (seed {spec.seed})" if spec.rule == "random" else ""))
     return "Study cohort: " + "; ".join(bits)
@@ -1173,7 +1327,11 @@ def define_study_cohort(
     death_discharge_concept_ids: int | Sequence[int] | None = None,
     death_sources: str | Sequence[str] | None = None,
     followup_evidence: str | Sequence[str] | None = None,
-    age_method: str = "year_difference",
+    age_method: str = "completed_years",
+    washin_fallback: str = "no_observation_period",
+    exclude_early_death: bool = True,
+    death_counts_as_verified_followup: bool = True,
+    episode_merge_days: int | None = None,
     cohort_definition_id: int = 1,
     outcome_cohort_id: int | None = None,
     cohort_name: str | None = None,
@@ -1186,9 +1344,13 @@ def define_study_cohort(
     r"""Defines a leak-free index-stay study cohort (one stay per patient) with an optional outcome.
 
     A single parameterised template that generalises :func:`build_readmission_cohort` and
-    :func:`build_end_of_life_cohort` (both now run on the same engine, so a cohort defined here and one built by
-    a legacy builder with equivalent settings are identical row for row). It adds emergency / outpatient /
-    custom index visit types, a study window on the index date, and a cohort-only mode (``target_outcome='none'``).
+    :func:`build_end_of_life_cohort` (both run on the same engine). It adds emergency / outpatient / custom index
+    visit types, a study window on the index date, and a cohort-only mode (``target_outcome='none'``).
+
+    The defaults here are the corrected, clinically safest settings. The legacy builders keep their historical
+    conventions through the options ``age_method``, ``washin_fallback``, ``exclude_early_death`` and
+    ``death_counts_as_verified_followup`` (see "Reproducing the legacy builders"): with those values a cohort
+    defined here and one built by a legacy builder are identical row for row.
 
     All arguments are keyword-only.
 
@@ -1208,13 +1370,23 @@ def define_study_cohort(
         Minimum age at the index visit start (see ``age_method``). ``None`` disables the age rule.
     min_los_days : int, None or "auto", default "auto"
         Minimum length of stay in days (``visit_end_date - visit_start_date``); ``None`` disables the rule.
-        ``"auto"`` follows the legacy builders: 1 for readmission, post-discharge mortality, composite and
-        cohort-only; 0 for in-hospital mortality; no restriction for fixed-window mortality.
+        ``"auto"`` depends on the index visit type: for an inpatient index (``visit_type='inpatient'``, i.e. concept
+        9201 only) it is 1 for readmission, post-discharge mortality, composite and cohort-only cohorts, 0 for
+        in-hospital mortality and no restriction for fixed-window mortality; for every other index visit type
+        (emergency, outpatient, a mix, custom ids, ``None``) it is 0 (or no restriction), because those visits are
+        usually same-day and a 1-day minimum would silently empty the cohort. Pass an explicit value (for example
+        ``1`` for a site-specific inpatient concept id) to override.
     washin_days : int or None, default 365
         Required prior observation. The index stay qualifies when an ``observation_period`` satisfies
-        ``start <= index_start - washin_days`` and ``end >= index_start``, or, when observation periods are
-        missing, when another visit of the patient started on or before ``index_start - washin_days``
-        (inclusive). ``0`` / ``None`` disables the rule.
+        ``start <= index_start - washin_days`` and ``end >= index_start``; see ``washin_fallback`` for patients who
+        have no observation period at all. ``0`` / ``None`` disables the rule.
+    washin_fallback : {"no_observation_period", "always", "never"}, default "no_observation_period"
+        How a prior visit counts as wash-in evidence (another visit of the patient started on or before
+        ``index_start - washin_days``, inclusive). ``"no_observation_period"``: only for a patient who has **no**
+        ``observation_period`` row at all (sources without observation periods); a patient whose observation
+        periods exist but do not cover the wash-in window fails it. ``"always"`` (the pre-0.5.3 behaviour of the
+        legacy builders): a prior visit also rescues patients whose observation periods do not cover the window.
+        ``"never"``: observation periods only.
     followup_days : int or None, default 30
         Length F of the follow-up / outcome horizon in days. Required for every outcome except
         ``'none'`` (where ``None`` also disables follow-up verification) and in-hospital mortality (ignored).
@@ -1232,8 +1404,10 @@ def define_study_cohort(
         ``'none'``: cohort only; ``outcome_flag`` and ``outcome_date`` are NULL.
     mortality_type : {"post_discharge", "in_hospital", "fixed_window"}
         Used when ``target_outcome='mortality'``. ``post_discharge``: death in (e + G, e + F];
-        ``fixed_window``: death in (s + G, s + F] measured from the index start (SARD-style); ``in_hospital``:
-        discharge to a death concept, or death date within [s, e].
+        ``fixed_window``: death in (s + G, s + F] measured from the index start (SARD end-of-life style, for example
+        ``gap_days=90, followup_days=365`` for 3-12 month mortality); ``in_hospital``: discharge to a death
+        concept, or a death date within [s, e]. A death before the window opens (``<= e + G`` or ``<= s + G``) is
+        neither an event nor a survivor; see ``exclude_early_death``.
     outcome_visit_type : str, int or sequence, default "inpatient"
         Visit types that count as readmissions (``readmission`` and ``readmission_or_death`` outcomes).
     gap_days : int, default 0
@@ -1247,13 +1421,14 @@ def define_study_cohort(
         Seed of the ``random`` rule.
     require_verified_followup : bool, default True
         Keeps a stay only if it has an outcome event, or evidence of observation on/after anchor + F (see
-        ``followup_evidence``), preventing lost-to-follow-up bias. Not applicable to in-hospital mortality or
-        when ``followup_days`` is ``None``. The result column ``followup_verified`` is reported either way.
+        ``followup_evidence``), or a death by then (see ``death_counts_as_verified_followup``), preventing
+        lost-to-follow-up bias. Not applicable to in-hospital mortality or when ``followup_days`` is ``None``. The
+        result column ``followup_verified`` is reported either way.
     death_discharge_concept_ids : int or sequence, optional
-        Discharge-disposition concepts meaning "died". Default: ``(4216643,)`` for readmission / cohort-only,
-        ``(4216643, 4155309)`` for mortality outcomes (the legacy end-of-life convention; 4155309 is 'Ileal part'
-        in Athena and is written by this package's PCORnet ETL for 'discharged against medical advice', so
-        consider passing ``(4216643,)``).
+        Discharge-disposition concepts meaning "died". Default: ``(4216643,)`` ('Patient died') for every outcome.
+        4155309 is deliberately not a default: it is 'Ileal part' (an anatomic site) in Athena and this package's
+        PCORnet ETL writes it for 'left against medical advice', so counting it labelled AMA discharges as deaths
+        (builders before 0.5.3 did; pass ``(4216643, 4155309)`` to reproduce that).
     death_sources : {"death_table", "discharge_disposition"} or sequence, optional
         Where a patient's death date comes from: the ``death`` table and / or the end date of any visit
         discharged to a death concept. Default: ``death_table`` only for readmission / cohort-only, both for
@@ -1263,10 +1438,40 @@ def define_study_cohort(
         ``'visit'`` (another visit's start), ``'measurement'``, ``'condition'``, ``'drug'`` (record dates) and
         ``'death'`` (death date). Default: the four record types for readmission / cohort-only, all six for
         mortality outcomes.
-    age_method : {"year_difference", "completed_years"}, default "year_difference"
-        ``year_difference`` (legacy, the default for equivalence) is ``date_diff('year', birth, index_start)``, the
-        number of calendar-year boundaries crossed, which overstates age by one year before the birthday.
-        ``completed_years`` is the exact age in whole years (``date_sub``). Missing birth month / day count as 1.
+    age_method : {"completed_years", "year_difference"}, default "completed_years"
+        ``completed_years`` is the exact age in whole years at the index start (``date_sub('year', birth,
+        index_start)``; the birthday counts as reached on its day, 29 February as 28 February in other years).
+        ``year_difference`` (what the legacy builders use) is ``date_diff('year', birth, index_start)``, the number
+        of calendar-year boundaries crossed, which overstates age by up to a year before the birthday (a 17-year-old
+        passes ``min_age=18``). The birth date is the person's year / month / day of birth; a missing month or day
+        counts as 1, which overstates the age by up to a year for such patients with either method.
+    exclude_early_death : bool, default True
+        Applies to post-discharge mortality, fixed-window mortality and ``readmission_or_death``. Drops an index
+        stay when the patient's death date is on or before ``anchor + gap_days`` (the anchor is the discharge date
+        ``e``, or the index start ``s`` for fixed-window mortality): a death before the outcome window opens is
+        neither an event nor a survivor, so labelling it ``outcome_flag = 0`` (and, with verified follow-up,
+        silently dropping it) would bias the mortality rate downward. With the default ``gap_days=0`` this only
+        adds, for fixed-window mortality, the death on the index start day itself (post-discharge / composite
+        cohorts already drop deaths up to the discharge date). The SARD end-of-life protocol excludes deaths inside
+        the gap the same way. ``False`` is the pre-0.5.3 legacy behaviour: such stays stay in the cohort as
+        survivors. The attrition table shows the step.
+    death_counts_as_verified_followup : bool, default True
+        A death is a known outcome. With True, a patient whose death date is on or before ``anchor + followup_days``
+        counts as verified follow-up (observation is complete until death) and is kept with
+        ``outcome_flag = 0`` when not readmitted, instead of being dropped as lost to follow-up; the column
+        ``died_in_followup`` flags them. Records dated after the patient's death date (a lagged or mis-dated
+        measurement, visit, condition or drug exposure) never count as follow-up evidence. ``False`` is the
+        pre-0.5.3 legacy protocol: a death inside the window does not verify follow-up (the patient is dropped
+        unless other evidence dated on/after ``anchor + followup_days`` exists, post-death records included).
+    episode_merge_days : int or None, default None
+        ``None``: every index-type visit is a candidate index stay. A number N merges index-type stays of a patient
+        that overlap or start within N days after the previous stay's end into one hospitalisation episode (0:
+        overlaps and same-day transfers; 1: also a continuation on the next day) before any rule is applied: the
+        episode starts with its earliest stay (``visit_occurrence_id`` and ``visit_concept_id`` come from it), ends
+        with the latest end date and takes the discharge disposition of the stay that ends last, so length of stay,
+        discharge date, in-hospital death and readmission windows refer to the whole hospitalisation. Without
+        merging, a transfer makes the first segment the index stay: it is shorter, and a death after the transfer is
+        not seen on it.
     cohort_definition_id : int, default 1
         Id written to ``cohort`` / ``cohort_definition``.
     outcome_cohort_id : int, optional
