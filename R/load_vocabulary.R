@@ -354,38 +354,22 @@ has_vocabulary_tables <- function(con) {
   isTRUE(res$present[[1]])
 }
 
-# `current` search_path extended so the attached vocabulary is reachable, nothing of it dropped.
-#
-# The caller's entries are kept, in order, and come first. Then, unless `current` already lists
-# `central_vocab` (it is then returned as is -- the caller placed it), the result gets
-#  * `main` appended when no entry already means the primary database's `main` schema (`main`, or
-#    `<primary>.main`). DuckDB resolves names through the search path in order and only falls back to `main`
-#    *after* it, so without this a path such as 'analysis' extended by `central_vocab.main` alone would let
-#    the central vocabulary win over a populated local vocabulary table, contradicting the documented
-#    precedence (primary `main` first); and
-#  * `central_vocab.main` appended last.
-# An empty path (the default of a fresh connection) becomes 'main,central_vocab.main'.
+# `current` search_path with `central_vocab.main` added: the default (empty) path becomes
+# `main,central_vocab.main`, and a path that already lists `central_vocab` is returned as is.
 #' @keywords internal
 #' @noRd
-search_path_with_central_vocab <- function(current, primary = NULL) {
+search_path_with_central_vocab <- function(current) {
   if (is.null(current) || length(current) != 1L || is.na(current)) current <- ""
   entries <- trimws(strsplit(current, ",", fixed = TRUE)[[1]])
   entries <- entries[nzchar(entries)]
   if (length(entries) == 0L) {
     return(.CENTRAL_VOCAB_SEARCH_PATH)
   }
-  names_lc <- tolower(gsub("\"", "", entries, fixed = TRUE))
-  if (.CENTRAL_VOCAB_ALIAS %in% sub("\\..*$", "", names_lc)) {
-    return(paste(entries, collapse = ","))
+  catalogs <- tolower(sub("\\..*$", "", gsub("\"", "", entries, fixed = TRUE)))
+  if (!(.CENTRAL_VOCAB_ALIAS %in% catalogs)) {
+    entries <- c(entries, paste0(.CENTRAL_VOCAB_ALIAS, ".main"))
   }
-  main_entries <- "main"
-  if (!is.null(primary) && length(primary) == 1L && !is.na(primary) && nzchar(primary)) {
-    main_entries <- c(main_entries, tolower(paste0(primary, ".main")))
-  }
-  if (!any(names_lc %in% main_entries)) {
-    entries <- c(entries, "main")
-  }
-  paste(c(entries, paste0(.CENTRAL_VOCAB_ALIAS, ".main")), collapse = ",")
+  paste(entries, collapse = ",")
 }
 
 #' @keywords internal
@@ -424,11 +408,9 @@ configure_omop_connection <- function(con, explicit_vocab, auto_attach_vocab, lo
   vocab_attached <- !is.null(attached)
   empty_vocab <- FALSE
   if (vocab_attached) {
-    # A search_path the caller set on a connection passed in is kept, extended by main (when absent)
-    # and central_vocab.main.
+    # A search_path the caller set on a connection passed in is kept, with central_vocab appended.
     current <- DBI::dbGetQuery(con, "SELECT current_setting('search_path') AS search_path")$search_path[[1]]
-    primary <- DBI::dbGetQuery(con, "SELECT current_database() AS db")$db[[1]]
-    wanted <- search_path_with_central_vocab(current, primary)
+    wanted <- search_path_with_central_vocab(current)
     if (!identical(wanted, current)) {
       DBI::dbExecute(con, sprintf("SET search_path = %s", DBI::dbQuoteString(con, wanted)))
     }
@@ -488,7 +470,7 @@ configure_omop_connection <- function(con, explicit_vocab, auto_attach_vocab, lo
 #' connection's `search_path` to `'main,central_vocab.main'`, so `concept`, `concept_ancestor`,
 #' `concept_relationship`, ... can be queried with no schema prefix while a 10M-concept vocabulary is
 #' stored once instead of inside every site database. (A `search_path` you already set on a connection
-#' you pass in is kept and extended, never replaced; see Details.) The shared SQL macros
+#' you pass in is kept, with `central_vocab.main` appended; see Details.) The shared SQL macros
 #' (`descendants_of()`, `ancestors_of()`, `clamp_physiologic()`, `map_to_standard_concept_id()`, the
 #' cohort macros, ...) are loaded as session-scoped `TEMP` macros, so connecting never writes to a
 #' database file and also works on read-only databases.
@@ -510,14 +492,9 @@ configure_omop_connection <- function(con, explicit_vocab, auto_attach_vocab, lo
 #' *different* database already attached under that name is an error.
 #'
 #' **Search path.** On a fresh connection (empty `search_path`) it becomes `'main,central_vocab.main'`.
-#' A `search_path` already set on a connection passed in as `db_path` is not replaced; its entries are kept,
-#' in order, and extended: `main` is appended unless an entry already means the primary database's `main`
-#' schema (`main` or `<database>.main`), then `central_vocab.main` is appended. So `'analysis,main'` becomes
-#' `'analysis,main,central_vocab.main'` and `'analysis'` becomes `'analysis,main,central_vocab.main'` too:
-#' the schemas you put first keep taking precedence, and the primary database's own tables always rank ahead
-#' of the central vocabulary (DuckDB would otherwise consult `main` only *after* `central_vocab.main`,
-#' letting the central vocabulary win over a populated local vocabulary table). A path that already lists
-#' `central_vocab` is left exactly as the caller wrote it. Calling `omop_connect()` again changes nothing.
+#' A `search_path` already set on a connection passed in as `db_path` is not replaced: `central_vocab.main`
+#' is appended to it (unless it already lists `central_vocab`), so schemas you put first keep taking
+#' precedence.
 #'
 #' **Precedence.** It is per table: a vocabulary table that holds rows in the primary database wins
 #' over the attached one. A local table that is merely *empty* -- as every vocabulary table is after
@@ -542,9 +519,10 @@ configure_omop_connection <- function(con, explicit_vocab, auto_attach_vocab, lo
 #'
 #' **Relation to [attach_central_vocabulary()].** That function is the ETL-time helper: it attaches
 #' the vocabulary and creates a zero-copy view per vocabulary table (temporary, or persistent in the
-#' database). Both functions recognise an attachment the other (or an earlier call) made: when
-#' `central_vocab` is already attached to the *same* file the `ATTACH` is skipped, so they can be used in
-#' either order on one connection; a *different* file under that name is an error in both.
+#' database), and fails if `central_vocab` is already attached. `omop_connect()` is the analysis-time
+#' helper and recognises an attachment made earlier by `attach_central_vocabulary()` (same file; no
+#' second `ATTACH`, its views are reused). Call `attach_central_vocabulary()` first when using both on
+#' one connection, since the other order fails at its `ATTACH`.
 #'
 #' @param db_path Path of the primary OMOP DuckDB database (`":memory:"` for an in-memory one; a leading
 #'   `~` is expanded), or an existing DBI connection. A path that does not exist is created as an empty

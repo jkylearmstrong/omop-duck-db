@@ -195,106 +195,28 @@ def load_macros(con, temporary=None, skip_unresolved=False):
     return skipped
 
 
-# Alias of the attached vocabulary database, and the tables exposed from it. Shared by
-# attach_central_vocabulary() and omop_connect() (omop_etl.vocabulary).
-CENTRAL_VOCAB_ALIAS = "central_vocab"
-_CENTRAL_VOCAB_TABLES = (
-    "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
-    "vocabulary", "relationship", "concept_class", "domain", "drug_strength",
-)
-
-
-def _sql_string(value):
-    """Single-quoted SQL string literal with embedded quotes escaped."""
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _sql_identifier(name):
-    """Double-quoted SQL identifier with embedded quotes escaped."""
-    return '"' + str(name).replace('"', '""') + '"'
-
-
-def _sql_path(path):
-    """Absolute path as a SQL string literal; Windows backslashes become forward slashes."""
-    absolute = os.path.abspath(path)
-    if os.sep == "\\":
-        absolute = absolute.replace("\\", "/")
-    return _sql_string(absolute)
-
-
-def _same_file(a, b):
-    """Whether two paths name the same file (compared textually when one cannot be stat'ed)."""
-    if not a or not b:
-        return False
-    try:
-        return os.path.samefile(a, b)
-    except OSError:
-        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
-
-
-def _attached_central_vocab(con):
-    """None if no ``central_vocab`` database is attached, else its path ('' if it has none)."""
-    row = con.execute(
-        f"SELECT path FROM duckdb_databases() WHERE database_name = {_sql_string(CENTRAL_VOCAB_ALIAS)}"
-    ).fetchone()
-    return None if row is None else (row[0] or "")
-
-
 def attach_central_vocabulary(con, vocab_db_path, temporary=True):
     """Attach an external DuckDB database containing Athena vocabulary tables and
-    create zero-copy views, avoiding copying 10-15 GB of vocabulary data into the local database.
-
-    The vocabulary is attached read-only as ``central_vocab``. The function is idempotent: when that
-    same file is already attached on ``con`` (by an earlier call, or by
-    :func:`omop_etl.vocabulary.omop_connect`) the ``ATTACH`` is skipped and the views are
-    (re)created; a *different* database already attached as ``central_vocab`` raises ``ValueError``.
-
-    Parameters
-    ----------
-    con : duckdb.DuckDBPyConnection
-    vocab_db_path : str or os.PathLike
-        Vocabulary database file (a leading ``~`` is expanded). ``FileNotFoundError`` if it is missing.
-    temporary : bool, default True
-        ``True`` creates session-scoped ``TEMP`` views over the vocabulary tables. ``False`` replaces
-        a local table of the same name in the connection's current schema by a persistent view stored
-        in the database (an existing view is simply replaced, so re-running is safe).
-    """
-    vocab_db_path = os.path.expanduser(os.fspath(vocab_db_path))
+    create zero-copy views, avoiding copying 10-15 GB of vocabulary data into the local database."""
     if not os.path.exists(vocab_db_path):
         raise FileNotFoundError(f"Central vocabulary database not found: {vocab_db_path}")
 
-    attached = _attached_central_vocab(con)
-    if attached is None:
-        con.execute(f"ATTACH {_sql_path(vocab_db_path)} AS {CENTRAL_VOCAB_ALIAS} (READ_ONLY);")
-    elif not _same_file(attached, vocab_db_path):
-        raise ValueError(
-            f"A different database is already attached as '{CENTRAL_VOCAB_ALIAS}' "
-            f"({attached or 'no file path'}); cannot attach {vocab_db_path} under the same name."
-        )
-
-    database, schema = con.execute("SELECT current_database(), current_schema()").fetchone()
-    for tbl in _CENTRAL_VOCAB_TABLES:
+    normalized_path = os.path.abspath(vocab_db_path).replace("\\", "/")
+    con.execute(f"ATTACH '{normalized_path}' AS central_vocab (READ_ONLY);")
+    vocab_tables = [
+        "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
+        "vocabulary", "relationship", "concept_class", "domain", "drug_strength"
+    ]
+    for tbl in vocab_tables:
         has_tbl = con.execute(
-            "SELECT 1 FROM information_schema.tables "
-            f"WHERE table_catalog = {_sql_string(CENTRAL_VOCAB_ALIAS)} AND table_name = {_sql_string(tbl)}"
+            f"SELECT 1 FROM information_schema.tables WHERE table_catalog = 'central_vocab' AND table_name = '{tbl}'"
         ).fetchone()
-        if not has_tbl:
-            continue
-        source = f"{CENTRAL_VOCAB_ALIAS}.{_sql_identifier(tbl)}"
-        if temporary:
-            con.execute(f"CREATE OR REPLACE TEMPORARY VIEW {_sql_identifier(tbl)} AS SELECT * FROM {source};")
-            continue
-        # Persistent: swap a local table for a view. The target is named in full, so a TEMP view of the same
-        # name (e.g. one omop_connect() added) can neither be hit by the DROP nor hide the persistent view,
-        # and a view left by an earlier call is replaced (DROP TABLE would reject it).
-        target = f"{_sql_identifier(database)}.{_sql_identifier(schema)}.{_sql_identifier(tbl)}"
-        is_table = con.execute(
-            "SELECT 1 FROM duckdb_tables() WHERE database_name = ? AND schema_name = ? AND lower(table_name) = ?",
-            [database, schema, tbl],
-        ).fetchone()
-        if is_table:
-            con.execute(f"DROP TABLE {target} CASCADE;")
-        con.execute(f"CREATE OR REPLACE VIEW {target} AS SELECT * FROM {source};")
+        if has_tbl:
+            if temporary:
+                con.execute(f"CREATE OR REPLACE TEMPORARY VIEW {tbl} AS SELECT * FROM central_vocab.{tbl};")
+            else:
+                con.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE;")
+                con.execute(f"CREATE OR REPLACE VIEW {tbl} AS SELECT * FROM central_vocab.{tbl};")
     print(f"Attached central vocabulary from {vocab_db_path} with zero-copy views.")
 
 

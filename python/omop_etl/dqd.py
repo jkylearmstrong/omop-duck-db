@@ -362,8 +362,6 @@ def run_dqd(
 _SANITIZE_METHODS = ("dqd_biologic_limits", "winsorize_iqr", "z_score_cutoff")
 _SANITIZE_ACTIONS = ("nullify", "clamp", "drop_row")
 _SANITIZE_FORMATS = ("df", "arrow", "pyarrow", "polars")
-# What dqd_biologic_limits does with a measurement whose unit_concept_id is NULL or 0 (see sanitize_measurements).
-_SANITIZE_UNIT_UNKNOWN = ("envelope", "skip")
 # Statistical methods need at least this many finite values in a (concept, unit) group.
 _SANITIZE_MIN_GROUP_ROWS = 3
 _SANITIZE_LIMITS_FILE = "physiologic_limits.csv"
@@ -379,7 +377,7 @@ _SANITIZE_REQUIRED_MEASUREMENT_COLS = (
 _SANITIZE_OPTIONAL_MEASUREMENT_COLS = ("measurement_datetime", "visit_occurrence_id")
 _SANITIZE_REPORT_COLUMNS = (
     "measurement_concept_id", "unit_concept_id", "n", "n_ok", "n_below", "n_above", "n_invalid",
-    "n_changed", "n_dropped", "n_no_limit", "n_unit_skipped", "n_insufficient_data", "n_envelope",
+    "n_changed", "n_dropped", "n_no_limit", "n_unit_skipped", "n_insufficient_data",
 )
 
 
@@ -554,7 +552,7 @@ def _sanitize_limits_cte(rows: list[tuple]) -> str:
 
 
 def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, concept_ids, limit_rows,
-                        iqr_multiplier, z_threshold, unit_unknown="envelope"):
+                        iqr_multiplier, z_threshold):
     """Compose ``(rows_sql, report_sql)``; both share one classification CTE chain.
 
     Every row of the in-scope measurements gets a ``sanitize_status`` and a cleaned value in SQL, so the
@@ -576,50 +574,24 @@ def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, conce
     ]
 
     if method == "dqd_biologic_limits":
-        # unit_unknown='envelope': a measurement with a NULL or 0 unit that no unit row or any-unit row of its
-        # concept covers is judged by the widest range over the concept's unit rows (lowest min, highest max;
-        # a side stays open when any unit row leaves it open). 'skip' never builds the envelope.
-        envelope = unit_unknown == "envelope"
-        env_cond = "(le.concept_id IS NOT NULL AND (b.unit_concept_id IS NULL OR b.unit_concept_id = 0))" \
-            if envelope else "FALSE"
         ctes += [
             _sanitize_limits_cte(limit_rows),
             "lim_unit AS (SELECT * FROM lim WHERE unit_concept_id IS NOT NULL)",
             "lim_any AS (SELECT * FROM lim WHERE unit_concept_id IS NULL)",
             "lim_concept AS (SELECT DISTINCT concept_id FROM lim)",
-        ]
-        if envelope:
-            ctes.append(
-                "lim_env AS (\n"
-                "  SELECT concept_id,\n"
-                "         CASE WHEN COUNT(*) FILTER (WHERE min_value IS NULL) > 0 THEN NULL ELSE MIN(min_value) END"
-                " AS env_lo,\n"
-                "         CASE WHEN COUNT(*) FILTER (WHERE max_value IS NULL) > 0 THEN NULL ELSE MAX(max_value) END"
-                " AS env_hi\n"
-                "  FROM lim_unit\n"
-                "  GROUP BY concept_id\n"
-                ")")
-        env_join = "  LEFT JOIN lim_env AS le ON le.concept_id = b.measurement_concept_id\n" if envelope else ""
-        env_lo = "WHEN " + env_cond + " THEN le.env_lo " if envelope else ""
-        env_hi = "WHEN " + env_cond + " THEN le.env_hi " if envelope else ""
-        ctes += [
-            # a unit-specific row wins over an any-unit row, which wins over the envelope; a concept with
-            # limits only in other units is 'unit_skipped', a concept with no limit row at all is 'no_limit'
+            # a unit-specific row wins over an any-unit row; a concept with limits only in other units is
+            # 'unit_skipped', a concept with no limit row at all is 'no_limit'
             "joined AS (\n"
             "  SELECT b.*,\n"
-            "         CASE WHEN lu.concept_id IS NOT NULL THEN lu.min_value\n"
-            "              WHEN la.concept_id IS NOT NULL THEN la.min_value " + env_lo + "END AS lo,\n"
-            "         CASE WHEN lu.concept_id IS NOT NULL THEN lu.max_value\n"
-            "              WHEN la.concept_id IS NOT NULL THEN la.max_value " + env_hi + "END AS hi,\n"
-            f"         (lu.concept_id IS NOT NULL OR la.concept_id IS NOT NULL OR {env_cond}) AS limit_applies,\n"
-            f"         (lu.concept_id IS NULL AND la.concept_id IS NULL AND {env_cond}) AS by_envelope,\n"
+            "         CASE WHEN lu.concept_id IS NOT NULL THEN lu.min_value ELSE la.min_value END AS lo,\n"
+            "         CASE WHEN lu.concept_id IS NOT NULL THEN lu.max_value ELSE la.max_value END AS hi,\n"
+            "         (lu.concept_id IS NOT NULL OR la.concept_id IS NOT NULL) AS limit_applies,\n"
             "         (lc.concept_id IS NOT NULL) AS concept_has_limit\n"
             "  FROM base AS b\n"
             "  LEFT JOIN lim_unit AS lu ON lu.concept_id = b.measurement_concept_id"
             " AND lu.unit_concept_id = b.unit_concept_id\n"
             "  LEFT JOIN lim_any AS la ON la.concept_id = b.measurement_concept_id\n"
             "  LEFT JOIN lim_concept AS lc ON lc.concept_id = b.measurement_concept_id\n"
-            + env_join +
             ")",
             "cls AS (\n"
             "  SELECT joined.*, CASE\n"
@@ -742,16 +714,13 @@ def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, conce
 
     changed, dropped = ("CAST(0 AS BIGINT)", "COUNT(*) FILTER (WHERE flagged)") if action == "drop_row" \
         else ("COUNT(*) FILTER (WHERE flagged)", "CAST(0 AS BIGINT)")
-    # rows whose ok / below_min / above_max verdict came from the unit envelope (never NaN/Inf rows)
-    n_envelope = ("COUNT(*) FILTER (WHERE by_envelope AND isfinite(value_raw))"
-                  if method == "dqd_biologic_limits" else "CAST(0 AS BIGINT)")
     report_sql = (
         f"{with_clause}\n"
         "SELECT measurement_concept_id, unit_concept_id, COUNT(*) AS n,\n"
         f"       {n_of('ok')} AS n_ok, {n_of('below_min')} AS n_below, {n_of('above_max')} AS n_above,\n"
         f"       {n_of('invalid_number')} AS n_invalid, {changed} AS n_changed, {dropped} AS n_dropped,\n"
         f"       {n_of('no_limit')} AS n_no_limit, {n_of('unit_skipped')} AS n_unit_skipped,\n"
-        f"       {n_of('insufficient_data')} AS n_insufficient_data, {n_envelope} AS n_envelope\n"
+        f"       {n_of('insufficient_data')} AS n_insufficient_data\n"
         "FROM fin\n"
         "GROUP BY measurement_concept_id, unit_concept_id\n"
         "ORDER BY measurement_concept_id, unit_concept_id NULLS LAST"
@@ -767,8 +736,8 @@ def _sanitize_arrow(result) -> Any:
 def _sanitize_warn_unscreened(report: pd.DataFrame) -> None:
     """Warn when most of a limit-bearing concept's rows lack a unit and so were not screened at all.
 
-    Only reachable with ``unit_unknown='skip'``: the package's own ETL writes ``unit_concept_id = 0`` for lab
-    results, and without the unit envelope such labs come back as ``unit_skipped`` with their artifacts intact.
+    The package's own ETL writes ``unit_concept_id = 0`` for lab results, and ``dqd_biologic_limits`` never
+    guesses a unit, so such labs come back as ``unit_skipped`` with their artifacts intact.
     """
     if report.empty:
         return
@@ -783,8 +752,7 @@ def _sanitize_warn_unscreened(report: pd.DataFrame) -> None:
     warnings.warn(
         f"sanitize_measurements: more than half of the measurements of {len(bad)} concept(s) with physiologic "
         f"limits have no unit (unit_concept_id is NULL or 0) and were NOT screened (sanitize_status "
-        f"'unit_skipped'): concept_id {shown}. Use unit_unknown='envelope' (the default) to judge them against "
-        f"the widest range over the listed units, map the units in the ETL, or pass `limits` rows without "
+        f"'unit_skipped'): concept_id {shown}. Map the units in the ETL, or pass `limits` rows without "
         f"unit_concept_id to apply a limit whatever the unit.",
         UserWarning, stacklevel=3)
 
@@ -800,7 +768,6 @@ def sanitize_measurements(
     z_threshold: float = 4.0,
     person_col: str = "subject_id",
     format: str = "df",
-    unit_unknown: str = "envelope",
 ) -> Any:
     r"""Sanitize implausible numeric measurements (RFC 6.1): physiologic limits or statistical outliers.
 
@@ -818,10 +785,8 @@ def sanitize_measurements(
         Table or view (``name`` or ``schema.name``) restricting the scope to the persons listed in its
         ``person_col``. Duplicate cohort rows do not duplicate measurements. ``None`` = everyone.
     method : {'dqd_biologic_limits', 'winsorize_iqr', 'z_score_cutoff'}
-        ``'dqd_biologic_limits'`` compares each value with the bundled per-concept, per-unit
-        clinical-plausibility limits (``inst/extdata/physiologic_limits.csv``, see Notes) or with
-        ``limits``. The name is the RFC's: the bounds are conservative clinical-plausibility limits curated
-        for this package, not numeric thresholds copied from the OHDSI Data Quality Dashboard.
+        ``'dqd_biologic_limits'`` compares each value with the bundled per-concept, per-unit plausibility
+        limits (``inst/extdata/physiologic_limits.csv``, see Notes) or with ``limits``.
         ``'winsorize_iqr'`` flags values outside the Tukey fences ``Q1 - k*IQR .. Q3 + k*IQR`` of their
         (concept, unit) group (``k = iqr_multiplier``). ``'z_score_cutoff'`` flags values with
         ``|z| > z_threshold`` using the group mean and sample standard deviation. The two statistical
@@ -852,14 +817,6 @@ def sanitize_measurements(
         ``'df'`` returns a pandas DataFrame with the report in ``df.attrs['sanitization_report']``.
         ``'arrow'`` (pyarrow Table) and ``'polars'`` return the rows only: the report is **not**
         attached to them. If polars is not installed ``'polars'`` warns and returns the Arrow table.
-    unit_unknown : {'envelope', 'skip'}, default 'envelope'
-        Only used by ``'dqd_biologic_limits'``: what to do with a measurement whose ``unit_concept_id`` is
-        NULL or 0 (unknown), as every lab written by this package's PCORnet ETL is. ``'envelope'`` judges
-        it against the widest range over the units the concept has limits in (lowest ``min_value``, highest
-        ``max_value``), so a value that is valid in any listed unit passes and only values impossible in
-        every unit (negative, 1e6) are flagged. ``'skip'`` leaves such a measurement untouched
-        (``'unit_skipped'``). A non-zero unit that the concept has no limit for is always ``'unit_skipped'``.
-        Passing ``'skip'`` with another method warns and is ignored.
 
     Returns
     -------
@@ -876,21 +833,18 @@ def sanitize_measurements(
         The per-concept report is a DataFrame in ``df.attrs['sanitization_report']``, one row per
         ``measurement_concept_id`` and ``unit_concept_id`` (NULL unit = NaN, listed last within a concept)
         with columns ``measurement_concept_id``, ``unit_concept_id``, ``n``, ``n_ok``, ``n_below``,
-        ``n_above``, ``n_invalid``, ``n_changed``, ``n_dropped``, ``n_no_limit``, ``n_unit_skipped``,
+        ``n_above``, ``n_invalid``, ``n_changed``, ``n_dropped``, ``n_no_limit``, ``n_unit_skipped`` and
         ``n_insufficient_data`` (the status counts the spec's other columns cannot hold: it is 0 for
-        ``'dqd_biologic_limits'``) and ``n_envelope``. It counts every in-scope row, including dropped ones,
-        and reconciles exactly:
+        ``'dqd_biologic_limits'``). It counts every in-scope row, including dropped ones, and reconciles
+        exactly:
         ``n = n_ok + n_below + n_above + n_invalid + n_no_limit + n_unit_skipped + n_insufficient_data``
-        and ``n_changed + n_dropped = n_below + n_above + n_invalid``. ``n_envelope`` is not part of that
-        sum: it counts the rows (of the ``'ok'``, ``'below_min'`` and ``'above_max'`` ones) whose verdict came
-        from the unit envelope (see ``unit_unknown``). It is 0 for the statistical methods and with
-        ``unit_unknown='skip'``.
+        and ``n_changed + n_dropped = n_below + n_above + n_invalid``.
 
     Raises
     ------
     ValueError
-        For an unknown ``method``/``action``/``format``/``unit_unknown``, a non-positive ``iqr_multiplier``
-        or ``z_threshold``, bad ``measurement_concept_ids`` or ``limits``, a missing ``measurement``
+        For an unknown ``method``/``action``/``format``, a non-positive ``iqr_multiplier`` or
+        ``z_threshold``, bad ``measurement_concept_ids`` or ``limits``, a missing ``measurement``
         table/column, or a ``cohort_table`` that cannot be read or lacks ``person_col``.
 
     Notes
@@ -902,34 +856,22 @@ def sanitize_measurements(
 
     **Inclusive bounds.** A value equal to a bound is ``'ok'``.
 
-    **Bundled limits.** ``physiologic_limits.csv`` holds conservative clinical-plausibility limits curated
-    for this package: every row has ``source = clinical_plausibility`` (see its ``note`` column). The units
-    were cross-checked against the unit lists of the OHDSI Data Quality Dashboard (DQD), but the bounds are
-    not DQD numeric thresholds, whatever the method name ``'dqd_biologic_limits'`` (the RFC's) suggests.
-    They are deliberately wide: they remove physiologically impossible values and sensor or data-entry
-    artifacts (a systolic pressure of 0 or 999, a saturation of 0, a negative lab value) and keep severe but
-    survivable ones (a venous or severe-hypoxemia saturation in the 20s or 30s, a serum sodium of 80-84
-    mmol/L, a glucose below 5 mg/dL). The table is a curated subset (10 vital signs and about 25 common
-    labs), not every measurement concept: a concept without a row is ``'no_limit'``. Pass ``limits`` to add
-    or replace rows.
+    **Bundled limits.** ``physiologic_limits.csv`` holds clinical-plausibility limits curated for this
+    package (every row has ``source = clinical_plausibility``; see its ``note`` column). They follow
+    the idea of the OHDSI Data Quality Dashboard plausibility checks but are not copied from DQD
+    thresholds. They are deliberately wide: they remove physiologically impossible values and sensor or
+    data-entry artifacts (a systolic pressure of 0 or 999), not abnormal ones. Pass ``limits`` to use
+    your own.
 
-    **Units (dqd_biologic_limits).** A limit row applies when the measurement's ``unit_concept_id`` equals
-    the row's, so a creatinine in umol/L is never compared with the mg/dL bounds. A non-zero unit that the
-    concept has no limit for is left untouched and reported as ``'unit_skipped'``. A concept with no limit
-    row at all is ``'no_limit'``.
-
-    **Unknown units (unit_unknown).** This package's PCORnet ETL writes ``unit_concept_id = 0`` for lab
-    results (the text stays in ``unit_source_value``). With the default ``unit_unknown='envelope'`` a
-    measurement with a NULL or 0 unit is judged against the widest range over the units its concept has
-    limits in. For creatinine (0.1-30 mg/dL, 8-2650 umol/L) that is 0.1-2650: a value of 999 passes because
-    it could be umol/L, while -5 and 1e6 are flagged (``'clamp'`` moves them to the envelope bound). The
-    envelope only catches values that are impossible in every unit, so it is much weaker than a limit in the
-    known unit, most of all for concepts whose units
-    differ by a large factor (creatinine, weight, height), and an ``'ok'`` from it does not mean the value is
-    plausible in its true unit. ``n_envelope`` in the report counts these rows. A ``limits`` row without
-    ``unit_concept_id``, or one for unit 0, takes precedence over the envelope. With
-    ``unit_unknown='skip'`` such rows are left untouched (``'unit_skipped'``) and a ``UserWarning`` is
-    raised when more than half of the measurements of a concept with limits are skipped for that reason.
+    **Units (dqd_biologic_limits).** A limit row applies only when the measurement's
+    ``unit_concept_id`` equals the row's. A concept that has limits only in other units, or a
+    measurement with a NULL/0 unit, is left untouched and reported as ``'unit_skipped'`` (a creatinine in
+    umol/L is never compared with the mg/dL bounds). A concept with no limit row at all is
+    ``'no_limit'``. No unit is ever guessed, so an ETL that leaves ``unit_concept_id`` at 0 (this
+    package's PCORnet ETL does for lab results: the text stays in ``unit_source_value``) gets no
+    screening of those rows. A ``UserWarning`` is raised when more than half of the measurements of a
+    concept with limits are skipped for that reason. Map the units in the ETL, or pass ``limits`` rows
+    without ``unit_concept_id`` (an any-unit limit) for the concepts you want screened.
 
     **Choosing an action.** ``'nullify'`` (or ``'drop_row'``) is the right action for the artifacts
     ``'dqd_biologic_limits'`` finds: a blood pressure of 0 or 999 is a sentinel, not an extreme
@@ -970,15 +912,12 @@ def sanitize_measurements(
     method_k = str(method).lower().strip()
     action_k = str(action).lower().strip()
     fmt = str(format).lower().strip()
-    unit_k = str(unit_unknown).lower().strip()
     if method_k not in _SANITIZE_METHODS:
         raise ValueError(f"method must be one of {list(_SANITIZE_METHODS)}; got {method!r}")
     if action_k not in _SANITIZE_ACTIONS:
         raise ValueError(f"action must be one of {list(_SANITIZE_ACTIONS)}; got {action!r}")
     if fmt not in _SANITIZE_FORMATS:
         raise ValueError(f"format must be one of 'df', 'arrow' or 'polars'; got {format!r}")
-    if unit_k not in _SANITIZE_UNIT_UNKNOWN:
-        raise ValueError(f"unit_unknown must be one of {list(_SANITIZE_UNIT_UNKNOWN)}; got {unit_unknown!r}")
     k_iqr = _sanitize_positive(iqr_multiplier, "iqr_multiplier")
     k_z = _sanitize_positive(z_threshold, "z_threshold")
     concept_ids = None if measurement_concept_ids is None else _sanitize_concept_ids(measurement_concept_ids)
@@ -990,9 +929,6 @@ def sanitize_measurements(
     elif limits is not None:
         warnings.warn(f"limits is only used by method='dqd_biologic_limits' and is ignored for method={method_k!r}.",
                       stacklevel=2)
-    if method_k != "dqd_biologic_limits" and unit_k != "envelope":
-        warnings.warn(f"unit_unknown is only used by method='dqd_biologic_limits' and is ignored for "
-                      f"method={method_k!r}.", stacklevel=2)
 
     try:
         meas_cols = {r[0].lower(): r[0] for r in con.execute("DESCRIBE SELECT * FROM measurement LIMIT 0").fetchall()}
@@ -1020,20 +956,18 @@ def sanitize_measurements(
 
     rows_sql, report_sql = _sanitize_build_sql(
         method=method_k, action=action_k, extras=extras, cohort_ref=cohort_ref, person_ref=person_ref,
-        concept_ids=concept_ids, limit_rows=limit_rows, iqr_multiplier=k_iqr, z_threshold=k_z,
-        unit_unknown=unit_k)
+        concept_ids=concept_ids, limit_rows=limit_rows, iqr_multiplier=k_iqr, z_threshold=k_z)
 
     out = None
     if fmt == "df":
         out = con.execute(rows_sql).df()
     else:
         table = _sanitize_arrow(con.execute(rows_sql))
-    # the report is also the input of the unscreened-unit warning, which only exists for unit_unknown='skip'
-    warn_unscreened = method_k == "dqd_biologic_limits" and unit_k == "skip"
+    # the report is also the input of the unscreened-unit warning, so the limits method always computes it
     report = None
-    if fmt == "df" or warn_unscreened:
+    if fmt == "df" or method_k == "dqd_biologic_limits":
         report = con.execute(report_sql).df()
-    if warn_unscreened:
+    if method_k == "dqd_biologic_limits":
         _sanitize_warn_unscreened(report)
     if out is not None:
         out.attrs["sanitization_report"] = report

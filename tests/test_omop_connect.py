@@ -574,79 +574,20 @@ def test_a_search_path_set_on_a_passed_in_connection_is_kept_with_central_vocab_
         con.close()
 
 
-def test_a_search_path_without_main_still_ranks_the_primary_database_before_the_central_vocabulary(cdm, vocab):
-    """DuckDB consults `main` only AFTER the search_path entries; appending central_vocab.main alone to a path
-    that omits `main` would let the central vocabulary beat a populated local vocabulary table."""
-    with duckdb.connect(str(cdm)) as w:
-        w.execute("INSERT INTO concept VALUES (1001, 'LOCAL type 2 diabetes', 'Condition', 'SNOMED', 'Disorder', "
-                  "'S', 'T2DM', DATE '1970-01-01', DATE '2099-12-31', NULL)")
-    con = duckdb.connect(str(cdm))
-    try:
-        con.execute("CREATE SCHEMA analysis")
-        con.execute("CREATE TABLE analysis.cohort_tbl AS SELECT 7 AS person_id")
-        con.execute("SET search_path = 'analysis'")  # no `main` in it
-        # what the plain append would have produced: the vocabulary wins over the local table (the hazard)
-        con.execute(f"ATTACH '{vocab.as_posix()}' AS central_vocab (READ_ONLY)")
-        con.execute("SET search_path = 'analysis,central_vocab.main'")
-        assert con.execute("SELECT concept_name FROM concept WHERE concept_id = 1001").fetchone()[0] == (
-            "Type 2 diabetes mellitus")
-        con.execute("SET search_path = 'analysis'")
-        omop_connect(con)
-        assert _setting(con, "search_path") == "analysis,main,central_vocab.main"
-        assert con.execute("SELECT concept_name FROM concept WHERE concept_id = 1001").fetchall() == [
-            ("LOCAL type 2 diabetes",)]
-        assert con.execute("SELECT person_id FROM cohort_tbl").fetchone()[0] == 7
-        assert con.execute("SELECT COUNT(*) FROM concept_ancestor").fetchone()[0] == len(ANCESTOR_ROWS)  # empty locally
-        assert con.execute("SELECT current_schema()").fetchone()[0] == "analysis"  # new objects keep landing there
-        omop_connect(con)  # idempotent
-        assert _setting(con, "search_path") == "analysis,main,central_vocab.main"
-    finally:
-        con.close()
-
-
-def test_a_search_path_naming_the_primary_database_main_schema_is_not_given_a_second_main(cdm, vocab):
-    con = duckdb.connect(str(cdm))
-    try:
-        con.execute("CREATE SCHEMA analysis")
-        con.execute("SET search_path = 'analysis,cdm.main'")
-        omop_connect(con, vocab_db_path=vocab)
-        assert _setting(con, "search_path") == "analysis,cdm.main,central_vocab.main"
-    finally:
-        con.close()
-
-
-def test_a_search_path_that_already_lists_central_vocab_is_left_exactly_as_the_caller_wrote_it(cdm, vocab):
-    con = duckdb.connect(str(cdm))
-    try:
-        con.execute(f"ATTACH '{vocab.as_posix()}' AS central_vocab (READ_ONLY)")
-        con.execute("SET search_path = 'main,central_vocab.main'")
-        omop_connect(con)
-        assert _setting(con, "search_path") == "main,central_vocab.main"
-    finally:
-        con.close()
-
-
-@pytest.mark.parametrize("current, primary, expected", [
-    ("", None, "main,central_vocab.main"),
-    (None, None, "main,central_vocab.main"),
-    ("main", None, "main,central_vocab.main"),
-    ("analysis,main", None, "analysis,main,central_vocab.main"),
-    ("MAIN,analysis", None, "MAIN,analysis,central_vocab.main"),
-    ("analysis", None, "analysis,main,central_vocab.main"),  # main resolution is made explicit, before the vocabulary
-    ("a,b", "cdm", "a,b,main,central_vocab.main"),
-    ("analysis,cdm.main", "cdm", "analysis,cdm.main,central_vocab.main"),
-    ("analysis,CDM.MAIN", "cdm", "analysis,CDM.MAIN,central_vocab.main"),
-    ("analysis,cdm.main", None, "analysis,cdm.main,main,central_vocab.main"),  # primary unknown: only `main` counts
-    ("analysis,other.main", "cdm", "analysis,other.main,main,central_vocab.main"),  # another catalog's main is not ours
-    ("main,central_vocab.main", None, "main,central_vocab.main"),
-    ("central_vocab.main,main", None, "central_vocab.main,main"),
-    ("CENTRAL_VOCAB.main,main", None, "CENTRAL_VOCAB.main,main"),
-    ('"central_vocab".main', None, '"central_vocab".main'),
-    ("central_vocab", None, "central_vocab"),
-    ("cdm.central_vocab", None, "cdm.central_vocab,main,central_vocab.main"),  # a schema that merely has that name
+@pytest.mark.parametrize("current, expected", [
+    ("", "main,central_vocab.main"),
+    (None, "main,central_vocab.main"),
+    ("main", "main,central_vocab.main"),
+    ("analysis,main", "analysis,main,central_vocab.main"),
+    ("main,central_vocab.main", "main,central_vocab.main"),
+    ("central_vocab.main,main", "central_vocab.main,main"),
+    ("CENTRAL_VOCAB.main,main", "CENTRAL_VOCAB.main,main"),
+    ('"central_vocab".main', '"central_vocab".main'),
+    ("central_vocab", "central_vocab"),
+    ("cdm.central_vocab", "cdm.central_vocab,central_vocab.main"),  # a schema that merely has that name
 ])
-def test_search_path_is_extended_not_replaced(current, primary, expected):
-    assert vocabulary._search_path_with_central_vocab(current, primary) == expected
+def test_search_path_is_extended_not_replaced(current, expected):
+    assert vocabulary._search_path_with_central_vocab(current) == expected
 
 
 # ----------------------------------------------------------------------- read-only + macros + untouched
@@ -809,42 +750,6 @@ def test_ancestry_macros_bind_the_callers_column_whatever_it_is_called(connected
         ).fetchone()[0] == reaching, (macro, column)
 
 
-# Join and semi-join shapes: {m} is the macro, {c} the caller's column. Every one is checked against the size of
-# the macro's result for each literal id, so a caller column that is captured by the macro's own scope (its output
-# column concept_id, or a concept_ancestor column) changes the count.
-JOIN_SHAPES = {
-    "comma lateral, unqualified": ('SELECT COUNT(*) FROM probe, {m}("{c}")', "inner"),
-    "comma lateral, qualified": ('SELECT COUNT(*) FROM probe, {m}(probe."{c}")', "inner"),
-    "JOIN LATERAL subquery": ('SELECT COUNT(*) FROM probe p JOIN LATERAL (SELECT concept_id FROM {m}(p."{c}")) d ON TRUE', "inner"),
-    "LEFT JOIN LATERAL subquery": ('SELECT COUNT(*) FROM probe p LEFT JOIN LATERAL (SELECT concept_id FROM {m}(p."{c}")) d ON TRUE', "left"),
-    "JOIN ... ON TRUE, qualified": ('SELECT COUNT(*) FROM probe p JOIN {m}(p."{c}") d ON TRUE', "inner"),
-    "JOIN ... ON predicate, unqualified": ('SELECT COUNT(*) FROM probe JOIN {m}("{c}") d ON d.concept_id IS NOT NULL', "inner"),
-    "EXISTS, qualified": ('SELECT COUNT(*) FROM probe p WHERE EXISTS (SELECT 1 FROM {m}(p."{c}"))', "exists"),
-    "EXISTS, unqualified": ('SELECT COUNT(*) FROM probe WHERE EXISTS (SELECT 1 FROM {m}("{c}"))', "exists"),
-    "NOT IN, unqualified": ('SELECT COUNT(*) FROM probe WHERE 1001 NOT IN (SELECT concept_id FROM {m}("{c}"))', "not in 1001"),
-}
-
-
-@pytest.mark.parametrize("column", CALLER_COLUMN_NAMES)
-@pytest.mark.parametrize("macro", ["descendants_of", "ancestors_of"])
-def test_ancestry_macros_bind_the_callers_column_in_join_and_semi_join_contexts(connected, macro, column):
-    connected.execute(f'CREATE TEMP TABLE probe ("{column}" INTEGER)')
-    connected.executemany("INSERT INTO probe VALUES (?)", [(v,) for v in ANCESTRY_COUNTS])
-    # what the macro returns for each id, written as a literal (no correlation involved)
-    members = {v: _ids(connected, f"SELECT concept_id FROM {macro}({'NULL' if v is None else v})")
-               for v in ANCESTRY_COUNTS}
-    expected = {
-        "inner": sum(len(m) for m in members.values()),
-        "left": sum(max(1, len(m)) for m in members.values()),
-        "exists": sum(1 for m in members.values() if m),
-        "not in 1001": sum(1 for m in members.values() if 1001 not in m),
-    }
-    assert expected["inner"] > 0 and expected["exists"] < len(members)  # a vacuous fixture would prove nothing
-    for label, (template, kind) in JOIN_SHAPES.items():
-        got = connected.execute(template.format(m=macro, c=column)).fetchone()[0]
-        assert got == expected[kind], (label, macro, column)
-
-
 def test_existing_mapping_macros_resolve_through_the_attached_vocabulary(connected):
     assert connected.execute("SELECT map_to_standard_concept_id('ICD10CM', 'E11.9')").fetchone()[0] == 1001
     assert connected.execute("SELECT map_to_standard_concept_id('ICD10CM', 'nope')").fetchone()[0] == 0
@@ -895,131 +800,6 @@ def test_omop_connect_after_attach_central_vocabulary_does_not_conflict(cdm, voc
         ).fetchall() == views_before  # its views were reused, none duplicated or replaced
         assert con.execute("SELECT COUNT(*) FROM concept").fetchone()[0] == len(CONCEPT_ROWS)
         assert _ids(con, "SELECT concept_id FROM descendants_of(1000)") == [1000, 1001, 1002, 1003]
-    finally:
-        con.close()
-
-
-def _table_types(con, catalog):
-    return {name: kind for name, kind in con.execute(
-        "SELECT table_name, table_type FROM information_schema.tables "
-        "WHERE table_catalog = ? AND table_schema = 'main'", [catalog]).fetchall()}
-
-
-def test_attach_central_vocabulary_after_omop_connect_reuses_the_attachment(cdm, vocab, capsys):
-    """The reverse order of the test above: used to fail with 'database with name "central_vocab" already exists'."""
-    con = omop_connect(cdm, vocab_db_path=vocab, read_only=True)
-    try:
-        attach_central_vocabulary(con, str(vocab), temporary=True)
-        assert "Attached central vocabulary" in capsys.readouterr().out
-        assert [d for d in _databases(con) if d == "central_vocab"] == ["central_vocab"]
-        assert os.path.samefile(_databases(con)["central_vocab"], vocab)
-        # the views were (re)created and everything still resolves
-        views = {r[0] for r in con.execute(
-            "SELECT view_name FROM duckdb_views() WHERE database_name = 'temp' AND NOT internal").fetchall()}
-        assert VOCAB_TABLES <= views
-        assert con.execute("SELECT COUNT(*) FROM concept").fetchone()[0] == len(CONCEPT_ROWS)
-        assert _ids(con, "SELECT concept_id FROM descendants_of(1001)") == [1001, 1002]
-        assert _setting(con, "search_path") == "main,central_vocab.main"
-    finally:
-        con.close()
-
-
-def test_attach_central_vocabulary_after_omop_connect_can_persist_the_views(cdm, vocab):
-    con = omop_connect(cdm, vocab_db_path=vocab)  # TEMP views over the empty local tables are in front
-    try:
-        attach_central_vocabulary(con, str(vocab), temporary=False)
-        assert con.execute("SELECT COUNT(*) FROM concept").fetchone()[0] == len(CONCEPT_ROWS)
-        # the persistent views were written to the primary database in full, not hidden by or mixed up with the
-        # TEMP views: the local tables are gone, replaced by views
-        persisted = _table_types(con, "cdm")
-        assert all(persisted[t] == "VIEW" for t in VOCAB_TABLES), persisted
-        assert persisted["vocabulary"] == "BASE TABLE"  # tables the vocabulary does not hold are left alone
-    finally:
-        con.close()
-    with duckdb.connect(str(cdm), read_only=True) as check:
-        assert {t: _table_types(check, "cdm")[t] for t in VOCAB_TABLES} == dict.fromkeys(VOCAB_TABLES, "VIEW")
-    again = omop_connect(cdm, read_only=True)
-    try:
-        assert again.execute("SELECT COUNT(*) FROM concept_ancestor").fetchone()[0] == len(ANCESTOR_ROWS)
-    finally:
-        again.close()
-
-
-@pytest.mark.parametrize("temporary", [True, False], ids=["temporary", "persistent"])
-def test_attach_central_vocabulary_is_idempotent(cdm, vocab, temporary, monkeypatch):
-    con = duckdb.connect(str(cdm))
-    try:
-        for _ in range(3):
-            attach_central_vocabulary(con, str(vocab), temporary=temporary)
-        # the same file spelled differently (relative, backslashes, pathlib) is still the same attachment
-        monkeypatch.chdir(vocab.parent)
-        attach_central_vocabulary(con, "central_vocabulary.duckdb", temporary=temporary)
-        attach_central_vocabulary(con, str(vocab).replace("/", os.sep), temporary=temporary)
-        attach_central_vocabulary(con, vocab, temporary=temporary)
-        assert [d for d in _databases(con) if d == "central_vocab"] == ["central_vocab"]
-        assert con.execute("SELECT COUNT(*) FROM concept").fetchone()[0] == len(CONCEPT_ROWS)
-        assert con.execute("SELECT COUNT(*) FROM concept_relationship").fetchone()[0] == len(RELATIONSHIP_ROWS)
-        assert con.execute("SELECT COUNT(*) FROM duckdb_views() WHERE NOT internal AND view_name = 'concept' "
-                           "AND database_name = ?", ["temp" if temporary else "cdm"]).fetchone()[0] == 1
-    finally:
-        con.close()
-
-
-def test_attach_central_vocabulary_persistent_views_can_be_recreated_in_a_later_session(cdm, vocab):
-    """Used to fail: DROP TABLE refuses the persistent views a previous session left behind."""
-    with duckdb.connect(str(cdm)) as first:
-        attach_central_vocabulary(first, str(vocab), temporary=False)
-    with duckdb.connect(str(cdm)) as second:
-        attach_central_vocabulary(second, str(vocab), temporary=False)
-        assert second.execute("SELECT COUNT(*) FROM concept").fetchone()[0] == len(CONCEPT_ROWS)
-        assert {t: _table_types(second, "cdm")[t] for t in VOCAB_TABLES} == dict.fromkeys(VOCAB_TABLES, "VIEW")
-
-
-@pytest.mark.parametrize("via", ["omop_connect", "attach_central_vocabulary"])
-def test_attach_central_vocabulary_rejects_a_different_database_under_the_same_name(cdm, vocab, tmp_path, via):
-    other = tmp_path / "other_vocabulary.duckdb"
-    _make_vocab(other, tables={"concept"})
-    con = omop_connect(cdm, vocab_db_path=vocab, read_only=True) if via == "omop_connect" else duckdb.connect(
-        str(cdm), read_only=True)
-    try:
-        if via == "attach_central_vocabulary":
-            attach_central_vocabulary(con, str(vocab), temporary=True)
-        with pytest.raises(ValueError, match="different database is already attached"):
-            attach_central_vocabulary(con, str(other), temporary=True)
-        # nothing changed: the first vocabulary is still the one attached and in use
-        assert os.path.samefile(_databases(con)["central_vocab"], vocab)
-        assert con.execute("SELECT COUNT(*) FROM concept").fetchone()[0] == len(CONCEPT_ROWS)
-    finally:
-        con.close()
-
-
-def test_attach_central_vocabulary_missing_file_is_still_an_error(cdm, tmp_path):
-    con = duckdb.connect(str(cdm), read_only=True)
-    try:
-        with pytest.raises(FileNotFoundError, match="Central vocabulary database not found"):
-            attach_central_vocabulary(con, str(tmp_path / "nope.duckdb"))
-        assert "central_vocab" not in _databases(con)
-    finally:
-        con.close()
-
-
-def test_attach_central_vocabulary_escapes_quotes_and_expands_a_leading_tilde(tmp_path, cdm_template, fake_home):
-    directory = tmp_path / "O'Brien's site"
-    directory.mkdir()
-    shutil.copy(cdm_template, directory / "cdm.duckdb")
-    _make_vocab(directory / "central_vocabulary.duckdb")
-    con = duckdb.connect(str(directory / "cdm.duckdb"), read_only=True)
-    try:
-        attach_central_vocabulary(con, str(directory / "central_vocabulary.duckdb"))
-        assert os.path.samefile(_databases(con)["central_vocab"], directory / "central_vocabulary.duckdb")
-    finally:
-        con.close()
-    shutil.copy(directory / "central_vocabulary.duckdb", fake_home / "v.duckdb")
-    con = duckdb.connect(str(directory / "cdm.duckdb"), read_only=True)
-    try:
-        attach_central_vocabulary(con, "~/v.duckdb")
-        assert os.path.samefile(_databases(con)["central_vocab"], fake_home / "v.duckdb")
-        assert con.execute("SELECT COUNT(*) FROM concept").fetchone()[0] == len(CONCEPT_ROWS)
     finally:
         con.close()
 

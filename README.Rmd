@@ -5,17 +5,6 @@ format: gfm
 
 ```{r, include = FALSE}
 knitr::opts_chunk$set(collapse = TRUE, comment = "#>", message = FALSE)
-
-# Keep machine-specific temp paths (which can contain a user name) out of the rendered README.
-local({
-  old_hook <- knitr::knit_hooks$get("output")
-  tmp <- unique(c(tempdir(), normalizePath(tempdir(), winslash = "/", mustWork = FALSE),
-                  normalizePath(tempdir(), winslash = "\\", mustWork = FALSE)))
-  knitr::knit_hooks$set(output = function(x, options) {
-    for (p in tmp) x <- gsub(p, "<tempdir>", x, fixed = TRUE)
-    old_hook(x, options)
-  })
-})
 ```
 
 # omop-duck-db <a href="https://jkylearmstrong.github.io/omop-duck-db/"><img src="man/figures/logo.png" align="right" height="139" alt="omop-duck-db website" /></a>

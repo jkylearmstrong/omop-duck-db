@@ -5,17 +5,7 @@ import warnings
 
 import duckdb
 
-from .build_omop_cdm import (
-    CENTRAL_VOCAB_ALIAS,
-    _CENTRAL_VOCAB_TABLES,
-    _attached_central_vocab,
-    _connection_is_read_only,
-    _same_file,
-    _sql_identifier,
-    _sql_path,
-    _sql_string,
-    load_macros,
-)
+from .build_omop_cdm import _connection_is_read_only, load_macros
 
 EXPECTED_VOCAB_TABLES = [
     "concept",
@@ -217,9 +207,42 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
 
 # --- omop_connect: session helper that makes an attached central vocabulary transparent ---------------
 
+CENTRAL_VOCAB_ALIAS = "central_vocab"
 # Looked up, in this order, in the directory that holds the primary database (nowhere else).
 VOCAB_DB_FILENAMES = ("central_vocabulary.duckdb", "vocabulary.duckdb", "vocab.duckdb")
+# Same tables attach_central_vocabulary() exposes.
+_CENTRAL_VOCAB_TABLES = (
+    "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
+    "vocabulary", "relationship", "concept_class", "domain", "drug_strength",
+)
 _SEARCH_PATH = f"main,{CENTRAL_VOCAB_ALIAS}.main"
+
+
+def _sql_string(value):
+    """Single-quoted SQL string literal with embedded quotes escaped."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sql_identifier(name):
+    """Double-quoted SQL identifier with embedded quotes escaped."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _sql_path(path):
+    """Absolute path as a SQL string literal; Windows backslashes become forward slashes."""
+    absolute = os.path.abspath(path)
+    if os.sep == "\\":
+        absolute = absolute.replace("\\", "/")
+    return _sql_string(absolute)
+
+
+def _same_file(a, b):
+    if not a or not b:
+        return False
+    try:
+        return os.path.samefile(a, b)
+    except OSError:  # one of the paths cannot be stat'ed: compare them textually
+        return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
 
 def _primary_database_file(con):
@@ -228,6 +251,14 @@ def _primary_database_file(con):
         "SELECT path FROM duckdb_databases() WHERE database_name = current_database()"
     ).fetchone()
     return os.path.abspath(row[0]) if row and row[0] else None
+
+
+def _attached_central_vocab(con):
+    """None if no ``central_vocab`` database is attached, else its path ('' if it has none)."""
+    row = con.execute(
+        f"SELECT path FROM duckdb_databases() WHERE database_name = {_sql_string(CENTRAL_VOCAB_ALIAS)}"
+    ).fetchone()
+    return None if row is None else (row[0] or "")
 
 
 def _discover_sibling_vocab(db_file):
@@ -310,32 +341,14 @@ def _has_vocabulary_tables(con):
     ).fetchone()[0]
 
 
-def _search_path_with_central_vocab(current, primary=None):
-    """``current`` search_path extended so the attached vocabulary is reachable, nothing of it dropped.
-
-    The caller's entries are kept, in order, and come first. Then, unless ``current`` already lists
-    ``central_vocab`` (it is then returned as is -- the caller placed it), the result gets
-
-    * ``main`` appended when no entry already means the primary database's ``main`` schema (``main``, or
-      ``<primary>.main``). DuckDB resolves names through the search path in order and only falls back to
-      ``main`` *after* it, so without this a path such as ``'analysis'`` extended by ``central_vocab.main``
-      alone would let the central vocabulary win over a populated local vocabulary table, contradicting the
-      documented precedence (primary ``main`` first); and
-    * ``central_vocab.main`` appended last.
-
-    An empty path (the default of a fresh connection) becomes ``'main,central_vocab.main'``.
-    """
+def _search_path_with_central_vocab(current):
+    """``current`` search_path with ``central_vocab.main`` added; the default (empty) path becomes
+    ``main,central_vocab.main`` and a path that already lists ``central_vocab`` is returned as is."""
     entries = [e.strip() for e in (current or "").split(",") if e.strip()]
     if not entries:
         return _SEARCH_PATH
-    names = [e.replace('"', "").lower() for e in entries]
-    if any(n.split(".")[0] == CENTRAL_VOCAB_ALIAS for n in names):
+    if any(e.replace('"', "").lower().split(".")[0] == CENTRAL_VOCAB_ALIAS for e in entries):
         return ",".join(entries)
-    main_entries = {"main"}
-    if primary:
-        main_entries.add(f"{primary}.main".lower())
-    if not any(n in main_entries for n in names):
-        entries.append("main")
     return ",".join(entries + [f"{CENTRAL_VOCAB_ALIAS}.main"])
 
 
@@ -365,11 +378,9 @@ def _configure_omop_connection(con, explicit_vocab, auto_attach_vocab, load_sql_
     vocab_attached = attached is not None
     empty_vocab = False
     if vocab_attached:
-        # A search_path the caller set on a connection passed in is kept, extended by main (when absent)
-        # and central_vocab.main.
+        # A search_path the caller set on a connection passed in is kept, with central_vocab appended.
         current = con.execute("SELECT current_setting('search_path')").fetchone()[0]
-        primary = con.execute("SELECT current_database()").fetchone()[0]
-        wanted = _search_path_with_central_vocab(current, primary)
+        wanted = _search_path_with_central_vocab(current)
         if wanted != current:
             con.execute(f"SET search_path = {_sql_string(wanted)}")
         _expose_central_vocab_tables(con)
@@ -427,7 +438,7 @@ def omop_connect(
     ``search_path`` becomes ``'main,central_vocab.main'``, so ``concept``, ``concept_ancestor``,
     ``concept_relationship``, ... can be queried with no schema prefix while a 10M-concept Athena
     vocabulary is stored once instead of inside every site database. (A ``search_path`` you already
-    set on a connection you pass in is kept and extended, never replaced; see Notes.)
+    set on a connection you pass in is kept, with ``central_vocab.main`` appended; see Notes.)
 
     Parameters
     ----------
@@ -486,15 +497,9 @@ def omop_connect(
     ``central_vocab``, is a no-op for the attachment.
 
     Search path: on a fresh connection (empty ``search_path``) it becomes ``'main,central_vocab.main'``.
-    A ``search_path`` already set on a connection you pass in is not replaced; its entries are kept, in
-    order, and extended: ``main`` is appended unless an entry already means the primary database's
-    ``main`` schema (``main`` or ``<database>.main``), then ``central_vocab.main`` is appended. So
-    ``'analysis,main'`` becomes ``'analysis,main,central_vocab.main'`` and ``'analysis'`` becomes
-    ``'analysis,main,central_vocab.main'`` too: the schemas you put first keep taking precedence, and
-    the primary database's own tables always rank ahead of the central vocabulary (DuckDB would
-    otherwise consult ``main`` only *after* ``central_vocab.main``, letting the central vocabulary win
-    over a populated local vocabulary table). A path that already lists ``central_vocab`` is left
-    exactly as the caller wrote it. Calling this again changes nothing.
+    A ``search_path`` already set on a connection you pass in is not replaced: ``central_vocab.main``
+    is appended to it (unless it already lists ``central_vocab``), so schemas you put first keep
+    taking precedence.
 
     Vocabulary precedence is per table: a vocabulary table that holds rows in the primary database
     wins over the attached one. A local table that is merely *empty* -- as every vocabulary table is
@@ -513,10 +518,11 @@ def omop_connect(
 
     Relation to :func:`attach_central_vocabulary`: that function is the ETL-time helper -- it
     attaches the vocabulary and creates a zero-copy view per vocabulary table (temporary, or
-    persistent in the database). Both functions recognise an attachment the other (or an earlier
-    call) made: when ``central_vocab`` is already attached to the *same* file the ``ATTACH`` is skipped,
-    so they can be used in either order on one connection; a *different* file under that name is a
-    ``ValueError`` in both.
+    persistent in the database), and fails if ``central_vocab`` is already attached.
+    ``omop_connect`` is the analysis-time helper and recognises an attachment made earlier by
+    ``attach_central_vocabulary`` (same file; no second ATTACH, its views are reused). Call
+    ``attach_central_vocabulary`` first when using both on one connection, since the other order
+    fails at its ATTACH.
 
     Examples
     --------
