@@ -12,6 +12,7 @@
 - Cluster job submission connector
 """
 
+from pathlib import Path
 import json
 import duckdb
 import numpy as np
@@ -32,13 +33,18 @@ from omop_etl import (
     auto_remap_unmapped,
     create_federated_consortium,
     with_cell_suppression,
+    with_differential_privacy,
     check_cross_database_discrepancy,
     compile_circe_to_duckdb,
     execute_circe_cohort,
     extract_sard_visit_tensors,
     arrow_to_pytorch,
+    arrow_to_cuda_tensors,
     build_cluster_command,
     cluster_submit,
+    export_to_parquet,
+    CohortExtractor,
+    FeatureMatrixBuilder,
 )
 
 
@@ -145,10 +151,13 @@ def mock_cdm():
 
 def test_phenotype_library_bundles():
     phenos = list_available_phenotypes()
+    assert len(phenos) == 25
     assert "heart_failure" in phenos
     assert "type_2_diabetes" in phenos
     assert "sepsis" in phenos
     assert "acute_kidney_injury" in phenos
+    assert "covid_19" in phenos
+    assert "rheumatoid_arthritis" in phenos
 
     hf = get_phenotype_concept_set("heart_failure")
     assert 316139 in hf["standard_concept_ids"]
@@ -268,6 +277,14 @@ def test_cell_suppression_and_cross_database(mock_cdm, tmp_path):
     row = fed_con.execute(f"SELECT * FROM {safe_view}").fetchone()
     assert row[1] == "<10"  # Suppressed because 3 < 5
 
+    # Test differential privacy
+    fed_con.execute("CREATE TABLE agg_counts_dp AS SELECT 316139 AS concept_id, 100 AS n_patients;")
+    dp_view = with_differential_privacy(fed_con, "agg_counts_dp", epsilon=1.0)
+    samples = [fed_con.execute(f"SELECT n_patients FROM {dp_view}").fetchone()[0] for _ in range(10)]
+    assert all(s >= 0 for s in samples)
+    # Repeated queries show variation around the true count 100
+    assert any(s != 100 for s in samples) or len(set(samples)) > 1
+
 
 def test_compile_circe_to_duckdb(mock_cdm):
     circe_dict = {
@@ -303,6 +320,114 @@ def test_compile_circe_to_duckdb(mock_cdm):
     assert cohort_res["cohort_definition_id"].iloc[0] == 10
 
 
+def test_circe_inclusion_rules(mock_cdm):
+    # CIRCE JSON definition with 3+ inclusion rules testing Demographic, Condition, Measurement, and Drug
+    circe_with_rules = {
+        "ConceptSets": [
+            {
+                "id": 0,
+                "name": "Heart Failure",
+                "expression": {"items": [{"concept": {"CONCEPT_ID": 316139}, "includeDescendants": True}]}
+            },
+            {
+                "id": 1,
+                "name": "Sodium",
+                "expression": {"items": [{"concept": {"CONCEPT_ID": 3019550}}]}
+            },
+            {
+                "id": 2,
+                "name": "Acetaminophen",
+                "expression": {"items": [{"concept": {"CONCEPT_ID": 1125315}}]}
+            }
+        ],
+        "PrimaryCriteria": {
+            "CriteriaList": [
+                {"VisitOccurrence": {}}
+            ],
+            "ObservationWindow": {"PriorDays": 0, "PostDays": 0},
+            "PrimaryCriteriaLimit": {"Type": "All"}
+        },
+        "InclusionRules": [
+            {
+                "name": "Adult Male Age >= 60",
+                "expression": {
+                    "Type": "ALL",
+                    "CriteriaList": [
+                        {
+                            "Criteria": {
+                                "DemographicCriteria": {
+                                    "Age": {"Value": 60, "Op": "gte"},
+                                    "Gender": [{"CONCEPT_ID": 8507}]
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Prior Heart Failure Condition",
+                "expression": {
+                    "Type": "ALL",
+                    "CriteriaList": [
+                        {
+                            "Criteria": {
+                                "ConditionOccurrence": {
+                                    "CodesetId": 0
+                                }
+                            },
+                            "StartWindow": {
+                                "Start": {"Days": 365, "Coeff": -1},
+                                "End": {"Days": 0, "Coeff": 1}
+                            },
+                            "Occurrence": {"Type": 2, "Count": 1}
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Sodium <= 135 OR Acetaminophen Exposure",
+                "expression": {
+                    "Type": "ANY",
+                    "CriteriaList": [
+                        {
+                            "Criteria": {
+                                "Measurement": {
+                                    "CodesetId": 1,
+                                    "ValueAsNumber": {"Value": 135.0, "Op": "lte"}
+                                }
+                            },
+                            "Occurrence": {"Type": 2, "Count": 1}
+                        },
+                        {
+                            "Criteria": {
+                                "DrugExposure": {
+                                    "CodesetId": 2
+                                }
+                            },
+                            "Occurrence": {"Type": 2, "Count": 1}
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+    sql = compile_circe_to_duckdb(circe_with_rules, target_cohort_id=42)
+    assert "WHERE (" in sql
+    assert "42 AS cohort_definition_id" in sql
+    assert "date_diff('year'" in sql
+
+    res = execute_circe_cohort(mock_cdm, circe_with_rules, target_cohort_id=42)
+    # Only Person 1 satisfies all 3 rules:
+    # Rule 1: Male, age 70 (Person 2 is female age 80, Person 3 is age 40)
+    # Rule 2: Prior HF condition (Person 1 has HF, Person 3 does not)
+    # Rule 3: Na <= 135 and Acetaminophen (Person 1 has both)
+    assert len(res) == 1
+    assert res["subject_id"].iloc[0] == 1
+    assert res["cohort_definition_id"].iloc[0] == 42
+
+
+
 def test_sard_dense_features_and_cluster_command(mock_cdm, tmp_path):
     # SARD visit tensors with dense features
     pq_path = tmp_path / "cohort.parquet"
@@ -319,3 +444,80 @@ def test_sard_dense_features_and_cluster_command(mock_cdm, tmp_path):
     assert "--gpus" in cmd
     sub = cluster_submit("localhost", dataset="data.parquet", dry_run=True)
     assert sub["status"] == "DRY_RUN"
+
+
+def test_arrow_to_cuda_tensors():
+    import pyarrow as pa
+    import torch
+
+    data = {
+        "feat1": [1.0, 2.0, 3.0],
+        "feat2": [4.0, 5.0, 6.0],
+        "target": [0.0, 1.0, 0.0],
+    }
+    pa_table = pa.Table.from_pydict(data)
+
+    # Test with target_col and device='cuda:0' (gracefully falls back to cpu)
+    X, y = arrow_to_cuda_tensors(pa_table, device="cuda:0", target_col="target")
+    assert isinstance(X, torch.Tensor)
+    assert isinstance(y, torch.Tensor)
+    assert X.shape == (3, 2)
+    assert y.shape == (3,)
+    assert X.dtype == torch.float32
+
+    # Test without target_col
+    X_only = arrow_to_cuda_tensors(pa_table, device="cpu")
+    assert X_only.shape == (3, 3)
+
+
+def test_export_to_parquet(mock_cdm, tmp_path):
+    out_dir = tmp_path / "parquet_export"
+    res_path = export_to_parquet(
+        db_path=mock_cdm,
+        table_name="person",
+        output_dir=out_dir,
+    )
+    assert Path(res_path).exists()
+    files = list(Path(res_path).glob("**/*.parquet"))
+    assert len(files) >= 1
+
+
+def test_ml_cohort_extractor_and_builder(mock_cdm):
+    cohort = CohortExtractor(con=mock_cdm)
+    cohort.define_index(
+        visit_concept_ids=[9201],
+        min_age=18,
+        index_selection_rule="first",
+        verified_followup_days=0,
+    )
+    assert len(cohort.cohort_df) >= 1
+
+    builder = FeatureMatrixBuilder(cohort)
+    builder.add_demographics()
+    builder.add_prior_utilization(lookback_days=365)
+    builder.add_acute_labs(lookback_days=365)
+    builder.add_chronic_conditions(lookback_days=730)
+    builder.add_medications(lookback_days=365)
+    builder.set_outcome(outcome_type="inpatient_readmission", window_days=30)
+
+    X, y, feature_names = builder.to_tabular()
+    assert X.shape[0] == len(cohort.cohort_df)
+    assert len(feature_names) > 0
+    assert "feat_age" in feature_names
+
+    tensor_3d = builder.to_tensor(max_seq_len=50)
+    assert tensor_3d.shape == (len(cohort.cohort_df), 50, len(feature_names))
+
+
+def test_generate_mock_pcornet_fixtures(tmp_path):
+    from tests.fixtures.generate_mock_pcornet import generate_mock_pcornet_datasets
+
+    out_dir = tmp_path / "mock_pcornet"
+    paths = generate_mock_pcornet_datasets(out_dir, n_patients=20)
+    assert paths["site1"].exists()
+    assert paths["site2"].exists()
+    assert (paths["site1"] / "demographic.csv").exists()
+    assert (paths["site1"] / "encounter.csv").exists()
+    assert (paths["site2"] / "demographic.csv").exists()
+
+

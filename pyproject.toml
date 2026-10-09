@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omop-duck-db"
-version = "0.5.4"
+version = "0.5.5"
 description = "Tools for building an OMOP CDM v5.4 DuckDB database and mapping PCORnet-format source data into it."
 readme = "README.md"
 license = "MIT"
@@ -29,6 +29,8 @@ dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "tw
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
+omop-duckdb = "omop_etl.cli:main"
+omop-duckdb-cli = "omop_etl.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/jkylearmstrong/omop-duck-db"
@@ -51,3 +53,6 @@ packages = ["python/omop_etl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore::UserWarning:pandas.core.arrays.masked",
+]

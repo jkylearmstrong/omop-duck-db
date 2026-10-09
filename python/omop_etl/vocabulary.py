@@ -261,15 +261,24 @@ def _attached_central_vocab(con):
     return None if row is None else (row[0] or "")
 
 
-def _discover_sibling_vocab(db_file):
-    """First of VOCAB_DB_FILENAMES that sits next to ``db_file`` (never ``db_file`` itself)."""
-    if not db_file:
-        return None
-    parent = os.path.dirname(db_file)
-    for name in VOCAB_DB_FILENAMES:
-        candidate = os.path.join(parent, name)
-        if os.path.isfile(candidate) and not _same_file(candidate, db_file):
-            return candidate
+def _discover_sibling_vocab(db_file, max_levels=4):
+    """First of VOCAB_DB_FILENAMES that sits next to ``db_file`` or in up to ``max_levels``
+    parent directories (never ``db_file`` itself), falling back to OMOP_CENTRAL_VOCAB."""
+    if db_file:
+        current = os.path.dirname(os.path.abspath(db_file))
+        for _ in range(max_levels):
+            for name in VOCAB_DB_FILENAMES:
+                candidate = os.path.join(current, name)
+                if os.path.isfile(candidate) and not _same_file(candidate, db_file):
+                    return candidate
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+    env_path = os.environ.get("OMOP_CENTRAL_VOCAB")
+    if env_path and os.path.isfile(env_path):
+        if not db_file or not _same_file(env_path, db_file):
+            return os.path.abspath(env_path)
     return None
 
 

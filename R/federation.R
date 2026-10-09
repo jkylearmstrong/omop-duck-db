@@ -172,6 +172,54 @@ with_cell_suppression <- function(con,
   target
 }
 
+#' Create Privacy-Preserving View with Differential Privacy Laplace Noise
+#'
+#' @param con Active DuckDB connection (DBI::dbConnect).
+#' @param view_name Source view or table name.
+#' @param output_view Target view name (default: `"dp_" || view_name`).
+#' @param epsilon Differential privacy budget parameter (default 1.0).
+#' @param delta Privacy failure bound (default 1e-5).
+#' @param count_columns Optional character vector of count columns to privatize.
+#' @return Name of created privacy view.
+#' @export
+with_differential_privacy <- function(con,
+                                      view_name,
+                                      output_view = NULL,
+                                      epsilon = 1.0,
+                                      delta = 1e-5,
+                                      count_columns = NULL) {
+  if (!inherits(con, "duckdb_connection")) stop("`con` must be a DuckDB connection.", call. = FALSE)
+  if (epsilon <= 0) stop("`epsilon` must be strictly positive.", call. = FALSE)
+
+  target <- if (!is.null(output_view)) output_view else paste0("dp_", view_name)
+  cols_df <- DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s LIMIT 0;", view_name))
+  col_names <- cols_df$column_name
+
+  target_counts <- if (!is.null(count_columns)) {
+    count_columns
+  } else {
+    col_names[grepl("(?i)count|n_patients|n_subjects|_n|subjects", col_names)]
+  }
+
+  scale <- 1.0 / as.numeric(epsilon)
+  select_exprs <- vapply(col_names, function(col) {
+    if (col %in% target_counts) {
+      laplace_sql <- sprintf(
+        "(CASE WHEN random() <= 0.5 THEN %f * ln(GREATEST(1e-12, 2.0 * random())) ELSE -%f * ln(GREATEST(1e-12, 2.0 * (1.0 - random()))) END)",
+        scale, scale
+      )
+      sprintf("GREATEST(0, ROUND(CAST(%s AS DOUBLE) + %s)) AS %s", col, laplace_sql, col)
+    } else {
+      col
+    }
+  }, character(1))
+
+  sql <- sprintf("CREATE OR REPLACE VIEW %s AS SELECT %s FROM %s;",
+                 target, paste(select_exprs, collapse = ", "), view_name)
+  DBI::dbExecute(con, sql)
+  target
+}
+
 #' Check Cross-Database Concept Frequency Discrepancy
 #'
 #' @param con Active DuckDB connection with `v_*` federated views.

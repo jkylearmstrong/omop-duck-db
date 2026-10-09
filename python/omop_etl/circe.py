@@ -48,6 +48,138 @@ DOMAIN_TABLE_MAP = {
 }
 
 
+def _parse_op(op_str: str) -> str:
+    op_clean = str(op_str).strip().lower()
+    mapping = {
+        "gte": ">=",
+        ">=": ">=",
+        "gt": ">",
+        ">": ">",
+        "lte": "<=",
+        "<=": "<=",
+        "lt": "<",
+        "<": "<",
+        "eq": "=",
+        "=": "=",
+        "==": "=",
+        "neq": "!=",
+        "!=": "!=",
+    }
+    return mapping.get(op_clean, "=")
+
+
+def _compile_numeric_filter(col_expr: str, filter_dict: dict | Any) -> str:
+    if not isinstance(filter_dict, dict):
+        try:
+            return f"{col_expr} = {float(filter_dict)}"
+        except (ValueError, TypeError):
+            return f"{col_expr} = '{str(filter_dict)}'"
+    op = _parse_op(filter_dict.get("Op", "eq"))
+    if op == "between" or "Extent" in filter_dict:
+        val = filter_dict.get("Value", 0)
+        ext = filter_dict.get("Extent", val)
+        return f"{col_expr} BETWEEN {float(val)} AND {float(ext)}"
+    val = filter_dict.get("Value")
+    if val is not None:
+        return f"{col_expr} {op} {float(val)}"
+    return "1=1"
+
+
+def _compile_window_bound(bound_dict: dict | None, index_date: str = "p.event_start_date") -> str | None:
+    if not bound_dict or not isinstance(bound_dict, dict):
+        return None
+    days = bound_dict.get("Days")
+    if days is None:
+        return None
+    coeff = int(bound_dict.get("Coeff", 1))
+    offset = int(days) * coeff
+    if offset == 0:
+        return index_date
+    elif offset > 0:
+        return f"{index_date} + INTERVAL '{offset}' DAY"
+    else:
+        return f"{index_date} - INTERVAL '{abs(offset)}' DAY"
+
+
+def _compile_criteria(crit_wrapper: dict, cdm_schema: str = "main") -> str | None:
+    crit = crit_wrapper.get("Criteria", crit_wrapper)
+    start_win = crit_wrapper.get("StartWindow", {})
+    occ = crit_wrapper.get("Occurrence", {})
+    occ_type = int(occ.get("Type", 2))
+    occ_count = int(occ.get("Count", 1))
+
+    # 1. DemographicCriteria
+    if "DemographicCriteria" in crit:
+        demo = crit["DemographicCriteria"]
+        demo_conds = ["per.person_id = p.subject_id"]
+        if "Age" in demo:
+            age_expr = (
+                f"date_diff('year', make_date(per.year_of_birth, "
+                f"COALESCE(per.month_of_birth, 1), COALESCE(per.day_of_birth, 1)), p.event_start_date)"
+            )
+            demo_conds.append(_compile_numeric_filter(age_expr, demo["Age"]))
+        if "Gender" in demo:
+            g_items = demo["Gender"]
+            g_cids = []
+            if isinstance(g_items, list):
+                for g in g_items:
+                    if isinstance(g, dict):
+                        cid = g.get("CONCEPT_ID", g.get("concept_id"))
+                        if cid is not None:
+                            g_cids.append(int(cid))
+                    elif isinstance(g, (int, str)):
+                        g_cids.append(int(g))
+            elif isinstance(g_items, (int, str)):
+                g_cids.append(int(g_items))
+            if g_cids:
+                cids_str = ", ".join(str(c) for c in g_cids)
+                demo_conds.append(f"per.gender_concept_id IN ({cids_str})")
+
+        subquery = f"SELECT 1 FROM {cdm_schema}.person per WHERE {' AND '.join(demo_conds)}"
+        if (occ_type == 0 and occ_count == 0) or (occ_type == 1 and occ_count == 0):
+            return f"NOT EXISTS ({subquery})"
+        return f"EXISTS ({subquery})"
+
+    # 2. Clinical Domain Criteria
+    for domain_key, domain_cfg in DOMAIN_TABLE_MAP.items():
+        if domain_key in crit:
+            c_item = crit[domain_key]
+            tbl = domain_cfg["table"]
+            c_col = domain_cfg["concept_col"]
+            d_col = domain_cfg["date_col"]
+
+            conds = [f"e.person_id = p.subject_id"]
+            codeset_id = c_item.get("CodesetId")
+            if codeset_id is not None:
+                conds.append(f"e.{c_col} IN (SELECT concept_id FROM _cs_resolved WHERE codeset_id = {int(codeset_id)})")
+
+            start_bound = _compile_window_bound(start_win.get("Start"))
+            end_bound = _compile_window_bound(start_win.get("End"))
+            if start_bound:
+                conds.append(f"CAST(e.{d_col} AS DATE) >= {start_bound}")
+            if end_bound:
+                conds.append(f"CAST(e.{d_col} AS DATE) <= {end_bound}")
+
+            if "ValueAsNumber" in c_item:
+                conds.append(_compile_numeric_filter("e.value_as_number", c_item["ValueAsNumber"]))
+
+            where_clause = " AND ".join(conds)
+            subquery = f"SELECT 1 FROM {cdm_schema}.{tbl} e WHERE {where_clause}"
+
+            if (occ_type == 0 and occ_count == 0) or (occ_type == 1 and occ_count == 0):
+                return f"NOT EXISTS ({subquery})"
+            elif occ_type == 2 and occ_count <= 1:
+                return f"EXISTS ({subquery})"
+            elif occ_type == 2:
+                return f"(SELECT COUNT(*) FROM {cdm_schema}.{tbl} e WHERE {where_clause}) >= {occ_count}"
+            elif occ_type == 0:
+                return f"(SELECT COUNT(*) FROM {cdm_schema}.{tbl} e WHERE {where_clause}) = {occ_count}"
+            elif occ_type == 1:
+                return f"(SELECT COUNT(*) FROM {cdm_schema}.{tbl} e WHERE {where_clause}) <= {occ_count}"
+
+    return None
+
+
 def compile_circe_to_duckdb(
     circe_json: str | dict | Path,
     target_cohort_id: int = 1,
@@ -161,6 +293,26 @@ def compile_circe_to_duckdb(
     if limit_rule.lower() == "first":
         order_clause = "QUALIFY ROW_NUMBER() OVER (PARTITION BY p.subject_id ORDER BY p.event_start_date ASC) = 1"
 
+    # 5. Parse InclusionRules
+    inclusion_rules = data.get("InclusionRules", [])
+    rule_clauses = []
+    for rule in inclusion_rules:
+        expr = rule.get("expression", {})
+        rule_type = expr.get("Type", "ALL").upper()
+        crit_list = expr.get("CriteriaList", [])
+        crit_clauses = []
+        for crit_wrapper in crit_list:
+            c_sql = _compile_criteria(crit_wrapper, cdm_schema=cdm_schema)
+            if c_sql:
+                crit_clauses.append(c_sql)
+        if crit_clauses:
+            join_op = " AND\n                " if rule_type == "ALL" else " OR\n                "
+            rule_clauses.append(f"(\n                {join_op.join(crit_clauses)}\n            )")
+
+    inc_filter = ""
+    if rule_clauses:
+        inc_filter = "WHERE " + " AND\n          ".join(rule_clauses)
+
     # Assemble complete SQL
     sql = f"""
     WITH _cs_resolved AS (
@@ -176,6 +328,7 @@ def compile_circe_to_duckdb(
             p.event_end_date
         FROM _primary_events_raw p
         {obs_filter}
+        {inc_filter}
         {order_clause}
     )
     SELECT 

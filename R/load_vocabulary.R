@@ -254,17 +254,29 @@ attached_central_vocab <- function(con) {
   if (is.na(res$path[[1]])) "" else res$path[[1]]
 }
 
-# First of .VOCAB_DB_FILENAMES that sits next to `db_file` (never `db_file` itself).
+# First of .VOCAB_DB_FILENAMES that sits next to `db_file` or up to 4 parent directories
+# (never `db_file` itself), falling back to OMOP_CENTRAL_VOCAB environment variable.
 #' @keywords internal
 #' @noRd
-discover_sibling_vocab <- function(db_file) {
-  if (is.null(db_file)) {
-    return(NULL)
+discover_sibling_vocab <- function(db_file, max_levels = 4L) {
+  if (!is.null(db_file)) {
+    current <- dirname(normalizePath(db_file, winslash = "/", mustWork = FALSE))
+    for (i in seq_len(max_levels)) {
+      for (name in .VOCAB_DB_FILENAMES) {
+        candidate <- file.path(current, name)
+        if (file.exists(candidate) && !dir.exists(candidate) && !same_file(candidate, db_file)) {
+          return(vocab_abs_path(candidate))
+        }
+      }
+      parent <- dirname(current)
+      if (identical(parent, current)) break
+      current <- parent
+    }
   }
-  for (name in .VOCAB_DB_FILENAMES) {
-    candidate <- file.path(dirname(db_file), name)
-    if (file.exists(candidate) && !dir.exists(candidate) && !same_file(candidate, db_file)) {
-      return(vocab_abs_path(candidate))
+  env_path <- Sys.getenv("OMOP_CENTRAL_VOCAB", unset = "")
+  if (nzchar(env_path) && file.exists(env_path) && !dir.exists(env_path)) {
+    if (is.null(db_file) || !same_file(env_path, db_file)) {
+      return(vocab_abs_path(env_path))
     }
   }
   NULL

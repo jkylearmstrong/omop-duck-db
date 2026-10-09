@@ -60,6 +60,7 @@ from omop_etl.dqd import (
 )
 from omop_etl.export import (
     export_cdm,
+    export_to_parquet,
 )
 from omop_etl.features import (
     CORE_14_LAB_PANEL,
@@ -73,8 +74,14 @@ from omop_etl.federation import (
     check_cross_database_discrepancy,
     create_federated_consortium,
     with_cell_suppression,
+    with_differential_privacy,
+)
+from omop_etl.ml import (
+    CohortExtractor,
+    FeatureMatrixBuilder,
 )
 from omop_etl.ml_features import (
+    arrow_to_cuda_tensors,
     arrow_to_pytorch,
     as_omop_learn_batch,
     build_concept_tokenizer,
@@ -95,6 +102,17 @@ from omop_etl.mapping import (
 from omop_etl.phenotypes import (
     get_phenotype_concept_set,
     list_available_phenotypes,
+)
+from omop_etl.propensity import (
+    PropensityResult,
+    generate_propensity_weights,
+)
+from omop_etl.survival import (
+    SurvivalResult,
+    estimate_km_survival,
+)
+from omop_etl.lakehouse import (
+    omop_connect_lakehouse,
 )
 from omop_etl.remapping import (
     auto_remap_unmapped,
@@ -121,6 +139,7 @@ __all__ = [
     "build_schema",
     "create_federated_consortium",
     "with_cell_suppression",
+    "with_differential_privacy",
     "check_cross_database_discrepancy",
     "etl_pcornet",
     "load_care_site",
@@ -178,11 +197,15 @@ __all__ = [
     "extract_measurements",
     "extract_standard_labs",
     "CORE_14_LAB_PANEL",
+    # ML Feature Extraction & Builders (RFC-6)
+    "CohortExtractor",
+    "FeatureMatrixBuilder",
     # omop-learn / SARD / PLP bridge: set-based sparse & sequence feature extraction
     "extract_sparse_concept_matrix",
     "extract_sard_visit_tensors",
     "as_omop_learn_batch",
     "arrow_to_pytorch",
+    "arrow_to_cuda_tensors",
     "build_concept_tokenizer",
     "DuckDBBackend",
     "default_features",
@@ -201,13 +224,22 @@ __all__ = [
     # Pre-compiled Phenotype Bundles
     "get_phenotype_concept_set",
     "list_available_phenotypes",
+    # Propensity & IPTW Weighting
+    "generate_propensity_weights",
+    "PropensityResult",
+    # Survival & Competing Risks CIF
+    "estimate_km_survival",
+    "SurvivalResult",
+    # Lakehouse Connector
+    "omop_connect_lakehouse",
     # Cluster Execution
     "cluster_submit",
     "build_cluster_command",
     # Multi-Target Export
     "export_cdm",
+    "export_to_parquet",
 ]
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 

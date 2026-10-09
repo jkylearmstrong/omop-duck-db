@@ -131,3 +131,47 @@ export_cdm <- function(con,
     exported_tables = results
   )
 }
+
+#' Export a CDM Table to Parquet
+#'
+#' @param db_path Character path to DuckDB database file or an active DBI connection.
+#' @param table_name Character table or view name in DuckDB to export.
+#' @param output_dir Character destination directory path.
+#' @param partition_by Optional character vector of column names to partition by.
+#' @param compression Character compression codec (default `"zstd"`).
+#' @return Absolute path to destination directory.
+#' @export
+export_to_parquet <- function(db_path,
+                               table_name,
+                               output_dir,
+                               partition_by = NULL,
+                               compression = "zstd") {
+  should_disconnect <- FALSE
+  if (is.character(db_path)) {
+    con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = TRUE)
+    should_disconnect <- TRUE
+  } else {
+    con <- db_path
+  }
+  on.exit({
+    if (should_disconnect) DBI::dbDisconnect(con, shutdown = TRUE)
+  }, add = TRUE)
+
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+  if (!is.null(partition_by) && length(partition_by) > 0) {
+    out_posix <- gsub("\\\\", "/", normalizePath(output_dir, mustWork = FALSE))
+    part_clause <- sprintf(", PARTITION_BY (%s)", paste(partition_by, collapse = ", "))
+    sql <- sprintf("COPY %s TO '%s' (FORMAT PARQUET, COMPRESSION '%s'%s);",
+                   table_name, out_posix, compression, part_clause)
+  } else {
+    out_file <- file.path(output_dir, paste0(table_name, ".parquet"))
+    out_posix <- gsub("\\\\", "/", normalizePath(out_file, mustWork = FALSE))
+    sql <- sprintf("COPY %s TO '%s' (FORMAT PARQUET, COMPRESSION '%s');",
+                   table_name, out_posix, compression)
+  }
+
+  DBI::dbExecute(con, sql)
+  normalizePath(output_dir, mustWork = FALSE)
+}
+

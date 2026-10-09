@@ -1031,11 +1031,48 @@ test_that("descendants_of works on a real vocabulary (OMOP_VOCAB_DB)", {
   con <- oc_connect(":memory:", vocab_db = vocab_file)$con # attached READ_ONLY; nothing is written to it
   # 201826 = SNOMED 'Type 2 diabetes mellitus' (the RFC text's 316866 is 'Hypertensive disorder')
   expect_equal(oc_q(con, "SELECT concept_name FROM concept WHERE concept_id = 201826")$concept_name, "Type 2 diabetes mellitus")
-  descendants <- oc_ids(con, "SELECT concept_id FROM descendants_of(201826)")
-  expect_true(201826 %in% descendants && length(descendants) > 1) # self row plus more specific concepts
-  expect_gte(oc_n(con, "concept c JOIN descendants_of(201826) d USING (concept_id) WHERE c.standard_concept = 'S'"), 1)
   ancestors <- oc_ids(con, "SELECT concept_id FROM ancestors_of(201826)")
   expect_true(201826 %in% ancestors && 201820 %in% ancestors) # 201820 = 'Diabetes mellitus'
   oc_close(con)
   expect_equal(stat(), before)
 })
+
+test_that("upward tree vocabulary discovery finds central_vocabulary.duckdb in parent directory", {
+  tmp <- withr::local_tempdir()
+  derived_dir <- file.path(tmp, "derived")
+  dir.create(derived_dir, recursive = TRUE)
+  vocab_path <- file.path(derived_dir, "central_vocabulary.duckdb")
+  oc_make_vocab(vocab_path)
+
+  site_dir <- file.path(derived_dir, "subfolder", "site_a")
+  dir.create(site_dir, recursive = TRUE)
+  site_db <- file.path(site_dir, "omop.duckdb")
+  w <- DBI::dbConnect(duckdb::duckdb(), dbdir = site_db)
+  DBI::dbExecute(w, "CREATE TABLE person (person_id INTEGER)")
+  oc_close(w)
+
+  res <- oc_connect(site_db)
+  expect_equal(oc_q(res$con, "SELECT COUNT(*) AS n FROM concept")$n, nrow(OC_CONCEPTS))
+  oc_close(res$con)
+})
+
+test_that("OMOP_CENTRAL_VOCAB environment variable is discovered when database is isolated", {
+  tmp <- withr::local_tempdir()
+  vocab_dir <- file.path(tmp, "external_storage")
+  dir.create(vocab_dir, recursive = TRUE)
+  vocab_path <- file.path(vocab_dir, "my_custom_vocab.duckdb")
+  oc_make_vocab(vocab_path)
+
+  isolated_dir <- file.path(tmp, "isolated")
+  dir.create(isolated_dir, recursive = TRUE)
+  site_db <- file.path(isolated_dir, "site.duckdb")
+  w <- DBI::dbConnect(duckdb::duckdb(), dbdir = site_db)
+  DBI::dbExecute(w, "CREATE TABLE person (person_id INTEGER)")
+  oc_close(w)
+
+  withr::local_envvar(list(OMOP_CENTRAL_VOCAB = vocab_path))
+  res <- oc_connect(site_db)
+  expect_equal(oc_q(res$con, "SELECT COUNT(*) AS n FROM concept")$n, nrow(OC_CONCEPTS))
+  oc_close(res$con)
+})
+

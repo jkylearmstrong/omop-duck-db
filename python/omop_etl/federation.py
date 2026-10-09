@@ -201,6 +201,72 @@ def with_cell_suppression(
     return target
 
 
+def with_differential_privacy(
+    con: duckdb.DuckDBPyConnection,
+    view_name: str,
+    output_view: Optional[str] = None,
+    epsilon: float = 1.0,
+    delta: float = 1e-5,
+    count_columns: Optional[list[str]] = None,
+) -> str:
+    """Creates a privacy-preserving view adding calibrated Laplace noise to count aggregates.
+
+    Implements (epsilon, delta)-Differential Privacy for consortium queries.
+    Adds Laplace(0, 1/epsilon) noise:
+        Count* = GREATEST(0, ROUND(Count + Laplace(0, 1/epsilon)))
+
+    Args:
+        con: Active DuckDB connection.
+        view_name: Source table or view to protect.
+        output_view: Target view name (default: f"dp_{view_name}").
+        epsilon: Differential privacy budget parameter (default 1.0).
+        delta: Privacy failure probability bound (default 1e-5).
+        count_columns: List of count columns to privatize (auto-detected if None).
+
+    Returns:
+        str: Name of created differentially private view.
+    """
+    if epsilon <= 0:
+        raise ValueError("Differential privacy budget epsilon must be strictly positive.")
+
+    target = output_view or f"dp_{view_name}"
+    cols_info = con.execute(f"DESCRIBE SELECT * FROM {view_name} LIMIT 0;").fetchall()
+    col_names = [c[0] for c in cols_info]
+
+    if count_columns is None:
+        target_counts = [
+            c for c in col_names if any(k in c.lower() for k in ("count", "n_patients", "n_subjects", "_n", "subjects"))
+        ]
+    else:
+        target_counts = count_columns
+
+    scale = 1.0 / float(epsilon)
+    select_exprs = []
+    for col in col_names:
+        if col in target_counts:
+            # Calibrated Laplace noise in DuckDB SQL:
+            # If U <= 0.5: scale * ln(2 * U)
+            # If U > 0.5: -scale * ln(2 * (1 - U))
+            laplace_sql = (
+                f"(CASE WHEN random() <= 0.5 "
+                f"THEN {scale} * ln(GREATEST(1e-12, 2.0 * random())) "
+                f"ELSE -{scale} * ln(GREATEST(1e-12, 2.0 * (1.0 - random()))) END)"
+            )
+            select_exprs.append(
+                f"GREATEST(0, ROUND(CAST({col} AS DOUBLE) + {laplace_sql})) AS {col}"
+            )
+        else:
+            select_exprs.append(col)
+
+    sql = f"""
+    CREATE OR REPLACE VIEW {target} AS
+    SELECT {', '.join(select_exprs)}
+    FROM {view_name};
+    """
+    con.execute(sql)
+    return target
+
+
 def check_cross_database_discrepancy(
     con: duckdb.DuckDBPyConnection,
     table_name: str = "condition_occurrence",

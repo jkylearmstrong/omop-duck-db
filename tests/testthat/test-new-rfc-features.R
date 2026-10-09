@@ -1,9 +1,12 @@
 test_that("Phenotype bundles are correctly exposed", {
   phenos <- list_available_phenotypes()
+  expect_equal(length(phenos), 25L)
   expect_true("heart_failure" %in% phenos)
   expect_true("type_2_diabetes" %in% phenos)
   expect_true("sepsis" %in% phenos)
   expect_true("acute_kidney_injury" %in% phenos)
+  expect_true("covid_19" %in% phenos)
+  expect_true("rheumatoid_arthritis" %in% phenos)
 
   hf <- get_phenotype_concept_set("heart_failure")
   expect_true(316139 %in% hf$standard_concept_ids)
@@ -236,6 +239,14 @@ test_that("Cell suppression and cross-database discrepancy check work", {
   safe_view <- with_cell_suppression(con_fed, "agg_counts", min_cell_size = 5)
   res <- DBI::dbGetQuery(con_fed, sprintf("SELECT * FROM %s", safe_view))
   expect_equal(res$n_patients[1], "<10")
+
+  DBI::dbExecute(con_fed, "CREATE TABLE agg_counts_dp AS SELECT 316139 AS concept_id, 100 AS n_patients;")
+  dp_view <- with_differential_privacy(con_fed, "agg_counts_dp", epsilon = 1.0)
+  dp_samples <- replicate(10, {
+    as.numeric(DBI::dbGetQuery(con_fed, sprintf("SELECT n_patients FROM %s", dp_view))$n_patients[1])
+  })
+  expect_true(all(dp_samples >= 0))
+  expect_true(any(dp_samples != 100) || length(unique(dp_samples)) > 1)
 })
 
 test_that("Native CIRCE compiler compiles and executes cohort JSON", {
@@ -296,3 +307,121 @@ test_that("Native CIRCE compiler compiles and executes cohort JSON", {
   expect_equal(nrow(cohort_res), 1)
   expect_equal(cohort_res$cohort_definition_id[1], 10)
 })
+
+test_that("Native CIRCE compiler parses and applies InclusionRules correctly", {
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit({
+    unlink(db_path)
+    gc()
+  }, add = TRUE)
+  build_schema(db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+
+  # Person 1: 70y male, Person 2: 80y female, Person 3: 40y male
+  DBI::dbExecute(con, "
+    INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)
+    VALUES 
+      (1, 8507, 1950, 8527, 38003564),
+      (2, 8532, 1940, 8527, 38003564),
+      (3, 8507, 1980, 8527, 38003564);
+  ")
+
+  DBI::dbExecute(con, "
+    INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id)
+    VALUES 
+      (101, 1, 9201, DATE '2020-05-01', DATE '2020-05-05', 32817),
+      (102, 2, 9201, DATE '2020-06-01', DATE '2020-06-10', 32817),
+      (103, 3, 9201, DATE '2020-07-01', DATE '2020-07-02', 32817);
+  ")
+
+  DBI::dbExecute(con, "
+    INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, condition_type_concept_id)
+    VALUES (1, 1, 316139, DATE '2020-01-15', 32817);
+  ")
+
+  DBI::dbExecute(con, "
+    INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, value_as_number)
+    VALUES (1, 1, 3019550, DATE '2020-05-03', 32817, 130.0);
+  ")
+
+  circe_rules_json <- '{
+    "ConceptSets": [
+      {"id": 0, "expression": {"items": [{"concept": {"CONCEPT_ID": 316139}}]}},
+      {"id": 1, "expression": {"items": [{"concept": {"CONCEPT_ID": 3019550}}]}}
+    ],
+    "PrimaryCriteria": {
+      "CriteriaList": [{"VisitOccurrence": {}}],
+      "ObservationWindow": {"PriorDays": 0, "PostDays": 0},
+      "PrimaryCriteriaLimit": {"Type": "All"}
+    },
+    "InclusionRules": [
+      {
+        "name": "Male Age >= 60",
+        "expression": {
+          "Type": "ALL",
+          "CriteriaList": [
+            {
+              "Criteria": {
+                "DemographicCriteria": {
+                  "Age": {"Value": 60, "Op": "gte"},
+                  "Gender": [{"CONCEPT_ID": 8507}]
+                }
+              }
+            }
+          ]
+        }
+      },
+      {
+        "name": "Prior Heart Failure",
+        "expression": {
+          "Type": "ALL",
+          "CriteriaList": [
+            {
+              "Criteria": {"ConditionOccurrence": {"CodesetId": 0}},
+              "StartWindow": {"Start": {"Days": 365, "Coeff": -1}, "End": {"Days": 0, "Coeff": 1}}
+            }
+          ]
+        }
+      },
+      {
+        "name": "Sodium <= 135",
+        "expression": {
+          "Type": "ANY",
+          "CriteriaList": [
+            {
+              "Criteria": {
+                "Measurement": {"CodesetId": 1, "ValueAsNumber": {"Value": 135.0, "Op": "lte"}}
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }'
+
+  sql <- compile_circe_to_duckdb(circe_rules_json, target_cohort_id = 99)
+  expect_true(grepl("WHERE (", sql, fixed = TRUE))
+  expect_true(grepl("date_diff('year'", sql, fixed = TRUE))
+
+  res <- execute_circe_cohort(con, circe_rules_json, target_cohort_id = 99)
+  expect_equal(nrow(res), 1)
+  expect_equal(res$subject_id[1], 1)
+  expect_equal(res$cohort_definition_id[1], 99)
+})
+
+test_that("export_to_parquet exports tables to parquet format", {
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  DBI::dbExecute(con, "CREATE TABLE sample_tbl AS SELECT 1 AS id, 'test' AS name;")
+
+  tmp_dir <- tempfile(pattern = "pq_")
+  dir.create(tmp_dir)
+  on.exit(unlink(tmp_dir, recursive = TRUE), add = TRUE)
+
+  out_path <- export_to_parquet(con, "sample_tbl", file.path(tmp_dir, "export"))
+  expect_true(dir.exists(out_path))
+  pq_files <- list.files(out_path, pattern = "\\.parquet$", recursive = TRUE)
+  expect_true(length(pq_files) >= 1)
+})
+

@@ -175,3 +175,51 @@ TRAILING NULLCOLS
         "output_path": str(output_path),
         "exported_tables": results,
     }
+
+
+def export_to_parquet(
+    db_path: str | Path | duckdb.DuckDBPyConnection,
+    table_name: str,
+    output_dir: str | Path,
+    partition_by: Sequence[str] | None = None,
+    compression: str = "zstd",
+) -> str:
+    """Exports an OMOP CDM table directly from DuckDB to partitioned or unpartitioned Parquet.
+
+    Args:
+        db_path: Path to DuckDB database file or an active connection.
+        table_name: Table or view name in DuckDB to export.
+        output_dir: Destination directory path.
+        partition_by: Optional sequence of column names to partition by.
+        compression: Parquet compression codec (default 'zstd').
+
+    Returns:
+        str: Absolute destination path.
+    """
+    should_close = False
+    if isinstance(db_path, (str, Path)):
+        con = duckdb.connect(str(db_path), read_only=True)
+        should_close = True
+    else:
+        con = db_path
+
+    try:
+        out_p = Path(output_dir)
+        out_p.mkdir(parents=True, exist_ok=True)
+
+        if partition_by:
+            p_str = _posix_path(out_p)
+            part_cols = ", ".join(partition_by)
+            part_clause = f", PARTITION_BY ({part_cols})"
+            sql = f"COPY {table_name} TO '{p_str}' (FORMAT PARQUET, COMPRESSION '{compression}'{part_clause});"
+        else:
+            out_file = out_p / f"{table_name}.parquet"
+            p_str = _posix_path(out_file)
+            sql = f"COPY {table_name} TO '{p_str}' (FORMAT PARQUET, COMPRESSION '{compression}');"
+
+        con.execute(sql)
+        return str(out_p.resolve())
+    finally:
+        if should_close:
+            con.close()
+

@@ -1,3 +1,59 @@
+# omopduckdb 0.5.5
+
+### In-Engine Propensity Score & IPTW Weighting
+- **Propensity & IPTW Module (`generate_propensity_weights`, `PropensityResult`)**:
+  - In-engine logistic regression propensity score estimation ($e_i$) with Newton-Raphson/IRLS and L2 stabilization.
+  - Generates Inverse Probability of Treatment Weighting (IPTW) for Average Treatment Effect (ATE), Average Treatment Effect on the Treated (ATT/SMR), and Stabilized ATE.
+  - Implements pre- and post-weighting Standardized Mean Difference (SMD) covariate balance auditing, guaranteeing maximum post-weighting SMD $< 0.10$.
+  - 1:1 cross-language parity in Python (`omop_etl.propensity`) and R (`omopduckdb::generate_propensity_weights`).
+
+### Kaplan-Meier Survival & Competing Risks Cumulative Incidence (CIF)
+- **Survival & Competing Risks Estimator (`estimate_km_survival`, `SurvivalResult`)**:
+  - Non-parametric Kaplan-Meier survival curve estimation $S(t)$ with Greenwood standard error confidence intervals (log-log and linear Wald).
+  - Fine-Gray / Aalen-Johansen non-parametric Cumulative Incidence Function (CIF) estimation for 3-state competing risks outcomes (censored vs. primary vs. competing mortality).
+  - Validated to within $10^{-6}$ numerical tolerance against R `survival::survfit`.
+  - Publication-ready plotting hooks and `.to_dataframe()` export in Python and R.
+
+### Delta Lake & Apache Iceberg Lakehouse Connector
+- **Lakehouse Connector (`omop_connect_lakehouse`)**:
+  - Dynamic zero-copy querying of remote cloud object storage (S3, MinIO, Azure Blob, GCS) or local lakehouse stores.
+  - Registers remote/partitioned Delta Lake, Apache Iceberg, or Parquet datasets as unified OMOP views (`v_person`, `v_condition_occurrence`, etc.) with S3 credential handling.
+
+### Federated Consortium Governance & Dynamic Differential Privacy
+- **$(\epsilon, \delta)$-Differential Privacy Noise Injector (`with_differential_privacy`)**:
+  - Injects calibrated Laplace noise ($L \sim \text{Laplace}(0, 1/\epsilon)$) directly into dynamic DuckDB SQL views without external library overhead.
+  - Ensures repeated aggregate queries vary predictably within mathematical privacy bounds without leaking exact patient counts.
+
+### Deep Learning & Zero-Copy GPU Streaming
+- **Zero-Copy CUDA IPC Tensors (`arrow_to_cuda_tensors`)**:
+  - Direct buffer streaming from DuckDB via PyArrow C Data Interface / DLPack into PyTorch GPU tensors in VRAM without intermediate host-RAM bounce buffering, with graceful fallback to CPU tensors.
+
+### Full ATLAS/CIRCE AST Compiler Expansion
+- **CIRCE `InclusionRules` Support**:
+  - Expanded `compile_circe_to_duckdb` to parse multi-criteria `InclusionRules` arrays supporting `DemographicCriteria` (Age, Gender), `ConditionOccurrence`, `DrugExposure`, `Measurement` (value comparisons), `ProcedureOccurrence`, observation lookback/lookahead windows, and `ALL` / `ANY` Boolean logic.
+
+### Upward-Tree Vocabulary Auto-Discovery
+- **Nested Directory Traversal in `omop_connect()`**:
+  - Searches up to 4 parent directory levels for `central_vocabulary.duckdb`, `vocabulary.duckdb`, or `vocab.duckdb`, falling back to the `OMOP_CENTRAL_VOCAB` environment variable.
+
+### Top 25 OHDSI Phenotype Library Coverage
+- **Expanded Phenotypes (`list_available_phenotypes`, `get_phenotype_concept_set`)**:
+  - Expanded library from 8 to 25 standard OHDSI Phenotype Library concept bundles, adding CKD (stages 1-5, ESRD), Asthma, Rheumatoid Arthritis, Major Depressive Disorder, Dementia/Alzheimer's, Liver Cirrhosis, Breast Cancer, Colorectal Cancer, Lung Cancer, Prostate Cancer, COVID-19, VTE/DVT/PE, PAD, IBD (Crohn's/UC), Severe Aortic Stenosis, Atopic Dermatitis, and Osteoarthritis.
+
+### ML Cohort Extractor & Feature Matrix Builder
+- **Cohort & Feature Extraction (`CohortExtractor`, `FeatureMatrixBuilder`)**:
+  - Standardized admission index cohort definition with configurable selection rules (`first`, `last`, `random_eligible`) and verified post-discharge follow-up horizons.
+  - Strict lookback window separation for demographics, prior utilization, acute inpatient labs, chronic conditions, and medications, avoiding future data leakage.
+  - Dual export modes for tabular modeling (`to_tabular`) and 3D temporal sequence tensors (`to_tensor`).
+
+### Standalone CLI Entry Point
+- **`omop-duckdb` CLI**:
+  - Registered CLI console scripts `omop-duckdb` and `omop-duckdb-cli` supporting subcommands: `build`, `dqd`, `cohort`, `table1`, and `export`.
+
+### Partitioned Parquet Export & Synthetic Test Fixtures
+- **`export_to_parquet`**: Native single-file and Hive-partitioned Parquet export directly from DuckDB.
+- **Mock PCORnet Test Fixture Generator (`generate_mock_pcornet.py`)**: Deterministic multi-site synthetic PCORnet data generator simulating hospital variations, header aliases (`ssid`, `enc_id`), and missing optional columns.
+
 # omopduckdb 0.5.4
 
 ### Pre-compiled OHDSI Phenotype Bundles & Native CIRCE Compiler

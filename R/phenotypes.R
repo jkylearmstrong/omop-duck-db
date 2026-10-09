@@ -79,6 +79,159 @@ NULL
     icd10_prefixes = c("I63", "I63.0", "I63.1", "I63.2", "I63.3", "I63.4", "I63.5", "I63.9"),
     icd9_prefixes = c("434.91", "434.11", "433.11"),
     description = "Acute ischemic stroke, cerebral infarction, and occlusion of cerebral arteries."
+  ),
+  chronic_kidney_disease = list(
+    name = "Chronic Kidney Disease",
+    domain_id = "Condition",
+    standard_concept_ids = c(46271022L, 193782L, 192359L, 443601L, 443612L, 443611L),
+    primary_snomed_id = 46271022L,
+    icd10_prefixes = c("N18", "N18.1", "N18.2", "N18.3", "N18.4", "N18.5", "N18.6", "N18.9"),
+    icd9_prefixes = c("585.1", "585.2", "585.3", "585.4", "585.5", "585.6", "585.9"),
+    description = "Chronic kidney disease stages 1-5 and end-stage renal disease (ESRD)."
+  ),
+  asthma = list(
+    name = "Asthma",
+    domain_id = "Condition",
+    standard_concept_ids = c(317009L, 4051466L, 4052029L, 4178431L),
+    primary_snomed_id = 317009L,
+    icd10_prefixes = c("J45", "J45.0", "J45.1", "J45.2", "J45.3", "J45.4", "J45.5", "J45.8", "J45.9"),
+    icd9_prefixes = c("493.0", "493.1", "493.2", "493.9"),
+    description = "Asthma including allergic, non-allergic, and status asthmaticus."
+  ),
+  rheumatoid_arthritis = list(
+    name = "Rheumatoid Arthritis",
+    domain_id = "Condition",
+    standard_concept_ids = c(80809L, 4035611L, 4160162L, 4218890L),
+    primary_snomed_id = 80809L,
+    icd10_prefixes = c("M05", "M06", "M05.0", "M05.1", "M05.2", "M05.3", "M06.0", "M06.9"),
+    icd9_prefixes = c("714.0", "714.1", "714.2"),
+    description = "Rheumatoid arthritis with and without rheumatoid factor or organ involvement."
+  ),
+  major_depressive_disorder = list(
+    name = "Major Depressive Disorder",
+    domain_id = "Condition",
+    standard_concept_ids = c(440383L, 436665L, 4152280L, 4282316L),
+    primary_snomed_id = 440383L,
+    icd10_prefixes = c("F32", "F33", "F32.0", "F32.1", "F32.2", "F32.3", "F32.9", "F33.0", "F33.1", "F33.2", "F33.3", "F33.9"),
+    icd9_prefixes = c("296.2", "296.3"),
+    description = "Single episode and recurrent major depressive disorder."
+  ),
+  dementia_alzheimers = list(
+    name = "Dementia & Alzheimer's Disease",
+    domain_id = "Condition",
+    standard_concept_ids = c(4182210L, 374888L, 4148906L, 4268612L),
+    primary_snomed_id = 4182210L,
+    icd10_prefixes = c("G30", "G30.0", "G30.1", "G30.8", "G30.9", "F01", "F02", "F03"),
+    icd9_prefixes = c("331.0", "290.0", "290.1", "290.2", "290.4"),
+    description = "Alzheimer's disease, vascular dementia, and unspecified senile dementia."
+  ),
+  liver_cirrhosis = list(
+    name = "Liver Cirrhosis & Portal Hypertension",
+    domain_id = "Condition",
+    standard_concept_ids = c(4064161L, 4245975L, 4153359L, 197494L),
+    primary_snomed_id = 4064161L,
+    icd10_prefixes = c("K74", "K74.0", "K74.1", "K74.2", "K74.3", "K74.4", "K74.5", "K74.6", "K70.3", "K76.6"),
+    icd9_prefixes = c("571.2", "571.5", "572.3"),
+    description = "Cirrhosis of liver (alcoholic and non-alcoholic) and portal hypertension."
+  ),
+  breast_cancer = list(
+    name = "Malignant Neoplasm of Breast",
+    domain_id = "Condition",
+    standard_concept_ids = c(137809L, 4112853L, 4116041L, 4273629L),
+    primary_snomed_id = 137809L,
+    icd10_prefixes = c("C50", "C50.0", "C50.1", "C50.2", "C50.3", "C50.4", "C50.5", "C50.6", "C50.8", "C50.9"),
+    icd9_prefixes = c("174.0", "174.1", "174.2", "174.3", "174.4", "174.5", "174.6", "174.8", "174.9"),
+    description = "Invasive primary malignant neoplasm of female and male breast."
+  ),
+  colorectal_cancer = list(
+    name = "Colorectal Cancer",
+    domain_id = "Condition",
+    standard_concept_ids = c(4028741L, 4114488L, 4124940L, 4132431L),
+    primary_snomed_id = 4028741L,
+    icd10_prefixes = c("C18", "C19", "C20", "C18.0", "C18.2", "C18.7", "C18.9", "C20"),
+    icd9_prefixes = c("153.0", "153.1", "153.2", "153.3", "153.4", "153.9", "154.0", "154.1"),
+    description = "Primary malignant neoplasm of colon, rectosigmoid junction, and rectum."
+  ),
+  lung_cancer = list(
+    name = "Malignant Neoplasm of Lung and Bronchus",
+    domain_id = "Condition",
+    standard_concept_ids = c(4115276L, 4118804L, 4112852L, 4030616L),
+    primary_snomed_id = 4115276L,
+    icd10_prefixes = c("C34", "C34.0", "C34.1", "C34.2", "C34.3", "C34.8", "C34.9"),
+    icd9_prefixes = c("162.2", "162.3", "162.4", "162.5", "162.8", "162.9"),
+    description = "Primary malignant neoplasm of bronchus and lung (NSCLC and SCLC)."
+  ),
+  prostate_cancer = list(
+    name = "Malignant Neoplasm of Prostate",
+    domain_id = "Condition",
+    standard_concept_ids = c(4163261L, 4116043L, 4030617L, 4314337L),
+    primary_snomed_id = 4163261L,
+    icd10_prefixes = c("C61"),
+    icd9_prefixes = c("185"),
+    description = "Primary malignant adenocarcinoma of prostate gland."
+  ),
+  covid_19 = list(
+    name = "COVID-19 Acute Infection",
+    domain_id = "Condition",
+    standard_concept_ids = c(37311061L, 705076L, 37311060L, 439676L),
+    primary_snomed_id = 37311061L,
+    icd10_prefixes = c("U07.1", "U07.2", "J12.82"),
+    icd9_prefixes = c("079.82"),
+    description = "Coronavirus disease 2019 (SARS-CoV-2 acute infection)."
+  ),
+  venous_thromboembolism = list(
+    name = "Venous Thromboembolism (DVT & PE)",
+    domain_id = "Condition",
+    standard_concept_ids = c(444094L, 440417L, 314443L, 4134440L),
+    primary_snomed_id = 444094L,
+    icd10_prefixes = c("I82", "I82.4", "I82.9", "I26", "I26.0", "I26.9"),
+    icd9_prefixes = c("453.4", "453.8", "453.9", "415.11", "415.19"),
+    description = "Acute deep vein thrombosis (DVT) and pulmonary embolism (PE)."
+  ),
+  peripheral_artery_disease = list(
+    name = "Peripheral Artery Disease",
+    domain_id = "Condition",
+    standard_concept_ids = c(321887L, 4138487L, 4185932L, 4216118L),
+    primary_snomed_id = 321887L,
+    icd10_prefixes = c("I73.9", "I70.2", "I70.20", "I70.21", "I70.22"),
+    icd9_prefixes = c("443.9", "440.20", "440.21"),
+    description = "Peripheral artery occlusive disease and arteriosclerosis of native extremities."
+  ),
+  inflammatory_bowel_disease = list(
+    name = "Inflammatory Bowel Disease (Crohn's & Ulcerative Colitis)",
+    domain_id = "Condition",
+    standard_concept_ids = c(4058243L, 197494L, 192359L, 4124940L),
+    primary_snomed_id = 4058243L,
+    icd10_prefixes = c("K50", "K50.0", "K50.1", "K50.9", "K51", "K51.0", "K51.9"),
+    icd9_prefixes = c("555.0", "555.1", "555.9", "556.0", "556.9"),
+    description = "Crohn's disease (regional enteritis) and ulcerative colitis."
+  ),
+  severe_aortic_stenosis = list(
+    name = "Severe Aortic Stenosis",
+    domain_id = "Condition",
+    standard_concept_ids = c(314378L, 4148906L, 4222384L, 4310564L),
+    primary_snomed_id = 314378L,
+    icd10_prefixes = c("I35.0", "I35.2", "I06.0", "I06.2"),
+    icd9_prefixes = c("424.1", "395.0", "395.2"),
+    description = "Aortic valve stenosis (calcific, rheumatic, or non-rheumatic)."
+  ),
+  atopic_dermatitis = list(
+    name = "Atopic Dermatitis & Eczema",
+    domain_id = "Condition",
+    standard_concept_ids = c(133834L, 4028244L, 4141157L, 4324887L),
+    primary_snomed_id = 133834L,
+    icd10_prefixes = c("L20", "L20.0", "L20.8", "L20.84", "L20.9"),
+    icd9_prefixes = c("691.8"),
+    description = "Atopic dermatitis, flexural eczema, and related allergic dermatitides."
+  ),
+  osteoarthritis = list(
+    name = "Osteoarthritis",
+    domain_id = "Condition",
+    standard_concept_ids = c(4014295L, 4178431L, 4079750L, 4287240L),
+    primary_snomed_id = 4014295L,
+    icd10_prefixes = c("M15", "M16", "M17", "M18", "M19", "M15.0", "M16.0", "M17.0", "M19.9"),
+    icd9_prefixes = c("715.00", "715.11", "715.15", "715.16", "715.90"),
+    description = "Primary generalized and localized osteoarthritis (knee, hip, hand, spine)."
   )
 )
 

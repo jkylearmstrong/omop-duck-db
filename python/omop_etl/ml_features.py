@@ -544,8 +544,9 @@ def extract_sard_visit_tensors(
         vdate = pd.to_datetime(toks["visit_date"])
         times = np.full((n_rows, n_slots), -1, dtype=np.int64)
         days_before = np.full((n_rows, n_slots), -1, dtype=np.int64)
-        unix = ((vdate - UNIX_REFERENCE_DATE) // pd.Timedelta("1d")).to_numpy(np.int64)
-        before = ((cohort_df["index_date"].to_numpy()[row] - vdate.to_numpy()) // np.timedelta64(1, "D")).astype(np.int64)
+        unix = (vdate - UNIX_REFERENCE_DATE).dt.days.to_numpy(np.int64)
+        idx_dates = pd.to_datetime(cohort_df["index_date"].to_numpy()[row])
+        before = (idx_dates - vdate).dt.days.to_numpy(np.int64)
         times[r, s] = unix[keep]
         days_before[r, s] = before[keep]
         n_visits = np.minimum(total_visits, n_slots).astype(np.int32)
@@ -649,4 +650,95 @@ def arrow_to_pytorch(
         dataset = TensorDataset(X_tensor)
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+
+def arrow_to_cuda_tensors(
+    query_or_table: Any,
+    con: duckdb.DuckDBPyConnection | None = None,
+    device: str = "cuda:0",
+    target_col: str | None = None,
+    feature_cols: Sequence[str] | None = None,
+) -> tuple[Any, Any] | Any:
+    """Streams PyArrow table or DuckDB query directly to PyTorch tensors on GPU/CPU via DLPack.
+
+    Leverages zero-copy PyArrow C Data Interface / DLPack buffer exchange into PyTorch tensors,
+    targeting GPU VRAM (device='cuda:0') if CUDA is supported, and gracefully falling back to CPU
+    tensors if CUDA is unavailable.
+
+    Args:
+        query_or_table: SQL query string, PyArrow Table, RecordBatch, or DuckDB relation.
+        con: Active DuckDB connection (required if query_or_table is a SQL query).
+        device: Target torch device (e.g. 'cuda:0', 'cuda', 'cpu').
+        target_col: Optional outcome/target column name.
+        feature_cols: Optional subset of feature column names.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+            (X_tensor, y_tensor) if target_col is specified, else X_tensor.
+    """
+    try:
+        import pyarrow as pa
+    except ImportError as exc:
+        raise ImportError("arrow_to_cuda_tensors requires pyarrow: pip install pyarrow") from exc
+
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError("arrow_to_cuda_tensors requires torch: pip install torch") from exc
+
+    if isinstance(query_or_table, str):
+        if con is None:
+            raise ValueError("Must provide active DuckDB connection `con` when query_or_table is a SQL query.")
+        pa_table = con.execute(query_or_table).arrow()
+    elif hasattr(query_or_table, "arrow"):
+        pa_table = query_or_table.arrow()
+    elif isinstance(query_or_table, (pa.Table, pa.RecordBatch)):
+        pa_table = query_or_table
+    else:
+        raise TypeError(f"Unsupported query_or_table type: {type(query_or_table)}")
+
+    # Resolve device (gracefully fallback to CPU if CUDA is requested but not available)
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        target_device = torch.device("cpu")
+    else:
+        target_device = torch.device(device)
+
+    def _arrow_col_to_tensor(pa_col: Any) -> torch.Tensor:
+        try:
+            if hasattr(torch, "from_dlpack") and hasattr(pa_col, "__dlpack__"):
+                t = torch.from_dlpack(pa_col)
+                return t.to(dtype=torch.float32, device=target_device)
+        except Exception:
+            pass
+        try:
+            np_arr = pa_col.to_numpy(zero_copy_only=False)
+            if not np_arr.flags.writeable:
+                np_arr = np_arr.copy()
+            return torch.as_tensor(np_arr, dtype=torch.float32, device=target_device)
+        except Exception:
+            np_arr = np.asarray(pa_col, dtype=np.float32)
+            if not np_arr.flags.writeable:
+                np_arr = np_arr.copy()
+            return torch.as_tensor(np_arr, dtype=torch.float32, device=target_device)
+
+    all_col_names = pa_table.column_names if hasattr(pa_table, "column_names") else pa_table.schema.names
+
+    y_tensor = None
+    if target_col and target_col in all_col_names:
+        y_col = pa_table[target_col]
+        y_tensor = _arrow_col_to_tensor(y_col)
+        f_cols = [c for c in (feature_cols or all_col_names) if c != target_col]
+    else:
+        f_cols = [c for c in (feature_cols or all_col_names) if c != target_col] if target_col else list(feature_cols or all_col_names)
+
+    col_tensors = [_arrow_col_to_tensor(pa_table[c]) for c in f_cols]
+    if col_tensors:
+        X_tensor = torch.stack(col_tensors, dim=1)
+    else:
+        X_tensor = torch.empty((len(pa_table), 0), dtype=torch.float32, device=target_device)
+
+    if y_tensor is not None:
+        return X_tensor, y_tensor
+    return X_tensor
+
 

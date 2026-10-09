@@ -1084,3 +1084,48 @@ def test_descendants_of_on_a_real_vocabulary():
     finally:
         con.close()
     assert stat() == before
+
+
+def test_upward_tree_vocab_discovery(tmp_path):
+    # derived/central_vocabulary.duckdb
+    derived_dir = tmp_path / "derived"
+    derived_dir.mkdir()
+    vocab_path = derived_dir / "central_vocabulary.duckdb"
+    _make_vocab(vocab_path)
+
+    # derived/subfolder/site_a/omop.duckdb
+    site_dir = derived_dir / "subfolder" / "site_a"
+    site_dir.mkdir(parents=True)
+    site_db = site_dir / "omop.duckdb"
+    with duckdb.connect(str(site_db)) as c:
+        c.execute("CREATE TABLE person (person_id INT);")
+
+    # Connect to deeply nested site_db without explicit vocab_db_path
+    con = omop_connect(site_db)
+    try:
+        # Should auto-discover derived/central_vocabulary.duckdb
+        res = con.execute("SELECT COUNT(*) FROM concept").fetchone()[0]
+        assert res == len(CONCEPT_ROWS)
+    finally:
+        con.close()
+
+
+def test_omop_central_vocab_env(tmp_path, monkeypatch):
+    vocab_dir = tmp_path / "external_storage"
+    vocab_dir.mkdir()
+    vocab_path = vocab_dir / "my_custom_vocab.duckdb"
+    _make_vocab(vocab_path)
+
+    isolated_db = tmp_path / "isolated" / "site.duckdb"
+    isolated_db.parent.mkdir()
+    with duckdb.connect(str(isolated_db)) as c:
+        c.execute("CREATE TABLE person (person_id INT);")
+
+    monkeypatch.setenv("OMOP_CENTRAL_VOCAB", str(vocab_path))
+    con = omop_connect(isolated_db)
+    try:
+        res = con.execute("SELECT COUNT(*) FROM concept").fetchone()[0]
+        assert res == len(CONCEPT_ROWS)
+    finally:
+        con.close()
+
