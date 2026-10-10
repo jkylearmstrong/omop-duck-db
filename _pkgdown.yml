@@ -18,6 +18,7 @@ reference:
   - load_vocabulary
   - attach_central_vocabulary
   - omop_connect
+  - omop_connect_lakehouse
   - load_from_bigquery
   - check_vocabulary_version
 - title: PCORnet ETL and synthesizers
@@ -33,6 +34,7 @@ reference:
   - create_federated_consortium
   - check_cross_database_discrepancy
   - with_cell_suppression
+  - with_differential_privacy
   - load_care_site
   - load_cdm_source
   - load_location
@@ -112,9 +114,15 @@ reference:
   - to_latex
   - validate_table1_reconciliation
   - export_cdm
+  - export_to_parquet
   - DEFAULT_LAB_LOINCS
   - DEFAULT_MEDICATION_CONCEPTS
   - DEFAULT_VITAL_LOINCS
+- title: Causal inference and survival analysis
+  desc: In-engine propensity score weighting (IPTW/SMR) and Kaplan-Meier / Competing Risks estimators.
+  contents:
+  - generate_propensity_weights
+  - estimate_km_survival
 - title: Large-file sync
   desc: Synchronize DuckDB databases and vocabulary files via Google Drive.
   contents:

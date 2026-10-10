@@ -569,7 +569,7 @@ def test_rfc_example_equals_explicit_equivalent_parameters(cdm):
 def test_rfc_example_study_window_only_restricts_the_index_date(cdm):
     """Readmissions after study_end still count (outcomes are ascertained relative to each index stay)."""
     cohort = define_study_cohort(cdm, materialise=False, attrition=False, **{**RFC_KWARGS, "washin_days": 0})
-    late = cohort[(cohort.cohort_end_date + pd.Timedelta(days=30)) > pd.Timestamp("2020-12-31")]
+    late = cohort[(pd.to_datetime(cohort.cohort_end_date) + pd.Timedelta(days=30)) > pd.Timestamp("2020-12-31")]
     assert len(late) > 0
     unrestricted = define_study_cohort(
         cdm, materialise=False, attrition=False, **{**RFC_KWARGS, "washin_days": 0, "study_window": None})

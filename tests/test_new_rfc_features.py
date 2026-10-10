@@ -447,8 +447,8 @@ def test_sard_dense_features_and_cluster_command(mock_cdm, tmp_path):
 
 
 def test_arrow_to_cuda_tensors():
+    torch = pytest.importorskip("torch")
     import pyarrow as pa
-    import torch
 
     data = {
         "feat1": [1.0, 2.0, 3.0],
@@ -510,6 +510,10 @@ def test_ml_cohort_extractor_and_builder(mock_cdm):
 
 
 def test_generate_mock_pcornet_fixtures(tmp_path):
+    import sys
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
     from tests.fixtures.generate_mock_pcornet import generate_mock_pcornet_datasets
 
     out_dir = tmp_path / "mock_pcornet"

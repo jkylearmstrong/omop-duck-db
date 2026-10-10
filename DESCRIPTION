@@ -47,8 +47,7 @@ Suggests:
     arrow,
     jsonlite,
     dplyr,
-    withr
+    withr,
+    survival
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0
-Remotes:  
-    jkylearmstrong/usethis

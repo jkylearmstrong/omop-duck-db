@@ -53,6 +53,8 @@ packages = ["python/omop_etl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "python"]
 filterwarnings = [
     "ignore::UserWarning:pandas.core.arrays.masked",
+    "ignore:The 'generic' unit for NumPy timedelta is deprecated:DeprecationWarning",
 ]
