@@ -62,6 +62,13 @@ from omop_etl.export import (
     export_cdm,
     export_to_parquet,
 )
+from omop_etl.plp_study_package import (
+    export_plp_study_package,
+)
+from omop_etl.andromeda import (
+    AndromedaAdapter,
+    export_to_andromeda,
+)
 from omop_etl.features import (
     CORE_14_LAB_PANEL,
     aggregate_concept_sets,
@@ -73,6 +80,8 @@ from omop_etl.features import (
 from omop_etl.federation import (
     check_cross_database_discrepancy,
     create_federated_consortium,
+    federated_meta_analysis,
+    FederatedMetaAnalysisResult,
     with_cell_suppression,
     with_differential_privacy,
 )
@@ -81,12 +90,15 @@ from omop_etl.ml import (
     FeatureMatrixBuilder,
 )
 from omop_etl.ml_features import (
+    ClinicalSequenceTokens,
     arrow_to_cuda_tensors,
     arrow_to_pytorch,
     as_omop_learn_batch,
     build_concept_tokenizer,
+    export_clinical_sequence_tokens,
     extract_sard_visit_tensors,
     extract_sparse_concept_matrix,
+    to_clinical_sequence_tokens,
 )
 from omop_etl.omop_learn_backend import (
     DuckDBBackend,
@@ -238,8 +250,21 @@ __all__ = [
     # Multi-Target Export
     "export_cdm",
     "export_to_parquet",
+    # OHDSI PLP Study Package Generator
+    "export_plp_study_package",
+    # Andromeda Adapter
+    "export_to_andromeda",
+    "AndromedaAdapter",
+    # Foundation Model Sequence Tokenizer
+    "ClinicalSequenceTokens",
+    "export_clinical_sequence_tokens",
+    "to_clinical_sequence_tokens",
+    # Federated Meta-Analysis Aggregator
+    "federated_meta_analysis",
+    "FederatedMetaAnalysisResult",
 ]
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"
+
 
 

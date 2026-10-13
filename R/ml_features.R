@@ -341,3 +341,136 @@ extract_sparse_concept_matrix <- function(con,
   vocab[, c("column_index", "token", "feature", "domain", "concept_id", "concept_name", "domain_id", "vocabulary_id",
             "standard_concept", "n_patients")]
 }
+
+#' Extract Foundation Model Clinical Sequence Tokens
+#'
+#' Formats clinical event sequences into tokenized sequences compatible with
+#' clinical BERT and Foundation Models (EHR-SHOT, CEHR-BERT, FEMR).
+#'
+#' @param con Active DuckDB connection.
+#' @param features_parquet Path to cohort parquet file.
+#' @param lookback_days Historical lookback window in days (default 365).
+#' @param min_patient_freq Minimum patient frequency threshold (default 1).
+#' @param domains Clinical domains to include (default: condition, drug, procedure).
+#' @param max_seq_len Maximum sequence length for input_ids (default 512).
+#' @param include_index_date Whether events on index date are included (default FALSE).
+#' @param person_col,index_date_col,outcome_col Optional column aliases in cohort parquet.
+#' @param concept_table Concept table name.
+#' @param anchor_date Strategy for selecting index date.
+#' @return A list with `input_ids` (matrix), `attention_mask` (matrix), `token_type_ids` (matrix),
+#'   `labels`, `vocab`, `id_to_token`, `concepts`, `max_seq_len`.
+#' @export
+extract_clinical_sequence_tokens <- function(con,
+                                            features_parquet,
+                                            lookback_days = 365,
+                                            min_patient_freq = 1,
+                                            domains = c("condition", "drug", "procedure"),
+                                            max_seq_len = 512,
+                                            include_index_date = FALSE,
+                                            person_col = NULL,
+                                            index_date_col = NULL,
+                                            outcome_col = NULL,
+                                            concept_table = NULL,
+                                            anchor_date = "auto") {
+  domains <- .mlf_validate_options(domains, lookback_days, min_patient_freq)
+  anchor <- if (is.character(anchor_date)) anchor_date[1] else "auto"
+  cohort <- .mlf_load_cohort(con, features_parquet, person_col, index_date_col, outcome_col, anchor_date = anchor)
+
+  sql <- paste(
+    .mlf_events_ctes(cohort$sql, domains, lookback_days, include_index_date, min_patient_freq, NULL),
+    ", ev_v AS (
+       SELECT ev.row_idx, ev.domain, ev.concept_id,
+              COALESCE(ev.visit_occurrence_id, -1) AS vid,
+              COALESCE(v.visit_start_date, ev.event_date) AS vdate
+       FROM ev
+       LEFT JOIN visit_occurrence v ON v.visit_occurrence_id = ev.visit_occurrence_id AND v.person_id = ev.person_id
+     )
+     SELECT row_idx, vid, vdate, domain, concept_id
+     FROM ev_v
+     GROUP BY row_idx, vid, vdate, domain, concept_id
+     ORDER BY row_idx, vdate, vid, domain, concept_id"
+  )
+  events <- tryCatch(DBI::dbGetQuery(con, sql), error = function(e) data.frame())
+  triples <- if (nrow(events) > 0) {
+    unique(events[, c("row_idx", "domain", "concept_id")])
+  } else {
+    data.frame(row_idx = numeric(0), domain = character(0), concept_id = numeric(0))
+  }
+  vocab <- .mlf_assemble_vocab(con, triples, cohort$df$person_id, NULL, concept_table)
+
+  special_tokens <- c("[PAD]" = 0L, "[UNK]" = 1L, "[CLS]" = 2L, "[SEP]" = 3L,
+                      "[MASK]" = 4L, "[VISIT]" = 5L, "[DISCHARGE]" = 6L)
+  cls_id <- 2L; sep_id <- 3L; pad_id <- 0L; visit_id <- 5L; discharge_id <- 6L
+
+  token_to_id <- as.list(special_tokens)
+  if (nrow(vocab) > 0) {
+    for (idx in seq_len(nrow(vocab))) {
+      tok <- as.character(vocab$token[idx])
+      token_to_id[[tok]] <- 6L + idx
+    }
+  }
+
+  n_rows <- nrow(cohort$df)
+  input_ids <- matrix(pad_id, nrow = n_rows, ncol = max_seq_len)
+  attention_mask <- matrix(0L, nrow = n_rows, ncol = max_seq_len)
+  token_type_ids <- matrix(0L, nrow = n_rows, ncol = max_seq_len)
+
+  if (nrow(events) > 0) {
+    events$row_idx <- as.integer(events$row_idx)
+    events$tok_id <- 7L + match(.mlf_pair_key(events$domain, events$concept_id),
+                                .mlf_pair_key(vocab$domain, vocab$concept_id)) - 1L
+  }
+
+  split_ev <- if (nrow(events) > 0) split(events, events$row_idx) else list()
+  for (row_num in seq_len(n_rows)) {
+    r_str <- as.character(row_num - 1L)
+    tokens <- c(cls_id)
+    segments <- c(0L)
+
+    if (r_str %in% names(split_ev)) {
+      row_events <- split_ev[[r_str]]
+      v_keys <- paste0(row_events$vdate, "_", row_events$vid)
+      uniq_v <- unique(v_keys)
+      v_idx <- 1L
+      for (vk in uniq_v) {
+        sub <- row_events[v_keys == vk, ]
+        tokens <- c(tokens, visit_id)
+        segments <- c(segments, v_idx)
+        valid_toks <- sub$tok_id[!is.na(sub$tok_id)]
+        if (length(valid_toks) > 0) {
+          tokens <- c(tokens, valid_toks)
+          segments <- c(segments, rep(v_idx, length(valid_toks)))
+        }
+        tokens <- c(tokens, discharge_id)
+        segments <- c(segments, v_idx)
+        v_idx <- v_idx + 1L
+      }
+    }
+    tokens <- c(tokens, sep_id)
+    segments <- c(segments, 0L)
+
+    if (length(tokens) > max_seq_len) {
+      tokens <- c(cls_id, tail(head(tokens, -1), max_seq_len - 2), sep_id)
+      segments <- c(0L, tail(head(segments, -1), max_seq_len - 2), 0L)
+    }
+
+    cur_len <- length(tokens)
+    input_ids[row_num, seq_len(cur_len)] <- tokens
+    attention_mask[row_num, seq_len(cur_len)] <- 1L
+    token_type_ids[row_num, seq_len(cur_len)] <- segments
+  }
+
+  cohort_out <- cohort$df[, setdiff(names(cohort$df), "row_idx"), drop = FALSE]
+  list(
+    input_ids = input_ids,
+    attention_mask = attention_mask,
+    token_type_ids = token_type_ids,
+    labels = if ("y" %in% names(cohort_out)) cohort_out$y else NULL,
+    vocab = token_to_id,
+    id_to_token = setNames(names(token_to_id), as.character(token_to_id)),
+    special_tokens = special_tokens,
+    concepts = vocab,
+    cohort = cohort_out,
+    max_seq_len = max_seq_len
+  )
+}

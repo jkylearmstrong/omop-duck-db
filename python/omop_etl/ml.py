@@ -35,6 +35,7 @@ class CohortExtractor:
         else:
             raise ValueError("Must provide either db_path or con.")
         self.cohort_df: pd.DataFrame = pd.DataFrame()
+        self.attrition: Any = None
 
     def define_index(
         self,
@@ -58,6 +59,8 @@ class CohortExtractor:
         Returns:
             CohortExtractor: self.
         """
+        from .cohort import ConsortAttrition
+
         v_in = ", ".join(str(int(x)) for x in visit_concept_ids)
 
         # Base candidate query
@@ -80,27 +83,83 @@ class CohortExtractor:
         """
         df = self.con.execute(sql).df()
 
+        attrition_records = []
+        n_candidates = int(df["person_id"].nunique()) if len(df) > 0 else 0
+        n_base = n_candidates
+        attrition_records.append({
+            "step_number": 1,
+            "step_name": f"Admissions meeting visit concept IDs ({v_in})",
+            "subjects_retained": n_candidates,
+            "subjects_dropped": 0,
+            "percent_retained": 100.0,
+            "exclusion_reason": "Baseline candidate admissions",
+        })
+
         if len(df) == 0:
             self.cohort_df = pd.DataFrame()
+            self.attrition = ConsortAttrition(pd.DataFrame(attrition_records))
             return self
 
         # Age filter
-        df = df[df["age_at_index"] >= min_age].copy()
+        df_age = df[df["age_at_index"] >= min_age].copy()
+        n_age = int(df_age["person_id"].nunique()) if len(df_age) > 0 else 0
+        dropped_age = max(0, n_candidates - n_age)
+        pct_age = (n_age / n_base * 100.0) if n_base > 0 else 0.0
+        attrition_records.append({
+            "step_number": 2,
+            "step_name": f"Age at admission >= {min_age}",
+            "subjects_retained": n_age,
+            "subjects_dropped": dropped_age,
+            "percent_retained": round(pct_age, 2),
+            "exclusion_reason": f"Pediatric patients (age < {min_age})",
+        })
+        df = df_age
+        n_candidates = n_age
 
         # Verified followup filter (prevents censoring bias)
         if verified_followup_days > 0 and len(df) > 0:
             df["required_obs"] = pd.to_datetime(df["discharge_date"]) + pd.to_timedelta(verified_followup_days, unit="D")
             df["obs_end_dt"] = pd.to_datetime(df["obs_end_date"])
-            df = df[df["obs_end_dt"] >= df["required_obs"]].copy()
+            df_obs = df[df["obs_end_dt"] >= df["required_obs"]].copy()
+            n_obs = int(df_obs["person_id"].nunique()) if len(df_obs) > 0 else 0
+            dropped_obs = max(0, n_candidates - n_obs)
+            pct_obs = (n_obs / n_base * 100.0) if n_base > 0 else 0.0
+            attrition_records.append({
+                "step_number": 3,
+                "step_name": f"Verified observation >= {verified_followup_days}d post-discharge",
+                "subjects_retained": n_obs,
+                "subjects_dropped": dropped_obs,
+                "percent_retained": round(pct_obs, 2),
+                "exclusion_reason": "Right-censored or lost to follow-up",
+            })
+            df = df_obs
+            n_candidates = n_obs
 
         # Diabetes requirement
-        if require_diabetes and len(df) > 0:
-            dm_sql = """
-            SELECT DISTINCT person_id FROM condition_occurrence 
-            WHERE condition_concept_id IN (201826, 443238, 316866, 4058243, 4099651)
-            """
-            dm_persons = set(self.con.execute(dm_sql).df()["person_id"])
-            df = df[df["person_id"].isin(dm_persons)].copy()
+        if require_diabetes:
+            if len(df) > 0:
+                dm_sql = """
+                SELECT DISTINCT person_id FROM condition_occurrence 
+                WHERE condition_concept_id IN (201826, 443238, 316866, 4058243, 4099651)
+                """
+                dm_persons = set(self.con.execute(dm_sql).df()["person_id"])
+                df_dm = df[df["person_id"].isin(dm_persons)].copy()
+                n_dm = int(df_dm["person_id"].nunique()) if len(df_dm) > 0 else 0
+            else:
+                df_dm = df
+                n_dm = 0
+            dropped_dm = max(0, n_candidates - n_dm)
+            pct_dm = (n_dm / n_base * 100.0) if n_base > 0 else 0.0
+            attrition_records.append({
+                "step_number": len(attrition_records) + 1,
+                "step_name": "Confirmed diabetes mellitus diagnosis",
+                "subjects_retained": n_dm,
+                "subjects_dropped": dropped_dm,
+                "percent_retained": round(pct_dm, 2),
+                "exclusion_reason": "No documented diabetes condition",
+            })
+            df = df_dm
+            n_candidates = n_dm
 
         # Selection rule per patient
         if len(df) > 0:
@@ -111,8 +170,52 @@ class CohortExtractor:
             elif index_selection_rule == "random_eligible":
                 df = df.sample(frac=1.0, random_state=random_state).groupby("person_id").first().reset_index()
 
+        n_final = len(df)
+        pct_final = (n_final / n_base * 100.0) if n_base > 0 else 0.0
+        attrition_records.append({
+            "step_number": len(attrition_records) + 1,
+            "step_name": f"Index encounter selection ({index_selection_rule})",
+            "subjects_retained": n_final,
+            "subjects_dropped": 0,
+            "percent_retained": round(pct_final, 2),
+            "exclusion_reason": "Condense multiple eligible visits per patient",
+        })
+
+        attrition_df = pd.DataFrame(attrition_records)
+        self.attrition = ConsortAttrition(attrition_df)
         self.cohort_df = df.reset_index(drop=True)
+        self.cohort_df.attrs["attrition"] = attrition_df
         return self
+
+    def to_mermaid(self) -> str:
+        """Render attrition flowchart to Mermaid diagram."""
+        if self.attrition is None:
+            raise ValueError("Call define_index() before generating flowchart.")
+        return self.attrition.to_mermaid()
+
+    def to_typst(self, output_path: str | Path | None = None) -> str:
+        """Render attrition flowchart to Typst syntax."""
+        if self.attrition is None:
+            raise ValueError("Call define_index() before generating flowchart.")
+        return self.attrition.to_typst(output_path)
+
+    def to_tikz(self, output_path: str | Path | None = None) -> str:
+        """Render attrition flowchart to LaTeX TikZ environment."""
+        if self.attrition is None:
+            raise ValueError("Call define_index() before generating flowchart.")
+        return self.attrition.to_tikz(output_path)
+
+    def to_latex(self, output_path: str | Path | None = None) -> str:
+        """Render attrition flowchart to LaTeX table."""
+        if self.attrition is None:
+            raise ValueError("Call define_index() before generating flowchart.")
+        return self.attrition.to_latex(output_path)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return attrition flowchart as a DataFrame."""
+        if self.attrition is None:
+            raise ValueError("Call define_index() before generating flowchart.")
+        return self.attrition.to_dataframe()
 
 
 class FeatureMatrixBuilder:

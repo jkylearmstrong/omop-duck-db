@@ -280,3 +280,189 @@ check_cross_database_discrepancy <- function(con,
   )
 }
 
+#' Multi-Site Federated Meta-Analysis Aggregator
+#'
+#' Computes pooled effect estimates across federated DuckDB nodes using the
+#' DerSimonian-Laird random-effects or inverse-variance fixed-effect method,
+#' without sharing patient-level data. Computes Cochran's Q, tau^2, and Higgins' I^2.
+#'
+#' @param estimates Vector of study-level parameter estimates (e.g. log OR, log HR, beta).
+#' @param std_errors Vector of study standard errors.
+#' @param variances Optional vector of study variances (used if `std_errors` is NULL).
+#' @param sites Optional character vector of site identifiers.
+#' @param site_summaries Optional data.frame with columns `site`, `estimate`, `std_error`.
+#' @param con Optional active federated DuckDB connection.
+#' @param query Optional SQL query to evaluate across site tables or `v_*` views.
+#' @param model Model type: `"random"` (DerSimonian-Laird, default) or `"fixed"`.
+#' @param effect_type Effect metric: `"beta"`, `"log_or"`, `"log_hr"`, or `"mean_diff"`.
+#' @param alpha Significance level for confidence intervals (default `0.05`).
+#' @return An object of class `federated_meta_analysis` containing pooled estimates and statistics.
+#' @export
+federated_meta_analysis <- function(estimates = NULL,
+                                    std_errors = NULL,
+                                    variances = NULL,
+                                    sites = NULL,
+                                    site_summaries = NULL,
+                                    con = NULL,
+                                    query = NULL,
+                                    model = "random",
+                                    effect_type = "beta",
+                                    alpha = 0.05) {
+  site_vec <- character(0)
+  est_vec <- numeric(0)
+  se_vec <- numeric(0)
+
+  if (!is.null(site_summaries) && is.data.frame(site_summaries)) {
+    cols <- tolower(names(site_summaries))
+    s_col <- if ("site" %in% cols) "site" else if ("site_anon" %in% cols) "site_anon" else names(site_summaries)[1]
+    e_col <- if ("estimate" %in% cols) "estimate" else if ("coef" %in% cols) "coef" else names(site_summaries)[2]
+    se_col <- if ("std_error" %in% cols) "std_error" else if ("se" %in% cols) "se" else names(site_summaries)[3]
+    site_vec <- as.character(site_summaries[[s_col]])
+    est_vec <- as.numeric(site_summaries[[e_col]])
+    se_vec <- as.numeric(site_summaries[[se_col]])
+  } else if (!is.null(con) && !is.null(query)) {
+    q_df <- DBI::dbGetQuery(con, query)
+    cols <- tolower(names(q_df))
+    s_col <- if ("site" %in% cols) "site" else if ("site_anon" %in% cols) "site_anon" else names(q_df)[1]
+    e_col <- if ("estimate" %in% cols) "estimate" else if ("coef" %in% cols) "coef" else names(q_df)[2]
+    se_col <- if ("std_error" %in% cols) "std_error" else if ("se" %in% cols) "se" else names(q_df)[3]
+    site_vec <- as.character(q_df[[s_col]])
+    est_vec <- as.numeric(q_df[[e_col]])
+    se_vec <- as.numeric(q_df[[se_col]])
+  } else if (!is.null(estimates)) {
+    est_vec <- as.numeric(estimates)
+    if (!is.null(std_errors)) {
+      se_vec <- as.numeric(std_errors)
+    } else if (!is.null(variances)) {
+      se_vec <- sqrt(as.numeric(variances))
+    } else {
+      stop("Must provide either std_errors or variances alongside estimates.", call. = FALSE)
+    }
+    site_vec <- if (!is.null(sites)) as.character(sites) else sprintf("Site %d", seq_along(est_vec))
+  } else {
+    stop("Must provide estimates, site_summaries, or con with query.", call. = FALSE)
+  }
+
+  k <- length(est_vec)
+  if (k == 0) stop("No study estimates provided for meta-analysis.", call. = FALSE)
+
+  vars <- se_vec^2
+  fe_weights <- 1.0 / pmax(1e-12, vars)
+  sum_fe_w <- sum(fe_weights)
+  theta_fe <- sum(fe_weights * est_vec) / sum_fe_w
+  se_fe <- 1.0 / sqrt(sum_fe_w)
+
+  q_stat <- sum(fe_weights * ((est_vec - theta_fe)^2))
+  df <- max(1L, k - 1L)
+  q_p_val <- if (k > 1L) stats::pchisq(q_stat, df = df, lower.tail = FALSE) else 1.0
+
+  sum_fe_w_sq <- sum(fe_weights^2)
+  c_factor <- if (sum_fe_w > 0) sum_fe_w - (sum_fe_w_sq / sum_fe_w) else 1.0
+  tau_sq <- if (k > 1L && c_factor > 0) max(0.0, (q_stat - df) / c_factor) else 0.0
+  tau <- sqrt(tau_sq)
+
+  i_sq <- if (k > 1L && q_stat > 0) max(0.0, (q_stat - df) / q_stat) * 100.0 else 0.0
+
+  re_weights <- 1.0 / pmax(1e-12, vars + tau_sq)
+  sum_re_w <- sum(re_weights)
+  theta_re <- sum(re_weights * est_vec) / sum_re_w
+  se_re <- 1.0 / sqrt(sum_re_w)
+
+  use_random <- identical(tolower(trimws(model)), "random")
+  pooled_est <- if (use_random) theta_re else theta_fe
+  pooled_se <- if (use_random) se_re else se_fe
+  final_weights <- if (use_random) re_weights else fe_weights
+  sum_final_w <- if (use_random) sum_re_w else sum_fe_w
+
+  z_crit <- stats::qnorm(1.0 - alpha / 2.0)
+  ci_lower <- pooled_est - z_crit * pooled_se
+  ci_upper <- pooled_est + z_crit * pooled_se
+  z_score <- if (pooled_se > 0) pooled_est / pooled_se else 0.0
+  p_val <- 2.0 * stats::pnorm(abs(z_score), lower.tail = FALSE)
+
+  study_rows <- data.frame(
+    site = site_vec,
+    estimate = est_vec,
+    std_error = se_vec,
+    ci_lower = est_vec - z_crit * se_vec,
+    ci_upper = est_vec + z_crit * se_vec,
+    weight = final_weights,
+    weight_pct = final_weights / sum_final_w * 100.0,
+    stringsAsFactors = FALSE
+  )
+
+  res <- list(
+    model = if (use_random) "random" else "fixed",
+    effect_type = effect_type,
+    k_studies = k,
+    pooled_estimate = pooled_est,
+    se = pooled_se,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper,
+    z_score = z_score,
+    p_value = p_val,
+    q_statistic = q_stat,
+    df = df,
+    q_p_value = q_p_val,
+    tau_squared = tau_sq,
+    tau = tau,
+    i_squared = i_sq,
+    studies = study_rows
+  )
+  class(res) <- c("federated_meta_analysis", "list")
+  res
+}
+
+#' @export
+print.federated_meta_analysis <- function(x, ...) {
+  cat(sprintf("=== Federated Meta-Analysis (%s Effects) ===\n", toupper(x$model)))
+  cat(sprintf("Pooled Estimate: %.4f (SE = %.4f, 95%% CI: [%.4f, %.4f])\n",
+              x$pooled_estimate, x$se, x$ci_lower, x$ci_upper))
+  cat(sprintf("Test of Effect: Z = %.2f, p = %.4e\n", x$z_score, x$p_value))
+  cat(sprintf("Heterogeneity: Q = %.2f (df = %d, p = %.4f); I2 = %.1f%%; tau2 = %.4f\n",
+              x$q_statistic, x$df, x$q_p_value, x$i_squared, x$tau_squared))
+  cat(sprintf("Number of participating sites: %d\n", x$k_studies))
+  invisible(x)
+}
+
+#' @export
+as.data.frame.federated_meta_analysis <- function(x, ...) {
+  s <- x$studies
+  s$type <- "Study"
+  pooled_row <- data.frame(
+    site = sprintf("Pooled (%s)", tools::toTitleCase(x$model)),
+    estimate = x$pooled_estimate,
+    std_error = x$se,
+    ci_lower = x$ci_lower,
+    ci_upper = x$ci_upper,
+    weight = sum(s$weight),
+    weight_pct = 100.0,
+    type = "Pooled",
+    stringsAsFactors = FALSE
+  )
+  rbind(s, pooled_row)
+}
+
+#' @export
+to_mermaid.federated_meta_analysis <- function(x, ...) {
+  lines <- c(
+    "flowchart TD",
+    "    subgraph MetaAnalysis [Federated Meta-Analysis Summary]",
+    sprintf('        Header["I² = %.1f%%, τ² = %.4f, Q = %.2f"]', x$i_squared, x$tau_squared, x$q_statistic)
+  )
+  for (i in seq_len(nrow(x$studies))) {
+    s <- x$studies[i, ]
+    lines <- c(lines, sprintf('        S%d["%s: %+.2f [%+.2f, %+.2f] (%.1f%%)"]',
+                              i, s$site, s$estimate, s$ci_lower, s$ci_upper, s$weight_pct))
+    lines <- c(lines, sprintf("        Header --> S%d", i))
+  }
+  lines <- c(lines, sprintf('        Pooled["★ POOLED: %+.2f [%+.2f, %+.2f] (p = %.4f)"]',
+                            x$pooled_estimate, x$ci_lower, x$ci_upper, x$p_value))
+  for (i in seq_len(nrow(x$studies))) {
+    lines <- c(lines, sprintf("        S%d --> Pooled", i))
+  }
+  lines <- c(lines, "    end")
+  paste(lines, collapse = "\n")
+}
+
+

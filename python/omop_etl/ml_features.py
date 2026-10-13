@@ -465,7 +465,9 @@ def extract_sard_visit_tensors(
     washin_buffer_days: int = 0,
     washin_buffer_hours: int = 0,
     dense_features: Any = None,
-) -> dict:
+    return_format: str = "tensors",
+    max_seq_len: int | None = None,
+) -> Any:
     """Padded chronological visit tensors for SARD / omop-learn sequence models.
 
     ``concept_tensor[i, v, t]`` is the token id of the ``t``-th concept in the ``v``-th visit of row
@@ -576,7 +578,168 @@ def extract_sard_visit_tensors(
         if len(dense_arr) != n_rows:
             raise ValueError(f"dense_features length ({len(dense_arr)}) must match cohort rows ({n_rows}).")
         res["dense_features"] = dense_arr
+
+    if return_format in ("huggingface", "tokens"):
+        return to_clinical_sequence_tokens(res, max_seq_len=max_seq_len or 512)
+
     return res
+
+
+class ClinicalSequenceTokens(dict):
+    """Container for HuggingFace / Clinical Foundation Model (EHR-SHOT / CEHR-BERT / FEMR) tokens."""
+
+    def to_hf_dataset(self) -> Any:
+        """Converts sequence tokens to HuggingFace datasets.Dataset."""
+        try:
+            import datasets
+            d = {
+                "input_ids": self["input_ids"].tolist(),
+                "attention_mask": self["attention_mask"].tolist(),
+                "token_type_ids": self["token_type_ids"].tolist(),
+            }
+            if self.get("labels") is not None:
+                d["labels"] = self["labels"].tolist()
+            return datasets.Dataset.from_dict(d)
+        except ImportError as exc:
+            raise ImportError("HuggingFace datasets package is required: pip install datasets") from exc
+
+    def to_torch(self) -> dict:
+        """Converts token arrays to torch.Tensor."""
+        try:
+            import torch
+            res = {
+                "input_ids": torch.as_tensor(self["input_ids"], dtype=torch.long),
+                "attention_mask": torch.as_tensor(self["attention_mask"], dtype=torch.long),
+                "token_type_ids": torch.as_tensor(self["token_type_ids"], dtype=torch.long),
+            }
+            if self.get("labels") is not None:
+                res["labels"] = torch.as_tensor(self["labels"])
+            return res
+        except ImportError as exc:
+            raise ImportError("PyTorch is required: pip install torch") from exc
+
+
+def to_clinical_sequence_tokens(
+    sard_result: dict,
+    max_seq_len: int = 512,
+) -> ClinicalSequenceTokens:
+    """Converts SARD visit tensor output into clinical foundation model sequence tokens.
+
+    Adheres to standard clinical BERT architectures (EHR-SHOT, CEHR-BERT, FEMR) with
+    special tokens: [PAD]=0, [UNK]=1, [CLS]=2, [SEP]=3, [MASK]=4, [VISIT]=5, [DISCHARGE]=6.
+    """
+    special_tokens = {
+        "[PAD]": 0,
+        "[UNK]": 1,
+        "[CLS]": 2,
+        "[SEP]": 3,
+        "[MASK]": 4,
+        "[VISIT]": 5,
+        "[DISCHARGE]": 6,
+    }
+    cls_id = 2
+    sep_id = 3
+    pad_id = 0
+    visit_id = 5
+    discharge_id = 6
+
+    vocab_df = sard_result.get("concepts", pd.DataFrame())
+    token_to_id = dict(special_tokens)
+    id_to_token = {v: k for k, v in special_tokens.items()}
+
+    # Register concept tokens
+    if len(vocab_df) > 0 and "token" in vocab_df.columns:
+        for _, row in vocab_df.iterrows():
+            t_str = str(row["token"])
+            t_id = int(row["token_id"])
+            token_to_id[t_str] = t_id
+            id_to_token[t_id] = t_str
+
+    concept_tensor = sard_result["concept_tensor"]
+    visit_lengths = sard_result["visit_lengths"]
+    n_visits = sard_result["n_visits"]
+    n_rows = len(concept_tensor)
+
+    input_ids = np.full((n_rows, max_seq_len), pad_id, dtype=np.int64)
+    attention_mask = np.zeros((n_rows, max_seq_len), dtype=np.int64)
+    token_type_ids = np.zeros((n_rows, max_seq_len), dtype=np.int64)
+
+    for i in range(n_rows):
+        tokens = [cls_id]
+        segment_ids = [0]
+        nv = int(n_visits[i])
+        for v in range(nv):
+            tokens.append(visit_id)
+            segment_ids.append(v + 1)
+            vl = int(visit_lengths[i, v])
+            for t in range(vl):
+                tid = int(concept_tensor[i, v, t])
+                if tid != PAD_TOKEN_IDX and tid > 0:
+                    tokens.append(tid)
+                    segment_ids.append(v + 1)
+            tokens.append(discharge_id)
+            segment_ids.append(v + 1)
+
+        tokens.append(sep_id)
+        segment_ids.append(0)
+
+        # Truncate if exceeds max_seq_len
+        if len(tokens) > max_seq_len:
+            tokens = [cls_id] + tokens[-(max_seq_len - 2):-1] + [sep_id]
+            segment_ids = [0] + segment_ids[-(max_seq_len - 2):-1] + [0]
+
+        cur_len = len(tokens)
+        input_ids[i, :cur_len] = tokens
+        attention_mask[i, :cur_len] = 1
+        token_type_ids[i, :cur_len] = segment_ids
+
+    res_dict = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "token_type_ids": token_type_ids,
+        "labels": sard_result.get("y"),
+        "vocab": token_to_id,
+        "id_to_token": id_to_token,
+        "special_tokens": special_tokens,
+        "concepts": vocab_df,
+        "cohort": sard_result.get("cohort"),
+        "max_seq_len": max_seq_len,
+    }
+    return ClinicalSequenceTokens(res_dict)
+
+
+def export_clinical_sequence_tokens(
+    con: duckdb.DuckDBPyConnection,
+    features_parquet: str | Path,
+    lookback_days: int | None = 365,
+    min_patient_freq: int = 1,
+    domains: Sequence[str] = ("condition", "drug", "procedure"),
+    max_seq_len: int = 512,
+    include_index_date: bool = False,
+    person_col: str | None = None,
+    index_date_col: str | None = None,
+    outcome_col: str | None = None,
+    concept_table: str | None = None,
+    anchor_date: str = "auto",
+) -> ClinicalSequenceTokens:
+    """Extracts HuggingFace/Foundation Model clinical sequence tokens from OMOP DuckDB.
+
+    Produces standardized sequence tokens compatible with EHR-SHOT, CEHR-BERT, and FEMR.
+    """
+    sard_res = extract_sard_visit_tensors(
+        con=con,
+        features_parquet=features_parquet,
+        lookback_days=lookback_days,
+        min_patient_freq=min_patient_freq,
+        domains=domains,
+        include_index_date=include_index_date,
+        person_col=person_col,
+        index_date_col=index_date_col,
+        outcome_col=outcome_col,
+        concept_table=concept_table,
+        anchor_date=anchor_date,
+    )
+    return to_clinical_sequence_tokens(sard_res, max_seq_len=max_seq_len)
 
 
 def as_omop_learn_batch(result: dict) -> dict:

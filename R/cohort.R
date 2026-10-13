@@ -1959,6 +1959,94 @@ to_markdown.default <- function(x, ...) {
   to_markdown.data.frame(as.data.frame(x), ...)
 }
 
+#' Convert Object to Typst Flowchart
+#'
+#' @param x Object to convert.
+#' @param ... Additional arguments passed to methods.
+#' @return Character string containing the Typst definition.
+#' @export
+to_typst <- function(x, ...) UseMethod("to_typst")
+
+#' @export
+to_typst.consort_attrition <- function(x, ...) {
+  lines <- c(
+    "// CONSORT / STROBE Participant Attrition Flowchart",
+    "#align(center)[",
+    "  #block(width: 100%, stroke: none)["
+  )
+  for (i in seq_len(nrow(x))) {
+    idx <- as.integer(x$step_number[i])
+    name <- gsub('"', '\\\\"', as.character(x$step_name[i]))
+    retained <- format(as.numeric(x$subjects_retained[i]), big.mark = ",")
+    pct <- sprintf("%.1f", as.numeric(x$percent_retained[i]))
+    dropped <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+
+    if (idx > 1) {
+      lines <- c(lines, "    #v(6pt)", "    #text(12pt)[$arrow.b$]", "    #v(6pt)")
+    }
+    box_content <- sprintf("[*Step %d: %s*\\ \n    (N = %s, %s%%)]", idx, name, retained, pct)
+    lines <- c(lines, sprintf('    #rect(width: 85%%, inset: 8pt, radius: 4pt, stroke: 0.75pt + rgb("204060"), fill: rgb("f4f7fa"))%s', box_content))
+
+    if (dropped > 0) {
+      reason <- if ("exclusion_reason" %in% names(x)) gsub('"', '\\\\"', as.character(x$exclusion_reason[i])) else "Excluded criteria not met"
+      excl_content <- sprintf("[_Excluded (N = %s)_\\ \n    %s]", format(dropped, big.mark = ","), reason)
+      lines <- c(lines, sprintf('    #v(3pt)\n    #rect(width: 70%%, inset: 6pt, radius: 3pt, stroke: (dash: "dashed", paint: rgb("b03030")), fill: rgb("fff5f5"))%s', excl_content))
+    }
+  }
+  lines <- c(lines, "  ]", "]")
+  paste(lines, collapse = "\n")
+}
+
+#' Convert Object to LaTeX TikZ Flowchart
+#'
+#' @param x Object to convert.
+#' @param ... Additional arguments passed to methods.
+#' @return Character string containing LaTeX TikZ code.
+#' @export
+to_tikz <- function(x, ...) UseMethod("to_tikz")
+
+#' @export
+to_tikz.consort_attrition <- function(x, ...) {
+  lines <- c(
+    "% CONSORT / STROBE Flowchart in TikZ",
+    "\\begin{tikzpicture}[",
+    "  node distance = 1.3cm and 1.8cm,",
+    "  auto,",
+    "  box/.style = {rectangle, draw=blue!70!black, fill=blue!5, rounded corners=3pt, text width=7cm, align=center, minimum height=1.1cm, inner sep=6pt, font=\\small},",
+    "  exclude/.style = {rectangle, draw=red!70!black, fill=red!5, dashed, text width=5cm, align=center, minimum height=0.9cm, inner sep=5pt, font=\\footnotesize},",
+    "  arrow/.style = {draw=black!75, -latex, thick}",
+    "]"
+  )
+  prev_node <- NULL
+  for (i in seq_len(nrow(x))) {
+    idx <- as.integer(x$step_number[i])
+    name <- gsub("%", "\\\\%", gsub("&", "\\\\&", gsub("_", "\\\\_", as.character(x$step_name[i]))))
+    retained <- format(as.numeric(x$subjects_retained[i]), big.mark = ",")
+    pct <- sprintf("%.1f", as.numeric(x$percent_retained[i]))
+    dropped <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+
+    node_id <- sprintf("step%d", idx)
+    node_label <- sprintf("\\textbf{%d. %s}\\\\\\(N = %s, %s\\%%)", idx, name, retained, pct)
+
+    if (idx == 1) {
+      lines <- c(lines, sprintf("  \\node [box] (%s) {%s};", node_id, node_label))
+    } else {
+      lines <- c(lines, sprintf("  \\node [box, below of=%s, node distance=1.8cm] (%s) {%s};", prev_node, node_id, node_label))
+      lines <- c(lines, sprintf("  \\path [arrow] (%s) -- (%s);", prev_node, node_id))
+      if (dropped > 0) {
+        excl_id <- sprintf("excl%d", idx)
+        reason <- if ("exclusion_reason" %in% names(x)) gsub("%", "\\\\%", gsub("&", "\\\\&", gsub("_", "\\\\_", as.character(x$exclusion_reason[i])))) else "Excluded criteria not met"
+        excl_label <- sprintf("\\textit{Excluded (N = %s)}\\\\\\%s", format(dropped, big.mark = ","), reason)
+        lines <- c(lines, sprintf("  \\node [exclude, right of=%s, node distance=6.5cm, yshift=-0.9cm] (%s) {%s};", prev_node, excl_id, excl_label))
+        lines <- c(lines, sprintf("  \\path [arrow, dashed, draw=red!70!black] (%s.south) |- (%s.west);", prev_node, excl_id))
+      }
+    }
+    prev_node <- node_id
+  }
+  lines <- c(lines, "\\end{tikzpicture}")
+  paste(lines, collapse = "\n")
+}
+
 #' Collapse Longitudinal Medication Exposures into Continuous Treatment Episodes
 #'
 #' @param con Active DuckDB connection (DBI::dbConnect).

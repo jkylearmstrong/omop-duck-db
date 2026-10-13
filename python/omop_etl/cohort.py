@@ -12,6 +12,7 @@ import numbers
 import re
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 import duckdb
@@ -1925,6 +1926,91 @@ class ConsortAttrition:
         if output_path:
             Path(output_path).write_text(latex_str, encoding="utf-8")
         return latex_str
+
+    def to_typst(self, output_path: str | Path | None = None) -> str:
+        """Render a Typst flowchart representation for Quarto/Typst manuscripts."""
+        lines = [
+            "// CONSORT / STROBE Participant Attrition Flowchart",
+            "#align(center)[",
+            "  #block(width: 100%, stroke: none)[",
+        ]
+        for _, row in self.df.iterrows():
+            idx = int(row["step_number"])
+            name = str(row["step_name"]).replace('"', '\\"')
+            retained = int(row["subjects_retained"])
+            pct = float(row.get("percent_retained", 100.0))
+            dropped = int(row.get("subjects_dropped", 0))
+
+            if idx > 1:
+                lines.append("    #v(6pt)")
+                lines.append("    #text(12pt)[$arrow.b$]")
+                lines.append("    #v(6pt)")
+
+            box_content = f"[*Step {idx}: {name}*\\ \n    (N = {retained:,}, {pct:.1f}%)]"
+            lines.append(
+                f'    #rect(width: 85%, inset: 8pt, radius: 4pt, stroke: 0.75pt + rgb("204060"), fill: rgb("f4f7fa"))'
+                f"{box_content}"
+            )
+            if dropped > 0:
+                reason = str(row.get("exclusion_reason", "Excluded criteria not met")).replace('"', '\\"')
+                excl_content = f"[_Excluded (N = {dropped:,})_\\ \n    {reason}]"
+                lines.append(
+                    f'    #v(3pt)\n    #rect(width: 70%, inset: 6pt, radius: 3pt, stroke: (dash: "dashed", paint: rgb("b03030")), fill: rgb("fff5f5"))'
+                    f"{excl_content}"
+                )
+
+        lines.extend([
+            "  ]",
+            "]",
+        ])
+        typst_str = "\n".join(lines) + "\n"
+        if output_path:
+            Path(output_path).write_text(typst_str, encoding="utf-8")
+        return typst_str
+
+    def to_tikz(self, output_path: str | Path | None = None) -> str:
+        """Render a LaTeX TikZ flowchart environment for publication manuscripts."""
+        lines = [
+            "% CONSORT / STROBE Flowchart in TikZ",
+            "\\begin{tikzpicture}[",
+            "  node distance = 1.3cm and 1.8cm,",
+            "  auto,",
+            "  box/.style = {rectangle, draw=blue!70!black, fill=blue!5, rounded corners=3pt, text width=7cm, align=center, minimum height=1.1cm, inner sep=6pt, font=\\small},",
+            "  exclude/.style = {rectangle, draw=red!70!black, fill=red!5, dashed, text width=5cm, align=center, minimum height=0.9cm, inner sep=5pt, font=\\footnotesize},",
+            "  arrow/.style = {draw=black!75, -latex, thick}",
+            "]",
+        ]
+        prev_node = None
+        for _, row in self.df.iterrows():
+            idx = int(row["step_number"])
+            name = str(row["step_name"]).replace("_", "\\_").replace("&", "\\&").replace("%", "\\%")
+            retained = int(row["subjects_retained"])
+            pct = float(row.get("percent_retained", 100.0))
+            dropped = int(row.get("subjects_dropped", 0))
+
+            node_id = f"step{idx}"
+            node_label = f"\\textbf{{{idx}. {name}}}\\\\(N = {retained:,}, {pct:.1f}\\%)"
+
+            if idx == 1:
+                lines.append(f"  \\node [box] ({node_id}) {{{node_label}}};")
+            else:
+                lines.append(f"  \\node [box, below of={prev_node}, node distance=1.8cm] ({node_id}) {{{node_label}}};")
+                lines.append(f"  \\path [arrow] ({prev_node}) -- ({node_id});")
+
+                if dropped > 0:
+                    excl_id = f"excl{idx}"
+                    reason = str(row.get("exclusion_reason", "Excluded criteria not met")).replace("_", "\\_").replace("&", "\\&").replace("%", "\\%")
+                    excl_label = f"\\textit{{Excluded (N = {dropped:,})}}\\\\{reason}"
+                    lines.append(f"  \\node [exclude, right of={prev_node}, node distance=6.5cm, yshift=-0.9cm] ({excl_id}) {{{excl_label}}};")
+                    lines.append(f"  \\path [arrow, dashed, draw=red!70!black] ({prev_node}.south) |- ({excl_id}.west);")
+
+            prev_node = node_id
+
+        lines.append("\\end{tikzpicture}\n")
+        tikz_str = "\n".join(lines)
+        if output_path:
+            Path(output_path).write_text(tikz_str, encoding="utf-8")
+        return tikz_str
 
 
 def generate_consort_attrition(

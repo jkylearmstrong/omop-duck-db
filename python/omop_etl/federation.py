@@ -5,7 +5,9 @@ DuckDB CDM databases in READ_ONLY mode and generating unified federated
 views (v_person, v_visit_occurrence, etc.) with site provenance.
 """
 
-from typing import Dict, Optional, Union
+from __future__ import annotations
+
+from typing import Any, Dict, Optional, Sequence, Union
 import os
 import duckdb
 from .build_omop_cdm import attach_central_vocabulary
@@ -334,4 +336,304 @@ def check_cross_database_discrepancy(
         "sites": sites,
         "evaluated_concepts": len(top_concepts_df),
     }
+
+
+class FederatedMetaAnalysisResult:
+    """Multi-site federated meta-analysis results container with forest plot exporters."""
+
+    def __init__(self, data: dict):
+        self.data = data
+
+    @property
+    def pooled_estimate(self) -> float:
+        return self.data["pooled_estimate"]
+
+    @property
+    def se(self) -> float:
+        return self.data["se"]
+
+    @property
+    def ci_lower(self) -> float:
+        return self.data["ci_lower"]
+
+    @property
+    def ci_upper(self) -> float:
+        return self.data["ci_upper"]
+
+    @property
+    def i_squared(self) -> float:
+        return self.data["i_squared"]
+
+    @property
+    def tau_squared(self) -> float:
+        return self.data["tau_squared"]
+
+    @property
+    def q_statistic(self) -> float:
+        return self.data["q_statistic"]
+
+    @property
+    def p_value(self) -> float:
+        return self.data["p_value"]
+
+    def to_dataframe(self) -> "pd.DataFrame":
+        """Returns study-level and pooled estimates as a formatted DataFrame."""
+        import pandas as pd
+        rows = []
+        for s in self.data["studies"]:
+            rows.append({
+                "site": s["site"],
+                "estimate": s["estimate"],
+                "std_error": s["std_error"],
+                "ci_lower": s["ci_lower"],
+                "ci_upper": s["ci_upper"],
+                "weight_percent": s["weight_pct"],
+                "type": "Study",
+            })
+        rows.append({
+            "site": f"Pooled ({self.data['model'].capitalize()})",
+            "estimate": self.data["pooled_estimate"],
+            "std_error": self.data["se"],
+            "ci_lower": self.data["ci_lower"],
+            "ci_upper": self.data["ci_upper"],
+            "weight_percent": 100.0,
+            "type": "Pooled",
+        })
+        return pd.DataFrame(rows)
+
+    def to_forest_text(self) -> str:
+        """Render a publication-ready ASCII forest plot."""
+        lines = [
+            f"=== Federated Meta-Analysis ({self.data['model'].upper()} Effects) ===",
+            f"Heterogeneity: Q = {self.data['q_statistic']:.2f} (df = {self.data['df']}), p = {self.data['q_p_value']:.4f}; I² = {self.data['i_squared']:.1f}%; τ² = {self.data['tau_squared']:.4f}",
+            "",
+            f"{'Site':<15} {'Estimate':<10} {'95% CI':<22} {'Weight (%)':<12} {'Forest Plot':<30}",
+            "-" * 85,
+        ]
+        all_low = [s["ci_lower"] for s in self.data["studies"]] + [self.data["ci_lower"]]
+        all_high = [s["ci_upper"] for s in self.data["studies"]] + [self.data["ci_upper"]]
+        min_val = min(all_low) if all_low else -1.0
+        max_val = max(all_high) if all_high else 1.0
+        span = max(1e-6, max_val - min_val)
+
+        def _draw_bar(est, low, high, is_diamond=False):
+            width = 24
+            pos_est = int(round((est - min_val) / span * (width - 1)))
+            pos_low = max(0, min(width - 1, int(round((low - min_val) / span * (width - 1)))))
+            pos_high = max(0, min(width - 1, int(round((high - min_val) / span * (width - 1)))))
+            bar = [" "] * width
+            for p in range(pos_low, pos_high + 1):
+                bar[p] = "-"
+            bar[pos_est] = "<>" if is_diamond else "■"
+            return "".join(bar)
+
+        for s in self.data["studies"]:
+            site_name = str(s["site"])[:14]
+            ci_str = f"[{s['ci_lower']:+.2f}, {s['ci_upper']:+.2f}]"
+            bar_str = _draw_bar(s["estimate"], s["ci_lower"], s["ci_upper"], is_diamond=False)
+            lines.append(f"{site_name:<15} {s['estimate']:+8.3f}  {ci_str:<22} {s['weight_pct']:8.1f}%    |{bar_str}|")
+
+        lines.append("-" * 85)
+        p_ci_str = f"[{self.data['ci_lower']:+.2f}, {self.data['ci_upper']:+.2f}]"
+        diamond_bar = _draw_bar(self.data["pooled_estimate"], self.data["ci_lower"], self.data["ci_upper"], is_diamond=True)
+        lines.append(f"{'POOLED':<15} {self.data['pooled_estimate']:+8.3f}  {p_ci_str:<22} {'100.0%':<12} |{diamond_bar}|")
+        lines.append(f"Z = {self.data['z_score']:.2f}, p = {self.data['p_value']:.4e}")
+        return "\n".join(lines)
+
+    def to_forest_mermaid(self) -> str:
+        """Render a Mermaid flowchart summary of the forest plot."""
+        lines = [
+            "flowchart TD",
+            "    subgraph MetaAnalysis [Federated Meta-Analysis Summary]",
+            f'        Header["I² = {self.data["i_squared"]:.1f}%, τ² = {self.data["tau_squared"]:.4f}, Q = {self.data["q_statistic"]:.2f}"]',
+        ]
+        for idx, s in enumerate(self.data["studies"], start=1):
+            name = str(s["site"]).replace('"', "'")
+            lines.append(f'        S{idx}["{name}: {s["estimate"]:+.2f} [{s["ci_lower"]:+.2f}, {s["ci_upper"]:+.2f}] ({s["weight_pct"]:.1f}%)"]')
+            lines.append(f"        Header --> S{idx}")
+        lines.append(f'        Pooled["★ POOLED: {self.data["pooled_estimate"]:+.2f} [{self.data["ci_lower"]:+.2f}, {self.data["ci_upper"]:+.2f}] (p = {self.data["p_value"]:.4f})"]')
+        for idx in range(1, len(self.data["studies"]) + 1):
+            lines.append(f"        S{idx} --> Pooled")
+        lines.append("    end")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return f"<FederatedMetaAnalysisResult pooled={self.data['pooled_estimate']:.4f} 95%CI=[{self.data['ci_lower']:.4f}, {self.data['ci_upper']:.4f}] I2={self.data['i_squared']:.1f}%>"
+
+
+def federated_meta_analysis(
+    estimates: Sequence[float] | None = None,
+    std_errors: Sequence[float] | None = None,
+    variances: Sequence[float] | None = None,
+    sites: Sequence[str] | None = None,
+    site_summaries: Any = None,
+    con: duckdb.DuckDBPyConnection | None = None,
+    query: str | None = None,
+    model: str = "random",
+    effect_type: str = "beta",
+    alpha: float = 0.05,
+) -> FederatedMetaAnalysisResult:
+    """Computes multi-site federated summary estimates using the DerSimonian-Laird method.
+
+    Aggregates site-level parameter estimates and standard errors without sharing
+    patient-level records, outputting pooled effect sizes, Cochran's Q, τ² between-study
+    variance, and Higgins' I² heterogeneity.
+
+    Args:
+        estimates: Sequence of site-specific parameter estimates (e.g. log OR, log HR, beta).
+        std_errors: Sequence of site-specific standard errors.
+        variances: Optional sequence of site variances (used if std_errors is None).
+        sites: Sequence of site names or identifiers.
+        site_summaries: Optional DataFrame or list of dicts with 'site', 'estimate', 'std_error'.
+        con: Optional federated DuckDB connection with site databases attached.
+        query: Optional SQL query evaluated per site or on v_* views.
+        model: 'random' (DerSimonian-Laird random effects) or 'fixed' (inverse-variance fixed effect).
+        effect_type: 'beta', 'log_or', 'log_hr', or 'mean_diff'.
+        alpha: Significance level for confidence intervals (default: 0.05).
+
+    Returns:
+        FederatedMetaAnalysisResult: Result object with summary stats and forest plot methods.
+    """
+    import math
+    import numpy as np
+    import pandas as pd
+    from scipy import stats
+
+    site_list: list[str] = []
+    est_list: list[float] = []
+    se_list: list[float] = []
+
+    # 1. Ingest from site_summaries DataFrame / list of dicts
+    if site_summaries is not None:
+        if isinstance(site_summaries, pd.DataFrame):
+            df = site_summaries.copy()
+            site_col = "site" if "site" in df.columns else ("site_anon" if "site_anon" in df.columns else df.columns[0])
+            est_col = "estimate" if "estimate" in df.columns else ("coef" if "coef" in df.columns else df.columns[1])
+            se_col = "std_error" if "std_error" in df.columns else ("se" if "se" in df.columns else df.columns[2])
+            for _, r in df.iterrows():
+                site_list.append(str(r[site_col]))
+                est_list.append(float(r[est_col]))
+                se_list.append(float(r[se_col]))
+        elif isinstance(site_summaries, (list, tuple)):
+            for item in site_summaries:
+                site_list.append(str(item.get("site", f"Site {len(site_list)+1}")))
+                est_list.append(float(item["estimate"]))
+                se_list.append(float(item.get("std_error", item.get("se"))))
+
+    # 2. Ingest from con if provided
+    elif con is not None and query is not None:
+        q_df = con.execute(query).df()
+        site_col = "site" if "site" in q_df.columns else ("site_anon" if "site_anon" in q_df.columns else q_df.columns[0])
+        est_col = "estimate" if "estimate" in q_df.columns else ("coef" if "coef" in q_df.columns else q_df.columns[1])
+        se_col = "std_error" if "std_error" in q_df.columns else ("se" if "se" in q_df.columns else q_df.columns[2])
+        for _, r in q_df.iterrows():
+            site_list.append(str(r[site_col]))
+            est_list.append(float(r[est_col]))
+            se_list.append(float(r[se_col]))
+
+    # 3. Direct estimates & std_errors
+    elif estimates is not None:
+        est_list = [float(e) for e in estimates]
+        if std_errors is not None:
+            se_list = [float(s) for s in std_errors]
+        elif variances is not None:
+            se_list = [math.sqrt(float(v)) for v in variances]
+        else:
+            raise ValueError("Must provide either std_errors or variances alongside estimates.")
+        if sites is not None:
+            site_list = [str(s) for s in sites]
+        else:
+            site_list = [f"Site {i+1}" for i in range(len(est_list))]
+
+    else:
+        raise ValueError("Must provide estimates, site_summaries, or con with query.")
+
+    k = len(est_list)
+    if k == 0:
+        raise ValueError("No study estimates provided for meta-analysis.")
+
+    ests = np.array(est_list, dtype=np.float64)
+    ses = np.array(se_list, dtype=np.float64)
+    vars_arr = ses ** 2
+
+    # Fixed effect inverse variance weights
+    fe_weights = 1.0 / np.maximum(1e-12, vars_arr)
+    sum_fe_w = float(np.sum(fe_weights))
+    theta_fe = float(np.sum(fe_weights * ests) / sum_fe_w)
+    se_fe = float(1.0 / math.sqrt(sum_fe_w))
+
+    # Cochran's Q statistic
+    q_stat = float(np.sum(fe_weights * ((ests - theta_fe) ** 2)))
+    df = max(1, k - 1)
+    q_p_val = float(1.0 - stats.chi2.cdf(q_stat, df)) if k > 1 else 1.0
+
+    # DerSimonian-Laird between-study variance tau^2
+    sum_fe_w_sq = float(np.sum(fe_weights ** 2))
+    c_factor = float(sum_fe_w - (sum_fe_w_sq / sum_fe_w)) if sum_fe_w > 0 else 1.0
+    tau_sq = float(max(0.0, (q_stat - df) / c_factor)) if (k > 1 and c_factor > 0) else 0.0
+    tau = math.sqrt(tau_sq)
+
+    # Higgins' I^2 statistic
+    i_sq = float(max(0.0, (q_stat - df) / max(1e-12, q_stat)) * 100.0) if (k > 1 and q_stat > 0) else 0.0
+
+    # Random-effects weights
+    re_weights = 1.0 / np.maximum(1e-12, vars_arr + tau_sq)
+    sum_re_w = float(np.sum(re_weights))
+    theta_re = float(np.sum(re_weights * ests) / sum_re_w)
+    se_re = float(1.0 / math.sqrt(sum_re_w))
+
+    # Select model output
+    use_random = (model.lower().strip() == "random")
+    pooled_est = theta_re if use_random else theta_fe
+    pooled_se = se_re if use_random else se_fe
+    final_weights = re_weights if use_random else fe_weights
+    sum_final_w = sum_re_w if use_random else sum_fe_w
+
+    z_crit = float(stats.norm.ppf(1.0 - alpha / 2.0))
+    ci_lower = float(pooled_est - z_crit * pooled_se)
+    ci_upper = float(pooled_est + z_crit * pooled_se)
+    z_score = float(pooled_est / pooled_se) if pooled_se > 0 else 0.0
+    p_val = float(2.0 * (1.0 - stats.norm.cdf(abs(z_score))))
+
+    # Study records
+    studies = []
+    for i in range(k):
+        s_low = float(ests[i] - z_crit * ses[i])
+        s_high = float(ests[i] + z_crit * ses[i])
+        w_pct = float(final_weights[i] / sum_final_w * 100.0)
+        studies.append({
+            "site": site_list[i],
+            "estimate": float(ests[i]),
+            "std_error": float(ses[i]),
+            "ci_lower": s_low,
+            "ci_upper": s_high,
+            "weight": float(final_weights[i]),
+            "weight_pct": w_pct,
+        })
+
+    out = {
+        "model": "random" if use_random else "fixed",
+        "effect_type": effect_type,
+        "k_studies": k,
+        "pooled_estimate": pooled_est,
+        "se": pooled_se,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "z_score": z_score,
+        "p_value": p_val,
+        "q_statistic": q_stat,
+        "df": df,
+        "q_p_value": q_p_val,
+        "tau_squared": tau_sq,
+        "tau": tau,
+        "i_squared": i_sq,
+        "studies": studies,
+    }
+
+    if effect_type.lower() in ("log_or", "log_hr"):
+        out["pooled_exp_estimate"] = math.exp(pooled_est)
+        out["exp_ci_lower"] = math.exp(ci_lower)
+        out["exp_ci_upper"] = math.exp(ci_upper)
+
+    return FederatedMetaAnalysisResult(out)
 

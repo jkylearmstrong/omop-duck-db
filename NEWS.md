@@ -1,3 +1,37 @@
+# omopduckdb 0.5.6
+
+### Automated OHDSI PLP Study Package Generator
+- **PLP Study Package Exporter (`export_plp_study_package`)**:
+  - Bundles target cohorts, outcome cohorts, covariate settings, and cross-validation workflows into an end-to-end reproducible R study package adhering to standard OHDSI `PatientLevelPrediction` (PLP) conventions.
+  - Automatically generates package scaffolding including `DESCRIPTION`, `NAMESPACE`, `R/RunStudy.R`, `R/ShinyApp.R`, pre-configured Shiny diagnostic viewers, cross-validation configurations, study JSON manifests, and an interactive CLI / Shiny launcher (`extras/launch_shiny.R`).
+  - Available with full 1:1 parity in Python (`omop_etl.plp_study_package`) and R (`omopduckdb::export_plp_study_package`).
+
+### Direct Andromeda Zero-Copy View Adapter
+- **Direct Andromeda Adapter (`duckdb_to_andromeda`, `as_andromeda`, `export_to_andromeda`, `AndromedaAdapter`)**:
+  - Eliminates the SQLite disk serialization bottleneck inside OHDSI Andromeda by mounting DuckDB tables or chunked streaming into Andromeda containers without intermediate disk round-trips.
+  - Supports DuckDB SQLite extension virtual table registration (`sqlite_scanner`) where available, with graceful streaming chunk fallback.
+  - 1:1 cross-language parity in Python (`omop_etl.andromeda`) and R (`omopduckdb::duckdb_to_andromeda`, `omopduckdb::as_andromeda`).
+
+### Automated CONSORT / STROBE Flowchart Exporters
+- **CONSORT / STROBE Attrition Diagrams (`ConsortAttrition`, `to_typst`, `to_tikz`, `to_mermaid`)**:
+  - Extends `CohortExtractor` with step-by-step attrition tracking capturing starting populations, excluded counts, remaining counts, and inclusion reasons across every cohort definition step.
+  - Native export of publication-ready flowcharts to Typst (`#block()`, `#rect()`, arrows), LaTeX TikZ (`\begin{tikzpicture}`, `\node`, `\draw`), and Mermaid (`graph TD`) for direct insertion into Quarto and LaTeX manuscripts.
+  - Accessible via `.attrition.to_typst()` / `.attrition.to_tikz()` on `CohortExtractor` in Python and S3 generics `to_typst()` / `to_tikz()` in R.
+
+### Foundation Model Tokenizer Integration (EHR-SHOT / CEHR-BERT / FEMR)
+- **Clinical Sequence Tokenizer (`extract_clinical_sequence_tokens`, `to_clinical_sequence_tokens`, `export_clinical_sequence_tokens`)**:
+  - Expands `extract_sard_visit_tensors()` to export HuggingFace/PyTorch-compatible clinical event token sequences (`input_ids`, `attention_mask`, `token_type_ids`, `labels`).
+  - Configurable special tokens (`[PAD] = 0`, `[UNK] = 1`, `[CLS] = 2`, `[SEP] = 3`, `[MASK] = 4`, `[VISIT] = 5`, `[DISCHARGE] = 6`).
+  - Preserves event visit boundaries with configurable maximum sequence lengths and padding modes.
+  - Full parity in Python (`omop_etl.ml_features`) and R (`omopduckdb::extract_clinical_sequence_tokens`).
+
+### Federated Consortium Meta-Analysis Aggregator
+- **Federated Meta-Analysis Aggregator (`federated_meta_analysis`, `FederatedMetaAnalysisResult`)**:
+  - Multi-site summary estimator calculating DerSimonian-Laird random-effects pooled estimates ($\hat{\theta}_{\text{DL}}$, SE, 95% CI), Cochran's $Q$ test of heterogeneity, between-study variance ($\tau^2$), and Higgins' $I^2$ across federated DuckDB nodes without sharing patient-level data.
+  - Supports odds ratios (OR), relative risks (RR), hazard ratios (HR), and mean differences.
+  - Built-in ASCII forest plot generation (`to_forest_text()`), Mermaid diagram generation (`to_forest_mermaid()` / `to_mermaid()`), and DataFrame conversion.
+  - Full parity in Python (`omop_etl.federation`) and R (`omopduckdb::federated_meta_analysis`).
+
 # omopduckdb 0.5.5
 
 ### In-Engine Propensity Score & IPTW Weighting
