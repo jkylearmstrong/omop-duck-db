@@ -1,3 +1,36 @@
+# omopduckdb 0.5.7
+
+All request-3 features ship with **dual Python and R usage** (R functions are snake_case mirrors in the `omopduckdb` package; Python lives in `omop_etl`).
+
+### Staged wide-table ingestion (`load_wide_measurement`) (Python `omop_etl` / R `omopduckdb`)
+- Stages a wide table (PCORnet `vital`, flowsheets, device streams) once into an integer-keyed intermediate table, then inserts into `measurement` one concept at a time with a commit between passes (`batch_execution_mode="sequential"`), instead of one giant uncommitted `UNION ALL`. Per-measurement plausibility bounds (`value_plausibility_filters`, e.g. SBP 30-300, DBP 10-200, BMI 5-120) and a per-column report (read / out-of-range / unmatched person / inserted). `DEFAULT_VITAL_CONCEPT_MAPPING` and `DEFAULT_VITAL_PLAUSIBILITY_FILTERS` cover PCORnet VITAL.
+
+### Vectorized datetime normalizer (`vectorized_strptime`) (Python `omop_etl` / R `omopduckdb`)
+- One SQL expression, no UDFs: normalizes single-digit hours, missing minutes, `0415`, and 12/24-hour notation, then tries a prioritized format list in a single `try_strptime(x, [...])`. `on_error='null' | 'default_date' | 'raise'`. `install_vectorized_strptime(con)` registers it as a macro.
+
+### Dual-strategy medication classifier (`extract_medication_classes`, `audit_medication_strategies`) (Python `omop_etl` / R `omopduckdb`)
+- Strategy A (user crosswalk of source strings/CUI/NDC to classes) and Strategy B (`concept_ancestor` traversal from ATC 3/4/5 classes or RxNorm ingredients), `strategy='source' | 'standard' | 'both'`.
+- The auditor reports Cohen's kappa, raw concordance, prevalence gap and a reason (`source_blind`, `standard_blind`, `low_kappa`, `low_concordance`, `prevalence_gap`, `peer_outlier`) per site and class, so sites with broken drug mappings stand out.
+
+### Path sanitizer (`omop_etl.paths`) (Python `omop_etl` / R `omopduckdb`)
+- `sanitize_sql_path`, `sql_path_literal`, `attach_database`, `read_csv_sql`, `read_parquet_sql`, `copy_to`. All internal ATTACH / `read_csv` / `read_parquet` / `COPY` call sites now go through them (Windows backslashes, spaces, single quotes; remote URIs untouched).
+
+### RAM governor and spill manager (`configure_resources`) (Python `omop_etl` / R `omopduckdb`)
+- Sets `memory_limit` to a fraction (default 75%) of available RAM, picks the temp directory on the writable volume with the most free space, and sets `threads` from usable cores. `etl_pcornet(auto_resources=True)` / `--auto-resources` on the ETL CLI; explicit `memory_limit`, `threads` and `temp_dir` still win.
+
+### Phenotype cohort DSL (`omop_etl.phenotype_dsl`) (Python `omop_etl` / R `omopduckdb`)
+- `ConditionCriteria` (concept sets, ICD prefixes, primary/secondary), `MeasurementCriteria` (LOINC / thresholds / lookback), `DrugCriteria` (ingredients / ATC / supply days / lookback) composed with `|`, `&`, `~` (`PhenotypeUnion`, `PhenotypeIntersect`, `PhenotypeNot`, `Everyone`). `compile_phenotype` emits one single-pass DuckDB query; `execute_phenotype` writes a cohort table; dict round-trip via `to_dict` / `phenotype_from_dict`.
+
+### Roadmap gap closures
+- **PCORnet `VITAL.SMOKING`** is now mapped to an `OBSERVATION` row: `observation_concept_id = 43054909` (LOINC 72166-2, *Tobacco smoking status*) with the LOINC answer concept in `value_as_concept_id` (01 -> 45881517, 02 -> 45884037, 03 -> 45883458, 04 -> 45879404, 05 -> 45881518, 06 -> 45885135, 07 -> 45884038, 08 -> 45878118). `NI` / `UN` / `OT` carry no status and produce no row. Python `load_vital`, R `etl_pcornet`.
+- **`load_vocabulary(tables =, drop_indexes =)`** (Python and R): reload only the named vocabulary tables, and drop / recreate user indexes around the bulk load.
+- **`build_safe_source_view()`** (Python and R): `src_<table>` view with header aliasing and NULL padding, as specified in RFC-3.
+- **`python -m omop_etl.quality_check --db-path ... --output dq_report.json`**: the Duck-DQD entry point named in RFC-5 (R: `run_dqd()`).
+- **R ETL** now logs aliased and null-padded columns like the Python ETL, and `etl_pcornet()` gains `auto_resources`, `memory_limit`, `threads` and `temp_dir`.
+
+### ETL
+- `prepare_source_view` now prints which source columns were aliased (e.g. `ssid -> PATID`) and which were null-padded.
+
 # omopduckdb 0.5.6
 
 ### Automated OHDSI PLP Study Package Generator

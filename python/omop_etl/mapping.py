@@ -1,5 +1,6 @@
 """Source-to-concept mapping helpers and OHDSI Usagi integrations for OMOP CDM."""
 
+from omop_etl.paths import sql_path_literal
 import csv
 import os
 
@@ -22,7 +23,7 @@ def import_source_to_concept_map(con, csv_path, default_vocabulary_id="Local"):
 
     con.execute(f"""
         CREATE OR REPLACE TEMPORARY VIEW _stcm_raw AS 
-        SELECT * FROM read_csv_auto('{csv_path}', union_by_name = true, all_varchar = true);
+        SELECT * FROM read_csv_auto({sql_path_literal(csv_path)}, union_by_name = true, all_varchar = true);
     """)
 
     cols = {r[0].upper(): r[0] for r in con.execute("DESCRIBE SELECT * FROM _stcm_raw LIMIT 0").fetchall()}
@@ -85,7 +86,7 @@ def import_usagi_mappings(con, usagi_csv_path, source_vocabulary_id="Custom", ap
 
     con.execute(f"""
         CREATE OR REPLACE TEMPORARY VIEW _usagi_raw AS 
-        SELECT * FROM read_csv_auto('{usagi_csv_path}', union_by_name = true, all_varchar = true);
+        SELECT * FROM read_csv_auto({sql_path_literal(usagi_csv_path)}, union_by_name = true, all_varchar = true);
     """)
 
     status_filter = "WHERE UPPER(COALESCE(mappingStatus, 'APPROVED')) = 'APPROVED'" if approved_only else ""

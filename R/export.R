@@ -52,11 +52,11 @@ export_cdm <- function(con,
           COPY (
               SELECT *, %s AS _part_col 
               FROM %s
-          ) TO '%s' (FORMAT PARQUET, PARTITION_BY (_part_col), COMPRESSION %s);
-        ", part_expr, tbl, gsub("\\\\", "/", tbl_path), compression)
+          ) TO %s (FORMAT PARQUET, PARTITION_BY (_part_col), COMPRESSION %s);
+        ", part_expr, tbl, sql_path_literal(tbl_path), compression)
       } else {
         out_file <- file.path(output_path, paste0(tbl, ".parquet"))
-        sql <- sprintf("COPY %s TO '%s' (FORMAT PARQUET, COMPRESSION %s);", tbl, gsub("\\\\", "/", out_file), compression)
+        sql <- sprintf("COPY %s TO %s (FORMAT PARQUET, COMPRESSION %s);", tbl, sql_path_literal(out_file), compression)
       }
       DBI::dbExecute(con, sql)
       results[[tbl]] <- list(status = "EXPORTED", format = "parquet")
@@ -77,7 +77,7 @@ export_cdm <- function(con,
 
     for (tbl in tables) {
       csv_file <- file.path(output_path, paste0(tbl, ".csv"))
-      DBI::dbExecute(con, sprintf("COPY %s TO '%s' (FORMAT CSV, HEADER TRUE);", tbl, gsub("\\\\", "/", csv_file)))
+      DBI::dbExecute(con, sprintf("COPY %s TO %s (FORMAT CSV, HEADER TRUE);", tbl, sql_path_literal(csv_file)))
 
       cols_info <- DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s LIMIT 0", tbl))
       oracle_cols <- character(nrow(cols_info))
@@ -116,7 +116,7 @@ export_cdm <- function(con,
     ext <- tgt
     for (tbl in tables) {
       out_file <- file.path(output_path, paste0(tbl, ".", ext))
-      sql <- sprintf("COPY %s TO '%s' (FORMAT CSV, HEADER TRUE, DELIMITER '%s');", tbl, gsub("\\\\", "/", out_file), delim)
+      sql <- sprintf("COPY %s TO %s (FORMAT CSV, HEADER TRUE, DELIMITER '%s');", tbl, sql_path_literal(out_file), delim)
       DBI::dbExecute(con, sql)
       results[[tbl]] <- list(status = "EXPORTED", format = tgt)
     }
@@ -160,14 +160,14 @@ export_to_parquet <- function(db_path,
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
   if (!is.null(partition_by) && length(partition_by) > 0) {
-    out_posix <- gsub("\\\\", "/", normalizePath(output_dir, mustWork = FALSE))
+    out_posix <- sql_path_literal(output_dir)
     part_clause <- sprintf(", PARTITION_BY (%s)", paste(partition_by, collapse = ", "))
-    sql <- sprintf("COPY %s TO '%s' (FORMAT PARQUET, COMPRESSION '%s'%s);",
+    sql <- sprintf("COPY %s TO %s (FORMAT PARQUET, COMPRESSION '%s'%s);",
                    table_name, out_posix, compression, part_clause)
   } else {
     out_file <- file.path(output_dir, paste0(table_name, ".parquet"))
-    out_posix <- gsub("\\\\", "/", normalizePath(out_file, mustWork = FALSE))
-    sql <- sprintf("COPY %s TO '%s' (FORMAT PARQUET, COMPRESSION '%s');",
+    out_posix <- sql_path_literal(out_file)
+    sql <- sprintf("COPY %s TO %s (FORMAT PARQUET, COMPRESSION '%s');",
                    table_name, out_posix, compression)
   }
 

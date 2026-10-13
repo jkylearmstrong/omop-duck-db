@@ -144,12 +144,14 @@ load_mapping_macros <- function(con, temporary = NULL, skip_unresolved = FALSE) 
 #' @noRd
 prepare_source_view <- function(con, view_name, csv_path, expected_columns, aliases = .DEFAULT_ALIASES) {
   cols_df <- DBI::dbGetQuery(con, sprintf(
-    "DESCRIBE SELECT * FROM read_csv_auto('%s', union_by_name = true, all_varchar = true) LIMIT 0",
-    csv_path
+    "DESCRIBE SELECT * FROM read_csv_auto(%s, union_by_name = true, all_varchar = true) LIMIT 0",
+    sql_path_literal(csv_path)
   ))
   actual_cols <- stats::setNames(cols_df$column_name, toupper(cols_df$column_name))
 
   exprs <- character(length(expected_columns))
+  aliased <- character(0)
+  padded <- character(0)
   for (i in seq_along(expected_columns)) {
     tgt <- expected_columns[[i]]
     tgt_upper <- toupper(tgt)
@@ -168,14 +170,41 @@ prepare_source_view <- function(con, view_name, csv_path, expected_columns, alia
 
     if (!is.null(found)) {
       exprs[[i]] <- sprintf('"%s" AS %s', found, tgt)
+      if (toupper(found) != tgt_upper) aliased <- c(aliased, sprintf("%s -> %s", found, tgt))
     } else {
       exprs[[i]] <- sprintf("NULL AS %s", tgt)
+      padded <- c(padded, tgt)
     }
   }
 
+  label <- basename(csv_path)
+  if (length(aliased)) cat(sprintf("  [%s] aliased columns: %s
+", label, paste(aliased, collapse = ", ")))
+  if (length(padded)) cat(sprintf("  [%s] null-padded missing columns: %s
+", label, paste(padded, collapse = ", ")))
+
   sql <- sprintf(
-    "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT %s FROM read_csv_auto('%s', union_by_name = true, all_varchar = true);",
-    view_name, paste(exprs, collapse = ", "), csv_path
+    "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT %s FROM read_csv_auto(%s, union_by_name = true, all_varchar = true);",
+    view_name, paste(exprs, collapse = ", "), sql_path_literal(csv_path)
   )
   DBI::dbExecute(con, sql)
+}
+
+#' Fault-tolerant view over a source CSV
+#'
+#' Creates the temporary view `src_<table_name>` over a source CSV, applying case-insensitive header
+#' aliases (e.g. `ssid` -> `PATID`) and padding absent expected columns with `NULL`. The aliased and
+#' null-padded columns are printed. Mirror of `omop_etl.build_safe_source_view` in Python.
+#'
+#' @param con DuckDB DBI connection.
+#' @param table_name Source table name (the view is `src_<table_name>`).
+#' @param csv_path Path to the CSV.
+#' @param expected_columns Columns the view must expose.
+#' @param aliases Named list mapping an expected column (upper case) to accepted header names.
+#' @return Invisibly, the view name.
+#' @export
+build_safe_source_view <- function(con, table_name, csv_path, expected_columns, aliases = .DEFAULT_ALIASES) {
+  view_name <- paste0("src_", table_name)
+  prepare_source_view(con, view_name, csv_path, expected_columns, aliases)
+  invisible(view_name)
 }

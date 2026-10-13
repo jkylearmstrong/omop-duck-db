@@ -944,7 +944,7 @@ def test_resource_lookup_works_from_the_wheel_layout(tmp_path):
     """Mimic ``pip install``: the CSV under omop_etl/resources/extdata/, no repository ``inst/`` anywhere."""
     pkg = tmp_path / "site" / "omop_etl"
     (pkg / "resources" / "extdata").mkdir(parents=True)
-    for name in ("dqd.py", "build_omop_cdm.py"):
+    for name in ("dqd.py", "build_omop_cdm.py", "paths.py"):
         (pkg / name).write_bytes((REPO_ROOT / "python" / "omop_etl" / name).read_bytes())
     (pkg / "__init__.py").write_text("")
     probe = ("from omop_etl.dqd import _sanitize_bundled_limits; "

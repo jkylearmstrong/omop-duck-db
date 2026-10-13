@@ -36,9 +36,8 @@ create_federated_consortium <- function(site_dbs, central_vocab_db = NULL, outpu
       stop("Site database not found: ", db_path)
     }
 
-    norm_path <- gsub("\\\\", "/", normalizePath(db_path, mustWork = TRUE))
     schema_alias <- sprintf("site_%d", i)
-    DBI::dbExecute(con, sprintf("ATTACH '%s' AS %s (READ_ONLY);", norm_path, schema_alias))
+    DBI::dbExecute(con, sprintf("ATTACH %s AS %s (READ_ONLY);", sql_path_literal(db_path), schema_alias))
 
     site_anon <- site_names[i]
     if (is.na(site_anon) || site_anon == "") {

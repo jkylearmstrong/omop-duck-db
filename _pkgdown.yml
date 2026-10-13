@@ -130,6 +130,34 @@ reference:
   contents:
   - generate_propensity_weights
   - estimate_km_survival
+- title: Wide-table ingestion, datetime normalization and file paths
+  desc: Staged one-concept-per-commit loading of wide measurement tables, vectorized timestamp parsing, safe SQL file paths, and ETL source-view helpers.
+  contents:
+  - load_wide_measurement
+  - DEFAULT_VITAL_CONCEPT_MAPPING
+  - DEFAULT_VITAL_PLAUSIBILITY_FILTERS
+  - vectorized_strptime
+  - install_vectorized_strptime
+  - DEFAULT_DATETIME_FORMATS
+  - sanitize_sql_path
+  - sql_path_helpers
+  - build_safe_source_view
+- title: Resource governor
+  desc: Size DuckDB memory, thread count and disk-spill location to the host.
+  contents:
+  - configure_resources
+  - detect_system_ram
+- title: Medication-class strategies and phenotype DSL
+  desc: Dual-strategy (source crosswalk vs OMOP hierarchy) medication classification with a per-site kappa auditor, and a composable phenotype cohort DSL compiled to single-pass SQL.
+  contents:
+  - extract_medication_classes
+  - audit_medication_strategies
+  - phenotype_criteria
+  - everyone
+  - phenotype_operators
+  - compile_phenotype
+  - execute_phenotype
+  - phenotype_serialize
 - title: Large-file sync
   desc: Synchronize DuckDB databases and vocabulary files via Google Drive.
   contents:

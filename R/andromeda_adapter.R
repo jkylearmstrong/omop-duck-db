@@ -51,11 +51,11 @@ duckdb_to_andromeda <- function(con,
     sqlite_file <- output_file
   }
 
-  norm_sqlite <- gsub("\\\\", "/", normalizePath(sqlite_file, mustWork = FALSE))
+  norm_sqlite <- sql_path_literal(sqlite_file)
 
   # Method 1: Try native DuckDB SQLite ATTACH zero-copy write
   attached <- tryCatch({
-    DBI::dbExecute(con, sprintf("ATTACH '%s' AS andr_sq (TYPE SQLITE);", norm_sqlite))
+    DBI::dbExecute(con, sprintf("ATTACH %s AS andr_sq (TYPE SQLITE);", norm_sqlite))
     for (tbl in table_names) {
       DBI::dbExecute(con, sprintf("CREATE TABLE andr_sq.%s AS SELECT * FROM %s;", tbl, tbl))
     }

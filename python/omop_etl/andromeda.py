@@ -6,6 +6,7 @@ SQLite databases, eliminating the intermediate disk serialization bottleneck.
 
 from __future__ import annotations
 
+from omop_etl.paths import sanitize_sql_path
 import os
 import sqlite3
 from pathlib import Path
@@ -15,7 +16,7 @@ import pandas as pd
 
 
 def _posix_path(p: str | Path) -> str:
-    return str(p).replace("\\", "/")
+    return sanitize_sql_path(p)
 
 
 def export_to_andromeda(

@@ -18,6 +18,12 @@
 #' @param site_name Optional institutional name or internal descriptor (e.g. "Hospital System A").
 #' @param disambiguate_patids Logical. If `TRUE`, formats `person_source_value` as
 #'   `src.PATID || '-' || site_id` and derives surrogate keys via `pcornet_id(src.PATID || '-' || site_id)`.
+#' @param auto_resources Logical. If `TRUE`, size DuckDB to the host with [configure_resources()]
+#'   (75% of available RAM, best spill volume, cores - 1) before loading; `memory_limit`, `threads` and
+#'   `temp_dir` still win over the detected values.
+#' @param memory_limit Optional DuckDB `memory_limit`, e.g. `"16GB"`.
+#' @param threads Optional DuckDB worker thread count.
+#' @param temp_dir Optional DuckDB disk-spill directory.
 #' @return Invisibly, `db_path`.
 #' @export
 etl_pcornet <- function(
@@ -27,7 +33,11 @@ etl_pcornet <- function(
     site_id = NULL,
     site_anon = NULL,
     site_name = NULL,
-    disambiguate_patids = FALSE
+    disambiguate_patids = FALSE,
+    auto_resources = FALSE,
+    memory_limit = NULL,
+    threads = NULL,
+    temp_dir = NULL
 ) {
   if (!dir.exists(source_dir)) {
     stop("Source directory not found: ", source_dir)
@@ -41,6 +51,18 @@ etl_pcornet <- function(
     try(DBI::dbDisconnect(con, shutdown = TRUE), silent = TRUE)
     gc()
   })
+
+  if (isTRUE(auto_resources)) {
+    cfg <- configure_resources(con, temp_directory = temp_dir, threads = threads)
+    cat(sprintf("Auto resources: memory_limit=%s, threads=%d, temp=%s
+", cfg$memory_limit, cfg$threads, cfg$temp_directory))
+  }
+  if (!is.null(memory_limit)) DBI::dbExecute(con, sprintf("SET memory_limit = '%s'", memory_limit))
+  if (!is.null(threads)) DBI::dbExecute(con, sprintf("SET threads = %d", as.integer(threads)))
+  if (!is.null(temp_dir)) {
+    dir.create(temp_dir, recursive = TRUE, showWarnings = FALSE)
+    DBI::dbExecute(con, sprintf("SET temp_directory = '%s'", sanitize_sql_path(temp_dir)))
+  }
 
   if (!is.null(central_vocab)) {
     attach_central_vocabulary(con, central_vocab, temporary = TRUE)
@@ -85,8 +107,7 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
   if (!file.exists(vocab_db_path)) {
     stop("Central vocabulary database not found: ", vocab_db_path)
   }
-  normalized_path <- gsub("\\\\", "/", normalizePath(vocab_db_path, mustWork = TRUE))
-  DBI::dbExecute(con, sprintf("ATTACH '%s' AS central_vocab (READ_ONLY);", normalized_path))
+  DBI::dbExecute(con, sprintf("ATTACH %s AS central_vocab (READ_ONLY);", sql_path_literal(vocab_db_path)))
   vocab_tables <- c(
     "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
     "vocabulary", "relationship", "concept_class", "domain", "drug_strength"
@@ -729,7 +750,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   prepare_source_view(
     con, "_temp_vital", path,
     c("VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
-      "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC")
+      "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC", "SMOKING")
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
 
@@ -852,6 +873,42 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     WHERE src.vital_sub_id IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.vital_sub_id) = 1;
   ", patid_expr, .TYPE_CONCEPT_EHR_MEASUREMENT, patid_expr, .today_iso()))
+  # PCORnet VITAL.SMOKING -> OBSERVATION "Tobacco smoking status" (LOINC 72166-2, concept 43054909) with the
+  # matching LOINC answer concept in value_as_concept_id. NI/UN/OT and unrecognized codes carry no status.
+  run_insert(con, "OBSERVATION (smoking status from VITAL)", gsub("__PATID__", patid_expr, "
+    INSERT INTO observation
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY src.VITALID) + (SELECT COALESCE(MAX(observation_id), 0) FROM observation) AS observation_id,
+        COALESCE(p.person_id, pcornet_id(__PATID__)) AS person_id,
+        43054909 AS observation_concept_id,
+        parse_omop_date(src.MEASURE_DATE) AS observation_date,
+        parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS observation_datetime,
+        32817 AS observation_type_concept_id,
+        NULL AS value_as_number,
+        NULL AS value_as_string,
+        sm.value_concept_id AS value_as_concept_id,
+        NULL AS qualifier_concept_id,
+        NULL AS unit_concept_id,
+        NULL AS provider_id,
+        COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
+        NULL AS visit_detail_id,
+        '72166-2' AS observation_source_value,
+        0 AS observation_source_concept_id,
+        NULL AS unit_source_value,
+        NULL AS qualifier_source_value,
+        src.SMOKING AS value_source_value,
+        NULL AS observation_event_id,
+        0 AS obs_event_field_concept_id
+    FROM _temp_vital src
+    JOIN (VALUES ('01', 45881517), ('02', 45884037), ('03', 45883458), ('04', 45879404), ('05', 45881518), ('06', 45885135), ('07', 45884038), ('08', 45878118)) sm(code, value_concept_id)
+      ON sm.code = LPAD(TRIM(src.SMOKING), 2, '0')
+    LEFT JOIN person p
+      ON p.person_source_value = __PATID__
+    LEFT JOIN visit_occurrence vo
+      ON vo.visit_source_value = src.ENCOUNTERID
+    WHERE src.VITALID IS NOT NULL
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID) = 1;
+  "))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_vital;")
 }
 

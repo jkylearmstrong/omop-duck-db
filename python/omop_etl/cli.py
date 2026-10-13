@@ -10,6 +10,7 @@ Commands:
 
 from __future__ import annotations
 
+from omop_etl.paths import sql_path_literal
 import argparse
 import json
 import sys
@@ -185,7 +186,7 @@ def handle_export(args: argparse.Namespace) -> int:
         dest_dir = Path(args.out)
         dest_dir.mkdir(parents=True, exist_ok=True)
         part_clause = f", PARTITION_BY ({args.partition_by})" if args.partition_by else ""
-        sql = f"COPY {args.table} TO '{dest_dir.as_posix()}' (FORMAT PARQUET{part_clause});"
+        sql = f"COPY {args.table} TO {sql_path_literal(dest_dir)} (FORMAT PARQUET{part_clause});"
         con.execute(sql)
         print(f"Table '{args.table}' exported to {args.out}")
         return 0

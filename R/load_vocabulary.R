@@ -17,10 +17,14 @@
 #'   see [build_schema()]).
 #' @param sanitize_cpt4 Automatically sanitize NULL concept_names for CPT4 concepts.
 #' @param sanitize_all_null_names Automatically sanitize any NULL concept_names.
+#' @param tables Optional character vector of vocabulary tables to (re)load, e.g.
+#'   `c("concept", "concept_relationship")`. Default loads every table found.
+#' @param drop_indexes Drop user indexes on the target tables before the bulk load and recreate them afterwards.
 #' @return `TRUE` if every matched table loaded successfully, `FALSE` if any
 #'   table failed and was rolled back.
 #' @export
-load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt4 = TRUE, sanitize_all_null_names = FALSE) {
+load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt4 = TRUE, sanitize_all_null_names = FALSE,
+                            tables = NULL, drop_indexes = FALSE) {
   if (!dir.exists(vocab_dir)) {
     stop("Vocabulary directory not found: ", vocab_dir)
   }
@@ -37,6 +41,26 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
     gc()
   })
   existing_tables <- tolower(DBI::dbListTables(con))
+  wanted <- if (is.null(tables)) NULL else tolower(tables)
+  if (!is.null(wanted)) {
+    known_vocab <- c("concept", "concept_relationship", "concept_ancestor", "concept_synonym", "vocabulary",
+                     "relationship", "concept_class", "domain", "drug_strength")
+    bad <- setdiff(wanted, known_vocab)
+    if (length(bad)) stop("Unknown vocabulary tables: ", paste(bad, collapse = ", "))
+    vocab_files <- vocab_files[names(vocab_files) %in% c(wanted, if ("concept" %in% wanted) "concept_cpt4")]
+  }
+
+  saved_indexes <- list()
+  if (isTRUE(drop_indexes)) {
+    target <- if (is.null(wanted)) names(vocab_files) else wanted
+    idx <- DBI::dbGetQuery(con, "SELECT table_name, index_name, sql FROM duckdb_indexes()")
+    for (i in seq_len(nrow(idx))) {
+      if (tolower(idx$table_name[[i]]) %in% target && !is.na(idx$sql[[i]])) {
+        saved_indexes[[length(saved_indexes) + 1L]] <- idx$sql[[i]]
+        DBI::dbExecute(con, paste0("DROP INDEX ", DBI::dbQuoteIdentifier(con, idx$index_name[[i]])))
+      }
+    }
+  }
 
   all_ok <- TRUE
   for (table_name in names(vocab_files)) {
@@ -64,8 +88,8 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
 
           DBI::dbExecute(con, sprintf("
             CREATE OR REPLACE TEMPORARY VIEW _temp_concept_raw AS
-            SELECT * FROM read_csv('%s', delim = '\t', header = true, all_varchar = true);
-          ", file_path))
+            SELECT * FROM read_csv(%s, delim = '\t', header = true, all_varchar = true);
+          ", sql_path_literal(file_path)))
 
           DBI::dbExecute(con, sprintf("
             INSERT INTO concept
@@ -86,7 +110,7 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
           DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_concept_raw;")
         } else {
           DBI::dbExecute(con, paste0(
-            "COPY ", table_name, " FROM '", file_path, "' (DELIMITER '\t', HEADER, DATEFORMAT '%Y%m%d');"
+            "COPY ", table_name, " FROM ", sql_path_literal(file_path), " (DELIMITER '\t', HEADER, DATEFORMAT '%Y%m%d');"
           ))
         }
 
@@ -112,8 +136,8 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
     tryCatch({
       DBI::dbExecute(con, sprintf("
         CREATE OR REPLACE TEMPORARY VIEW _temp_cpt4_raw AS
-        SELECT * FROM read_csv('%s', delim = '\t', header = true, all_varchar = true);
-      ", cpt4_path))
+        SELECT * FROM read_csv(%s, delim = '\t', header = true, all_varchar = true);
+      ", sql_path_literal(cpt4_path)))
       DBI::dbExecute(con, "
         INSERT OR REPLACE INTO concept
         SELECT
@@ -135,6 +159,8 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
       cat("  Warning: failed to load CONCEPT_CPT4.csv:", conditionMessage(e), "\n")
     })
   }
+
+  for (sql in saved_indexes) DBI::dbExecute(con, sql)
 
   invisible(all_ok)
 }

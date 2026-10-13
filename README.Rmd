@@ -580,6 +580,57 @@ orb <- orbital::orbital(fit)
 scores <- orbital::augment(orb, dplyr::tbl(con, "to_score")) |> dplyr::collect()
 ```
 
+## Wide tables, messy timestamps, medication classes, phenotypes & resource limits (Python and R)
+
+```python
+import duckdb
+from omop_etl import (configure_resources, load_wide_measurement, vectorized_strptime,
+                      extract_medication_classes, audit_medication_strategies,
+                      ConditionCriteria, MeasurementCriteria, DrugCriteria, execute_phenotype,
+                      DEFAULT_VITAL_CONCEPT_MAPPING, DEFAULT_VITAL_PLAUSIBILITY_FILTERS)
+
+con = duckdb.connect("omop_cdm.duckdb")
+configure_resources(con)                       # 75% of available RAM, best spill volume, cores - 1
+
+# staged, one-concept-per-commit unpivot of a wide table, with clinical plausibility bounds
+load_wide_measurement(con, "vital.csv", DEFAULT_VITAL_CONCEPT_MAPPING,
+                      value_plausibility_filters=DEFAULT_VITAL_PLAUSIBILITY_FILTERS, missing_columns="skip")
+
+# vectorized parsing of '05JAN2020' + '4:15', '01/05/2020' + '4:15 PM', ...
+con.sql(f"SELECT {vectorized_strptime('MEASURE_DATE', 'MEASURE_TIME', on_error='default_date')} FROM vital_raw")
+
+# two independent medication-class strategies and a per-site agreement audit
+flags, audit = extract_medication_classes(con, "my_cohort", {"statin": {"atc_codes": ["C10AA"]}},
+                                          strategy="both", crosswalk="site_drug_crosswalk.csv", return_audit=True)
+print(audit[audit.flagged])                    # kappa, concordance, reason per site/class
+
+# composable phenotype, compiled to one query
+t2dm = (ConditionCriteria(icd_codes=["E11"], concept_ids=[201826])
+        | MeasurementCriteria(loinc_codes=["4548-4"], value_gte=6.5)
+        | DrugCriteria(concept_ids=[21600712], min_days_supply=30))
+execute_phenotype(con, t2dm & ~ConditionCriteria(icd_codes=["E10"]), "cohort", cohort_definition_id=7)
+```
+
+The same functions exist in R with identical semantics (snake_case, `library(omopduckdb)`):
+
+```r
+library(omopduckdb)
+con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
+configure_resources(con)
+load_wide_measurement(con, "vital.csv", DEFAULT_VITAL_CONCEPT_MAPPING,
+                      value_plausibility_filters = DEFAULT_VITAL_PLAUSIBILITY_FILTERS, missing_columns = "skip")
+DBI::dbGetQuery(con, paste("SELECT", vectorized_strptime("MEASURE_DATE", "MEASURE_TIME", on_error = "default_date"), "FROM vital_raw"))
+res <- extract_medication_classes(con, "my_cohort", list(statin = list(atc_codes = "C10AA")),
+                                  strategy = "both", crosswalk = "site_drug_crosswalk.csv", return_audit = TRUE)
+res$audit[res$audit$flagged, ]
+t2dm <- condition_criteria(icd_codes = "E11", concept_ids = 201826) |
+  measurement_criteria(loinc_codes = "4548-4", value_gte = 6.5) |
+  drug_criteria(concept_ids = 21600712, min_days_supply = 30)
+execute_phenotype(con, t2dm & !condition_criteria(icd_codes = "E10"), "cohort", cohort_definition_id = 7)
+```
+
+All file paths handed to DuckDB go through `omop_etl.paths.sanitize_sql_path`, so Windows paths work in ATTACH, `read_csv`, `read_parquet` and `COPY`.
+
 ## Testing
 
 `tests/fixtures/pcornet_sample/` is a small set of fabricated (not real)
