@@ -9,6 +9,7 @@ Supports:
 
 from __future__ import annotations
 
+from omop_etl.paths import sanitize_sql_path
 import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -36,7 +37,7 @@ ORACLE_TYPE_MAP = {
 
 
 def _posix_path(p: Path | str) -> str:
-    return str(p).replace("\\", "/")
+    return sanitize_sql_path(p)
 
 
 def export_cdm(

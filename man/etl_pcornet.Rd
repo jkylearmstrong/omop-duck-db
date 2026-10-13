@@ -11,7 +11,11 @@ etl_pcornet(
   site_id = NULL,
   site_anon = NULL,
   site_name = NULL,
-  disambiguate_patids = FALSE
+  disambiguate_patids = FALSE,
+  auto_resources = FALSE,
+  memory_limit = NULL,
+  threads = NULL,
+  temp_dir = NULL
 )
 }
 \arguments{
@@ -35,6 +39,16 @@ to attach in read-only mode with zero-copy views.}
 
 \item{disambiguate_patids}{Logical. If \code{TRUE}, formats \code{person_source_value} as
 \code{src.PATID || '-' || site_id} and derives surrogate keys via \code{pcornet_id(src.PATID || '-' || site_id)}.}
+
+\item{auto_resources}{Logical. If \code{TRUE}, size DuckDB to the host with \code{\link[=configure_resources]{configure_resources()}}
+(75\% of available RAM, best spill volume, cores - 1) before loading; \code{memory_limit}, \code{threads} and
+\code{temp_dir} still win over the detected values.}
+
+\item{memory_limit}{Optional DuckDB \code{memory_limit}, e.g. \code{"16GB"}.}
+
+\item{threads}{Optional DuckDB worker thread count.}
+
+\item{temp_dir}{Optional DuckDB disk-spill directory.}
 }
 \value{
 Invisibly, \code{db_path}.

@@ -27,6 +27,7 @@ with the padding index.
 
 from __future__ import annotations
 
+from omop_etl.paths import sanitize_sql_path
 import json
 import re
 from collections import namedtuple
@@ -133,7 +134,7 @@ def _ident(name: str) -> str:
 
 
 def _quote_path(path) -> str:
-    return str(path).replace("\\", "/").replace("'", "''")
+    return sanitize_sql_path(path).replace("'", "''")
 
 
 def _resolve_column(cols: dict, explicit: str | None, aliases: Sequence[str], what: str, param: str,

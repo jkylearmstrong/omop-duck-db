@@ -89,6 +89,37 @@ test_that("etl_pcornet unpivots vital.csv into measurement with LOINC codes", {
   expect_equal(meas$value_as_number, c(180, 25.8, 70, 80, 120))
 })
 
+test_that("etl_pcornet maps vital.csv SMOKING to a tobacco smoking status observation", {
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit(unlink(db_path))
+  source_dir <- tempfile()
+  dir.create(source_dir)
+  writeLines("PATID,SEX,BIRTH_DATE,RACE,HISPANIC,PROVIDERID
+P1,M,1990-01-01,05,N,PR1
+",
+             file.path(source_dir, "demographic.csv"))
+  writeLines(paste0("VITALID,PATID,ENCOUNTERID,MEASURE_DATE,MEASURE_TIME,SYSTOLIC,SMOKING
+",
+                    "V1,P1,E1,2024-01-01,10:00,120,04
+",
+                    "V2,P1,E1,2024-02-01,10:00,,1
+",
+                    "V3,P1,E1,2024-03-01,10:00,,NI
+"),
+             file.path(source_dir, "vital.csv"))
+
+  build_schema(db_path = db_path)
+  etl_pcornet(source_dir = source_dir, db_path = db_path)
+
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = TRUE)
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  obs <- DBI::dbGetQuery(con, "SELECT observation_concept_id, value_as_concept_id, value_source_value FROM observation ORDER BY observation_date")
+  expect_equal(obs$observation_concept_id, c(43054909, 43054909))
+  expect_equal(obs$value_as_concept_id, c(45879404, 45881517))
+  expect_equal(obs$value_source_value, c("04", "1"))
+  expect_equal(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM measurement")$n, 1)
+})
+
 test_that("attach_central_vocabulary attaches zero-copy views", {
   vocab_path <- tempfile(fileext = ".duckdb")
   on.exit(unlink(vocab_path))

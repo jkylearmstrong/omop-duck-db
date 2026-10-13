@@ -8,7 +8,9 @@ load_vocabulary(
   vocab_dir,
   db_path = "omop_cdm.duckdb",
   sanitize_cpt4 = TRUE,
-  sanitize_all_null_names = FALSE
+  sanitize_all_null_names = FALSE,
+  tables = NULL,
+  drop_indexes = FALSE
 )
 }
 \arguments{
@@ -21,6 +23,11 @@ see \code{\link[=build_schema]{build_schema()}}).}
 \item{sanitize_cpt4}{Automatically sanitize NULL concept_names for CPT4 concepts.}
 
 \item{sanitize_all_null_names}{Automatically sanitize any NULL concept_names.}
+
+\item{tables}{Optional character vector of vocabulary tables to (re)load, e.g.
+\code{c("concept", "concept_relationship")}. Default loads every table found.}
+
+\item{drop_indexes}{Drop user indexes on the target tables before the bulk load and recreate them afterwards.}
 }
 \value{
 \code{TRUE} if every matched table loaded successfully, \code{FALSE} if any

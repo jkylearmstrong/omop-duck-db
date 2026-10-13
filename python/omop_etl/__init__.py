@@ -5,6 +5,7 @@ from omop_etl.build_omop_cdm import (
     build_condition_era,
     build_drug_era,
     build_observation_period,
+    build_safe_source_view,
     build_schema,
     etl_pcornet,
     load_care_site,
@@ -61,6 +62,47 @@ from omop_etl.dqd import (
 from omop_etl.export import (
     export_cdm,
     export_to_parquet,
+)
+from omop_etl.paths import (
+    attach_database,
+    copy_to,
+    read_csv_sql,
+    read_parquet_sql,
+    sanitize_sql_path,
+    sql_path_literal,
+)
+from omop_etl.resources import (
+    ResourceConfig,
+    configure_resources,
+    detect_system_ram,
+)
+from omop_etl.datetime_utils import (
+    DEFAULT_DATETIME_FORMATS,
+    install_vectorized_strptime,
+    normalize_time_sql,
+    vectorized_strptime,
+)
+from omop_etl.wide_measurement import (
+    DEFAULT_VITAL_CONCEPT_MAPPING,
+    DEFAULT_VITAL_PLAUSIBILITY_FILTERS,
+    load_wide_measurement,
+)
+from omop_etl.medication_classes import (
+    audit_medication_strategies,
+    extract_medication_classes,
+)
+from omop_etl.phenotype_dsl import (
+    ConditionCriteria,
+    DrugCriteria,
+    Everyone,
+    Intersect as PhenotypeIntersect,
+    MeasurementCriteria,
+    Not as PhenotypeNot,
+    PhenotypeExpr,
+    Union as PhenotypeUnion,
+    compile_phenotype,
+    execute_phenotype,
+    phenotype_from_dict,
 )
 from omop_etl.plp_study_package import (
     export_plp_study_package,
@@ -262,9 +304,40 @@ __all__ = [
     # Federated Meta-Analysis Aggregator
     "federated_meta_analysis",
     "FederatedMetaAnalysisResult",
+    # Path sanitizer, resource governor, datetime normalizer, wide loader, medication classes, phenotype DSL
+    "attach_database",
+    "copy_to",
+    "read_csv_sql",
+    "read_parquet_sql",
+    "sanitize_sql_path",
+    "sql_path_literal",
+    "ResourceConfig",
+    "configure_resources",
+    "detect_system_ram",
+    "DEFAULT_DATETIME_FORMATS",
+    "install_vectorized_strptime",
+    "normalize_time_sql",
+    "vectorized_strptime",
+    "DEFAULT_VITAL_CONCEPT_MAPPING",
+    "DEFAULT_VITAL_PLAUSIBILITY_FILTERS",
+    "load_wide_measurement",
+    "audit_medication_strategies",
+    "extract_medication_classes",
+    "ConditionCriteria",
+    "DrugCriteria",
+    "Everyone",
+    "MeasurementCriteria",
+    "PhenotypeExpr",
+    "PhenotypeIntersect",
+    "PhenotypeNot",
+    "PhenotypeUnion",
+    "compile_phenotype",
+    "execute_phenotype",
+    "phenotype_from_dict",
+    "build_safe_source_view",
 ]
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"
 
 
 

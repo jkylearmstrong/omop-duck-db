@@ -1,5 +1,6 @@
 """Vocabulary loading, inspection, and CPT4 sanitization for OMOP CDM in DuckDB."""
 
+from omop_etl.paths import sanitize_sql_path, sql_path_literal
 import os
 import warnings
 
@@ -71,7 +72,8 @@ def check_vocabulary_version(con):
     }
 
 
-def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sanitize_all_null_names=False):
+def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sanitize_all_null_names=False,
+                    tables=None, drop_indexes=False):
     """Load or refresh OHDSI Athena vocabulary into the OMOP CDM database.
 
     Supports CPT4 sanitization: Athena downloads without a UMLS license
@@ -80,6 +82,11 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
     automatically sanitizes NULL CPT4 concept names to 'CPT4 ' || concept_code.
 
     Each table is loaded inside its own transaction with row-count verification.
+
+    Args:
+        tables: Optional iterable of vocabulary table names to (re)load, e.g.
+            ``["concept", "concept_relationship"]``; default loads every table found.
+        drop_indexes: Drop user indexes on the target tables before the bulk load and recreate them afterwards.
     """
     if not os.path.isdir(vocab_dir):
         raise FileNotFoundError(f"Vocabulary directory not found: {vocab_dir}")
@@ -97,11 +104,28 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
 
     con = duckdb.connect(db_path)
     existing_tables = {row[0].lower() for row in con.execute("SHOW TABLES").fetchall()}
+    wanted = None if tables is None else {str(t).lower() for t in tables}
+    if wanted is not None:
+        unknown = wanted - set(EXPECTED_VOCAB_TABLES)
+        if unknown:
+            con.close()
+            raise ValueError(f"Unknown vocabulary tables: {sorted(unknown)}")
+
+    saved_indexes = []
+    if drop_indexes:
+        target = wanted if wanted is not None else set(EXPECTED_VOCAB_TABLES)
+        for tbl, name, sql in con.execute(
+                "SELECT table_name, index_name, sql FROM duckdb_indexes()").fetchall():
+            if tbl.lower() in target and sql:
+                saved_indexes.append((name, sql))
+                con.execute(f"DROP INDEX {_sql_identifier(name)}")
 
     all_ok = True
 
     # 1. Load standard vocabulary tables
     for table_name in EXPECTED_VOCAB_TABLES:
+        if wanted is not None and table_name not in wanted:
+            continue
         if table_name not in existing_tables:
             print(f"Skipping {table_name} - no matching table in schema")
             continue
@@ -123,7 +147,7 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
                 con.execute(f"""
                     CREATE OR REPLACE TEMPORARY VIEW _temp_concept_raw AS 
                     SELECT * FROM read_csv(
-                        '{file_path}', 
+                        {sql_path_literal(file_path)}, 
                         delim = '\t', 
                         header = true, 
                         dateformat = '%Y%m%d', 
@@ -148,7 +172,7 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
                 con.execute("DROP VIEW IF EXISTS _temp_concept_raw;")
             else:
                 con.execute(f"""
-                    COPY {table_name} FROM '{file_path}' (
+                    COPY {table_name} FROM {sql_path_literal(file_path)} (
                         DELIMITER '\t', 
                         HEADER, 
                         DATEFORMAT '%Y%m%d'
@@ -167,14 +191,14 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
             all_ok = False
 
     # 2. If separate CONCEPT_CPT4.csv exists, ingest/sanitize it into concept
-    if "concept_cpt4" in vocab_files and "concept" in existing_tables:
+    if "concept_cpt4" in vocab_files and "concept" in existing_tables and (wanted is None or "concept" in wanted):
         cpt4_path = vocab_files["concept_cpt4"]
         print(f"Ingesting separate CPT4 concepts from {os.path.basename(cpt4_path)} ...")
         try:
             con.execute(f"""
                 CREATE OR REPLACE TEMPORARY VIEW _temp_cpt4_raw AS 
                 SELECT * FROM read_csv(
-                    '{cpt4_path}', 
+                    {sql_path_literal(cpt4_path)}, 
                     delim = '\t', 
                     header = true, 
                     dateformat = '%Y%m%d', 
@@ -201,6 +225,8 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
         except Exception as e:
             print(f"  Warning: failed to load CONCEPT_CPT4.csv: {e}")
 
+    for _name, sql in saved_indexes:
+        con.execute(sql)
     con.close()
     return all_ok
 
@@ -230,10 +256,7 @@ def _sql_identifier(name):
 
 def _sql_path(path):
     """Absolute path as a SQL string literal; Windows backslashes become forward slashes."""
-    absolute = os.path.abspath(path)
-    if os.sep == "\\":
-        absolute = absolute.replace("\\", "/")
-    return _sql_string(absolute)
+    return _sql_string(sanitize_sql_path(path))
 
 
 def _same_file(a, b):

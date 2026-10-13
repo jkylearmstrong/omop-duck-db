@@ -13,6 +13,7 @@ import os
 import re
 import warnings
 import duckdb
+from omop_etl.paths import sanitize_sql_path, sql_path_literal
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,7 @@ TYPE_CONCEPT_EHR_ENCOUNTER = 32827
 TYPE_CONCEPT_EHR_CONDITION = 32020
 TYPE_CONCEPT_EHR_PROCEDURE = 32817
 TYPE_CONCEPT_EHR_MEASUREMENT = 32817
+CONCEPT_TOBACCO_SMOKING_STATUS = 43054909  # LOINC 72166-2 "Tobacco smoking status"
 TYPE_CONCEPT_EHR_DRUG = 32838
 TYPE_CONCEPT_EHR_DEATH = 32815
 TYPE_CONCEPT_PRIMARY_DX = 44786627  # "Primary admission diagnosis"
@@ -79,11 +81,12 @@ def prepare_source_view(con, view_name, csv_path, expected_columns, aliases=None
         aliases = DEFAULT_ALIASES
 
     cols_info = con.execute(
-        f"DESCRIBE SELECT * FROM read_csv_auto('{csv_path}', union_by_name = true, all_varchar = true) LIMIT 0"
+        f"DESCRIBE SELECT * FROM read_csv_auto({sql_path_literal(csv_path)}, union_by_name = true, all_varchar = true) LIMIT 0"
     ).fetchall()
     actual_cols = {col[0].upper(): col[0] for col in cols_info}
 
     exprs = []
+    aliased, padded = [], []
     for tgt in expected_columns:
         tgt_upper = tgt.upper()
         candidates = aliases.get(tgt_upper, [tgt_upper])
@@ -98,11 +101,28 @@ def prepare_source_view(con, view_name, csv_path, expected_columns, aliases=None
 
         if found is not None:
             exprs.append(f'"{found}" AS {tgt}')
+            if found.upper() != tgt_upper:
+                aliased.append(f"{found} -> {tgt}")
         else:
             exprs.append(f"NULL AS {tgt}")
+            padded.append(tgt)
 
-    sql = f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS SELECT {', '.join(exprs)} FROM read_csv_auto('{csv_path}', union_by_name = true, all_varchar = true);"
+    label = os.path.basename(str(csv_path))
+    if aliased:
+        print(f"  [{label}] aliased columns: {', '.join(aliased)}")
+    if padded:
+        print(f"  [{label}] null-padded missing columns: {', '.join(padded)}")
+
+    sql = f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS SELECT {', '.join(exprs)} FROM read_csv_auto({sql_path_literal(csv_path)}, union_by_name = true, all_varchar = true);"
     con.execute(sql)
+
+
+def build_safe_source_view(con, table_name, csv_path, expected_columns, aliases=None):
+    """Create view ``src_<table_name>`` over a source CSV, aliasing header variants (e.g. ``ssid`` -> PATID)
+    and padding absent expected columns with NULL. Aliased / padded columns are printed."""
+    view_name = f"src_{table_name}"
+    prepare_source_view(con, view_name, csv_path, expected_columns, aliases)
+    return view_name
 
 
 def run_insert(con, label, sql):
@@ -201,8 +221,7 @@ def attach_central_vocabulary(con, vocab_db_path, temporary=True):
     if not os.path.exists(vocab_db_path):
         raise FileNotFoundError(f"Central vocabulary database not found: {vocab_db_path}")
 
-    normalized_path = os.path.abspath(vocab_db_path).replace("\\", "/")
-    con.execute(f"ATTACH '{normalized_path}' AS central_vocab (READ_ONLY);")
+    con.execute(f"ATTACH {sql_path_literal(vocab_db_path)} AS central_vocab (READ_ONLY);")
     vocab_tables = [
         "concept", "concept_relationship", "concept_ancestor", "concept_synonym",
         "vocabulary", "relationship", "concept_class", "domain", "drug_strength"
@@ -827,7 +846,7 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False):
         path,
         [
             "VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
-            "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC"
+            "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC", "SMOKING"
         ],
     )
 
@@ -951,6 +970,42 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False):
           ON stcm.source_code = src.loinc_code
         WHERE src.vital_sub_id IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.vital_sub_id) = 1;
+    """)
+    # PCORnet VITAL.SMOKING -> OBSERVATION "Tobacco smoking status" (LOINC 72166-2, concept 43054909) with the
+    # matching LOINC answer concept in value_as_concept_id. NI/UN/OT and unrecognized codes carry no status.
+    run_insert(con, "OBSERVATION (smoking status from VITAL)", f"""
+        INSERT INTO observation
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY src.VITALID) + (SELECT COALESCE(MAX(observation_id), 0) FROM observation) AS observation_id,
+            COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
+            {CONCEPT_TOBACCO_SMOKING_STATUS} AS observation_concept_id,
+            parse_omop_date(src.MEASURE_DATE) AS observation_date,
+            parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS observation_datetime,
+            {TYPE_CONCEPT_EHR_MEASUREMENT} AS observation_type_concept_id,
+            NULL AS value_as_number,
+            NULL AS value_as_string,
+            sm.value_concept_id AS value_as_concept_id,
+            NULL AS qualifier_concept_id,
+            NULL AS unit_concept_id,
+            NULL AS provider_id,
+            COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
+            NULL AS visit_detail_id,
+            '72166-2' AS observation_source_value,
+            0 AS observation_source_concept_id,
+            NULL AS unit_source_value,
+            NULL AS qualifier_source_value,
+            src.SMOKING AS value_source_value,
+            NULL AS observation_event_id,
+            0 AS obs_event_field_concept_id
+        FROM _temp_vital src
+        JOIN (VALUES ('01', 45881517), ('02', 45884037), ('03', 45883458), ('04', 45879404), ('05', 45881518), ('06', 45885135), ('07', 45884038), ('08', 45878118)) sm(code, value_concept_id)
+          ON sm.code = LPAD(TRIM(src.SMOKING), 2, '0')
+        LEFT JOIN person p
+          ON p.person_source_value = {patid_expr}
+        LEFT JOIN visit_occurrence vo
+          ON vo.visit_source_value = src.ENCOUNTERID
+        WHERE src.VITALID IS NOT NULL
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_vital;")
 
@@ -1322,22 +1377,32 @@ def etl_pcornet(
     site_anon=None,
     site_name=None,
     disambiguate_patids=False,
+    auto_resources=False,
 ):
-    """Run full PCORnet -> OMOP CDM v5.4 pipeline."""
+    """Run full PCORnet -> OMOP CDM v5.4 pipeline.
+
+    ``auto_resources=True`` sizes DuckDB to the host (see ``omop_etl.resources.configure_resources``);
+    explicit ``memory_limit`` / ``threads`` / ``temp_dir`` still win over the detected values.
+    """
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
 
     if disambiguate_patids and site_id is None:
         raise ValueError("disambiguate_patids requires site_id to be specified.")
 
-    con = duckdb.connect(db_path)
+    con = duckdb.connect(sanitize_sql_path(db_path))
+    if auto_resources:
+        from omop_etl.resources import configure_resources
+
+        cfg = configure_resources(con, temp_directory=temp_dir, threads=threads)
+        print(f"Auto resources: memory_limit={cfg.memory_limit}, threads={cfg.threads}, temp={cfg.temp_directory}")
     if memory_limit:
         con.execute(f"SET memory_limit = '{memory_limit}';")
     if threads:
         con.execute(f"SET threads = {threads};")
     if temp_dir:
         os.makedirs(temp_dir, exist_ok=True)
-        con.execute(f"SET temp_directory = '{temp_dir}';")
+        con.execute(f"SET temp_directory = '{sanitize_sql_path(temp_dir)}';")
 
     if central_vocab:
         attach_central_vocabulary(con, central_vocab, temporary=True)
@@ -1377,6 +1442,7 @@ def main():
     parser.add_argument("--memory-limit", default=None, help="DuckDB memory limit (e.g. 16GB)")
     parser.add_argument("--threads", type=int, default=None, help="DuckDB worker threads")
     parser.add_argument("--temp-dir", default=None, help="DuckDB disk spill temporary directory")
+    parser.add_argument("--auto-resources", action="store_true", help="Size DuckDB memory_limit (75%% of available RAM), threads and the spill directory to this host")
     parser.add_argument("--site-id", type=int, default=None, help="Numeric site identifier (e.g. 1 to 5)")
     parser.add_argument("--site-anon", default=None, help="Publication pseudonym (e.g. 'Site A')")
     parser.add_argument("--site-name", default=None, help="Optional institutional name or internal descriptor (e.g. 'Hospital System A')")
@@ -1395,6 +1461,7 @@ def main():
         site_anon=args.site_anon,
         site_name=args.site_name,
         disambiguate_patids=args.disambiguate_patids,
+        auto_resources=args.auto_resources,
     )
 
 

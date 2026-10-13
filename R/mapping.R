@@ -11,8 +11,8 @@ import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = 
   }
 
   DBI::dbExecute(con, sprintf(
-    "CREATE OR REPLACE TEMPORARY VIEW _stcm_raw AS SELECT * FROM read_csv_auto('%s', union_by_name = true, all_varchar = true);",
-    csv_path
+    "CREATE OR REPLACE TEMPORARY VIEW _stcm_raw AS SELECT * FROM read_csv_auto(%s, union_by_name = true, all_varchar = true);",
+    sql_path_literal(csv_path)
   ))
 
   cols_df <- DBI::dbGetQuery(con, "DESCRIBE SELECT * FROM _stcm_raw LIMIT 0")
@@ -84,8 +84,8 @@ import_usagi_mappings <- function(con, usagi_csv_path, source_vocabulary_id = "C
   }
 
   DBI::dbExecute(con, sprintf(
-    "CREATE OR REPLACE TEMPORARY VIEW _usagi_raw AS SELECT * FROM read_csv_auto('%s', union_by_name = true, all_varchar = true);",
-    usagi_csv_path
+    "CREATE OR REPLACE TEMPORARY VIEW _usagi_raw AS SELECT * FROM read_csv_auto(%s, union_by_name = true, all_varchar = true);",
+    sql_path_literal(usagi_csv_path)
   ))
 
   status_filter <- if (isTRUE(approved_only)) "WHERE UPPER(COALESCE(mappingStatus, 'APPROVED')) = 'APPROVED'" else ""

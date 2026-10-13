@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Sequence, Union
 import os
 import duckdb
+from omop_etl.paths import sql_path_literal
 from .build_omop_cdm import attach_central_vocabulary
 
 FEDERATED_TABLES = [
@@ -63,9 +64,8 @@ def create_federated_consortium(
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"Site database not found: {db_path}")
 
-        norm_path = os.path.abspath(db_path).replace("\\", "/")
         schema_alias = f"site_{idx}"
-        con.execute(f"ATTACH '{norm_path}' AS {schema_alias} (READ_ONLY);")
+        con.execute(f"ATTACH {sql_path_literal(db_path)} AS {schema_alias} (READ_ONLY);")
 
         # Resolve site_id and site_anon
         site_anon = str(site_key)
