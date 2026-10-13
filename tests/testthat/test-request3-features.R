@@ -2,6 +2,8 @@
 # auditor, path sanitizer, RAM/disk governor, and the phenotype cohort DSL (R mirror of
 # tests/test_request3_features.py).
 
+winify <- function(p) if (.Platform$OS.type == "windows") gsub("/", "\\\\", p, fixed = TRUE) else p
+
 new_cdm <- function() {
   db <- tempfile(fileext = ".duckdb")
   build_schema(db_path = db)
@@ -39,7 +41,7 @@ test_that("read_csv_sql / attach_database / sql_copy_to work with awkward paths"
   c2 <- DBI::dbConnect(duckdb::duckdb(), dbdir = other)
   DBI::dbExecute(c2, "CREATE TABLE t AS SELECT 1 AS x")
   DBI::dbDisconnect(c2, shutdown = TRUE)
-  attach_database(con, gsub("/", "\\\\", other, fixed = TRUE), "other", read_only = TRUE)
+  attach_database(con, winify(other), "other", read_only = TRUE)
   expect_equal(DBI::dbGetQuery(con, "SELECT x FROM other.t")$x, 1)
   out <- file.path(dir, "out.parquet")
   sql_copy_to(con, "(SELECT * FROM other.t)", out)
@@ -381,7 +383,7 @@ test_that("prepare_source_view / build_safe_source_view log aliases and padding"
   con <- DBI::dbConnect(duckdb::duckdb())
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
   out <- paste(utils::capture.output(
-    build_safe_source_view(con, "demographic", gsub("/", "\\\\", p, fixed = TRUE), c("PATID", "BIRTH_DATE", "PROVIDERID"))
+    build_safe_source_view(con, "demographic", winify(p), c("PATID", "BIRTH_DATE", "PROVIDERID"))
   ), collapse = "\n")
   expect_match(out, "ssid -> PATID", fixed = TRUE)
   expect_match(out, "PROVIDERID", fixed = TRUE)
@@ -397,9 +399,9 @@ test_that("load_vocabulary can load a subset of tables", {
   db <- tempfile(fileext = ".duckdb")
   build_schema(db_path = db)
   expect_true(load_vocabulary(dir, db_path = db, tables = "concept"))
-  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db, read_only = TRUE)
-  on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
   expect_gt(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM concept")$n, 0)
   expect_equal(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM concept_relationship")$n, 0)
+  DBI::dbDisconnect(con, shutdown = TRUE)
   expect_error(load_vocabulary(dir, db_path = db, tables = "nope"), "Unknown vocabulary tables")
 })

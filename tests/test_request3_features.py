@@ -2,6 +2,7 @@
 classifier + auditor, path sanitizer, RAM/disk governor, and the phenotype cohort DSL."""
 
 import math
+import os
 from pathlib import Path
 
 import duckdb
@@ -39,6 +40,11 @@ def con():
     return c
 
 
+def _winify(path):
+    """Backslash form of a path on Windows; unchanged elsewhere (a backslash is a legal filename char there)."""
+    return str(path).replace("/", "\\") if os.name == "nt" else str(path)
+
+
 def _add_people(c, n):
     for i in range(1, n + 1):
         c.execute(
@@ -73,10 +79,10 @@ def test_attach_and_copy_with_backslash_paths(tmp_path):
     db = tmp_path / "other.duckdb"
     duckdb.connect(str(db)).execute("CREATE TABLE t AS SELECT 1 AS x")
     c = duckdb.connect()
-    attach_database(c, str(db).replace("/", "\\"), "other", read_only=True)
+    attach_database(c, _winify(db), "other", read_only=True)
     assert c.execute("SELECT x FROM other.t").fetchone()[0] == 1
     out = tmp_path / "out.parquet"
-    copy_to(c, "(SELECT * FROM other.t)", str(out).replace("/", "\\"))
+    copy_to(c, "(SELECT * FROM other.t)", _winify(out))
     assert out.exists()
 
 
@@ -509,7 +515,7 @@ def test_prepare_source_view_logs_aliases_and_padding(tmp_path, capsys):
     p = tmp_path / "demographic.csv"
     p.write_text("ssid,BIRTH_DATE\nP1,2000-01-01\n")
     c = duckdb.connect()
-    prepare_source_view(c, "v", str(p).replace("/", "\\"), ["PATID", "BIRTH_DATE", "PROVIDERID"])
+    prepare_source_view(c, "v", _winify(p), ["PATID", "BIRTH_DATE", "PROVIDERID"])
     out = capsys.readouterr().out
     assert "ssid -> PATID" in out and "PROVIDERID" in out
     assert c.execute("SELECT PATID, PROVIDERID FROM v").fetchone() == ("P1", None)
