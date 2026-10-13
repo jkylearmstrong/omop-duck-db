@@ -1292,7 +1292,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #' build_schema(db_path = db)
 #' con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
 #' DBI::dbExecute(con, "
-#'   INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)
+#'   INSERT INTO person (person_id, gender_concept_id, year_of_birth,
+#'                       race_concept_id, ethnicity_concept_id)
 #'   VALUES (1, 8507, 1960, 8527, 38003564), (2, 8532, 1975, 8527, 38003564)")
 #' DBI::dbExecute(con, "
 #'   INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,

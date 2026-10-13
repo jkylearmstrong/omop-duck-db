@@ -450,8 +450,8 @@ extract_clinical_sequence_tokens <- function(con,
     segments <- c(segments, 0L)
 
     if (length(tokens) > max_seq_len) {
-      tokens <- c(cls_id, tail(head(tokens, -1), max_seq_len - 2), sep_id)
-      segments <- c(0L, tail(head(segments, -1), max_seq_len - 2), 0L)
+      tokens <- c(cls_id, utils::tail(utils::head(tokens, -1L), max_seq_len - 2L), sep_id)
+      segments <- c(0L, utils::tail(utils::head(segments, -1L), max_seq_len - 2L), 0L)
     }
 
     cur_len <- length(tokens)

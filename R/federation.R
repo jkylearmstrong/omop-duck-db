@@ -448,7 +448,7 @@ to_mermaid.federated_meta_analysis <- function(x, ...) {
   lines <- c(
     "flowchart TD",
     "    subgraph MetaAnalysis [Federated Meta-Analysis Summary]",
-    sprintf('        Header["I² = %.1f%%, τ² = %.4f, Q = %.2f"]', x$i_squared, x$tau_squared, x$q_statistic)
+    sprintf('        Header["I^2 = %.1f%%, tau^2 = %.4f, Q = %.2f"]', x$i_squared, x$tau_squared, x$q_statistic)
   )
   for (i in seq_len(nrow(x$studies))) {
     s <- x$studies[i, ]
@@ -456,7 +456,7 @@ to_mermaid.federated_meta_analysis <- function(x, ...) {
                               i, s$site, s$estimate, s$ci_lower, s$ci_upper, s$weight_pct))
     lines <- c(lines, sprintf("        Header --> S%d", i))
   }
-  lines <- c(lines, sprintf('        Pooled["★ POOLED: %+.2f [%+.2f, %+.2f] (p = %.4f)"]',
+  lines <- c(lines, sprintf('        Pooled["* POOLED: %+.2f [%+.2f, %+.2f] (p = %.4f)"]',
                             x$pooled_estimate, x$ci_lower, x$ci_upper, x$p_value))
   for (i in seq_len(nrow(x$studies))) {
     lines <- c(lines, sprintf("        S%d --> Pooled", i))
