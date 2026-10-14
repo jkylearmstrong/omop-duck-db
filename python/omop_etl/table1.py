@@ -19,12 +19,12 @@ import pandas as pd
 DEFAULT_LAB_LOINCS: dict[str, list[str]] = {
     "albumin": ["1751-7", "2862-1"],
     "alt": ["1742-6", "1743-4", "1744-2"],
-    "anion_gap": ["1863-0", "48642-3"],
+    "anion_gap": ["1863-0", "33037-3"],
     "ast": ["1920-8", "30239-8"],
     "bicarbonate": ["1963-8", "2028-9", "2026-3"],
     "bun": ["3094-0", "6299-2"],
     "creatinine": ["2160-0", "38483-4"],
-    "egfr": ["33914-3", "48643-1", "62238-1", "88293-6", "88294-4"],
+    "egfr": ["33914-3", "48642-3", "48643-1", "62238-1", "88293-6", "88294-4"],
     "glucose": ["2345-7", "2339-0", "41653-7"],
     "hba1c": ["4548-4", "17856-6", "17855-8"],
     "hematocrit": ["20570-8", "4544-3", "4545-0"],
@@ -42,14 +42,15 @@ DEFAULT_VITAL_LOINCS: dict[str, list[str]] = {
 
 # Default 8 core chronic medication concept classes (ATC / RxNorm ancestor concepts)
 DEFAULT_MEDICATION_CONCEPTS: dict[str, list[int]] = {
-    "insulins": [21600712, 1782521, 1502809],
-    "metformin": [1503297, 21600744],
-    "sulfonylureas": [1502855, 1502826, 21600749],
-    "statins": [1539403, 1545958, 1551860, 21601783],
-    "antihypertensives": [21601664],
-    "raas_inhibitors": [21601744],
-    "beta_blockers": [21601664, 1314002, 21601668],
-    "systemic_corticosteroids": [21602722, 1506270],
+    # ATC class concepts (21xxxxxx) and RxNorm ingredients, verified against the OMOP vocabulary.
+    "insulins": [21600713],                          # A10A insulins and analogues
+    "metformin": [1503297, 21600745],                # metformin; A10BA biguanides
+    "sulfonylureas": [1502855, 1502809, 21600749],   # tolbutamide, tolazamide; A10BB
+    "statins": [1539403, 1545958, 1551860, 21601855],  # simva/atorva/prava; C10AA
+    "antihypertensives": [21600381, 21601664, 21601744, 21601782],  # C02, C07, C08, C09
+    "raas_inhibitors": [21601782],                   # C09
+    "beta_blockers": [21601664, 1314002, 21601668],  # C07; atenolol; oxprenolol
+    "systemic_corticosteroids": [21602722, 1506270],  # H02; methylprednisolone
 }
 
 

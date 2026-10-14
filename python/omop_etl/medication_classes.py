@@ -24,13 +24,15 @@ import pandas as pd
 
 from omop_etl.paths import read_csv_sql
 
-__all__ = ["extract_medication_classes", "audit_medication_strategies"]
+__all__ = ["extract_medication_classes", "audit_medication_strategies", "MedicationExtractor"]
 
 _STRATEGIES = ("source", "standard", "both")
 _SOURCE_COLS = ("source_value", "source_code", "source", "code", "cui", "ndc")
 _CLASS_COLS = ("drug_class", "medication_class", "class", "class_name")
 _PERSON_COLS = ("subject_id", "person_id")
 _INDEX_COLS = ("cohort_start_date", "index_date")
+_END_COLS = ("cohort_end_date", "visit_end_date", "discharge_date", "end_date")
+_WINDOWS = ("pre_admission", "inpatient", "discharge")
 _SITE_COLS = ("site_anon", "site_id", "site")
 
 
@@ -109,6 +111,8 @@ def extract_medication_classes(
     site_col: str | None = None,
     lookback_days: int | None = None,
     lookahead_days: int = 0,
+    window: str | None = None,
+    end_date_col: str | None = None,
     return_audit: bool = False,
     **audit_kwargs,
 ):
@@ -130,6 +134,10 @@ def extract_medication_classes(
         person_col, index_date_col, site_col: Override column auto-detection. ``site_col`` (or an
             auto-detected ``site_anon``/``site_id``/``site`` column) carries through for per-site auditing.
         lookback_days, lookahead_days: Exposure window around the index date. ``None`` lookback = unbounded.
+        window: Optional named temporal frame that overrides ``lookback_days``/``lookahead_days``:
+            ``'pre_admission'`` = [index - ``lookback_days`` (default 365), index - 1]; ``'inpatient'`` =
+            [index, stay end]; ``'discharge'`` = [stay end, stay end] (orders written at discharge).
+            The stay end is ``end_date_col`` (default ``cohort_end_date``/``visit_end_date``).
         return_audit: Also return :func:`audit_medication_strategies` output (needs ``strategy='both'``).
         **audit_kwargs: Forwarded to :func:`audit_medication_strategies`.
 
@@ -158,22 +166,38 @@ def extract_medication_classes(
         _first_present(cols, ("cohort_definition_id",), "cohort_definition_id", None)
         where = f"WHERE cohort_definition_id = {int(cohort_definition_id)}"
 
+    if window is not None and window not in _WINDOWS:
+        raise ValueError(f"window must be one of {_WINDOWS}, got {window!r}.")
+    ecol = None
+    if window in ("inpatient", "discharge"):
+        ecol = _first_present(cols, _END_COLS, "stay end date", end_date_col)
+    end_sel = f', CAST("{ecol}" AS DATE) AS end_date' if ecol else ""
     site_sel = f', "{scol}" AS site' if scol else ""
     base = db_con.execute(
         f'SELECT ROW_NUMBER() OVER () AS _row, "{pcol}" AS person_id, CAST("{icol}" AS DATE) AS index_date'
-        f"{site_sel} FROM {cohort_table} {where}"
+        f"{end_sel}{site_sel} FROM {cohort_table} {where}"
     ).df()
-    result = base.drop(columns="_row").copy()
+    result = base.drop(columns=["_row"] + (["end_date"] if ecol else [])).copy()
 
-    lo = "" if lookback_days is None else f"AND de.drug_exposure_start_date >= v.index_date - {int(lookback_days)}"
-    hi = f"AND de.drug_exposure_start_date <= v.index_date + {int(lookahead_days)}"
+    d = "de.drug_exposure_start_date"
+    if window == "pre_admission":
+        lb = 365 if lookback_days is None else int(lookback_days)
+        lo, hi = f"AND {d} >= v.index_date - {lb}", f"AND {d} <= v.index_date - 1"
+    elif window == "inpatient":
+        lo, hi = f"AND {d} >= v.index_date", f"AND {d} <= v.end_date"
+    elif window == "discharge":
+        lo, hi = f"AND {d} >= v.end_date", f"AND {d} <= v.end_date"
+    else:
+        lo = "" if lookback_days is None else f"AND {d} >= v.index_date - {int(lookback_days)}"
+        hi = f"AND {d} <= v.index_date + {int(lookahead_days)}"
 
-    db_con.register("_med_cohort_df", base[["_row", "person_id", "index_date"]])
+    db_con.register("_med_cohort_df", base[["_row", "person_id", "index_date"] + (["end_date"] if ecol else [])])
     flags: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
     tmp_tables = []
     try:
         db_con.execute("CREATE OR REPLACE TEMPORARY VIEW _med_cohort AS "
-            "SELECT _row, person_id, CAST(index_date AS DATE) AS index_date FROM _med_cohort_df")
+            "SELECT _row, person_id, CAST(index_date AS DATE) AS index_date"
+            + (", CAST(end_date AS DATE) AS end_date" if ecol else "") + " FROM _med_cohort_df")
         if use_standard:
             anc = _resolve_table(db_con, "concept_ancestor")
             concept = None
@@ -353,3 +377,30 @@ def audit_medication_strategies(
     audit["reason"] = [",".join(dict.fromkeys(r)) for r in reasons]
     audit["flagged"] = audit["reason"].ne("")
     return audit
+
+
+class MedicationExtractor:
+    """Medication exposure engine: RxNorm/ATC ``concept_ancestor`` roll-up, local crosswalk, temporal frames.
+
+    A thin, stateful front-end over :func:`extract_medication_classes` (dual track: ``'standard'`` =
+    ``concept_ancestor`` join, ``'source'`` = custom NDC/CUI crosswalk, ``'both'``).
+
+    >>> me = MedicationExtractor(con, specs, crosswalk="ndc_map.csv")
+    >>> me.extract("cohort", window="pre_admission")
+    """
+
+    def __init__(self, con, medication_specs: Mapping[str, Any], *, strategy: str = "standard", crosswalk=None):
+        self.con, self.specs, self.strategy, self.crosswalk = con, dict(medication_specs), strategy, crosswalk
+
+    def extract(self, cohort_table: str, window: str | None = None, **kwargs):
+        return extract_medication_classes(
+            self.con, cohort_table, self.specs, self.strategy, crosswalk=self.crosswalk, window=window, **kwargs)
+
+    def extract_all_windows(self, cohort_table: str, **kwargs) -> pd.DataFrame:
+        """One frame with ``<class>__<window>`` flag columns for every temporal frame."""
+        out = None
+        for w in _WINDOWS:
+            df = self.extract(cohort_table, window=w, **kwargs)
+            flag = df[[c for c in self.specs]].add_suffix(f"__{w}")
+            out = df[[c for c in df.columns if c not in self.specs and not c.endswith(("_source", "_standard"))]]                 .join(flag) if out is None else out.join(flag)
+        return out

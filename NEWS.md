@@ -1,3 +1,20 @@
+# omopduckdb 0.5.9
+
+Python (`omop_etl`) additions for "request 2". R mirrors of the new classes are NOT yet written; only the mapping fixes below are applied to `R/table1.R`.
+
+### Mapping bug fixes (audited against the OMOP vocabulary)
+- **LOINC `48642-3` (eGFR, MDRD) was in `anion_gap`**, giving an Anion Gap mean of ~59.5 mEq/L. Moved to `egfr`; `anion_gap` is now `1863-0` + `33037-3`.
+- **`DEFAULT_MEDICATION_CONCEPTS` had wrong concept ids** (found by the same audit): `insulins` held isoniazid (1782521) and tolazamide plus the whole A10 "diabetes drugs" class; `metformin` held A10B (all non-insulin glucose-lowering drugs); `sulfonylureas` held nateglinide; `statins` held ACE inhibitors (C09A); `raas_inhibitors` held calcium-channel blockers (C08); `antihypertensives` held only beta blockers. Now A10A, A10BA, A10BB, C10AA, C09 and C02+C07+C08+C09. **Behaviour change:** flag counts for these classes will change.
+- Still open (not changed): `33914-3` is a deprecated LOINC (kept for legacy data); `59260-0` hemoglobin is mmol/L, so mixing it with `718-7` is only safe after unit harmonization; wide-vital `HT`/`WT` use `[in_us]`/`[lb_av]` labels with UCUM concept ids 9326 (British inch) / 8739 (US pound); `PHYSIOLOGIC_LAB_BOUNDS` (e.g. potassium 1.5-10, hemoglobin 1-25) differs from the new `DEFAULT_PHYSIOLOGIC_BOUNDS`.
+
+### New
+- `filter_bounds(df, bounds=None | {...} | False, action="nullify"|"clip"|"drop")` with `DEFAULT_PHYSIOLOGIC_BOUNDS`; wide or long frames; `.attrs["bounds_report"]`.
+- `harmonize_measurement_units(con, ...)`: unit preflight report plus a `measurement_harmonized` view (cells/uL -> 10^3/uL, umol/L -> mg/dL, mmol/L glucose etc.). Unrecognized units are flagged, never guessed. `extract_measurements(measurement_table=)` reads from it.
+- `extract_medication_classes(window="pre_admission"|"inpatient"|"discharge")` and `MedicationExtractor` (concept_ancestor track, crosswalk track, per-window flags).
+- `Table1Generator` with `DOMAIN_PROFILES` (heart_failure, nephrology, sepsis_icu, oncology, pulmonary, pharmacotherapy_safety), `add_custom_lab`, YAML/dict profiles. Profile code lists are a starting point for clinician review; LOINC and ATC codes were verified to exist in the OMOP vocabulary.
+- `CohortFlow` (sequential steps, attrition table, Markdown/Mermaid/TikZ/Graphviz output, visit-type / anchor / follow-up preflight), `Table2Generator` (completeness, sentinel and zero-SD flags), `as_plp_arrow` (in-memory Arrow covariate tables for PatientLevelPrediction; no file round-trip).
+- Test `test_codes_match_vocabulary_names` (set `OMOP_VOCAB_DB`) guards the mapping tables.
+
 # omopduckdb 0.5.8
 
 Closes the remaining items of the "outstanding requests" review of 0.5.7. Everything ships with **dual Python and R usage** (R functions are snake_case mirrors; Python lives in `omop_etl`). The readmission-cohort engine (`define_study_cohort`), Table 1 / missingness (`generate_table1`) and the Elixhauser / Charlson calculators were already present and are unchanged apart from the guard below.
