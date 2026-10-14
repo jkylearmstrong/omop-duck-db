@@ -32,3 +32,4 @@
 ^\.Renviron$
 ^NOTES\.md$
 ^omop-duck-db-hex\.png$
+(^|/)[^/]*\.pdf$

@@ -145,9 +145,12 @@ class Table1Generator:
     :data:`DEFAULT_PHYSIOLOGIC_BOUNDS`) are applied BEFORE aggregation. ``bounds=False`` disables all bounding.
     """
 
-    def __init__(self, db_path: str | Path | None = None, *, con: duckdb.DuckDBPyConnection | None = None,
+    def __init__(self, db_path: str | Path | Any | None = None, *, con: duckdb.DuckDBPyConnection | None = None,
                  read_only: bool = True, bounds: Mapping[str, Sequence[float]] | bool | None = None,
                  population: str = "adult", harmonize_units: bool = True):
+        if con is None and db_path is not None and hasattr(db_path, "execute"):
+            con = db_path
+            db_path = None
         if con is None and db_path is None:
             raise ValueError("Provide db_path or con.")
         self._owns = con is None
@@ -253,5 +256,62 @@ class Table1Generator:
         self.features = df
         cont = list(self.labs) + list(extra_continuous)
         cat = [c for c in df.columns if c.startswith(("rx_", "dx_"))] + list(extra_categorical)
-        return generate_table1(df, strata_col=stratify_by, continuous_vars=cont, categorical_vars=cat,
+        res = generate_table1(df, strata_col=stratify_by, continuous_vars=cont, categorical_vars=cat,
                                **table1_kwargs)
+        self.last_result = res
+        return res
+
+    def to_quarto(
+        self,
+        table_or_df: Any = None,
+        output_path: str | Path | None = None,
+        which_table: str = "table1",
+        caption: str | None = None,
+        label: str | None = None,
+        include_loinc_footnotes: bool = True,
+        **kwargs: Any,
+    ) -> str:
+        """Render Table 1 in publication-grade Quarto manuscript format."""
+        from omop_etl.table1 import table1_to_quarto
+        target = table_or_df if table_or_df is not None else getattr(self, "last_result", None)
+        if target is None:
+            raise RuntimeError("Run .generate(cohort_table) or pass a DataFrame before calling .to_quarto().")
+        return table1_to_quarto(
+            target,
+            output_path=output_path,
+            which_table=which_table,
+            caption=caption,
+            label=label,
+            include_loinc_footnotes=include_loinc_footnotes,
+            loinc_map=self.labs,
+            **kwargs,
+        )
+
+    def to_typst(
+        self,
+        table_or_df: Any = None,
+        output_path: str | Path | None = None,
+        which_table: str = "table1",
+        caption: str | None = None,
+        label: str | None = None,
+        include_loinc_footnotes: bool = True,
+        font_size: str = "9pt",
+        **kwargs: Any,
+    ) -> str:
+        """Render Table 1 in native Typst manuscript syntax."""
+        from omop_etl.table1 import table1_to_typst
+        target = table_or_df if table_or_df is not None else getattr(self, "last_result", None)
+        if target is None:
+            raise RuntimeError("Run .generate(cohort_table) or pass a DataFrame before calling .to_typst().")
+        return table1_to_typst(
+            target,
+            output_path=output_path,
+            which_table=which_table,
+            caption=caption,
+            label=label,
+            include_loinc_footnotes=include_loinc_footnotes,
+            loinc_map=self.labs,
+            font_size=font_size,
+            **kwargs,
+        )
+

@@ -43,6 +43,8 @@ reference:
   - check_cross_database_discrepancy
   - with_cell_suppression
   - with_differential_privacy
+  - audit_cell_suppression
+  - consortium_privacy_audit
   - federated_meta_analysis
   - load_care_site
   - load_cdm_source
@@ -112,6 +114,7 @@ reference:
   - extract_prior_utilization
   - consortium_calibration
   - decision_curve_analysis
+  - consortium_explainability
   - CORE_14_LAB_PANEL
   - ACUTE_LAB_PANEL
   - WORST_LAB_DIRECTION
@@ -147,6 +150,8 @@ reference:
   - sanitize_measurements
   - generate_table1
   - export_table1
+  - table1_to_quarto
+  - table1_to_typst
   - to_markdown
   - to_latex
   - validate_table1_reconciliation

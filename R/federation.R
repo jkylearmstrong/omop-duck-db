@@ -713,6 +713,222 @@ print.consortium_scores <- function(x, ...) {
   invisible(x)
 }
 
+#' Privacy-Preserving Cell Suppression Auditor
+#'
+#' @description
+#' Scans and redacts small cell counts (e.g. N < 11 or N < 20) across exported
+#' consortium summary tables (Table 1, Table 2, risk factor tables) in compliance
+#' with HIPAA Safe Harbor, GDPR, and CMS de-identification cell suppression policies.
+#'
+#' @param tables Single `data.frame` or named `list` of `data.frame`s to scan.
+#' @param min_cell_count Threshold below which patient counts are masked (default `11L`).
+#' @param mask_value String replacement for suppressed counts (default `paste0("<", min_cell_count)`).
+#' @param count_cols Optional character vector of specific count columns to redact.
+#' @param suppress_zero Logical; whether to suppress zero counts (default `FALSE`).
+#' @param preserve_pct Logical; whether to preserve the percentage in formatted cells like `"5 (2.3%)"` (default `FALSE`).
+#'
+#' @return An S3 object of class `consortium_privacy_audit` containing `$tables` (sanitized tables),
+#'   `$violations` (data.frame of redacted cells), `$violation_count`, and `$summary`.
+#' @export
+audit_cell_suppression <- function(tables,
+                                   min_cell_count = 11L,
+                                   mask_value = NULL,
+                                   count_cols = NULL,
+                                   suppress_zero = FALSE,
+                                   preserve_pct = FALSE,
+                                   return_audit = FALSE) {
+  is_single <- is.data.frame(tables)
+  if (is_single) {
+    tbl_list <- list(table = tables)
+  } else if (is.list(tables)) {
+    tbl_list <- tables
+  } else {
+    stop("`tables` must be a data.frame or named list of data.frames.", call. = FALSE)
+  }
+
+  min_cnt <- as.integer(min_cell_count)
+  mask_str <- if (!is.null(mask_value)) as.character(mask_value) else paste0("<", min_cnt)
+
+  skip_cols <- c(
+    "p_value", "p_val", "smd", "mean", "sd", "median", "iqr", "hr", "shr",
+    "auc", "c_index", "brier", "ece", "mce", "threshold", "step", "variable",
+    "feature", "category", "site", "site_anon", "metric", "unit", "concept_id", "loinc"
+  )
+
+  count_kw <- c("count", "n_patients", "n_subjects", "_n", "subjects", "patients", "cases", "events", "num", "freq", "total", "high_risk", "readmitted", "deaths")
+
+  should_suppress <- function(n) {
+    if (is.na(n)) return(FALSE)
+    if (suppress_zero) {
+      n >= 0 && n < min_cnt
+    } else {
+      n >= 1 && n < min_cnt
+    }
+  }
+
+  clean_tables <- list()
+  violations_list <- list()
+
+  for (t_name in names(tbl_list)) {
+    df <- as.data.frame(tbl_list[[t_name]], stringsAsFactors = FALSE)
+    df_clean <- df
+
+    for (c_name in names(df_clean)) {
+      c_lower <- tolower(trimws(c_name))
+
+      if (!is.null(count_cols)) {
+        is_target <- c_name %in% count_cols
+      } else {
+        if (c_lower %in% skip_cols || grepl("(_pct|_percent|_smd|_rate)$", c_lower)) {
+          is_target <- FALSE
+        } else if (any(sapply(count_kw, function(kw) grepl(kw, c_lower, fixed = TRUE)))) {
+          is_target <- TRUE
+        } else {
+          is_target <- TRUE
+        }
+      }
+
+      if (!is_target) next
+
+      col_vals <- df_clean[[c_name]]
+      col_mod <- FALSE
+
+      for (r_idx in seq_along(col_vals)) {
+        v <- col_vals[r_idx]
+        if (is.na(v)) next
+
+        masked <- FALSE
+        new_v <- v
+
+        if (is.numeric(v) && (v == as.integer(v)) && (!is.null(count_cols) || any(sapply(count_kw, function(kw) grepl(kw, c_lower, fixed = TRUE))))) {
+          n_val <- as.integer(v)
+          if (should_suppress(n_val)) {
+            new_v <- mask_str
+            masked <- TRUE
+          }
+        } else if (is.character(v) || is.factor(v)) {
+          v_str <- trimws(as.character(v))
+          m_pct <- regexec("^([0-9]+)\\s*\\(([0-9.]+%?)\\)$", v_str)
+          matches <- regmatches(v_str, m_pct)[[1]]
+          if (length(matches) == 3) {
+            n_val <- as.integer(matches[2])
+            if (should_suppress(n_val)) {
+              new_v <- if (preserve_pct) paste0(mask_str, " (", matches[3], ")") else mask_str
+              masked <- TRUE
+            }
+          } else {
+            m_int <- regexec("^([0-9]+)$", v_str)
+            m_int_matches <- regmatches(v_str, m_int)[[1]]
+            if (length(m_int_matches) == 2 && (!is.null(count_cols) || any(sapply(count_kw, function(kw) grepl(kw, c_lower, fixed = TRUE))) || (r_idx == 1 && grepl("total", tolower(as.character(df_clean[1, 1])))))) {
+              n_val <- as.integer(m_int_matches[2])
+              if (should_suppress(n_val)) {
+                new_v <- mask_str
+                masked <- TRUE
+              }
+            }
+          }
+        }
+
+        if (masked) {
+          col_mod <- TRUE
+          violations_list[[length(violations_list) + 1]] <- data.frame(
+            table = t_name,
+            row_index = r_idx,
+            column = c_name,
+            original_value = as.character(v),
+            masked_value = as.character(new_v),
+            stringsAsFactors = FALSE
+          )
+          col_vals[r_idx] <- new_v
+        }
+      }
+
+      if (col_mod) {
+        df_clean[[c_name]] <- col_vals
+      }
+    }
+
+    clean_tables[[t_name]] <- df_clean
+  }
+
+  violations_df <- if (length(violations_list) > 0) {
+    do.call(rbind, violations_list)
+  } else {
+    data.frame(
+      table = character(0),
+      row_index = integer(0),
+      column = character(0),
+      original_value = character(0),
+      masked_value = character(0),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  summary_rows <- lapply(names(clean_tables), function(nm) {
+    df_t <- clean_tables[[nm]]
+    n_v <- sum(violations_df$table == nm)
+    data.frame(
+      table = nm,
+      table_name = nm,
+      n_rows = nrow(df_t),
+      n_columns = ncol(df_t),
+      suppressed_cells = n_v,
+      violations = n_v,
+      min_cell_count = min_cnt,
+      status = if (n_v == 0) "CLEAN" else paste0("SUPPRESSED_", n_v),
+      stringsAsFactors = FALSE
+    )
+  })
+  summary_df <- do.call(rbind, summary_rows)
+
+  res <- list(
+    tables = clean_tables,
+    violations = violations_df,
+    violation_count = nrow(violations_df),
+    is_clean = (nrow(violations_df) == 0L),
+    min_cell_count = min_cnt,
+    mask_value = mask_str,
+    is_single_df = is_single,
+    summary = summary_df
+  )
+  class(res) <- c("consortium_privacy_audit", "list")
+
+  if (is_single && !return_audit) {
+    single_df <- clean_tables[[1]]
+    attr(single_df, "suppressed_cell_count") <- nrow(violations_df)
+    attr(single_df, "is_clean") <- (nrow(violations_df) == 0L)
+    return(single_df)
+  }
+
+  res
+}
+
+#' @rdname audit_cell_suppression
+#' @export
+consortium_privacy_audit <- audit_cell_suppression
+
+#' @export
+print.consortium_privacy_audit <- function(x, ...) {
+  cat(sprintf("=== Consortium Privacy Audit [%d table(s), %d suppressed cell(s) (N < %d)] ===\n",
+              length(x$tables), x$violation_count, x$min_cell_count))
+  print(x$summary, row.names = FALSE)
+  invisible(x)
+}
+
+#' @export
+summary.consortium_privacy_audit <- function(object, ...) {
+  object$summary
+}
+
+#' @export
+as.data.frame.consortium_privacy_audit <- function(x, ...) {
+  if (x$is_single_df && length(x$tables) == 1) {
+    return(x$tables[[1]])
+  }
+  x$violations
+}
+
+
 
 
 

@@ -624,14 +624,16 @@ def export_table1(
     output_path: str | Path | None = None,
     format: str = "markdown",
     which_table: str = "table1",
+    **kwargs: Any,
 ) -> str:
-    """Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, or CSV.
+    """Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, Typst, or CSV.
 
     Args:
         table1_result: Result dictionary from generate_table1 (or a DataFrame).
         output_path: Optional file path to write to.
-        format: Export format: 'markdown', 'latex', 'quarto', 'csv'.
+        format: Export format: 'markdown', 'latex', 'quarto', 'typst', 'csv'.
         which_table: Key to export if dict: 'table1' or 'table1b'.
+        **kwargs: Additional parameters passed to table1_to_quarto or table1_to_typst.
 
     Returns:
         str: Formatted text representation of the table.
@@ -647,14 +649,281 @@ def export_table1(
     elif fmt in ("tex", "latex"):
         content = _format_latex_table(df)
     elif fmt in ("qmd", "quarto"):
-        md_text = _format_markdown_table(df)
-        content = f"```{{=markdown}}\n{md_text}\n```"
+        content = table1_to_quarto(df, **kwargs)
+    elif fmt in ("typ", "typst"):
+        content = table1_to_typst(df, **kwargs)
     elif fmt == "csv":
         content = df.to_csv(index=False)
     else:
-        raise ValueError(f"Unsupported format '{format}'. Use 'markdown', 'latex', 'quarto', or 'csv'.")
+        raise ValueError(f"Unsupported format '{format}'. Use 'markdown', 'latex', 'quarto', 'typst', or 'csv'.")
 
     if output_path:
         Path(output_path).write_text(content, encoding="utf-8")
     return content
+
+
+def table1_to_quarto(
+    table1_data: dict[str, pd.DataFrame] | pd.DataFrame,
+    output_path: str | Path | None = None,
+    which_table: str = "table1",
+    caption: str | None = None,
+    label: str | None = None,
+    include_loinc_footnotes: bool = True,
+    loinc_map: dict[str, list[str]] | None = None,
+    loinc_footnotes: dict[str, Any] | None = None,
+    footnotes: dict[str, Any] | None = None,
+) -> str:
+    """Format Table 1 into publication-grade Quarto manuscript format.
+
+    Outputs clean KaTeX/LaTeX bracketed confidence intervals, superscript footnote
+    references for LOINC lab codes, and multi-level header spans ready for direct inclusion.
+
+    Args:
+        table1_data: Result dictionary from generate_table1() or a DataFrame.
+        output_path: Optional file path to write to (.qmd / .md).
+        which_table: If a dict, key to export ('table1' or 'table1b').
+        caption: Table caption (default: 'Baseline Demographic and Clinical Characteristics').
+        label: Quarto cross-reference label (default: 'tbl-table1').
+        include_loinc_footnotes: Whether to generate superscript LOINC code footnotes.
+        loinc_map: Optional mapping of variable names to LOINC codes (default: DEFAULT_LAB_LOINCS).
+        loinc_footnotes: Custom mapping of variable names to LOINC codes or footnotes.
+        footnotes: Additional footnote mappings.
+
+    Returns:
+        str: Formatted Quarto manuscript markdown string.
+    """
+    if isinstance(table1_data, dict):
+        df = table1_data.get(which_table, next(iter(table1_data.values()))).copy()
+    else:
+        df = table1_data.copy()
+
+    cap = caption or "Baseline Demographic and Clinical Characteristics"
+    lbl = label or "tbl-table1"
+    active_loincs = dict(DEFAULT_LAB_LOINCS)
+    if loinc_map:
+        active_loincs.update(loinc_map)
+    custom_fns = {}
+    if loinc_footnotes:
+        for k, v in loinc_footnotes.items():
+            if isinstance(v, (list, tuple)):
+                active_loincs[k] = list(v)
+            else:
+                active_loincs[k] = [str(v)]
+                custom_fns[str(k).lower()] = str(v)
+    if footnotes:
+        for k, v in footnotes.items():
+            custom_fns[str(k).lower()] = str(v)
+
+    var_col = df.columns[0]
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    loinc_footnotes: list[tuple[str, str]] = []
+
+    for col in df.columns:
+        new_vals = []
+        for row_idx, val in enumerate(df[col]):
+            if pd.isna(val) or val is None:
+                new_vals.append("")
+                continue
+            s_val = str(val).strip()
+            s_val = re.sub(r"\s*\+/-\s*", r" $\\pm$ ", s_val)
+            s_val = re.sub(r"\[\s*([\d\.\-]+)\s*,\s*([\d\.\-]+)\s*\]", r"[IQR: \1, \2]", s_val)
+
+            if col == var_col and include_loinc_footnotes and s_val:
+                norm_v = re.sub(r"[^a-z0-9_]", "", s_val.lower())
+                matched_key = None
+                for lk in active_loincs:
+                    norm_k = re.sub(r"[^a-z0-9_]", "", str(lk).lower())
+                    if norm_k and (norm_v == norm_k or norm_k in norm_v or norm_v in norm_k):
+                        matched_key = lk
+                        break
+                if matched_key and active_loincs[matched_key]:
+                    sym = letters[len(loinc_footnotes) % len(letters)]
+                    codes_str = ", ".join(str(c) for c in active_loincs[matched_key])
+                    loinc_footnotes.append((sym, f"LOINC {codes_str}"))
+                    s_val = f"{s_val}^{sym}"
+
+            new_vals.append(s_val)
+        df[col] = new_vals
+
+    cols = [str(c) for c in df.columns]
+    align_spec = []
+    for i, c in enumerate(cols):
+        align_spec.append(":---" if i == 0 else ":---:")
+
+    header_row = "| " + " | ".join(cols) + " |"
+    divider_row = "| " + " | ".join(align_spec) + " |"
+    data_rows = []
+    for row in df.itertuples(index=False):
+        data_rows.append("| " + " | ".join(str(v) for v in row) + " |")
+
+    table_body = "\n".join([header_row, divider_row] + data_rows)
+
+    footnote_lines = []
+    if loinc_footnotes:
+        fn_parts = [f"^{sym} {txt}" for sym, txt in loinc_footnotes]
+        footnote_lines.append("; ".join(fn_parts) + ".")
+    footnote_lines.append("*Note:* Continuous variables expressed as Mean $\\pm$ SD or Median [IQR]; categorical variables as N (%). SMD = Standardized Mean Difference.")
+
+    footnote_block = "\n".join(f"::: {{.table-footnote}}\n{ln}\n:::" for ln in footnote_lines)
+
+    content = f"""#| label: {lbl}
+#| tbl-cap: "{cap}"
+
+{table_body}
+
+{footnote_block}
+"""
+    if output_path:
+        Path(output_path).write_text(content, encoding="utf-8")
+    return content
+
+
+def table1_to_typst(
+    table1_data: dict[str, pd.DataFrame] | pd.DataFrame,
+    output_path: str | Path | None = None,
+    which_table: str = "table1",
+    caption: str | None = None,
+    label: str | None = None,
+    include_loinc_footnotes: bool = True,
+    loinc_map: dict[str, list[str]] | None = None,
+    loinc_footnotes: dict[str, Any] | None = None,
+    footnotes: dict[str, Any] | None = None,
+    font_size: str = "9pt",
+) -> str:
+    """Format Table 1 into native Typst manuscript table syntax.
+
+    Outputs Typst table with #table(columns: ...), table.hline(), multi-level headers,
+    bracketed confidence intervals, and superscript LOINC code footnotes.
+
+    Args:
+        table1_data: Result dictionary from generate_table1() or a DataFrame.
+        output_path: Optional file path to write to (.typ).
+        which_table: If a dict, key to export ('table1' or 'table1b').
+        caption: Table caption (default: 'Baseline Demographic and Clinical Characteristics').
+        label: Typst figure label (e.g. 'tbl-baseline').
+        include_loinc_footnotes: Whether to generate superscript LOINC code footnotes.
+        loinc_map: Optional mapping of variable names to LOINC codes.
+        loinc_footnotes: Custom mapping of variable names to LOINC codes or footnotes.
+        footnotes: Additional footnote mappings.
+        font_size: Font size for table content (default: '9pt').
+
+    Returns:
+        str: Native Typst markup string.
+    """
+    if isinstance(table1_data, dict):
+        df = table1_data.get(which_table, next(iter(table1_data.values()))).copy()
+    else:
+        df = table1_data.copy()
+
+    cap = caption or "Baseline Demographic and Clinical Characteristics"
+    lbl = label
+    active_loincs = dict(DEFAULT_LAB_LOINCS)
+    if loinc_map:
+        active_loincs.update(loinc_map)
+    custom_fns = {}
+    if loinc_footnotes:
+        for k, v in loinc_footnotes.items():
+            if isinstance(v, (list, tuple)):
+                active_loincs[k] = list(v)
+            else:
+                active_loincs[k] = [str(v)]
+                custom_fns[str(k).lower()] = str(v)
+    if footnotes:
+        for k, v in footnotes.items():
+            custom_fns[str(k).lower()] = str(v)
+
+    var_col = df.columns[0]
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    loinc_footnotes: list[tuple[str, str]] = []
+
+    def typst_escape(text: str) -> str:
+        s = str(text).replace("\\", "\\\\").replace('"', '\\"').replace("[", "\\[").replace("]", "\\]")
+        s = s.replace("$", "\\$").replace("#", "\\#").replace("*", "\\*").replace("_", "\\_")
+        return s
+
+    num_cols = len(df.columns)
+    col_widths = []
+    align_specs = []
+    for i in range(num_cols):
+        if i == 0:
+            col_widths.append("1.8fr")
+            align_specs.append("left")
+        elif i == 1 and "category" in str(df.columns[1]).lower():
+            col_widths.append("1.2fr")
+            align_specs.append("left")
+        else:
+            col_widths.append("1fr")
+            align_specs.append("center")
+
+    lines = [
+        f"// Table 1: {cap}",
+        f"#figure(",
+        f"  caption: [{cap}],",
+        f"  #set text({font_size})",
+        f"  #table(",
+        f"    columns: ({', '.join(col_widths)}),",
+        f"    align: ({', '.join(align_specs)}),",
+        f"    stroke: none,",
+        f"    fill: (col, row) => if row == 0 {{ rgb(\"f0f4f8\") }} else if calc.even(row) {{ rgb(\"fafbfc\") }} else {{ none }},",
+        f"    table.hline(stroke: 1.5pt),",
+    ]
+
+    header_cells = [f"    [*table.cell()[{typst_escape(c)}]*]" for c in df.columns]
+    lines.extend(header_cells)
+    lines.append("    table.hline(stroke: 1pt),")
+
+    for _, row in df.iterrows():
+        row_cells = []
+        for c_idx, col in enumerate(df.columns):
+            val = row[col]
+            if pd.isna(val) or val is None:
+                row_cells.append("    []")
+                continue
+
+            s_val = str(val).strip()
+            s_val = re.sub(r"\s*\+/-\s*", " \u00b1 ", s_val)
+            s_val = re.sub(r"\[\s*([\d\.\-]+)\s*,\s*([\d\.\-]+)\s*\]", r"[IQR: \1, \2]", s_val)
+
+            if c_idx == 0 and include_loinc_footnotes and s_val:
+                norm_v = re.sub(r"[^a-z0-9_]", "", s_val.lower())
+                matched_key = None
+                for lk in active_loincs:
+                    norm_k = re.sub(r"[^a-z0-9_]", "", str(lk).lower())
+                    if norm_k and (norm_v == norm_k or norm_k in norm_v or norm_v in norm_k):
+                        matched_key = lk
+                        break
+                if matched_key and active_loincs[matched_key]:
+                    sym = letters[len(loinc_footnotes) % len(letters)]
+                    codes_str = ", ".join(str(c) for c in active_loincs[matched_key])
+                    loinc_footnotes.append((sym, f"LOINC {codes_str}"))
+                    cell_content = f"[{typst_escape(s_val)}#super[{sym}]]"
+                else:
+                    cell_content = f"[{typst_escape(s_val)}]"
+            else:
+                cell_content = f"[{typst_escape(s_val)}]"
+
+            row_cells.append(f"    {cell_content}")
+        lines.extend(row_cells)
+
+    lines.append("    table.hline(stroke: 1.5pt),")
+    lines.append("  )")
+    if lbl:
+        clean_lbl = lbl.strip("<>")
+        lines.append(f") <{clean_lbl}>")
+    else:
+        lines.append(")")
+
+    lines.append("#v(3pt)")
+    lines.append('#text(8pt, fill: rgb("555555"))[')
+    if loinc_footnotes:
+        fn_parts = [f"#super[{sym}] {typst_escape(txt)}" for sym, txt in loinc_footnotes]
+        lines.append(f"  {'; '.join(fn_parts)}\\ ")
+    lines.append("  _Note:_ Values expressed as Mean \u00b1 SD, Median [IQR], or N (%). SMD = Standardized Mean Difference.")
+    lines.append("]")
+
+    content = "\n".join(lines) + "\n"
+    if output_path:
+        Path(output_path).write_text(content, encoding="utf-8")
+    return content
+
 

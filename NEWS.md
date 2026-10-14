@@ -1,3 +1,30 @@
+# omopduckdb 0.6.2
+
+Release 0.6.2 adds three modular, zero-hard-dependency capabilities for federated health system intelligence, with complete 1:1 parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
+
+### 1. Automated Privacy-Preserving Cell Suppression Auditor
+- `audit_cell_suppression()` and `consortium_privacy_audit()` (Python & R):
+  - Audits exported multi-site summary tables (Table 1, Table 2, risk factor tables, patient counts) for compliance with HIPAA Safe Harbor, CMS, and GDPR small-cell de-identification governance rules.
+  - Automatically identifies small cell counts ($0 < N < \text{threshold}$, e.g. $N < 11$ or $N < 20$) in both raw counts and formatted count/percent strings (e.g. `"5 (2.3%)"`).
+  - Preserves legitimate statistical values such as p-values, standardized mean differences (SMDs), means, medians, and IQRs.
+  - Returns `PrivacyAuditResult` (Python) / `consortium_privacy_audit` (R) containing cleaned data frames, total violation counts, flagged column details, and summary audit diagnostics.
+  - Integrated directly into `FederatedConsortium.audit_cell_suppression()` / `consortium$audit_privacy()`.
+
+### 2. Direct Quarto and Typst Publication Styler
+- `table1_to_quarto()`, `table1_to_typst()`, `Table1Generator.to_quarto()`, and `Table1Generator.to_typst()` (Python & R):
+  - Directly outputs camera-ready Quarto markdown (`tbl-colwidths`, `#| label`, `#| tbl-cap`) and Typst markup (`#table(columns: ..., ...)`).
+  - Formats bracketed confidence intervals and ranges cleanly (`[12.3, 45.6]`).
+  - Supports automatic superscript footnote annotations for standard LOINC codes and custom mapping metadata (`LOINC 59260-0^1`).
+  - Provides multi-level header spans and cross-site stratification without requiring manual LaTeX string post-processing.
+  - Integrated into `export_table1(format = "quarto" | "typst")` and `Table1Generator` class/R6 instances.
+
+### 3. Built-in Tree Model Explainability & TRIPOD Reporting
+- `ConsortiumExplainability` and `consortium_explainability()` (Python & R):
+  - Provides model-agnostic and tree-based feature attribution, direction of effect, TRIPOD Item 13b / STROBE Item 15a compliant variable importance tables, and cross-site feature importance drift auditing across federated health systems.
+  - Zero heavy dependencies: supports SHAP (via optional `shap` library in Python), native tree gain/Gini importances (`randomForest`, `rpart`, `feature_importances_`, `coef_`), or robust multi-iteration permutation importance fallbacks.
+  - Evaluates cross-site feature importance drift across member medical centers when `site_labels` are supplied, identifying ranking concordance and site-specific predictor variance.
+  - Includes publication-grade visualization methods: `.plot_importance()`, `.plot_beeswarm()`, and base-R `plot.consortium_explainability()`.
+
 # omopduckdb 0.6.1
 
 Release 0.6.1 delivers high-impact multi-site consortium analytics, cross-site model calibration, clinical decision curve analysis, automated international unit scaling, and competing-risk cumulative incidence function modeling with complete 1:1 parity between Python (`omop_etl` / `omop_duck_db`) and R (`omopduckdb`).

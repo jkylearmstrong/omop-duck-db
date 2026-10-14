@@ -501,18 +501,20 @@ validate_table1_reconciliation <- function(omop_table1,
   )
 }
 
-#' Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, or CSV
+#' Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, Typst, or CSV
 #'
 #' @param table1_result Result list from `generate_table1()` or a `data.frame`.
 #' @param output_path Optional file path to write output.
-#' @param format Output format (`"markdown"`, `"latex"`, `"quarto"`, `"csv"`).
+#' @param format Output format (`"markdown"`, `"latex"`, `"quarto"`, `"typst"`, `"csv"`).
 #' @param which_table Name of table to export (`"table1"` or `"table1b"`).
+#' @param ... Additional arguments passed to `table1_to_quarto` or `table1_to_typst` (e.g. caption, label, loinc_footnotes).
 #' @return Formatted character string.
 #' @export
 export_table1 <- function(table1_result,
                           output_path = NULL,
                           format = "markdown",
-                          which_table = "table1") {
+                          which_table = "table1",
+                          ...) {
   df <- if (is.list(table1_result) && !is.data.frame(table1_result)) {
     if (!is.null(table1_result[[which_table]])) table1_result[[which_table]] else table1_result[[1]]
   } else {
@@ -525,7 +527,9 @@ export_table1 <- function(table1_result,
   } else if (fmt %in% c("tex", "latex")) {
     to_latex(df)
   } else if (fmt %in% c("qmd", "quarto")) {
-    sprintf("```{=markdown}\n%s\n```", to_markdown(df))
+    table1_to_quarto(df, ...)
+  } else if (fmt %in% c("typ", "typst")) {
+    table1_to_typst(df, ...)
   } else if (fmt == "csv") {
     raw_conn <- textConnection(NULL, "w")
     utils::write.csv(df, raw_conn, row.names = FALSE)
@@ -533,7 +537,7 @@ export_table1 <- function(table1_result,
     close(raw_conn)
     paste(txt, collapse = "\n")
   } else {
-    stop(sprintf("Unsupported format '%s'. Use 'markdown', 'latex', 'quarto', or 'csv'.", format), call. = FALSE)
+    stop(sprintf("Unsupported format '%s'. Use 'markdown', 'latex', 'quarto', 'typst', or 'csv'.", format), call. = FALSE)
   }
 
   if (!is.null(output_path)) {
@@ -541,4 +545,298 @@ export_table1 <- function(table1_result,
   }
   content
 }
+
+#' Format Table 1 into Publication-Grade Quarto Manuscript Syntax
+#'
+#' @description
+#' Formats Table 1 with KaTeX/LaTeX bracketed confidence intervals, superscript
+#' footnote references for LOINC lab codes, and multi-level header spans ready for direct manuscript inclusion.
+#'
+#' @param table1_data Result list from `generate_table1()` or a `data.frame`.
+#' @param output_path Optional file path to write output (.qmd / .md).
+#' @param which_table Name of table to export (`"table1"` or `"table1b"`).
+#' @param caption Table caption (default: `"Baseline Demographic and Clinical Characteristics"`).
+#' @param label Quarto cross-reference label (default: `"tbl-table1"`).
+#' @param include_loinc_footnotes Logical; whether to generate superscript LOINC code footnotes (default `TRUE`).
+#' @param loinc_map Optional named list of LOINC codes by variable name.
+#' @param loinc_footnotes Optional named list or vector of LOINC codes or footnotes.
+#' @param ... Additional arguments.
+#' @return Formatted Quarto manuscript character string.
+#' @export
+table1_to_quarto <- function(table1_data,
+                            output_path = NULL,
+                            which_table = "table1",
+                            caption = NULL,
+                            label = NULL,
+                            include_loinc_footnotes = TRUE,
+                            loinc_map = NULL,
+                            loinc_footnotes = NULL,
+                            ...) {
+  df <- if (is.list(table1_data) && !is.data.frame(table1_data)) {
+    if (!is.null(table1_data[[which_table]])) table1_data[[which_table]] else table1_data[[1]]
+  } else {
+    table1_data
+  }
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+
+  cap <- if (!is.null(caption)) as.character(caption) else "Baseline Demographic and Clinical Characteristics"
+  lbl <- if (!is.null(label)) as.character(label) else "tbl-table1"
+
+  active_loincs <- list(
+    albumin = c("1751-7", "2862-1"),
+    alt = c("1742-6", "1743-4", "1744-2"),
+    anion_gap = c("1863-0", "33037-3"),
+    ast = c("1920-8", "30239-8"),
+    bicarbonate = c("1963-8", "2028-9", "2026-3"),
+    bun = c("3094-0", "6299-2"),
+    creatinine = c("2160-0", "38483-4"),
+    egfr = c("33914-3", "48642-3", "48643-1", "62238-1", "88293-6", "88294-4"),
+    glucose = c("2345-7", "2339-0", "41653-7"),
+    hba1c = c("4548-4", "17856-6", "17855-8", "59261-8"),
+    hematocrit = c("20570-8", "4544-3", "4545-0"),
+    hemoglobin = c("718-7", "59260-0"),
+    ldl = c("13457-7", "2089-1", "18262-6"),
+    wbc = c("26464-8", "6690-2"),
+    sodium = c("2951-2", "2947-0")
+  )
+  if (!is.null(loinc_map)) {
+    for (nm in names(loinc_map)) active_loincs[[nm]] <- loinc_map[[nm]]
+  }
+  if (!is.null(loinc_footnotes)) {
+    for (nm in names(loinc_footnotes)) active_loincs[[nm]] <- loinc_footnotes[[nm]]
+  }
+
+  var_col <- names(df)[1]
+  letters_vec <- letters
+  loinc_footnotes_list <- list()
+
+  for (c_name in names(df)) {
+    vals <- as.character(df[[c_name]])
+    for (r_idx in seq_along(vals)) {
+      v <- trimws(vals[r_idx])
+      if (is.na(v) || v == "") next
+
+      v <- gsub("\\s*\\+/-\\s*", " $\\\\pm$ ", v)
+      v <- gsub("\\[\\s*([0-9.-]+)\\s*,\\s*([0-9.-]+)\\s*\\]", "[IQR: \\1, \\2]", v)
+
+      if (c_name == var_col && include_loinc_footnotes && v != "") {
+        norm_v <- gsub("[^a-z0-9_]", "", tolower(v))
+        matched_key <- NULL
+        for (lk in names(active_loincs)) {
+          norm_k <- gsub("[^a-z0-9_]", "", tolower(lk))
+          if (nchar(norm_k) > 0 && (norm_v == norm_k || grepl(norm_k, norm_v, fixed = TRUE) || grepl(norm_v, norm_k, fixed = TRUE))) {
+            matched_key <- lk
+            break
+          }
+        }
+        if (!is.null(matched_key) && length(active_loincs[[matched_key]]) > 0) {
+          sym <- letters_vec[((length(loinc_footnotes_list)) %% length(letters_vec)) + 1]
+          codes_str <- paste(active_loincs[[matched_key]], collapse = ", ")
+          loinc_footnotes_list[[length(loinc_footnotes_list) + 1]] <- list(sym = sym, text = paste0("LOINC ", codes_str))
+          v <- paste0(v, "^", sym)
+        }
+      }
+      vals[r_idx] <- v
+    }
+    df[[c_name]] <- vals
+  }
+
+  cols <- names(df)
+  align_spec <- ifelse(seq_along(cols) == 1, ":---", ":---:")
+
+  header_row <- paste0("| ", paste(cols, collapse = " | "), " |")
+  divider_row <- paste0("| ", paste(align_spec, collapse = " | "), " |")
+
+  data_rows <- apply(df, 1, function(row) {
+    paste0("| ", paste(row, collapse = " | "), " |")
+  })
+
+  table_body <- paste(c(header_row, divider_row, data_rows), collapse = "\n")
+
+  footnote_lines <- character(0)
+  if (length(loinc_footnotes_list) > 0) {
+    fn_parts <- sapply(loinc_footnotes_list, function(fn) paste0("^", fn$sym, " ", fn$text))
+    footnote_lines <- c(footnote_lines, paste0(paste(fn_parts, collapse = "; "), "."))
+  }
+  footnote_lines <- c(footnote_lines, "*Note:* Continuous variables expressed as Mean $\\\\pm$ SD or Median [IQR]; categorical variables as N (%). SMD = Standardized Mean Difference.")
+
+  footnote_block <- paste(sapply(footnote_lines, function(ln) paste0("::: {.table-footnote}\n", ln, "\n:::")), collapse = "\n")
+
+  content <- paste0(
+    "#| label: ", lbl, "\n",
+    "#| tbl-cap: \"", cap, "\"\n\n",
+    table_body, "\n\n",
+    footnote_block, "\n"
+  )
+
+  if (!is.null(output_path)) {
+    writeLines(content, output_path)
+  }
+  content
+}
+
+
+#' Format Table 1 into Native Typst Manuscript Table Syntax
+#'
+#' @description
+#' Generates publication-ready Typst table code with `#table(columns: ...)`, bracketed
+#' confidence intervals, and superscript LOINC code footnotes.
+#'
+#' @param table1_data Result list from `generate_table1()` or a `data.frame`.
+#' @param output_path Optional file path to write output (.typ).
+#' @param which_table Name of table to export (`"table1"` or `"table1b"`).
+#' @param caption Table caption (default: `"Baseline Demographic and Clinical Characteristics"`).
+#' @param label Typst figure label (e.g. `"tbl-baseline"`).
+#' @param include_loinc_footnotes Logical; whether to generate superscript LOINC code footnotes (default `TRUE`).
+#' @param loinc_map Optional named list of LOINC codes by variable name.
+#' @param loinc_footnotes Optional named list or vector of LOINC codes or footnotes.
+#' @param font_size Font size for table content (default: `"9pt"`).
+#' @param ... Additional arguments.
+#' @return Formatted Typst character string.
+#' @export
+table1_to_typst <- function(table1_data,
+                           output_path = NULL,
+                           which_table = "table1",
+                           caption = NULL,
+                           label = NULL,
+                           include_loinc_footnotes = TRUE,
+                           loinc_map = NULL,
+                           loinc_footnotes = NULL,
+                           font_size = "9pt",
+                           ...) {
+  df <- if (is.list(table1_data) && !is.data.frame(table1_data)) {
+    if (!is.null(table1_data[[which_table]])) table1_data[[which_table]] else table1_data[[1]]
+  } else {
+    table1_data
+  }
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+
+  cap <- if (!is.null(caption)) as.character(caption) else "Baseline Demographic and Clinical Characteristics"
+  lbl <- label
+
+  active_loincs <- list(
+    albumin = c("1751-7", "2862-1"),
+    alt = c("1742-6", "1743-4", "1744-2"),
+    anion_gap = c("1863-0", "33037-3"),
+    ast = c("1920-8", "30239-8"),
+    bicarbonate = c("1963-8", "2028-9", "2026-3"),
+    bun = c("3094-0", "6299-2"),
+    creatinine = c("2160-0", "38483-4"),
+    egfr = c("33914-3", "48642-3", "48643-1", "62238-1", "88293-6", "88294-4"),
+    glucose = c("2345-7", "2339-0", "41653-7"),
+    hba1c = c("4548-4", "17856-6", "17855-8", "59261-8"),
+    hematocrit = c("20570-8", "4544-3", "4545-0"),
+    hemoglobin = c("718-7", "59260-0"),
+    ldl = c("13457-7", "2089-1", "18262-6"),
+    wbc = c("26464-8", "6690-2"),
+    sodium = c("2951-2", "2947-0")
+  )
+  if (!is.null(loinc_map)) {
+    for (nm in names(loinc_map)) active_loincs[[nm]] <- loinc_map[[nm]]
+  }
+  if (!is.null(loinc_footnotes)) {
+    for (nm in names(loinc_footnotes)) active_loincs[[nm]] <- loinc_footnotes[[nm]]
+  }
+
+  var_col <- names(df)[1]
+  letters_vec <- letters
+  loinc_footnotes_list <- list()
+
+  typst_esc <- function(x) {
+    s <- gsub("\\\\", "\\\\\\\\", as.character(x))
+    s <- gsub('"', '\\\\"', s)
+    s <- gsub("\\[", "\\\\[", s)
+    s <- gsub("\\]", "\\\\]", s)
+    s <- gsub("\\$", "\\\\$", s)
+    s <- gsub("#", "\\\\#", s)
+    s <- gsub("\\*", "\\\\*", s)
+    s <- gsub("_", "\\\\_", s)
+    s
+  }
+
+  num_cols <- ncol(df)
+  col_widths <- sapply(seq_len(num_cols), function(i) {
+    if (i == 1) "1.8fr"
+    else if (i == 2 && grepl("category", tolower(names(df)[2]))) "1.2fr"
+    else "1fr"
+  })
+  align_specs <- sapply(seq_len(num_cols), function(i) if (i == 1) "left" else "center")
+
+  lines <- c(
+    paste0("// Table 1: ", cap),
+    "#figure(",
+    paste0("  caption: [", cap, "],"),
+    paste0("  #set text(", font_size, ")"),
+    "  #table(",
+    paste0("    columns: (", paste(col_widths, collapse = ", "), "),"),
+    paste0("    align: (", paste(align_specs, collapse = ", "), "),"),
+    "    stroke: none,",
+    "    fill: (col, row) => if row == 0 { rgb(\"f0f4f8\") } else if calc.even(row) { rgb(\"fafbfc\") } else { none },",
+    "    table.hline(stroke: 1.5pt),"
+  )
+
+  header_cells <- sapply(names(df), function(c_name) {
+    paste0("    [*table.cell()[", typst_esc(c_name), "]*]")
+  })
+  lines <- c(lines, header_cells, "    table.hline(stroke: 1pt),")
+
+  for (i in seq_len(nrow(df))) {
+    row_cells <- character(num_cols)
+    for (j in seq_len(num_cols)) {
+      v <- df[i, j]
+      if (is.na(v) || is.null(v)) {
+        row_cells[j] <- "    []"
+        next
+      }
+
+      s_val <- trimws(as.character(v))
+      s_val <- gsub("\\s*\\+/-\\s*", " \\u00b1 ", s_val)
+      s_val <- gsub("\\[\\s*([0-9.-]+)\\s*,\\s*([0-9.-]+)\\s*\\]", "[IQR: \\1, \\2]", s_val)
+
+      if (j == 1 && include_loinc_footnotes && s_val != "") {
+        norm_v <- gsub("[^a-z0-9_]", "", tolower(s_val))
+        matched_key <- NULL
+        for (lk in names(active_loincs)) {
+          norm_k <- gsub("[^a-z0-9_]", "", tolower(lk))
+          if (nchar(norm_k) > 0 && (norm_v == norm_k || grepl(norm_k, norm_v, fixed = TRUE) || grepl(norm_v, norm_k, fixed = TRUE))) {
+            matched_key <- lk
+            break
+          }
+        }
+        if (!is.null(matched_key) && length(active_loincs[[matched_key]]) > 0) {
+          sym <- letters_vec[((length(loinc_footnotes_list)) %% length(letters_vec)) + 1]
+          codes_str <- paste(active_loincs[[matched_key]], collapse = ", ")
+          loinc_footnotes_list[[length(loinc_footnotes_list) + 1]] <- list(sym = sym, text = paste0("LOINC ", codes_str))
+          cell_content <- paste0("[", typst_esc(s_val), "#super[", sym, "]]")
+        } else {
+          cell_content <- paste0("[", typst_esc(s_val), "]")
+        }
+      } else {
+        cell_content <- paste0("[", typst_esc(s_val), "]")
+      }
+      row_cells[j] <- paste0("    ", cell_content)
+    }
+    lines <- c(lines, row_cells)
+  }
+
+  close_fig <- if (!is.null(lbl)) {
+    paste0("  )\n) <", gsub("^<|>$", "", lbl), ">")
+  } else {
+    "  )\n)"
+  }
+
+  lines <- c(lines, "    table.hline(stroke: 1.5pt),", close_fig, "#v(3pt)", "#text(8pt, fill: rgb(\"555555\"))[")
+  if (length(loinc_footnotes_list) > 0) {
+    fn_parts <- sapply(loinc_footnotes_list, function(fn) paste0("#super[", fn$sym, "] ", typst_esc(fn$text)))
+    lines <- c(lines, paste0("  ", paste(fn_parts, collapse = "; "), "\\\\ "))
+  }
+  lines <- c(lines, "  _Note:_ Values expressed as Mean \\u00b1 SD, Median [IQR], or N (%). SMD = Standardized Mean Difference.", "]")
+
+  content <- paste(lines, collapse = "\n")
+  if (!is.null(output_path)) {
+    writeLines(content, output_path)
+  }
+  content
+}
+
 

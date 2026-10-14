@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Sequence, Union
 import os
+import re
 import duckdb
+import numpy as np
 import pandas as pd
 from omop_etl.paths import sql_path_literal
 from .build_omop_cdm import attach_central_vocabulary
@@ -42,6 +44,9 @@ __all__ = [
     "federated_meta_analysis",
     "FederatedMetaAnalysisResult",
     "FEDERATED_TABLES",
+    "PrivacyAuditResult",
+    "audit_cell_suppression",
+    "consortium_privacy_audit",
 ]
 
 
@@ -849,6 +854,44 @@ class FederatedConsortium:
             consortium_summary=consortium_summary_df,
         )
 
+    def audit_privacy(
+        self,
+        tables: dict[str, pd.DataFrame] | pd.DataFrame,
+        min_cell_count: int = 11,
+        mask_value: str | None = None,
+        count_cols: Sequence[str] | None = None,
+        suppress_zero: bool = False,
+        preserve_pct: bool = False,
+    ) -> "PrivacyAuditResult":
+        """Audits exported consortium tables against small cell count privacy thresholds (HIPAA/GDPR)."""
+        return audit_cell_suppression(
+            tables=tables,
+            min_cell_count=min_cell_count,
+            mask_value=mask_value,
+            count_cols=count_cols,
+            suppress_zero=suppress_zero,
+            preserve_pct=preserve_pct,
+        )
+
+    def audit_cell_suppression(
+        self,
+        tables: dict[str, pd.DataFrame] | pd.DataFrame,
+        min_cell_count: int = 11,
+        mask_value: str | None = None,
+        count_cols: Sequence[str] | None = None,
+        suppress_zero: bool = False,
+        preserve_pct: bool = False,
+    ) -> "PrivacyAuditResult":
+        """Alias for audit_privacy."""
+        return self.audit_privacy(
+            tables=tables,
+            min_cell_count=min_cell_count,
+            mask_value=mask_value,
+            count_cols=count_cols,
+            suppress_zero=suppress_zero,
+            preserve_pct=preserve_pct,
+        )
+
     def close(self):
         """Closes the DuckDB connection handle."""
         if self.con is not None:
@@ -916,5 +959,238 @@ class ConsortiumScoreResult:
             f"{len(self._site_summary)} site(s)>\n"
             f"{self.summary().to_string()}"
         )
+
+
+class PrivacyAuditResult(dict):
+    """Container for privacy-audited consortium tables with cell suppression logs.
+
+    Subclasses dict so that clean_tables['table1'] or clean_tables.get('table1')
+    returns the masked, privacy-compliant DataFrame directly.
+    """
+
+    def __init__(
+        self,
+        tables: dict[str, pd.DataFrame],
+        violations: list[dict[str, Any]],
+        min_cell_count: int,
+        mask_value: str,
+        is_single_df: bool = False,
+    ):
+        super().__init__(tables)
+        self.tables = tables
+        self.violations = (
+            pd.DataFrame(violations)
+            if violations
+            else pd.DataFrame(
+                columns=["table", "row_index", "column", "original_value", "masked_value"]
+            )
+        )
+        self.min_cell_count = min_cell_count
+        self.mask_value = mask_value
+        self._is_single_df = is_single_df
+
+    @property
+    def violation_count(self) -> int:
+        return len(self.violations)
+
+    @property
+    def is_clean(self) -> bool:
+        return len(self.violations) == 0
+
+    def summary(self) -> pd.DataFrame:
+        """Emits a per-table summary of audited rows, columns, and small cell violations."""
+        rows = []
+        for tbl_name, df in self.tables.items():
+            tbl_v = (
+                self.violations[self.violations["table"] == tbl_name]
+                if not self.violations.empty
+                else pd.DataFrame()
+            )
+            rows.append({
+                "table": tbl_name,
+                "table_name": tbl_name,
+                "n_rows": len(df),
+                "n_columns": len(df.columns),
+                "suppressed_cells": len(tbl_v),
+                "violations": len(tbl_v),
+                "min_cell_count": self.min_cell_count,
+                "status": "CLEAN" if len(tbl_v) == 0 else f"SUPPRESSED_{len(tbl_v)}",
+            })
+        return pd.DataFrame(rows)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Returns the primary clean DataFrame if a single table was audited, or the violations table."""
+        if self._is_single_df and len(self.tables) == 1:
+            return next(iter(self.tables.values())).copy()
+        return self.violations.copy()
+
+    def __repr__(self) -> str:
+        return (
+            f"<PrivacyAuditResult: {len(self.tables)} table(s) audited, "
+            f"{len(self.violations)} small cell(s) suppressed (N < {self.min_cell_count})>\n"
+            f"{self.summary().to_string(index=False)}"
+        )
+
+
+def audit_cell_suppression(
+    tables: dict[str, pd.DataFrame] | pd.DataFrame,
+    min_cell_count: int = 11,
+    mask_value: str | None = None,
+    count_cols: Sequence[str] | None = None,
+    suppress_zero: bool = False,
+    preserve_pct: bool = False,
+    return_audit: bool = False,
+) -> Any:
+    """Scans and redacts small cell counts in consortium export tables for HIPAA/GDPR compliance.
+
+    Consortium governance and de-identification standards (HIPAA Safe Harbor, GDPR,
+    and CMS cell suppression policy) require that multi-site summary tables do not
+    display small cell counts (e.g. N < 11 or N < 20) that could re-identify individual patients.
+
+    Args:
+        tables: Single pandas DataFrame or dictionary of DataFrames (e.g. from generate_table1(),
+            generate_table2(), calculate_scores(), risk factor tables).
+        min_cell_count: Threshold below which patient counts are masked (default 11).
+        mask_value: String to replace small counts with (default: f"<{min_cell_count}").
+        count_cols: Explicit list of column names to scan. If None, automatically detects count
+            columns and formatted count cells (e.g. '5 (2.3%)', integer counts).
+        suppress_zero: Whether to suppress zero counts (default False, as 0 does not identify individuals).
+        preserve_pct: For cells formatted as 'N (pct%)', whether to preserve the percentage (e.g. '<11 (2.3%)').
+
+    Returns:
+        PrivacyAuditResult: Dictionary-like container holding sanitized DataFrames and violation audit logs.
+    """
+    if isinstance(tables, pd.DataFrame):
+        tables_dict = {"table": tables.copy()}
+        is_single_df = True
+    elif isinstance(tables, dict):
+        tables_dict = {k: (v.copy() if isinstance(v, pd.DataFrame) else pd.DataFrame(v)) for k, v in tables.items()}
+        is_single_df = False
+    else:
+        raise TypeError(f"tables must be a DataFrame or dict of DataFrames, got {type(tables).__name__}")
+
+    mask_str = mask_value if mask_value is not None else f"<{int(min_cell_count)}"
+    violations: list[dict[str, Any]] = []
+
+    skip_col_names = {
+        "p_value", "p_val", "smd", "mean", "sd", "median", "iqr", "hr", "shr",
+        "auc", "c_index", "brier", "ece", "mce", "threshold", "step", "variable",
+        "feature", "category", "site", "site_anon", "metric", "unit", "concept_id", "loinc",
+    }
+
+    count_keywords = ("count", "n_patients", "n_subjects", "_n", "subjects", "patients", "cases", "events", "num", "freq", "total", "high_risk", "readmitted", "deaths")
+
+    pct_cell_pattern = re.compile(r"^(\d+)\s*\(([\d\.]+%?)\)$")
+    int_cell_pattern = re.compile(r"^\s*(\d+)\s*$")
+    ratio_cell_pattern = re.compile(r"^(\d+)\s*/\s*(\d+)")
+
+    def should_suppress(n: int) -> bool:
+        if suppress_zero:
+            return 0 <= n < min_cell_count
+        return 1 <= n < min_cell_count
+
+    clean_tables: dict[str, pd.DataFrame] = {}
+
+    for tbl_name, df in tables_dict.items():
+        df_clean = df.copy()
+        for col in df_clean.columns:
+            col_lower = str(col).lower().strip()
+            if count_cols is not None:
+                is_target_col = col in count_cols
+            else:
+                if col_lower in skip_col_names or col_lower.endswith("_pct") or col_lower.endswith("_percent") or col_lower.endswith("_smd") or col_lower.endswith("_rate"):
+                    is_target_col = False
+                elif any(kw in col_lower for kw in count_keywords):
+                    is_target_col = True
+                else:
+                    # Generic column (e.g. Overall, Strata, No, Yes): inspect values
+                    is_target_col = True
+
+            if not is_target_col:
+                continue
+
+            # Iterate through column values
+            new_col_vals = []
+            col_modified = False
+            for row_idx, val in enumerate(df_clean[col]):
+                if pd.isna(val) or val is None:
+                    new_col_vals.append(val)
+                    continue
+
+                masked = False
+                new_val = val
+
+                # 1. Numeric types (int or float integer)
+                if isinstance(val, (int, np.integer)):
+                    n_val = int(val)
+                    if should_suppress(n_val):
+                        new_val = mask_str
+                        masked = True
+                elif isinstance(val, (float, np.floating)) and val.is_integer() and (count_cols is not None or any(kw in col_lower for kw in count_keywords)):
+                    n_val = int(val)
+                    if should_suppress(n_val):
+                        new_val = mask_str
+                        masked = True
+                # 2. String representations
+                elif isinstance(val, str):
+                    val_str = val.strip()
+                    m_pct = pct_cell_pattern.match(val_str)
+                    m_int = int_cell_pattern.match(val_str)
+                    m_ratio = ratio_cell_pattern.match(val_str)
+
+                    if m_pct:
+                        n_val = int(m_pct.group(1))
+                        if should_suppress(n_val):
+                            pct_str = m_pct.group(2)
+                            new_val = f"{mask_str} ({pct_str})" if preserve_pct else mask_str
+                            masked = True
+                    elif m_int and (count_cols is not None or any(kw in col_lower for kw in count_keywords) or (row_idx == 0 and "total" in str(df_clean.iloc[row_idx, 0]).lower())):
+                        n_val = int(m_int.group(1))
+                        if should_suppress(n_val):
+                            new_val = mask_str
+                            masked = True
+                    elif m_ratio:
+                        n_val = int(m_ratio.group(1))
+                        if should_suppress(n_val):
+                            new_val = mask_str
+                            masked = True
+
+                if masked:
+                    col_modified = True
+                    violations.append({
+                        "table": tbl_name,
+                        "row_index": row_idx,
+                        "column": col,
+                        "original_value": val,
+                        "masked_value": new_val,
+                    })
+
+                new_col_vals.append(new_val)
+
+            if col_modified:
+                df_clean[col] = new_col_vals
+
+        clean_tables[tbl_name] = df_clean
+
+    result = PrivacyAuditResult(
+        tables=clean_tables,
+        violations=violations,
+        min_cell_count=min_cell_count,
+        mask_value=mask_str,
+        is_single_df=is_single_df,
+    )
+
+    if is_single_df and not return_audit:
+        single_df = clean_tables["table"]
+        single_df.attrs["suppressed_cell_count"] = len(violations)
+        single_df.attrs["min_cell_count"] = min_cell_count
+        single_df.attrs["is_clean"] = len(violations) == 0
+        return single_df
+
+    return result
+
+
+consortium_privacy_audit = audit_cell_suppression
+
 
 

@@ -153,8 +153,20 @@ table1_generator <- function(db_path = NULL, con = NULL, read_only = TRUE, bound
     df <- extract(cohort_table, lab_strategy, med_window)
     st$features <- df
     cat_vars <- c(grep("^(rx_|dx_)", names(df), value = TRUE), extra_categorical)
-    generate_table1(df, strata_col = stratify_by, continuous_vars = c(names(st$labs), extra_continuous),
-                    categorical_vars = cat_vars, ...)
+    res <- generate_table1(df, strata_col = stratify_by, continuous_vars = c(names(st$labs), extra_continuous),
+                           categorical_vars = cat_vars, ...)
+    st$last_result <- res
+    res
+  }
+  to_quarto <- function(table1_data = NULL, ...) {
+    tbl <- if (!is.null(table1_data)) table1_data else st$last_result
+    if (is.null(tbl)) stop("Call $generate() or pass table1_data before $to_quarto().", call. = FALSE)
+    table1_to_quarto(tbl, loinc_map = st$labs, ...)
+  }
+  to_typst <- function(table1_data = NULL, ...) {
+    tbl <- if (!is.null(table1_data)) table1_data else st$last_result
+    if (is.null(tbl)) stop("Call $generate() or pass table1_data before $to_typst().", call. = FALSE)
+    table1_to_typst(tbl, loinc_map = st$labs, ...)
   }
   self$add_domain_profile <- add_domain_profile
   self$add_custom_lab <- add_custom_lab
@@ -162,8 +174,16 @@ table1_generator <- function(db_path = NULL, con = NULL, read_only = TRUE, bound
   self$add_custom_condition <- add_custom_condition
   self$extract <- extract
   self$generate <- generate
+  self$to_quarto <- to_quarto
+  self$to_typst <- to_typst
   self$state <- st
   self$close <- function() if (owns) DBI::dbDisconnect(con, shutdown = TRUE)
   class(self) <- "table1_generator"
   self
 }
+
+#' @export
+to_typst.table1_result <- function(x, ...) {
+  table1_to_typst(x, ...)
+}
+

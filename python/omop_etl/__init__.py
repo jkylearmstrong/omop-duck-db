@@ -67,6 +67,7 @@ from omop_etl.medication_classes import (
     extract_medication_transitions,
 )
 from omop_etl.table1_profiles import DOMAIN_PROFILES, Table1Generator
+from omop_etl.table1 import generate_table1, export_table1, table1_to_quarto, table1_to_typst
 from omop_etl.cohort_flow import CohortFlow, Table2Generator, as_plp_arrow
 from omop_etl.risk_scores import (
     calculate_bedside_scores,
@@ -150,13 +151,18 @@ from omop_etl.federation import (
     federated_meta_analysis,
     with_cell_suppression,
     with_differential_privacy,
+    PrivacyAuditResult,
+    audit_cell_suppression,
+    consortium_privacy_audit,
 )
 from omop_etl.ml import (
     CohortExtractor,
     ConsortiumCalibration,
+    ConsortiumExplainability,
     DecisionCurveAnalysis,
     FeatureMatrixBuilder,
     consortium_calibration,
+    consortium_explainability,
     decision_curve_analysis,
 )
 from omop_etl.ml_features import (
@@ -226,6 +232,7 @@ __all__ = [
     "MedicationTransitions", "extract_medication_transitions",
     "calculate_lace_index", "calculate_hospital_score",
     "DOMAIN_PROFILES", "Table1Generator", "CohortFlow", "Table2Generator", "as_plp_arrow",
+    "generate_table1", "export_table1", "table1_to_quarto", "table1_to_typst",
     "ACUTE_LAB_PANEL",
     "extract_inpatient_labs",
     "extract_prior_utilization",
@@ -238,6 +245,9 @@ __all__ = [
     "FederatedConsortium",
     "with_cell_suppression",
     "with_differential_privacy",
+    "PrivacyAuditResult",
+    "audit_cell_suppression",
+    "consortium_privacy_audit",
     "check_cross_database_discrepancy",
     "etl_pcornet",
     "load_care_site",
@@ -383,6 +393,8 @@ __all__ = [
     "ConsortiumScoreResult",
     "ConsortiumCalibration",
     "consortium_calibration",
+    "ConsortiumExplainability",
+    "consortium_explainability",
     "DecisionCurveAnalysis",
     "decision_curve_analysis",
     "CIFResult",

@@ -860,3 +860,17 @@ def decision_curve_analysis(
 
     return DecisionCurveAnalysis(net_benefit=nb_df, summary_stats=summary_stats)
 
+
+# ---------------------------------------------------------------------------
+# Re-export Explainability
+# ---------------------------------------------------------------------------
+import sys
+from omop_etl.explainability import (
+    ConsortiumExplainability,
+    consortium_explainability,
+)
+import omop_etl.explainability as explainability
+
+sys.modules["omop_etl.ml.explainability"] = explainability
+
+

@@ -3,9 +3,11 @@
 from omop_etl.ml import (
     CohortExtractor,
     ConsortiumCalibration,
+    ConsortiumExplainability,
     DecisionCurveAnalysis,
     FeatureMatrixBuilder,
     consortium_calibration,
+    consortium_explainability,
     decision_curve_analysis,
 )
 
@@ -14,6 +16,9 @@ __all__ = [
     "FeatureMatrixBuilder",
     "ConsortiumCalibration",
     "consortium_calibration",
+    "ConsortiumExplainability",
+    "consortium_explainability",
     "DecisionCurveAnalysis",
     "decision_curve_analysis",
 ]
+
