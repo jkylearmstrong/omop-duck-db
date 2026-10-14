@@ -129,6 +129,20 @@ from omop_etl.reconciliation import (
     cohort_overlap,
     run_study_grid,
 )
+from omop_etl.integrity import (
+    leakage_scan,
+    add_missing_indicators,
+    missingness_by_outcome,
+    provenance,
+    check_vocabulary_provenance,
+    numbers_of_record,
+    scan_document_numbers,
+    vocabulary_preflight,
+    generate_site_patient_tokens,
+    consortium_patient_overlap,
+    planned_readmission_filter,
+    observation_period_diagnostics,
+)
 from omop_etl.phenotype_dsl import (
     ConditionCriteria,
     DrugCriteria,
@@ -455,6 +469,20 @@ __all__ = [
     "compare_feature_tables",
     "cohort_overlap",
     "run_study_grid",
+    # Integrity, Leakage, Missingness & Provenance Additions
+    "leakage_scan",
+    "add_missing_indicators",
+    "missingness_by_outcome",
+    "provenance",
+    "check_vocabulary_provenance",
+    "numbers_of_record",
+    "scan_document_numbers",
+    "vocabulary_preflight",
+    "generate_site_patient_tokens",
+    "consortium_patient_overlap",
+    "planned_readmission_filter",
+    "observation_period_diagnostics",
 ]
 
-__version__ = "0.6.3"
+__version__ = "0.6.4b"
+

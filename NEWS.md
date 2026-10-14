@@ -47,7 +47,30 @@ Release 0.6.4b introduces production medication classification guards, explainab
   - Executes study definitions across parameter grids (e.g. sampling rules, lookback windows, wash-in periods).
   - Emits side-by-side N, event counts, and event rates overall and stratified by site.
 
+### 4. Data Integrity, Statistical Leakage, Informative Missingness, and Provenance
+- **Statistical Leakage Scan (`leakage_scan`)**:
+  - Flags features with perfect or near-perfect stratum separation, single-feature AUC $\ge 0.98$, pure 0/1 outcome rates in non-trivial strata, and temporal sequence violations where data occurs after index date.
+- **Informative Missingness Helpers (`add_missing_indicators`, `missingness_by_outcome`)**:
+  - Adds binary missingness indicator columns (`miss_<col>`) and evaluates missingness proportions stratified by outcome ($p_1$ vs. $p_0$).
+  - Evaluates missingness gaps and preserves explicit fill-rule metadata across consortium summaries.
+- **System Provenance Stamp (`provenance`, `check_vocabulary_provenance`)**:
+  - Captures library version, DuckDB version, active vocabulary releases per `vocabulary_id`, random seed, and git commit SHA.
+  - Compares vocabulary provenance between databases to prevent silent version drift across network sites.
+- **Numbers-of-Record Manifest & Stale-Number Scanner (`numbers_of_record`, `scan_document_numbers`)**:
+  - Generates authoritative JSON manifests of cohort sample sizes and outcome event counts.
+  - Scans rendered manuscripts (Markdown, Quarto, LaTeX) to detect stale figures left over from older cohort runs or unverified numbers.
+- **Vocabulary & Input Preflight Verification (`vocabulary_preflight`)**:
+  - Verifies presence of required vocabularies, ATC descendant coverage in `concept_ancestor`, and unmapped concept 0 rates across clinical tables with fast-fail safety guards.
+- **Privacy-Preserving Cross-Site Overlap (`generate_site_patient_tokens`, `consortium_patient_overlap`)**:
+  - Locally computes HMAC-SHA256 salted patient tokens without exposing raw IDs.
+  - Computes pairwise cross-site overlap with automated HIPAA/GDPR small-cell suppression ($<11$).
+- **CMS Planned-Readmission Filter (`planned_readmission_filter`)**:
+  - Identifies and excludes planned maintenance chemotherapy, transplants, and elective procedures from readmission outcomes, reporting removal tallies by site.
+- **Observation Period Diagnostics (`observation_period_diagnostics`)**:
+  - Compares patient qualification under constructed `observation_period` vs. first-observed clinical events to assess wash-in validity.
+
 # omopduckdb 0.6.3
+
 
 
 Release 0.6.3 delivers forward-looking consortium intelligence capabilities for federated clinical research, bridging OHDSI network standards and modern medical publishing with complete 1:1 parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
