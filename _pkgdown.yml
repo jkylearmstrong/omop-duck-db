@@ -31,6 +31,12 @@ reference:
 - title: Multi-site Consortium Federation
   desc: Federated CDM queries and multi-site metadata initialization.
   contents:
+  - federated_consortium
+  - consortium_query
+  - consortium_site_summaries
+  - consortium_generate_table1
+  - consortium_generate_table2
+  - consortium_close
   - create_federated_consortium
   - check_cross_database_discrepancy
   - with_cell_suppression
@@ -83,6 +89,9 @@ reference:
   - extract_elixhauser_comorbidities
   - extract_charlson_index
   - calculate_bedside_scores
+  - calculate_lace_index
+  - calculate_hospital_score
+  - scores
   - list_available_phenotypes
   - get_phenotype_concept_set
   - phenotypes
@@ -165,6 +174,8 @@ reference:
   desc: Dual-strategy (source crosswalk vs OMOP hierarchy) medication classification with a per-site kappa auditor, and a composable phenotype cohort DSL compiled to single-pass SQL.
   contents:
   - extract_medication_classes
+  - extract_medication_transitions
+  - medication_transitions
   - audit_medication_strategies
   - phenotype_criteria
   - everyone
@@ -176,10 +187,12 @@ reference:
   desc: Physiologic bounding and unit harmonization, clinical domain profiles for Table 1, medication windows, CONSORT cohort flow, completeness profiling and the Arrow hand-off to PatientLevelPrediction.
   contents:
   - DEFAULT_PHYSIOLOGIC_BOUNDS
+  - POPULATION_PHYSIOLOGIC_BOUNDS
   - DEFAULT_UNIT_RULES
   - resolve_bounds
   - filter_bounds
   - harmonize_measurement_units
+  - harmonize_anthropometrics
   - medication_extractor
   - domain_profiles
   - domain_profile_names
