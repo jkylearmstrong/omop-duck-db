@@ -726,6 +726,7 @@ print.consortium_scores <- function(x, ...) {
 #' @param count_cols Optional character vector of specific count columns to redact.
 #' @param suppress_zero Logical; whether to suppress zero counts (default `FALSE`).
 #' @param preserve_pct Logical; whether to preserve the percentage in formatted cells like `"5 (2.3%)"` (default `FALSE`).
+#' @param return_audit Logical; whether to return the full privacy audit result object instead of the cleaned data frame when a single table is passed (default `FALSE`).
 #'
 #' @return An S3 object of class `consortium_privacy_audit` containing `$tables` (sanitized tables),
 #'   `$violations` (data.frame of redacted cells), `$violation_count`, and `$summary`.

@@ -2,13 +2,14 @@
 % Please edit documentation in R/table1.R
 \name{export_table1}
 \alias{export_table1}
-\title{Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, or CSV}
+\title{Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, Typst, or CSV}
 \usage{
 export_table1(
   table1_result,
   output_path = NULL,
   format = "markdown",
-  which_table = "table1"
+  which_table = "table1",
+  ...
 )
 }
 \arguments{
@@ -16,13 +17,15 @@ export_table1(
 
 \item{output_path}{Optional file path to write output.}
 
-\item{format}{Output format (\code{"markdown"}, \code{"latex"}, \code{"quarto"}, \code{"csv"}).}
+\item{format}{Output format (\code{"markdown"}, \code{"latex"}, \code{"quarto"}, \code{"typst"}, \code{"csv"}).}
 
 \item{which_table}{Name of table to export (\code{"table1"} or \code{"table1b"}).}
+
+\item{...}{Additional arguments passed to \code{table1_to_quarto} or \code{table1_to_typst} (e.g. caption, label, loinc_footnotes).}
 }
 \value{
 Formatted character string.
 }
 \description{
-Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, or CSV
+Export Table 1 or Table 1b to Markdown, LaTeX, Quarto, Typst, or CSV
 }

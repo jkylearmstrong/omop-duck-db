@@ -11,7 +11,9 @@ table1_to_quarto(
   caption = NULL,
   label = NULL,
   include_loinc_footnotes = TRUE,
-  loinc_map = NULL
+  loinc_map = NULL,
+  loinc_footnotes = NULL,
+  ...
 )
 }
 \arguments{
@@ -28,6 +30,10 @@ table1_to_quarto(
 \item{include_loinc_footnotes}{Logical; whether to generate superscript LOINC code footnotes (default \code{TRUE}).}
 
 \item{loinc_map}{Optional named list of LOINC codes by variable name.}
+
+\item{loinc_footnotes}{Optional named list or vector of LOINC codes or footnotes.}
+
+\item{...}{Additional arguments.}
 }
 \value{
 Formatted Quarto manuscript character string.

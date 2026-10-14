@@ -11,7 +11,8 @@ audit_cell_suppression(
   mask_value = NULL,
   count_cols = NULL,
   suppress_zero = FALSE,
-  preserve_pct = FALSE
+  preserve_pct = FALSE,
+  return_audit = FALSE
 )
 
 consortium_privacy_audit(
@@ -20,7 +21,8 @@ consortium_privacy_audit(
   mask_value = NULL,
   count_cols = NULL,
   suppress_zero = FALSE,
-  preserve_pct = FALSE
+  preserve_pct = FALSE,
+  return_audit = FALSE
 )
 }
 \arguments{
@@ -35,6 +37,8 @@ consortium_privacy_audit(
 \item{suppress_zero}{Logical; whether to suppress zero counts (default \code{FALSE}).}
 
 \item{preserve_pct}{Logical; whether to preserve the percentage in formatted cells like \code{"5 (2.3\%)"} (default \code{FALSE}).}
+
+\item{return_audit}{Logical; whether to return the full privacy audit result object instead of the cleaned data frame when a single table is passed (default \code{FALSE}).}
 }
 \value{
 An S3 object of class \code{consortium_privacy_audit} containing \verb{$tables} (sanitized tables),

@@ -9,9 +9,12 @@ table1_to_typst(
   output_path = NULL,
   which_table = "table1",
   caption = NULL,
+  label = NULL,
   include_loinc_footnotes = TRUE,
   loinc_map = NULL,
-  font_size = "9pt"
+  loinc_footnotes = NULL,
+  font_size = "9pt",
+  ...
 )
 }
 \arguments{
@@ -23,11 +26,17 @@ table1_to_typst(
 
 \item{caption}{Table caption (default: \code{"Baseline Demographic and Clinical Characteristics"}).}
 
+\item{label}{Typst figure label (e.g. \code{"tbl-baseline"}).}
+
 \item{include_loinc_footnotes}{Logical; whether to generate superscript LOINC code footnotes (default \code{TRUE}).}
 
 \item{loinc_map}{Optional named list of LOINC codes by variable name.}
 
+\item{loinc_footnotes}{Optional named list or vector of LOINC codes or footnotes.}
+
 \item{font_size}{Font size for table content (default: \code{"9pt"}).}
+
+\item{...}{Additional arguments.}
 }
 \value{
 Formatted Typst character string.
