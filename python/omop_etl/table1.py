@@ -672,6 +672,8 @@ def table1_to_quarto(
     loinc_map: dict[str, list[str]] | None = None,
     loinc_footnotes: dict[str, Any] | None = None,
     footnotes: dict[str, Any] | None = None,
+    provenance_notes: dict[str, dict[str, Any]] | None = None,
+    include_provenance_footnotes: bool = True,
 ) -> str:
     """Format Table 1 into publication-grade Quarto manuscript format.
 
@@ -688,6 +690,8 @@ def table1_to_quarto(
         loinc_map: Optional mapping of variable names to LOINC codes (default: DEFAULT_LAB_LOINCS).
         loinc_footnotes: Custom mapping of variable names to LOINC codes or footnotes.
         footnotes: Additional footnote mappings.
+        provenance_notes: Optional dictionary mapping variables to provenance dicts (window, anchor, bounds, units, fill_rule, concept_set).
+        include_provenance_footnotes: Whether to render row-level provenance footnotes (default True if notes supplied).
 
     Returns:
         str: Formatted Quarto manuscript markdown string.
@@ -716,7 +720,9 @@ def table1_to_quarto(
 
     var_col = df.columns[0]
     letters = "abcdefghijklmnopqrstuvwxyz"
-    loinc_footnotes: list[tuple[str, str]] = []
+    rendered_footnotes: list[tuple[str, str]] = []
+
+    prov = provenance_notes or {}
 
     for col in df.columns:
         new_vals = []
@@ -728,7 +734,7 @@ def table1_to_quarto(
             s_val = re.sub(r"\s*\+/-\s*", r" $\\pm$ ", s_val)
             s_val = re.sub(r"\[\s*([\d\.\-]+)\s*,\s*([\d\.\-]+)\s*\]", r"[IQR: \1, \2]", s_val)
 
-            if col == var_col and include_loinc_footnotes and s_val:
+            if col == var_col and s_val:
                 norm_v = re.sub(r"[^a-z0-9_]", "", s_val.lower())
                 matched_key = None
                 for lk in active_loincs:
@@ -736,10 +742,31 @@ def table1_to_quarto(
                     if norm_k and (norm_v == norm_k or norm_k in norm_v or norm_v in norm_k):
                         matched_key = lk
                         break
-                if matched_key and active_loincs[matched_key]:
-                    sym = letters[len(loinc_footnotes) % len(letters)]
+                
+                # Check provenance notes first if available
+                prov_meta = None
+                for pk, pdata in prov.items():
+                    norm_p = re.sub(r"[^a-z0-9_]", "", str(pk).lower())
+                    if norm_p and (norm_v == norm_p or norm_p in norm_v or norm_v in norm_p):
+                        prov_meta = pdata
+                        break
+
+                if prov_meta and include_provenance_footnotes:
+                    sym = letters[len(rendered_footnotes) % len(letters)]
+                    desc_parts = []
+                    if "window" in prov_meta: desc_parts.append(f"window={prov_meta['window']}")
+                    if "anchor" in prov_meta: desc_parts.append(f"anchor={prov_meta['anchor']}")
+                    if "bounds" in prov_meta: desc_parts.append(f"bounds={prov_meta['bounds']}")
+                    if "units" in prov_meta: desc_parts.append(f"units={prov_meta['units']}")
+                    if "fill_rule" in prov_meta: desc_parts.append(f"fill={prov_meta['fill_rule']}")
+                    if "concept_set" in prov_meta: desc_parts.append(f"concept_set={prov_meta['concept_set']}")
+                    note_txt = ", ".join(desc_parts) if desc_parts else "provenance documented"
+                    rendered_footnotes.append((sym, note_txt))
+                    s_val = f"{s_val}^{sym}"
+                elif include_loinc_footnotes and matched_key and active_loincs[matched_key]:
+                    sym = letters[len(rendered_footnotes) % len(letters)]
                     codes_str = ", ".join(str(c) for c in active_loincs[matched_key])
-                    loinc_footnotes.append((sym, f"LOINC {codes_str}"))
+                    rendered_footnotes.append((sym, f"LOINC {codes_str}"))
                     s_val = f"{s_val}^{sym}"
 
             new_vals.append(s_val)
@@ -759,8 +786,8 @@ def table1_to_quarto(
     table_body = "\n".join([header_row, divider_row] + data_rows)
 
     footnote_lines = []
-    if loinc_footnotes:
-        fn_parts = [f"^{sym} {txt}" for sym, txt in loinc_footnotes]
+    if rendered_footnotes:
+        fn_parts = [f"^{sym} {txt}" for sym, txt in rendered_footnotes]
         footnote_lines.append("; ".join(fn_parts) + ".")
     footnote_lines.append("*Note:* Continuous variables expressed as Mean $\\pm$ SD or Median [IQR]; categorical variables as N (%). SMD = Standardized Mean Difference.")
 
@@ -789,6 +816,8 @@ def table1_to_typst(
     loinc_footnotes: dict[str, Any] | None = None,
     footnotes: dict[str, Any] | None = None,
     font_size: str = "9pt",
+    provenance_notes: dict[str, dict[str, Any]] | None = None,
+    include_provenance_footnotes: bool = True,
 ) -> str:
     """Format Table 1 into native Typst manuscript table syntax.
 
@@ -806,6 +835,8 @@ def table1_to_typst(
         loinc_footnotes: Custom mapping of variable names to LOINC codes or footnotes.
         footnotes: Additional footnote mappings.
         font_size: Font size for table content (default: '9pt').
+        provenance_notes: Optional dictionary mapping variables to provenance metadata.
+        include_provenance_footnotes: Whether to render row-level provenance footnotes (default True).
 
     Returns:
         str: Native Typst markup string.
@@ -834,7 +865,9 @@ def table1_to_typst(
 
     var_col = df.columns[0]
     letters = "abcdefghijklmnopqrstuvwxyz"
-    loinc_footnotes: list[tuple[str, str]] = []
+    rendered_footnotes: list[tuple[str, str]] = []
+
+    prov = provenance_notes or {}
 
     def typst_escape(text: str) -> str:
         s = str(text).replace("\\", "\\\\").replace('"', '\\"').replace("[", "\\[").replace("]", "\\]")
@@ -884,7 +917,7 @@ def table1_to_typst(
             s_val = re.sub(r"\s*\+/-\s*", " \u00b1 ", s_val)
             s_val = re.sub(r"\[\s*([\d\.\-]+)\s*,\s*([\d\.\-]+)\s*\]", r"[IQR: \1, \2]", s_val)
 
-            if c_idx == 0 and include_loinc_footnotes and s_val:
+            if c_idx == 0 and s_val:
                 norm_v = re.sub(r"[^a-z0-9_]", "", s_val.lower())
                 matched_key = None
                 for lk in active_loincs:
@@ -892,10 +925,30 @@ def table1_to_typst(
                     if norm_k and (norm_v == norm_k or norm_k in norm_v or norm_v in norm_k):
                         matched_key = lk
                         break
-                if matched_key and active_loincs[matched_key]:
-                    sym = letters[len(loinc_footnotes) % len(letters)]
+
+                prov_meta = None
+                for pk, pdata in prov.items():
+                    norm_p = re.sub(r"[^a-z0-9_]", "", str(pk).lower())
+                    if norm_p and (norm_v == norm_p or norm_p in norm_v or norm_v in norm_p):
+                        prov_meta = pdata
+                        break
+
+                if prov_meta and include_provenance_footnotes:
+                    sym = letters[len(rendered_footnotes) % len(letters)]
+                    desc_parts = []
+                    if "window" in prov_meta: desc_parts.append(f"window={prov_meta['window']}")
+                    if "anchor" in prov_meta: desc_parts.append(f"anchor={prov_meta['anchor']}")
+                    if "bounds" in prov_meta: desc_parts.append(f"bounds={prov_meta['bounds']}")
+                    if "units" in prov_meta: desc_parts.append(f"units={prov_meta['units']}")
+                    if "fill_rule" in prov_meta: desc_parts.append(f"fill={prov_meta['fill_rule']}")
+                    if "concept_set" in prov_meta: desc_parts.append(f"concept_set={prov_meta['concept_set']}")
+                    note_txt = ", ".join(desc_parts) if desc_parts else "provenance documented"
+                    rendered_footnotes.append((sym, note_txt))
+                    cell_content = f"[{typst_escape(s_val)}#super[{sym}]]"
+                elif include_loinc_footnotes and matched_key and active_loincs[matched_key]:
+                    sym = letters[len(rendered_footnotes) % len(letters)]
                     codes_str = ", ".join(str(c) for c in active_loincs[matched_key])
-                    loinc_footnotes.append((sym, f"LOINC {codes_str}"))
+                    rendered_footnotes.append((sym, f"LOINC {codes_str}"))
                     cell_content = f"[{typst_escape(s_val)}#super[{sym}]]"
                 else:
                     cell_content = f"[{typst_escape(s_val)}]"
@@ -915,8 +968,8 @@ def table1_to_typst(
 
     lines.append("#v(3pt)")
     lines.append('#text(8pt, fill: rgb("555555"))[')
-    if loinc_footnotes:
-        fn_parts = [f"#super[{sym}] {typst_escape(txt)}" for sym, txt in loinc_footnotes]
+    if rendered_footnotes:
+        fn_parts = [f"#super[{sym}] {typst_escape(txt)}" for sym, txt in rendered_footnotes]
         lines.append(f"  {'; '.join(fn_parts)}\\ ")
     lines.append("  _Note:_ Values expressed as Mean \u00b1 SD, Median [IQR], or N (%). SMD = Standardized Mean Difference.")
     lines.append("]")

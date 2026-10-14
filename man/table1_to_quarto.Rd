@@ -13,6 +13,8 @@ table1_to_quarto(
   include_loinc_footnotes = TRUE,
   loinc_map = NULL,
   loinc_footnotes = NULL,
+  provenance_notes = NULL,
+  include_provenance_footnotes = TRUE,
   ...
 )
 }

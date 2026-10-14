@@ -237,6 +237,9 @@ from omop_etl.phenotypes import (
 from omop_etl.propensity import (
     PropensityResult,
     generate_propensity_weights,
+    consortium_propensity_score,
+    match_nearest_neighbor,
+    plot_love_plot,
 )
 from omop_etl.survival import (
     CIFResult,
@@ -377,6 +380,9 @@ __all__ = [
     "list_available_phenotypes",
     # Propensity & IPTW Weighting
     "generate_propensity_weights",
+    "consortium_propensity_score",
+    "match_nearest_neighbor",
+    "plot_love_plot",
     "PropensityResult",
     # Survival & Competing Risks CIF
     "estimate_km_survival",

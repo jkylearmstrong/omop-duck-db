@@ -136,6 +136,8 @@ attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
 .TYPE_CONCEPT_EHR_PROCEDURE <- 32817
 .TYPE_CONCEPT_EHR_MEASUREMENT <- 32817
 .TYPE_CONCEPT_EHR_DRUG <- 32838
+.TYPE_CONCEPT_MED_ADMIN <- 38000180
+.TYPE_CONCEPT_DISPENSING <- 38000175
 .TYPE_CONCEPT_EHR_DEATH <- 32815
 .TYPE_CONCEPT_PRIMARY_DX <- 44786627 # "Primary admission diagnosis"
 
@@ -913,79 +915,225 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
 }
 
 .load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
-  path <- find_source_file(source_dir, "prescribing")
-  if (is.null(path)) {
-    cat("Skipping DRUG_EXPOSURE - no prescribing.csv found\n")
-    return(invisible(NULL))
-  }
-  prepare_source_view(
-    con, "_temp_prescribing", path,
-    c("PRESCRIBINGID", "PATID", "RXNORM_CUI", "RX_START_DATE", "RX_END_DATE",
-      "RAW_RX_MED_NAME", "RAW_RX_NDC", "PROVIDERID", "ENCOUNTERID")
-  )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+  loaded_any <- FALSE
 
-  run_insert(con, "DRUG_EXPOSURE (from PRESCRIBING)", sprintf("
-    INSERT INTO drug_exposure
-    SELECT
-        ROW_NUMBER() OVER (ORDER BY src.PRESCRIBINGID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
-        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
-        COALESCE(
-            stcm.target_concept_id,
-            cr.concept_id_2,
-            CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
-            0
-        ) AS drug_concept_id,
-        parse_omop_date(src.RX_START_DATE) AS drug_exposure_start_date,
-        parse_omop_datetime(src.RX_START_DATE, NULL) AS drug_exposure_start_datetime,
-        COALESCE(parse_omop_date(src.RX_END_DATE), parse_omop_date(src.RX_START_DATE)) AS drug_exposure_end_date,
-        parse_omop_datetime(src.RX_END_DATE, NULL) AS drug_exposure_end_datetime,
-        NULL AS verbatim_end_date,
-        %d AS drug_type_concept_id,
-        NULL AS stop_reason,
-        NULL AS refills,
-        NULL AS quantity,
-        NULL AS days_supply,
-        NULL AS sig,
-        0 AS route_concept_id,
-        NULL AS lot_number,
-        COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
-        COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
-        NULL AS visit_detail_id,
-        COALESCE(src.RXNORM_CUI, src.RAW_RX_NDC, src.RAW_RX_MED_NAME) AS drug_source_value,
-        COALESCE(c.concept_id, 0) AS drug_source_concept_id,
-        NULL AS route_source_value,
-        NULL AS dose_unit_source_value
-    FROM _temp_prescribing src
-    LEFT JOIN person p
-      ON p.person_source_value = %s
-    LEFT JOIN provider pr
-      ON pr.provider_source_value = src.PROVIDERID
-    LEFT JOIN visit_occurrence vo
-      ON vo.visit_source_value = src.ENCOUNTERID
-    LEFT JOIN concept c
-      ON c.vocabulary_id = 'RxNorm'
-     AND c.concept_code = src.RXNORM_CUI
-    LEFT JOIN (
-        SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
-        FROM concept_relationship
-        WHERE relationship_id = 'Maps to'
-        GROUP BY concept_id_1
-    ) cr
-      ON cr.concept_id_1 = c.concept_id
-    LEFT JOIN (
-        SELECT source_code, MIN(target_concept_id) AS target_concept_id
-        FROM source_to_concept_map
-        WHERE source_vocabulary_id = 'RxNorm'
-          AND (invalid_reason IS NULL OR invalid_reason = '')
-          AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
-        GROUP BY source_code
-    ) stcm
-      ON stcm.source_code = src.RXNORM_CUI
-    WHERE src.PRESCRIBINGID IS NOT NULL
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PRESCRIBINGID) = 1;
-  ", patid_expr, .TYPE_CONCEPT_EHR_DRUG, patid_expr, .today_iso()))
-  DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_prescribing;")
+  # 1. PRESCRIBING
+  path_rx <- find_source_file(source_dir, "prescribing")
+  if (!is.null(path_rx)) {
+    loaded_any <- TRUE
+    prepare_source_view(
+      con, "_temp_prescribing", path_rx,
+      c("PRESCRIBINGID", "PATID", "RXNORM_CUI", "RX_START_DATE", "RX_END_DATE",
+        "RAW_RX_MED_NAME", "RAW_RX_NDC", "PROVIDERID", "ENCOUNTERID")
+    )
+    run_insert(con, "DRUG_EXPOSURE (from PRESCRIBING)", sprintf("
+      INSERT INTO drug_exposure
+      SELECT
+          ROW_NUMBER() OVER (ORDER BY src.PRESCRIBINGID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
+          COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
+          COALESCE(
+              stcm.target_concept_id,
+              cr.concept_id_2,
+              CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+              0
+          ) AS drug_concept_id,
+          parse_omop_date(src.RX_START_DATE) AS drug_exposure_start_date,
+          parse_omop_datetime(src.RX_START_DATE, NULL) AS drug_exposure_start_datetime,
+          COALESCE(parse_omop_date(src.RX_END_DATE), parse_omop_date(src.RX_START_DATE)) AS drug_exposure_end_date,
+          parse_omop_datetime(src.RX_END_DATE, NULL) AS drug_exposure_end_datetime,
+          NULL AS verbatim_end_date,
+          %d AS drug_type_concept_id,
+          NULL AS stop_reason,
+          NULL AS refills,
+          NULL AS quantity,
+          NULL AS days_supply,
+          NULL AS sig,
+          0 AS route_concept_id,
+          NULL AS lot_number,
+          COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
+          COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
+          NULL AS visit_detail_id,
+          COALESCE(src.RXNORM_CUI, src.RAW_RX_NDC, src.RAW_RX_MED_NAME) AS drug_source_value,
+          COALESCE(c.concept_id, 0) AS drug_source_concept_id,
+          NULL AS route_source_value,
+          NULL AS dose_unit_source_value
+      FROM _temp_prescribing src
+      LEFT JOIN person p
+        ON p.person_source_value = %s
+      LEFT JOIN provider pr
+        ON pr.provider_source_value = src.PROVIDERID
+      LEFT JOIN visit_occurrence vo
+        ON vo.visit_source_value = src.ENCOUNTERID
+      LEFT JOIN concept c
+        ON c.vocabulary_id = 'RxNorm'
+       AND c.concept_code = src.RXNORM_CUI
+      LEFT JOIN (
+          SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
+          FROM concept_relationship
+          WHERE relationship_id = 'Maps to'
+          GROUP BY concept_id_1
+      ) cr
+        ON cr.concept_id_1 = c.concept_id
+      LEFT JOIN (
+          SELECT source_code, MIN(target_concept_id) AS target_concept_id
+          FROM source_to_concept_map
+          WHERE source_vocabulary_id = 'RxNorm'
+            AND (invalid_reason IS NULL OR invalid_reason = '')
+            AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
+          GROUP BY source_code
+      ) stcm
+        ON stcm.source_code = src.RXNORM_CUI
+      WHERE src.PRESCRIBINGID IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PRESCRIBINGID) = 1;
+    ", patid_expr, .TYPE_CONCEPT_EHR_DRUG, patid_expr, .today_iso()))
+    DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_prescribing;")
+  }
+
+  # 2. MED_ADMIN
+  path_admin <- find_source_file(source_dir, "med_admin")
+  if (!is.null(path_admin)) {
+    loaded_any <- TRUE
+    prepare_source_view(
+      con, "_temp_med_admin", path_admin,
+      c("MEDADMINID", "PATID", "ENCOUNTERID", "MEDADMIN_CODE", "MEDADMIN_START_DATE",
+        "MEDADMIN_START_TIME", "MEDADMIN_STOP_DATE", "RAW_MEDADMIN_MED_NAME",
+        "RAW_RX_NDC", "PROVIDERID")
+    )
+    run_insert(con, "DRUG_EXPOSURE (from MED_ADMIN)", sprintf("
+      INSERT INTO drug_exposure
+      SELECT
+          ROW_NUMBER() OVER (ORDER BY src.MEDADMINID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
+          COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
+          COALESCE(
+              stcm.target_concept_id,
+              cr.concept_id_2,
+              CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+              0
+          ) AS drug_concept_id,
+          parse_omop_date(src.MEDADMIN_START_DATE) AS drug_exposure_start_date,
+          parse_omop_datetime(src.MEDADMIN_START_DATE, src.MEDADMIN_START_TIME) AS drug_exposure_start_datetime,
+          COALESCE(parse_omop_date(src.MEDADMIN_STOP_DATE), parse_omop_date(src.MEDADMIN_START_DATE)) AS drug_exposure_end_date,
+          parse_omop_datetime(COALESCE(src.MEDADMIN_STOP_DATE, src.MEDADMIN_START_DATE), NULL) AS drug_exposure_end_datetime,
+          NULL AS verbatim_end_date,
+          %d AS drug_type_concept_id,
+          NULL AS stop_reason,
+          NULL AS refills,
+          NULL AS quantity,
+          NULL AS days_supply,
+          NULL AS sig,
+          0 AS route_concept_id,
+          NULL AS lot_number,
+          COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
+          COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
+          NULL AS visit_detail_id,
+          COALESCE(src.MEDADMIN_CODE, src.RAW_RX_NDC, src.RAW_MEDADMIN_MED_NAME) AS drug_source_value,
+          COALESCE(c.concept_id, 0) AS drug_source_concept_id,
+          NULL AS route_source_value,
+          NULL AS dose_unit_source_value
+      FROM _temp_med_admin src
+      LEFT JOIN person p
+        ON p.person_source_value = %s
+      LEFT JOIN provider pr
+        ON pr.provider_source_value = src.PROVIDERID
+      LEFT JOIN visit_occurrence vo
+        ON vo.visit_source_value = src.ENCOUNTERID
+      LEFT JOIN concept c
+        ON c.vocabulary_id = 'RxNorm'
+       AND c.concept_code = src.MEDADMIN_CODE
+      LEFT JOIN (
+          SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
+          FROM concept_relationship
+          WHERE relationship_id = 'Maps to'
+          GROUP BY concept_id_1
+      ) cr
+        ON cr.concept_id_1 = c.concept_id
+      LEFT JOIN (
+          SELECT source_code, MIN(target_concept_id) AS target_concept_id
+          FROM source_to_concept_map
+          WHERE source_vocabulary_id = 'RxNorm'
+            AND (invalid_reason IS NULL OR invalid_reason = '')
+            AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
+          GROUP BY source_code
+      ) stcm
+        ON stcm.source_code = src.MEDADMIN_CODE
+      WHERE src.MEDADMINID IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY src.MEDADMINID) = 1;
+    ", patid_expr, .TYPE_CONCEPT_MED_ADMIN, patid_expr, .today_iso()))
+    DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_med_admin;")
+  }
+
+  # 3. DISPENSING
+  path_disp <- find_source_file(source_dir, "dispensing")
+  if (!is.null(path_disp)) {
+    loaded_any <- TRUE
+    prepare_source_view(
+      con, "_temp_dispensing", path_disp,
+      c("DISPENSINGID", "PATID", "PRESCRIBINGID", "DISPENSING_DATE",
+        "RAW_RX_NDC", "DISPENSING_SUP", "DISPENSING_AMT")
+    )
+    run_insert(con, "DRUG_EXPOSURE (from DISPENSING)", sprintf("
+      INSERT INTO drug_exposure
+      SELECT
+          ROW_NUMBER() OVER (ORDER BY src.DISPENSINGID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
+          COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
+          COALESCE(
+              stcm.target_concept_id,
+              cr.concept_id_2,
+              CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+              0
+          ) AS drug_concept_id,
+          parse_omop_date(src.DISPENSING_DATE) AS drug_exposure_start_date,
+          parse_omop_datetime(src.DISPENSING_DATE, NULL) AS drug_exposure_start_datetime,
+          parse_omop_date(src.DISPENSING_DATE) AS drug_exposure_end_date,
+          parse_omop_datetime(src.DISPENSING_DATE, NULL) AS drug_exposure_end_datetime,
+          NULL AS verbatim_end_date,
+          %d AS drug_type_concept_id,
+          NULL AS stop_reason,
+          NULL AS refills,
+          TRY_CAST(src.DISPENSING_AMT AS DOUBLE) AS quantity,
+          TRY_CAST(src.DISPENSING_SUP AS INTEGER) AS days_supply,
+          NULL AS sig,
+          0 AS route_concept_id,
+          NULL AS lot_number,
+          NULL AS provider_id,
+          NULL AS visit_occurrence_id,
+          NULL AS visit_detail_id,
+          src.RAW_RX_NDC AS drug_source_value,
+          COALESCE(c.concept_id, 0) AS drug_source_concept_id,
+          NULL AS route_source_value,
+          NULL AS dose_unit_source_value
+      FROM _temp_dispensing src
+      LEFT JOIN person p
+        ON p.person_source_value = %s
+      LEFT JOIN concept c
+        ON c.vocabulary_id = 'NDC'
+       AND c.concept_code = src.RAW_RX_NDC
+      LEFT JOIN (
+          SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
+          FROM concept_relationship
+          WHERE relationship_id = 'Maps to'
+          GROUP BY concept_id_1
+      ) cr
+        ON cr.concept_id_1 = c.concept_id
+      LEFT JOIN (
+          SELECT source_code, MIN(target_concept_id) AS target_concept_id
+          FROM source_to_concept_map
+          WHERE source_vocabulary_id = 'NDC'
+            AND (invalid_reason IS NULL OR invalid_reason = '')
+            AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
+          GROUP BY source_code
+      ) stcm
+        ON stcm.source_code = src.RAW_RX_NDC
+      WHERE src.DISPENSINGID IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DISPENSINGID) = 1;
+    ", patid_expr, .TYPE_CONCEPT_DISPENSING, patid_expr, .today_iso()))
+    DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_dispensing;")
+  }
+
+  if (!loaded_any) {
+    cat("Skipping DRUG_EXPOSURE - no prescribing.csv, med_admin.csv, or dispensing.csv found\n")
+  }
 }
 
 .load_death <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {

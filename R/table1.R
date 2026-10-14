@@ -571,6 +571,8 @@ table1_to_quarto <- function(table1_data,
                             include_loinc_footnotes = TRUE,
                             loinc_map = NULL,
                             loinc_footnotes = NULL,
+                            provenance_notes = NULL,
+                            include_provenance_footnotes = TRUE,
                             ...) {
   df <- if (is.list(table1_data) && !is.data.frame(table1_data)) {
     if (!is.null(table1_data[[which_table]])) table1_data[[which_table]] else table1_data[[1]]
@@ -608,7 +610,8 @@ table1_to_quarto <- function(table1_data,
 
   var_col <- names(df)[1]
   letters_vec <- letters
-  loinc_footnotes_list <- list()
+  rendered_footnotes_list <- list()
+  prov <- if (is.null(provenance_notes)) list() else provenance_notes
 
   for (c_name in names(df)) {
     vals <- as.character(df[[c_name]])
@@ -619,7 +622,7 @@ table1_to_quarto <- function(table1_data,
       v <- gsub("\\s*\\+/-\\s*", " $\\\\pm$ ", v)
       v <- gsub("\\[\\s*([0-9.-]+)\\s*,\\s*([0-9.-]+)\\s*\\]", "[IQR: \\1, \\2]", v)
 
-      if (c_name == var_col && include_loinc_footnotes && v != "") {
+      if (c_name == var_col && v != "") {
         norm_v <- gsub("[^a-z0-9_]", "", tolower(v))
         matched_key <- NULL
         for (lk in names(active_loincs)) {
@@ -629,10 +632,32 @@ table1_to_quarto <- function(table1_data,
             break
           }
         }
-        if (!is.null(matched_key) && length(active_loincs[[matched_key]]) > 0) {
-          sym <- letters_vec[((length(loinc_footnotes_list)) %% length(letters_vec)) + 1]
+
+        prov_meta <- NULL
+        for (pk in names(prov)) {
+          norm_p <- gsub("[^a-z0-9_]", "", tolower(pk))
+          if (nchar(norm_p) > 0 && (norm_v == norm_p || grepl(norm_p, norm_v, fixed = TRUE) || grepl(norm_v, norm_p, fixed = TRUE))) {
+            prov_meta <- prov[[pk]]
+            break
+          }
+        }
+
+        if (!is.null(prov_meta) && isTRUE(include_provenance_footnotes)) {
+          sym <- letters_vec[((length(rendered_footnotes_list)) %% length(letters_vec)) + 1]
+          parts <- character(0)
+          if (!is.null(prov_meta$window)) parts <- c(parts, paste0("window=", prov_meta$window))
+          if (!is.null(prov_meta$anchor)) parts <- c(parts, paste0("anchor=", prov_meta$anchor))
+          if (!is.null(prov_meta$bounds)) parts <- c(parts, paste0("bounds=", prov_meta$bounds))
+          if (!is.null(prov_meta$units)) parts <- c(parts, paste0("units=", prov_meta$units))
+          if (!is.null(prov_meta$fill_rule)) parts <- c(parts, paste0("fill=", prov_meta$fill_rule))
+          if (!is.null(prov_meta$concept_set)) parts <- c(parts, paste0("concept_set=", prov_meta$concept_set))
+          txt <- if (length(parts) > 0) paste(parts, collapse = ", ") else "provenance documented"
+          rendered_footnotes_list[[length(rendered_footnotes_list) + 1]] <- list(sym = sym, text = txt)
+          v <- paste0(v, "^", sym)
+        } else if (include_loinc_footnotes && !is.null(matched_key) && length(active_loincs[[matched_key]]) > 0) {
+          sym <- letters_vec[((length(rendered_footnotes_list)) %% length(letters_vec)) + 1]
           codes_str <- paste(active_loincs[[matched_key]], collapse = ", ")
-          loinc_footnotes_list[[length(loinc_footnotes_list) + 1]] <- list(sym = sym, text = paste0("LOINC ", codes_str))
+          rendered_footnotes_list[[length(rendered_footnotes_list) + 1]] <- list(sym = sym, text = paste0("LOINC ", codes_str))
           v <- paste0(v, "^", sym)
         }
       }
@@ -654,8 +679,8 @@ table1_to_quarto <- function(table1_data,
   table_body <- paste(c(header_row, divider_row, data_rows), collapse = "\n")
 
   footnote_lines <- character(0)
-  if (length(loinc_footnotes_list) > 0) {
-    fn_parts <- sapply(loinc_footnotes_list, function(fn) paste0("^", fn$sym, " ", fn$text))
+  if (length(rendered_footnotes_list) > 0) {
+    fn_parts <- sapply(rendered_footnotes_list, function(fn) paste0("^", fn$sym, " ", fn$text))
     footnote_lines <- c(footnote_lines, paste0(paste(fn_parts, collapse = "; "), "."))
   }
   footnote_lines <- c(footnote_lines, "*Note:* Continuous variables expressed as Mean $\\\\pm$ SD or Median [IQR]; categorical variables as N (%). SMD = Standardized Mean Difference.")
@@ -703,6 +728,8 @@ table1_to_typst <- function(table1_data,
                            loinc_map = NULL,
                            loinc_footnotes = NULL,
                            font_size = "9pt",
+                           provenance_notes = NULL,
+                           include_provenance_footnotes = TRUE,
                            ...) {
   df <- if (is.list(table1_data) && !is.data.frame(table1_data)) {
     if (!is.null(table1_data[[which_table]])) table1_data[[which_table]] else table1_data[[1]]
@@ -740,7 +767,8 @@ table1_to_typst <- function(table1_data,
 
   var_col <- names(df)[1]
   letters_vec <- letters
-  loinc_footnotes_list <- list()
+  rendered_footnotes_list <- list()
+  prov <- if (is.null(provenance_notes)) list() else provenance_notes
 
   typst_esc <- function(x) {
     s <- gsub("\\\\", "\\\\\\\\", as.character(x))
@@ -793,7 +821,7 @@ table1_to_typst <- function(table1_data,
       s_val <- gsub("\\s*\\+/-\\s*", " \\u00b1 ", s_val)
       s_val <- gsub("\\[\\s*([0-9.-]+)\\s*,\\s*([0-9.-]+)\\s*\\]", "[IQR: \\1, \\2]", s_val)
 
-      if (j == 1 && include_loinc_footnotes && s_val != "") {
+      if (j == 1 && s_val != "") {
         norm_v <- gsub("[^a-z0-9_]", "", tolower(s_val))
         matched_key <- NULL
         for (lk in names(active_loincs)) {
@@ -803,10 +831,32 @@ table1_to_typst <- function(table1_data,
             break
           }
         }
-        if (!is.null(matched_key) && length(active_loincs[[matched_key]]) > 0) {
-          sym <- letters_vec[((length(loinc_footnotes_list)) %% length(letters_vec)) + 1]
+
+        prov_meta <- NULL
+        for (pk in names(prov)) {
+          norm_p <- gsub("[^a-z0-9_]", "", tolower(pk))
+          if (nchar(norm_p) > 0 && (norm_v == norm_p || grepl(norm_p, norm_v, fixed = TRUE) || grepl(norm_v, norm_p, fixed = TRUE))) {
+            prov_meta <- prov[[pk]]
+            break
+          }
+        }
+
+        if (!is.null(prov_meta) && isTRUE(include_provenance_footnotes)) {
+          sym <- letters_vec[((length(rendered_footnotes_list)) %% length(letters_vec)) + 1]
+          parts <- character(0)
+          if (!is.null(prov_meta$window)) parts <- c(parts, paste0("window=", prov_meta$window))
+          if (!is.null(prov_meta$anchor)) parts <- c(parts, paste0("anchor=", prov_meta$anchor))
+          if (!is.null(prov_meta$bounds)) parts <- c(parts, paste0("bounds=", prov_meta$bounds))
+          if (!is.null(prov_meta$units)) parts <- c(parts, paste0("units=", prov_meta$units))
+          if (!is.null(prov_meta$fill_rule)) parts <- c(parts, paste0("fill=", prov_meta$fill_rule))
+          if (!is.null(prov_meta$concept_set)) parts <- c(parts, paste0("concept_set=", prov_meta$concept_set))
+          txt <- if (length(parts) > 0) paste(parts, collapse = ", ") else "provenance documented"
+          rendered_footnotes_list[[length(rendered_footnotes_list) + 1]] <- list(sym = sym, text = txt)
+          cell_content <- paste0("[", typst_esc(s_val), "#super[", sym, "]]")
+        } else if (include_loinc_footnotes && !is.null(matched_key) && length(active_loincs[[matched_key]]) > 0) {
+          sym <- letters_vec[((length(rendered_footnotes_list)) %% length(letters_vec)) + 1]
           codes_str <- paste(active_loincs[[matched_key]], collapse = ", ")
-          loinc_footnotes_list[[length(loinc_footnotes_list) + 1]] <- list(sym = sym, text = paste0("LOINC ", codes_str))
+          rendered_footnotes_list[[length(rendered_footnotes_list) + 1]] <- list(sym = sym, text = paste0("LOINC ", codes_str))
           cell_content <- paste0("[", typst_esc(s_val), "#super[", sym, "]]")
         } else {
           cell_content <- paste0("[", typst_esc(s_val), "]")
@@ -826,8 +876,8 @@ table1_to_typst <- function(table1_data,
   }
 
   lines <- c(lines, "    table.hline(stroke: 1.5pt),", close_fig, "#v(3pt)", "#text(8pt, fill: rgb(\"555555\"))[")
-  if (length(loinc_footnotes_list) > 0) {
-    fn_parts <- sapply(loinc_footnotes_list, function(fn) paste0("#super[", fn$sym, "] ", typst_esc(fn$text)))
+  if (length(rendered_footnotes_list) > 0) {
+    fn_parts <- sapply(rendered_footnotes_list, function(fn) paste0("#super[", fn$sym, "] ", typst_esc(fn$text)))
     lines <- c(lines, paste0("  ", paste(fn_parts, collapse = "; "), "\\\\ "))
   }
   lines <- c(lines, "  _Note:_ Values expressed as Mean \\u00b1 SD, Median [IQR], or N (%). SMD = Standardized Mean Difference.", "]")

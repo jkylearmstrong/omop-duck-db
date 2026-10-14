@@ -14,6 +14,8 @@ table1_to_typst(
   loinc_map = NULL,
   loinc_footnotes = NULL,
   font_size = "9pt",
+  provenance_notes = NULL,
+  include_provenance_footnotes = TRUE,
   ...
 )
 }
