@@ -7,7 +7,9 @@
 """
 
 import os
+import sys
 import tempfile
+from unittest.mock import patch
 import duckdb
 import numpy as np
 import pandas as pd
@@ -147,7 +149,12 @@ def test_consortium_calibration():
     assert not summary_df.empty
 
     fig = cal.plot()
-    assert fig is not None
+    try:
+        import matplotlib.pyplot as plt
+        assert fig is not None
+        plt.close(fig)
+    except ImportError:
+        assert fig is None
 
     # Test re-export
     cal2 = dd_consortium_calibration(y_true, y_prob, site_labels, n_bins=5)
@@ -193,7 +200,12 @@ def test_decision_curve_analysis():
     assert not df_out.empty
 
     fig = dca.plot()
-    assert fig is not None
+    try:
+        import matplotlib.pyplot as plt
+        assert fig is not None
+        plt.close(fig)
+    except ImportError:
+        assert fig is None
 
     # Test re-export
     dca2 = dd_decision_curve_analysis(y_true, y_prob, threshold_range=(0.05, 0.35))
@@ -304,7 +316,20 @@ def test_cif_and_fine_gray_estimator():
     assert not df_out.empty
 
     fig = plot_cif(cif)
-    assert fig is not None
+    try:
+        import matplotlib.pyplot as plt
+        assert fig is not None
+        plt.close(fig)
+    except ImportError:
+        assert fig is None
+
+    fig_method = cif.plot()
+    try:
+        import matplotlib.pyplot as plt
+        assert fig_method is not None
+        plt.close(fig_method)
+    except ImportError:
+        assert fig_method is None
 
     # Test Fine-Gray estimator
     fg = fine_gray_estimator(
@@ -334,4 +359,44 @@ def test_cif_and_fine_gray_estimator():
     fg2 = dd_fine_gray_estimator(df, time_col="time_days", status_col="status", group_col="treatment")
     assert isinstance(fg2, FineGrayResult)
     fig2 = dd_plot_cif(cif2)
-    assert fig2 is not None
+    try:
+        import matplotlib.pyplot as plt
+        assert fig2 is not None
+        plt.close(fig2)
+    except ImportError:
+        assert fig2 is None
+
+
+def test_plotting_without_matplotlib_fallback():
+    """Verify that when matplotlib is not available, plot() functions gracefully return None."""
+    np.random.seed(42)
+    cal = consortium_calibration(
+        y_true=np.array([0, 1, 0, 1, 0, 1]),
+        y_prob=np.array([0.1, 0.9, 0.2, 0.8, 0.3, 0.7]),
+        site_labels=np.array(["A", "A", "B", "B", "C", "C"]),
+        n_bins=2,
+    )
+    dca = decision_curve_analysis(
+        y_true=np.array([0, 1, 0, 1]),
+        y_prob=np.array([0.1, 0.8, 0.2, 0.7]),
+        threshold_range=(0.1, 0.5),
+    )
+    df = pd.DataFrame({
+        "time_days": [5, 10, 15, 20],
+        "status": [0, 1, 2, 1],
+    })
+    cif = estimate_cif(df, time_col="time_days", status_col="status")
+
+    with patch.dict(sys.modules, {"matplotlib": None, "matplotlib.pyplot": None}):
+        assert cal.plot() is None
+        assert dca.plot() is None
+        assert cif.plot() is None
+        assert plot_cif(cif) is None
+        assert dd_consortium_calibration(
+            np.array([0, 1, 0, 1]),
+            np.array([0.1, 0.8, 0.2, 0.7]),
+            np.array(["A", "A", "B", "B"]),
+            n_bins=2,
+        ).plot() is None
+        assert dd_plot_cif(cif) is None
+
