@@ -349,7 +349,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
 #' @export
 audit_medication_strategies <- function(flags, classes = NULL, site_col = "site", kappa_threshold = 0.6,
                                         concordance_threshold = 0.9, prevalence_gap_threshold = 0.10,
-                                        peer_kappa_gap = 0.25, min_n = 0, min_prevalence = NULL,
+                                        peer_kappa_gap = 0.25, min_n = 10, min_prevalence = NULL,
                                         explain = FALSE, con = NULL, medication_specs = NULL,
                                         cohort_table = "cohort", ...) {
   if (is.null(classes)) {
@@ -392,16 +392,18 @@ audit_medication_strategies <- function(flags, classes = NULL, site_col = "site"
     r <- audit[i, ]
     cls <- r$medication_class
     why <- character(0)
-    if (r$n >= min_n) {
-      if (r$source_prevalence == 0 && r$standard_prevalence == 0) {
-        why <- c(why, "both_blind")
-      } else if (r$source_prevalence == 0 && r$standard_prevalence > 0) {
+    if (r$n > 0) {
+      if (r$source_prevalence == 0 && r$standard_prevalence > 0) {
         why <- c(why, "source_blind")
       } else if (r$standard_prevalence == 0 && r$source_prevalence > 0) {
         why <- c(why, "standard_blind")
+      } else if (r$source_prevalence == 0 && r$standard_prevalence == 0) {
+        if (min_n > 0 && r$n >= min_n) {
+          why <- c(why, "both_blind")
+        }
       }
 
-      if (!is.null(min_prevalence)) {
+      if (!is.null(min_prevalence) && (min_n == 0 || r$n >= min_n)) {
         floor <- if (is.list(min_prevalence) || (is.vector(min_prevalence) && !is.null(names(min_prevalence)))) {
           min_prevalence[[cls]] %||% 0.0
         } else {

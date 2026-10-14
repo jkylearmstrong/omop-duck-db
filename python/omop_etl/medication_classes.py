@@ -443,15 +443,16 @@ def audit_medication_strategies(
     for i, r in audit.iterrows():
         cls = r["medication_class"]
         why = []
-        if r["n"] >= min_n:
-            if r["source_prevalence"] == 0 and r["standard_prevalence"] == 0:
-                why.append("both_blind")
-            elif r["source_prevalence"] == 0 and r["standard_prevalence"] > 0:
+        if r["n"] > 0:
+            if r["source_prevalence"] == 0 and r["standard_prevalence"] > 0:
                 why.append("source_blind")
             elif r["standard_prevalence"] == 0 and r["source_prevalence"] > 0:
                 why.append("standard_blind")
+            elif r["source_prevalence"] == 0 and r["standard_prevalence"] == 0:
+                if min_n > 0 and r["n"] >= min_n:
+                    why.append("both_blind")
 
-            if min_prevalence is not None:
+            if min_prevalence is not None and (min_n == 0 or r["n"] >= min_n):
                 floor = min_prevalence.get(cls, 0.0) if isinstance(min_prevalence, Mapping) else float(min_prevalence)
                 if floor > 0 and (r["source_prevalence"] < floor or r["standard_prevalence"] < floor):
                     why.append("below_min_prevalence")
