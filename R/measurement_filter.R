@@ -70,7 +70,7 @@ DEFAULT_UNIT_RULES <- local({
     platelets = list(canonical = "10*3/uL", rules = list(
       r("^(/ul|/mcl|/mm3|cells/ul)$", 0.001), r("^(10\\*3/ul|10\\^3/ul|k/ul|thou/ul|10\\*9/l|g/l)$", 1))),
     creatinine = list(canonical = "mg/dL", rules = list(
-      r("^(umol/l|µmol/l|μmol/l|micromol/l)$", 1 / 88.42), r("^(mmol/l)$", 1000 / 88.42), r("^(mg/dl)$", 1))),
+      r("^(umol/l|\u00b5mol/l|\u03bcmol/l|micromol/l)$", 1 / 88.42), r("^(mmol/l)$", 1000 / 88.42), r("^(mg/dl)$", 1))),
     glucose = list(canonical = "mg/dL", rules = list(r("^(mmol/l)$", 18.016), r("^(mg/dl)$", 1), r("^(g/l)$", 100))),
     hemoglobin = list(canonical = "g/dL", rules = list(r("^(g/l)$", 0.1), r("^(mmol/l)$", 1.611), r("^(g/dl)$", 1))),
     hba1c = list(canonical = "%", rules = list(r("^(mmol/mol)$", 0.09148, 2.152), r("^(%|percent)$", 1, 0))),

@@ -125,7 +125,7 @@ test_that("harmonize_measurement_units scales European Hemoglobin, IFCC HbA1c, a
     VALUES
     (1, 1, 3000963, DATE '2023-01-01', 32817, 10.0, 'mmol/L'),
     (2, 1, 3004410, DATE '2023-01-01', 32817, 50.0, 'mmol/mol'),
-    (3, 1, 3016723, DATE '2023-01-01', 32817, 176.8, 'µmol/l'),
+    (3, 1, 3016723, DATE '2023-01-01', 32817, 176.8, '\u00b5mol/l'),
     (4, 1, 3000963, DATE '2023-02-01', 32817, 9.0, NULL),
     (5, 1, 3004410, DATE '2023-02-01', 32817, 60.0, NULL)
   ")
