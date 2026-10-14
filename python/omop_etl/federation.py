@@ -862,6 +862,7 @@ class FederatedConsortium:
         count_cols: Sequence[str] | None = None,
         suppress_zero: bool = False,
         preserve_pct: bool = False,
+        secondary_suppression: bool = False,
     ) -> "PrivacyAuditResult":
         """Audits exported consortium tables against small cell count privacy thresholds (HIPAA/GDPR)."""
         return audit_cell_suppression(
@@ -871,6 +872,7 @@ class FederatedConsortium:
             count_cols=count_cols,
             suppress_zero=suppress_zero,
             preserve_pct=preserve_pct,
+            secondary_suppression=secondary_suppression,
         )
 
     def audit_cell_suppression(
@@ -881,6 +883,7 @@ class FederatedConsortium:
         count_cols: Sequence[str] | None = None,
         suppress_zero: bool = False,
         preserve_pct: bool = False,
+        secondary_suppression: bool = False,
     ) -> "PrivacyAuditResult":
         """Alias for audit_privacy."""
         return self.audit_privacy(
@@ -890,7 +893,55 @@ class FederatedConsortium:
             count_cols=count_cols,
             suppress_zero=suppress_zero,
             preserve_pct=preserve_pct,
+            secondary_suppression=secondary_suppression,
         )
+
+    def cross_site_validation(
+        self,
+        site_data: dict[str, pd.DataFrame] | pd.DataFrame,
+        feature_cols: Sequence[str],
+        target_col: str,
+        site_col: str = "site",
+        regularize: bool = True,
+        alpha: float = 1.0,
+    ) -> Any:
+        """Runs K x K Internal-External Cross-Validation (IECV) across participating sites."""
+        from .ml import consortium_cross_site_validation
+        return consortium_cross_site_validation(
+            site_data=site_data,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            site_col=site_col,
+            regularize=regularize,
+            alpha=alpha,
+        )
+
+    def cohort_diagnostics(
+        self,
+        cohort_table: str = "cohort",
+        cohort_id: int = 1,
+        baseline_window_days: int = 365,
+        top_n_concepts: int = 10,
+        secondary_suppression: bool = True,
+        min_cell_count: int = 11,
+    ) -> Any:
+        """Generates pure DuckDB OHDSI Cohort Diagnostics across the consortium database."""
+        from .cohort_diagnostics import consortium_cohort_diagnostics
+        return consortium_cohort_diagnostics(
+            con=self.con,
+            cohort_table=cohort_table,
+            cohort_id=cohort_id,
+            baseline_window_days=baseline_window_days,
+            top_n_concepts=top_n_concepts,
+            secondary_suppression=secondary_suppression,
+            min_cell_count=min_cell_count,
+        )
+
+    def build_manuscript(self, **kwargs) -> str:
+        """Builds an end-to-end Quarto or Typst manuscript scaffold for the consortium."""
+        from .manuscript import build_manuscript_scaffold
+        kwargs.setdefault("consortium_name", self.consortium_name)
+        return build_manuscript_scaffold(**kwargs)
 
     def close(self):
         """Closes the DuckDB connection handle."""
@@ -997,6 +1048,20 @@ class PrivacyAuditResult(dict):
     def is_clean(self) -> bool:
         return len(self.violations) == 0
 
+    @property
+    def primary_count(self) -> int:
+        if self.violations.empty:
+            return 0
+        if "suppression_type" in self.violations.columns:
+            return int((self.violations["suppression_type"] == "primary").sum())
+        return len(self.violations)
+
+    @property
+    def secondary_count(self) -> int:
+        if self.violations.empty or "suppression_type" not in self.violations.columns:
+            return 0
+        return int((self.violations["suppression_type"] == "secondary").sum())
+
     def summary(self) -> pd.DataFrame:
         """Emits a per-table summary of audited rows, columns, and small cell violations."""
         rows = []
@@ -1006,12 +1071,24 @@ class PrivacyAuditResult(dict):
                 if not self.violations.empty
                 else pd.DataFrame()
             )
+            prim_c = (
+                int((tbl_v["suppression_type"] == "primary").sum())
+                if not tbl_v.empty and "suppression_type" in tbl_v.columns
+                else len(tbl_v)
+            )
+            sec_c = (
+                int((tbl_v["suppression_type"] == "secondary").sum())
+                if not tbl_v.empty and "suppression_type" in tbl_v.columns
+                else 0
+            )
             rows.append({
                 "table": tbl_name,
                 "table_name": tbl_name,
                 "n_rows": len(df),
                 "n_columns": len(df.columns),
                 "suppressed_cells": len(tbl_v),
+                "primary_suppressed": prim_c,
+                "secondary_suppressed": sec_c,
                 "violations": len(tbl_v),
                 "min_cell_count": self.min_cell_count,
                 "status": "CLEAN" if len(tbl_v) == 0 else f"SUPPRESSED_{len(tbl_v)}",
@@ -1025,9 +1102,10 @@ class PrivacyAuditResult(dict):
         return self.violations.copy()
 
     def __repr__(self) -> str:
+        sec_info = f" ({self.primary_count} primary, {self.secondary_count} secondary)" if self.secondary_count > 0 else ""
         return (
             f"<PrivacyAuditResult: {len(self.tables)} table(s) audited, "
-            f"{len(self.violations)} small cell(s) suppressed (N < {self.min_cell_count})>\n"
+            f"{len(self.violations)} small cell(s) suppressed{sec_info} (N < {self.min_cell_count})>\n"
             f"{self.summary().to_string(index=False)}"
         )
 
@@ -1039,6 +1117,7 @@ def audit_cell_suppression(
     count_cols: Sequence[str] | None = None,
     suppress_zero: bool = False,
     preserve_pct: bool = False,
+    secondary_suppression: bool = False,
     return_audit: bool = False,
 ) -> Any:
     """Scans and redacts small cell counts in consortium export tables for HIPAA/GDPR compliance.
@@ -1046,6 +1125,9 @@ def audit_cell_suppression(
     Consortium governance and de-identification standards (HIPAA Safe Harbor, GDPR,
     and CMS cell suppression policy) require that multi-site summary tables do not
     display small cell counts (e.g. N < 11 or N < 20) that could re-identify individual patients.
+    When secondary_suppression=True, complementary masking is performed: if exactly one cell
+    in a row or column is suppressed, the second-smallest non-zero cell is masked to prevent
+    deductive algebraic disclosure.
 
     Args:
         tables: Single pandas DataFrame or dictionary of DataFrames (e.g. from generate_table1(),
@@ -1056,9 +1138,11 @@ def audit_cell_suppression(
             columns and formatted count cells (e.g. '5 (2.3%)', integer counts).
         suppress_zero: Whether to suppress zero counts (default False, as 0 does not identify individuals).
         preserve_pct: For cells formatted as 'N (pct%)', whether to preserve the percentage (e.g. '<11 (2.3%)').
+        secondary_suppression: Whether to apply complementary masking to prevent marginal reconstruction.
+        return_audit: Whether to always return PrivacyAuditResult even for a single DataFrame.
 
     Returns:
-        PrivacyAuditResult: Dictionary-like container holding sanitized DataFrames and violation audit logs.
+        PrivacyAuditResult or pd.DataFrame: Container holding sanitized DataFrames and violation audit logs.
     """
     if isinstance(tables, pd.DataFrame):
         tables_dict = {"table": tables.copy()}
@@ -1093,6 +1177,8 @@ def audit_cell_suppression(
 
     for tbl_name, df in tables_dict.items():
         df_clean = df.copy()
+        target_count_cols: list[str] = []
+
         for col in df_clean.columns:
             col_lower = str(col).lower().strip()
             if count_cols is not None:
@@ -1108,6 +1194,8 @@ def audit_cell_suppression(
 
             if not is_target_col:
                 continue
+
+            target_count_cols.append(col)
 
             # Iterate through column values
             new_col_vals = []
@@ -1163,12 +1251,108 @@ def audit_cell_suppression(
                         "column": col,
                         "original_value": val,
                         "masked_value": new_val,
+                        "suppression_type": "primary",
                     })
 
                 new_col_vals.append(new_val)
 
             if col_modified:
                 df_clean[col] = new_col_vals
+
+        # Secondary / complementary cell suppression
+        if secondary_suppression and target_count_cols:
+            for c in target_count_cols:
+                if c in df_clean.columns and df_clean[c].dtype != object:
+                    df_clean[c] = df_clean[c].astype(object)
+
+            def parse_cell_count(v: Any) -> tuple[int | None, str | None]:
+                if pd.isna(v) or v is None:
+                    return None, None
+                if isinstance(v, (int, np.integer)):
+                    return int(v), None
+                if isinstance(v, (float, np.floating)) and v.is_integer():
+                    return int(v), None
+                if isinstance(v, str):
+                    v_s = v.strip()
+                    m_p = pct_cell_pattern.match(v_s)
+                    if m_p:
+                        return int(m_p.group(1)), m_p.group(2)
+                    m_i = int_cell_pattern.match(v_s)
+                    if m_i:
+                        return int(m_i.group(1)), None
+                    m_r = ratio_cell_pattern.match(v_s)
+                    if m_r:
+                        return int(m_r.group(1)), None
+                return None, None
+
+            # a) Row-level secondary suppression across count columns
+            for r_idx in range(len(df_clean)):
+                suppressed_in_row = [
+                    v for v in violations
+                    if v["table"] == tbl_name and v["row_index"] == r_idx and v["column"] in target_count_cols
+                ]
+                if len(suppressed_in_row) == 1:
+                    # Exactly one cell suppressed in this row: find the second-smallest non-zero cell
+                    suppressed_col = suppressed_in_row[0]["column"]
+                    candidates = []
+                    for c_col in target_count_cols:
+                        if c_col == suppressed_col:
+                            continue
+                        val = df_clean.at[r_idx, c_col]
+                        cnt, pct = parse_cell_count(val)
+                        if cnt is not None and cnt > 0:
+                            candidates.append((cnt, pct, c_col, val))
+                    if candidates:
+                        candidates.sort(key=lambda x: x[0])
+                        sec_cnt, sec_pct, sec_col, sec_orig = candidates[0]
+                        sec_masked_val = (
+                            f"{mask_str} ({sec_pct})"
+                            if preserve_pct and sec_pct is not None
+                            else mask_str
+                        )
+                        df_clean.at[r_idx, sec_col] = sec_masked_val
+                        violations.append({
+                            "table": tbl_name,
+                            "row_index": r_idx,
+                            "column": sec_col,
+                            "original_value": sec_orig,
+                            "masked_value": sec_masked_val,
+                            "suppression_type": "secondary",
+                        })
+
+            # b) Column-level secondary suppression
+            for c_col in target_count_cols:
+                suppressed_in_col = [
+                    v for v in violations
+                    if v["table"] == tbl_name and v["column"] == c_col
+                ]
+                if len(suppressed_in_col) == 1:
+                    suppressed_row = suppressed_in_col[0]["row_index"]
+                    candidates = []
+                    for r_idx in range(len(df_clean)):
+                        if r_idx == suppressed_row:
+                            continue
+                        val = df_clean.at[r_idx, c_col]
+                        cnt, pct = parse_cell_count(val)
+                        if cnt is not None and cnt > 0:
+                            candidates.append((cnt, pct, r_idx, val))
+                    if candidates:
+                        candidates.sort(key=lambda x: x[0])
+                        sec_cnt, sec_pct, sec_row, sec_orig = candidates[0]
+                        sec_masked_val = (
+                            f"{mask_str} ({sec_pct})"
+                            if preserve_pct and sec_pct is not None
+                            else mask_str
+                        )
+                        df_clean.at[sec_row, c_col] = sec_masked_val
+                        violations.append({
+                            "table": tbl_name,
+                            "row_index": sec_row,
+                            "column": c_col,
+                            "original_value": sec_orig,
+                            "masked_value": sec_masked_val,
+                            "suppression_type": "secondary",
+                        })
 
         clean_tables[tbl_name] = df_clean
 
@@ -1183,6 +1367,8 @@ def audit_cell_suppression(
     if is_single_df and not return_audit:
         single_df = clean_tables["table"]
         single_df.attrs["suppressed_cell_count"] = len(violations)
+        single_df.attrs["primary_suppressed_count"] = result.primary_count
+        single_df.attrs["secondary_suppressed_count"] = result.secondary_count
         single_df.attrs["min_cell_count"] = min_cell_count
         single_df.attrs["is_clean"] = len(violations) == 0
         return single_df

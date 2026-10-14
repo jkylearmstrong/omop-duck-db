@@ -725,11 +725,12 @@ print.consortium_scores <- function(x, ...) {
 #' @param mask_value String replacement for suppressed counts (default `paste0("<", min_cell_count)`).
 #' @param count_cols Optional character vector of specific count columns to redact.
 #' @param suppress_zero Logical; whether to suppress zero counts (default `FALSE`).
-#' @param preserve_pct Logical; whether to preserve the percentage in formatted cells like `"5 (2.3%)"` (default `FALSE`).
+#' @param preserve_pct Logical; whether to preserve the percentage in formatted cells like `"5 (2.3\\%)"` (default `FALSE`).
+#' @param secondary_suppression Logical; whether to apply complementary cell suppression to prevent algebraic disclosure from marginal totals (default `FALSE`).
 #' @param return_audit Logical; whether to return the full privacy audit result object instead of the cleaned data frame when a single table is passed (default `FALSE`).
 #'
 #' @return An S3 object of class `consortium_privacy_audit` containing `$tables` (sanitized tables),
-#'   `$violations` (data.frame of redacted cells), `$violation_count`, and `$summary`.
+#'   `$violations` (data.frame of redacted cells), `$violation_count`, `$primary_count`, `$secondary_count`, and `$summary`.
 #' @export
 audit_cell_suppression <- function(tables,
                                    min_cell_count = 11L,
@@ -737,6 +738,7 @@ audit_cell_suppression <- function(tables,
                                    count_cols = NULL,
                                    suppress_zero = FALSE,
                                    preserve_pct = FALSE,
+                                   secondary_suppression = FALSE,
                                    return_audit = FALSE) {
   is_single <- is.data.frame(tables)
   if (is_single) {
@@ -767,12 +769,26 @@ audit_cell_suppression <- function(tables,
     }
   }
 
+  parse_cell_count <- function(v) {
+    if (is.na(v)) return(list(cnt = NA_integer_, pct = NA_character_))
+    if (is.numeric(v) && v == as.integer(v)) return(list(cnt = as.integer(v), pct = NA_character_))
+    if (is.character(v) || is.factor(v)) {
+      v_s <- trimws(as.character(v))
+      m_p <- regmatches(v_s, regexec("^([0-9]+)\\s*\\(([0-9.]+%?)\\)$", v_s))[[1]]
+      if (length(m_p) == 3) return(list(cnt = as.integer(m_p[2]), pct = m_p[3]))
+      m_i <- regmatches(v_s, regexec("^([0-9]+)$", v_s))[[1]]
+      if (length(m_i) == 2) return(list(cnt = as.integer(m_i[2]), pct = NA_character_))
+    }
+    list(cnt = NA_integer_, pct = NA_character_)
+  }
+
   clean_tables <- list()
   violations_list <- list()
 
   for (t_name in names(tbl_list)) {
     df <- as.data.frame(tbl_list[[t_name]], stringsAsFactors = FALSE)
     df_clean <- df
+    target_count_cols <- character(0)
 
     for (c_name in names(df_clean)) {
       c_lower <- tolower(trimws(c_name))
@@ -790,6 +806,7 @@ audit_cell_suppression <- function(tables,
       }
 
       if (!is_target) next
+      target_count_cols <- c(target_count_cols, c_name)
 
       col_vals <- df_clean[[c_name]]
       col_mod <- FALSE
@@ -838,6 +855,7 @@ audit_cell_suppression <- function(tables,
             column = c_name,
             original_value = as.character(v),
             masked_value = as.character(new_v),
+            suppression_type = "primary",
             stringsAsFactors = FALSE
           )
           col_vals[r_idx] <- new_v
@@ -846,6 +864,101 @@ audit_cell_suppression <- function(tables,
 
       if (col_mod) {
         df_clean[[c_name]] <- col_vals
+      }
+    }
+
+    # Secondary / complementary cell suppression
+    if (secondary_suppression && length(target_count_cols) > 0) {
+      current_v <- if (length(violations_list) > 0) do.call(rbind, violations_list) else NULL
+
+      # a) Row-level secondary suppression
+      for (r_idx in seq_len(nrow(df_clean))) {
+        supp_row <- if (!is.null(current_v)) {
+          current_v[current_v$table == t_name & current_v$row_index == r_idx & current_v$column %in% target_count_cols, , drop = FALSE]
+        } else NULL
+
+        if (!is.null(supp_row) && nrow(supp_row) == 1) {
+          supp_col <- supp_row$column[1]
+          cand_cols <- setdiff(target_count_cols, supp_col)
+          cand_counts <- integer(0)
+          cand_pcts <- character(0)
+          valid_cols <- character(0)
+
+          for (cc in cand_cols) {
+            val <- df_clean[r_idx, cc]
+            parsed <- parse_cell_count(val)
+            if (!is.na(parsed$cnt) && parsed$cnt > 0) {
+              cand_counts <- c(cand_counts, parsed$cnt)
+              cand_pcts <- c(cand_pcts, if (is.na(parsed$pct)) "" else parsed$pct)
+              valid_cols <- c(valid_cols, cc)
+            }
+          }
+
+          if (length(valid_cols) > 0) {
+            min_idx <- which.min(cand_counts)
+            sec_col <- valid_cols[min_idx]
+            sec_pct <- cand_pcts[min_idx]
+            sec_orig <- as.character(df_clean[r_idx, sec_col])
+            sec_masked <- if (preserve_pct && nzchar(sec_pct)) paste0(mask_str, " (", sec_pct, ")") else mask_str
+
+            df_clean[r_idx, sec_col] <- sec_masked
+            violations_list[[length(violations_list) + 1]] <- data.frame(
+              table = t_name,
+              row_index = r_idx,
+              column = sec_col,
+              original_value = sec_orig,
+              masked_value = sec_masked,
+              suppression_type = "secondary",
+              stringsAsFactors = FALSE
+            )
+            current_v <- do.call(rbind, violations_list)
+          }
+        }
+      }
+
+      # b) Column-level secondary suppression
+      for (cc in target_count_cols) {
+        supp_col <- if (!is.null(current_v)) {
+          current_v[current_v$table == t_name & current_v$column == cc, , drop = FALSE]
+        } else NULL
+
+        if (!is.null(supp_col) && nrow(supp_col) == 1) {
+          supp_row_idx <- supp_col$row_index[1]
+          cand_rows <- setdiff(seq_len(nrow(df_clean)), supp_row_idx)
+          cand_counts <- integer(0)
+          cand_pcts <- character(0)
+          valid_rows <- integer(0)
+
+          for (rr in cand_rows) {
+            val <- df_clean[rr, cc]
+            parsed <- parse_cell_count(val)
+            if (!is.na(parsed$cnt) && parsed$cnt > 0) {
+              cand_counts <- c(cand_counts, parsed$cnt)
+              cand_pcts <- c(cand_pcts, if (is.na(parsed$pct)) "" else parsed$pct)
+              valid_rows <- c(valid_rows, rr)
+            }
+          }
+
+          if (length(valid_rows) > 0) {
+            min_idx <- which.min(cand_counts)
+            sec_r <- valid_rows[min_idx]
+            sec_pct <- cand_pcts[min_idx]
+            sec_orig <- as.character(df_clean[sec_r, cc])
+            sec_masked <- if (preserve_pct && nzchar(sec_pct)) paste0(mask_str, " (", sec_pct, ")") else mask_str
+
+            df_clean[sec_r, cc] <- sec_masked
+            violations_list[[length(violations_list) + 1]] <- data.frame(
+              table = t_name,
+              row_index = sec_r,
+              column = cc,
+              original_value = sec_orig,
+              masked_value = sec_masked,
+              suppression_type = "secondary",
+              stringsAsFactors = FALSE
+            )
+            current_v <- do.call(rbind, violations_list)
+          }
+        }
       }
     }
 
@@ -861,19 +974,26 @@ audit_cell_suppression <- function(tables,
       column = character(0),
       original_value = character(0),
       masked_value = character(0),
+      suppression_type = character(0),
       stringsAsFactors = FALSE
     )
   }
 
   summary_rows <- lapply(names(clean_tables), function(nm) {
     df_t <- clean_tables[[nm]]
-    n_v <- sum(violations_df$table == nm)
+    tbl_v <- violations_df[violations_df$table == nm, , drop = FALSE]
+    n_v <- nrow(tbl_v)
+    prim_n <- if ("suppression_type" %in% names(tbl_v)) sum(tbl_v$suppression_type == "primary") else n_v
+    sec_n <- if ("suppression_type" %in% names(tbl_v)) sum(tbl_v$suppression_type == "secondary") else 0L
+
     data.frame(
       table = nm,
       table_name = nm,
       n_rows = nrow(df_t),
       n_columns = ncol(df_t),
       suppressed_cells = n_v,
+      primary_suppressed = prim_n,
+      secondary_suppressed = sec_n,
       violations = n_v,
       min_cell_count = min_cnt,
       status = if (n_v == 0) "CLEAN" else paste0("SUPPRESSED_", n_v),
@@ -886,6 +1006,8 @@ audit_cell_suppression <- function(tables,
     tables = clean_tables,
     violations = violations_df,
     violation_count = nrow(violations_df),
+    primary_count = if ("suppression_type" %in% names(violations_df)) sum(violations_df$suppression_type == "primary") else nrow(violations_df),
+    secondary_count = if ("suppression_type" %in% names(violations_df)) sum(violations_df$suppression_type == "secondary") else 0L,
     is_clean = (nrow(violations_df) == 0L),
     min_cell_count = min_cnt,
     mask_value = mask_str,
@@ -897,6 +1019,8 @@ audit_cell_suppression <- function(tables,
   if (is_single && !return_audit) {
     single_df <- clean_tables[[1]]
     attr(single_df, "suppressed_cell_count") <- nrow(violations_df)
+    attr(single_df, "primary_suppressed_count") <- res$primary_count
+    attr(single_df, "secondary_suppressed_count") <- res$secondary_count
     attr(single_df, "is_clean") <- (nrow(violations_df) == 0L)
     return(single_df)
   }

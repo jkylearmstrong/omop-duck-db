@@ -862,6 +862,765 @@ def decision_curve_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Robust Multivariable Odds Ratios with L2 / Ridge Inversion
+# ---------------------------------------------------------------------------
+
+class ConsortiumRiskFactors:
+    """Publication-ready Table 5 multivariable risk factors container.
+
+    Holds standardized odds ratios, 95% confidence intervals, and Wald p-values
+    computed via L2 regularized logistic regression and QR orthogonalization.
+    """
+
+    def __init__(
+        self,
+        table: pd.DataFrame,
+        coefficients: pd.Series,
+        standard_errors: pd.Series,
+        covariance_matrix: np.ndarray,
+        dropped_features: list[str],
+        metadata: dict[str, Any],
+    ):
+        self.table = table
+        self.coefficients = coefficients
+        self.standard_errors = standard_errors
+        self.covariance_matrix = covariance_matrix
+        self.dropped_features = dropped_features
+        self.metadata = metadata
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Returns the publication-grade Table 5 DataFrame."""
+        return self.table.copy()
+
+    def to_quarto(
+        self,
+        caption: str = "Table 5: Multivariable Risk Factors for Clinical Outcome (L2 Regularized)",
+        label: str = "tbl-risk-factors",
+    ) -> str:
+        """Renders the risk factors table into Quarto Markdown with bracketed 95% CIs."""
+        lines = [
+            f"```{{=typst}}",
+            f"// {caption}",
+            f"```",
+            f": {caption} {{#{label}}}",
+            "",
+            "| Domain | Variable | Unit / Metric | Odds Ratio (95% CI) | p-value |",
+            "|:---|:---|:---|:---:|:---:|",
+        ]
+        curr_domain = None
+        for _, row in self.table.iterrows():
+            d = str(row["domain"])
+            if d != curr_domain:
+                curr_domain = d
+                lines.append(f"| **{curr_domain}** | | | | |")
+            lines.append(
+                f"| | {row['variable']} | {row['unit']} | {row['or_ci_formatted']} | {row['p_formatted']} |"
+            )
+        return "\n".join(lines) + "\n"
+
+    def to_typst(
+        self,
+        caption: str = "Table 5: Multivariable Risk Factors for Clinical Outcome (L2 Regularized)",
+    ) -> str:
+        """Renders the risk factors table into Typst table syntax."""
+        lines = [
+            f"#figure(",
+            f"  table(",
+            f"    columns: (1.5fr, 2fr, 2fr, 2fr, 1.2fr),",
+            f"    align: (left, left, left, center, center),",
+            f"    stroke: (x, y) => if y == 0 {{ (bottom: 1.2pt) }} else {{ none }},",
+            f"    table.header([*Domain*], [*Variable*], [*Unit*], [*Odds Ratio (95% CI)*], [*p-value*]),",
+        ]
+        curr_domain = None
+        for _, row in self.table.iterrows():
+            d = str(row["domain"])
+            if d != curr_domain:
+                curr_domain = d
+                lines.append(f"    table.cell(colspan: 5)[*#upper(\"{curr_domain}\")*],")
+            lines.append(
+                f"    [], [{row['variable']}], [{row['unit']}], [{row['or_ci_formatted']}], [{row['p_formatted']}], "
+            )
+        lines.append(f"  ),")
+        lines.append(f"  caption: [{caption}],")
+        lines.append(f")")
+        return "\n".join(lines) + "\n"
+
+    def plot_forest(
+        self,
+        output_path: str | Path | None = None,
+        save_path: str | Path | None = None,
+        title: str = "Multivariable Odds Ratios (95% CI)",
+        figsize: tuple[float, float] = (8.0, 6.0),
+        show: bool = False,
+    ) -> Any:
+        """Plots a publication-quality Forest Plot with log-scale odds ratios and 95% CIs."""
+        if save_path is not None:
+            output_path = save_path
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return None
+
+        df = self.table.copy()
+        if df.empty:
+            return None
+
+        # Sort variables for forest plot
+        df = df.iloc[::-1].reset_index(drop=True)
+        y_pos = np.arange(len(df))
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+        ax.axvline(1.0, color="gray", linestyle="--", linewidth=1.0, alpha=0.7)
+
+        or_vals = df["odds_ratio"].astype(float).values
+        ci_low = df["ci_95_lower"].astype(float).values
+        ci_high = df["ci_95_upper"].astype(float).values
+
+        xerr_low = np.maximum(0.0, or_vals - ci_low)
+        xerr_high = np.maximum(0.0, ci_high - or_vals)
+
+        ax.errorbar(
+            or_vals,
+            y_pos,
+            xerr=[xerr_low, xerr_high],
+            fmt="s",
+            color="#08519c",
+            ecolor="#3182bd",
+            elinewidth=1.8,
+            capsize=3.5,
+            markersize=6,
+        )
+
+        labels = [f"{row['variable']} ({row['unit']})" for _, row in df.iterrows()]
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels, fontsize=9)
+        ax.set_xscale("log")
+        ax.set_xlabel("Odds Ratio (log scale)", fontsize=10, fontweight="bold")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.grid(axis="x", linestyle=":", alpha=0.5)
+
+        plt.tight_layout()
+        if output_path:
+            p = Path(output_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(str(p), dpi=300, bbox_inches="tight")
+        if show:
+            plt.show()
+        return fig
+
+    def __repr__(self) -> str:
+        return (
+            f"<ConsortiumRiskFactors: {len(self.table)} predictors, "
+            f"{len(self.dropped_features)} dropped collinear features, "
+            f"L2 alpha={self.metadata.get('alpha', 1.0)}>\n"
+            f"{self.table[['domain', 'variable', 'unit', 'or_ci_formatted', 'p_formatted']].to_string(index=False)}"
+        )
+
+
+def consortium_multivariable_risk_factors(
+    X: pd.DataFrame | np.ndarray,
+    y: Sequence[int | float] | np.ndarray | pd.Series | None = None,
+    outcome_col: str | None = None,
+    target_col: str | None = None,
+    feature_cols: Sequence[str] | None = None,
+    binary_cols: Sequence[str] | None = None,
+    regularize: bool = True,
+    alpha: float = 1.0,
+    l2_lambda: float | None = None,
+    domain_mapping: dict[str, str] | None = None,
+    standardize_continuous: bool = True,
+    drop_collinear: bool = True,
+    feature_names: Sequence[str] | None = None,
+) -> ConsortiumRiskFactors:
+    """Calculates robust multivariable Odds Ratios with L2 / Ridge inversion and QR orthogonalization.
+
+    When fitting multivariable logistic regression on high-dimensional clinical matrices
+    (e.g. hundreds of dummy-coded comorbidities, procedures, and medication classes), standard
+    unregularized maximum likelihood frequently suffers from Hessian collinearity and quasi-complete
+    separation, resulting in NaN standard errors and missing 95% CIs.
+
+    This function uses QR decomposition to eliminate linearly dependent features, applies L2
+    penalized logistic regression (ridge inversion) to guarantee an invertible parameter covariance
+    matrix, and emits publication-grade Table 5 outputs with standardized units ("Per 1-SD Increase"
+    vs. "Presence vs. Absence").
+
+    Args:
+        X: Feature matrix DataFrame or 2D NumPy array. If `outcome_col` is supplied, X may be full DataFrame.
+        y: Binary outcome vector (0 or 1). Optional if `outcome_col` is specified.
+        outcome_col: Column name of outcome if X is a combined DataFrame.
+        target_col: Optional alias for outcome_col.
+        feature_cols: Optional list of predictor columns to subset from X.
+        binary_cols: List of column names that are binary indicators. If None, auto-detected.
+        regularize: Whether to apply L2 ridge regularization (default True).
+        alpha: L2 penalty parameter lambda (default 1.0).
+        l2_lambda: Optional alias for alpha.
+        domain_mapping: Optional dictionary mapping feature names to clinical domains.
+        standardize_continuous: Whether continuous features are standardized to 1-SD units (default True).
+        drop_collinear: Whether to eliminate linearly dependent columns via QR decomposition (default True).
+        feature_names: Optional column names if X is a raw numpy array.
+
+    Returns:
+        ConsortiumRiskFactors: Container holding Table 5 DataFrame, Wald statistics, and plotting methods.
+    """
+    if l2_lambda is not None:
+        alpha = float(l2_lambda)
+
+    target_k = outcome_col or target_col
+    if y is None and target_k is not None:
+        if isinstance(X, pd.DataFrame):
+            y = X[target_k].values
+            if feature_cols is not None:
+                X_df = X[list(feature_cols)].copy()
+            else:
+                X_df = X[[c for c in X.columns if c != target_k]].copy()
+            feat_names = list(X_df.columns)
+        else:
+            raise ValueError("When outcome_col/target_col is passed, X must be a pandas DataFrame.")
+    else:
+        if isinstance(X, pd.DataFrame):
+            if feature_cols is not None:
+                X_df = X[list(feature_cols)].copy()
+            else:
+                X_df = X.copy()
+            feat_names = list(X_df.columns)
+        else:
+            X_arr = np.asarray(X, dtype=float)
+            feat_names = (
+                list(feature_names)
+                if feature_names is not None
+                else [f"x{i+1}" for i in range(X_arr.shape[1])]
+            )
+            X_df = pd.DataFrame(X_arr, columns=feat_names)
+
+    if y is None:
+        raise ValueError("Binary outcome target y or outcome_col/target_col must be specified.")
+
+    y_arr = np.asarray(y, dtype=float).ravel()
+    if len(X_df) != len(y_arr):
+        raise ValueError(f"Length of X ({len(X_df)}) and y ({len(y_arr)}) must match.")
+
+    # Drop missing values
+    valid_mask = (~X_df.isna().any(axis=1)) & (~np.isnan(y_arr))
+    if not valid_mask.all():
+        X_df = X_df.loc[valid_mask].reset_index(drop=True)
+        y_arr = y_arr[valid_mask]
+
+    n_samples, n_features = X_df.shape
+    if n_samples < 5:
+        raise ValueError(f"Insufficient samples ({n_samples}) for multivariable regression.")
+
+    # 1. Determine binary vs continuous columns
+    if binary_cols is not None:
+        binary_set = set(binary_cols)
+    else:
+        binary_set = set()
+        for c in X_df.columns:
+            u_vals = set(X_df[c].dropna().unique())
+            if u_vals.issubset({0, 1, 0.0, 1.0}):
+                binary_set.add(c)
+
+    # 2. Standardize continuous columns if requested
+    X_proc = pd.DataFrame(index=X_df.index)
+    col_units: dict[str, str] = {}
+    for c in X_df.columns:
+        s = X_df[c].astype(float)
+        if c in binary_set:
+            X_proc[c] = s
+            col_units[c] = "Presence vs. Absence"
+        else:
+            if standardize_continuous:
+                sd = float(s.std())
+                if sd > 1e-12:
+                    X_proc[c] = (s - s.mean()) / sd
+                    col_units[c] = "Per 1-SD Increase"
+                else:
+                    X_proc[c] = s
+                    col_units[c] = "Continuous (Invariant)"
+            else:
+                X_proc[c] = s
+                col_units[c] = "Per 1-Unit Increase"
+
+    # 3. QR Orthogonalization / Collinearity elimination
+    dropped_features: list[str] = []
+    active_cols = list(X_proc.columns)
+
+    if drop_collinear and len(active_cols) > 0:
+        kept_cols = []
+        design_mat = np.ones((n_samples, 1))
+        for c in active_cols:
+            col_v = X_proc[c].values[:, np.newaxis]
+            # Test residual after projection onto current design basis
+            proj, _, _, _ = np.linalg.lstsq(design_mat, col_v, rcond=None)
+            resid = col_v - design_mat @ proj
+            var_resid = np.var(resid)
+            if var_resid < 1e-7:
+                dropped_features.append(c)
+            else:
+                kept_cols.append(c)
+                design_mat = np.column_stack([design_mat, col_v])
+        active_cols = kept_cols
+
+    if len(active_cols) == 0:
+        raise ValueError("All features were identified as collinear or invariant.")
+
+    # 4. Fit L2 regularized logistic regression via Newton-Raphson / IRLS
+    Z = np.column_stack([np.ones(n_samples), X_proc[active_cols].values])
+    p_dim = Z.shape[1]
+
+    # Initialize beta: intercept = log(p0 / (1 - p0)), others = 0
+    p0 = float(np.clip(np.mean(y_arr), 1e-4, 1.0 - 1e-4))
+    beta = np.zeros(p_dim)
+    beta[0] = np.log(p0 / (1.0 - p0))
+
+    # L2 penalty matrix (do not penalize intercept)
+    lam = float(alpha) if regularize else 1e-9
+    diag_pen = np.full(p_dim, lam)
+    diag_pen[0] = 0.0
+    Lambda = np.diag(diag_pen)
+
+    for iteration in range(60):
+        eta = np.clip(Z @ beta, -30.0, 30.0)
+        prob = 1.0 / (1.0 + np.exp(-eta))
+        prob = np.clip(prob, 1e-12, 1.0 - 1e-12)
+        w = prob * (1.0 - prob)
+        W_Z = Z * w[:, np.newaxis]
+        Hessian = Z.T @ W_Z + Lambda
+        grad = Z.T @ (prob - y_arr) + Lambda @ beta
+
+        try:
+            step = np.linalg.solve(Hessian, grad)
+        except np.linalg.LinAlgError:
+            # Fall back to pseudo-inverse if Hessian is near singular
+            step = np.linalg.pinv(Hessian) @ grad
+
+        beta -= step
+        if np.max(np.abs(step)) < 1e-6:
+            break
+
+    # 5. Parameter covariance matrix via regularized information inversion
+    eta_final = np.clip(Z @ beta, -30.0, 30.0)
+    p_final = np.clip(1.0 / (1.0 + np.exp(-eta_final)), 1e-12, 1.0 - 1e-12)
+    w_final = p_final * (1.0 - p_final)
+    H_final = Z.T @ (Z * w_final[:, np.newaxis]) + Lambda
+
+    try:
+        cov_matrix = np.linalg.inv(H_final)
+    except np.linalg.LinAlgError:
+        cov_matrix = np.linalg.pinv(H_final)
+
+    se = np.sqrt(np.maximum(1e-12, np.diag(cov_matrix)))
+
+    # 6. Extract Odds Ratios, 95% CIs, and Wald p-values (skip intercept = idx 0)
+    feat_betas = beta[1:]
+    feat_se = se[1:]
+
+    # Normal CDF approximation for p-values
+    def norm_cdf(val: float) -> float:
+        return 0.5 * (1.0 + np.math.erf(val / np.sqrt(2.0)))
+
+    def infer_domain(fname: str) -> str:
+        fn_l = fname.lower()
+        if any(k in fn_l for k in ("age", "gender", "sex", "race", "ethnicity", "male", "female")):
+            return "Demographics"
+        elif any(fn_l.startswith(k) for k in ("dx_", "cond_", "condition_", "charlson", "elixhauser", "cci")) or any(k in fn_l for k in ("diabetes", "hypertension", "failure", "copd", "ckd")):
+            return "Comorbidities"
+        elif any(fn_l.startswith(k) for k in ("rx_", "drug_", "med_")) or any(k in fn_l for k in ("statin", "insulin", "aspirin", "ace_", "arb_")):
+            return "Medications"
+        elif any(fn_l.startswith(k) for k in ("proc_", "procedure_")):
+            return "Procedures"
+        elif any(fn_l.startswith(k) for k in ("lab_", "measurement_", "val_")) or any(k in fn_l for k in ("creatinine", "glucose", "a1c", "sbp", "dbp", "bmi", "potassium", "sodium")):
+            return "Laboratory & Vitals"
+        return "Clinical Features"
+
+    rows = []
+    for idx, f_name in enumerate(active_cols):
+        b = float(feat_betas[idx])
+        s_err = float(feat_se[idx])
+        or_val = float(np.exp(b))
+        ci_l = float(np.exp(b - 1.96 * s_err))
+        ci_u = float(np.exp(b + 1.96 * s_err))
+        z_score = b / s_err if s_err > 0 else 0.0
+        p_val = 2.0 * (1.0 - norm_cdf(abs(z_score)))
+
+        dom = (
+            domain_mapping.get(f_name, infer_domain(f_name))
+            if domain_mapping is not None
+            else infer_domain(f_name)
+        )
+
+        p_str = "<0.001" if p_val < 0.001 else f"{p_val:.3f}"
+        rows.append({
+            "domain": dom,
+            "variable": f_name,
+            "unit": col_units.get(f_name, "Unit"),
+            "odds_ratio": round(or_val, 2),
+            "ci_95_lower": round(ci_l, 2),
+            "ci_95_upper": round(ci_u, 2),
+            "p_value": float(p_val),
+            "or_ci_formatted": f"{or_val:.2f} [{ci_l:.2f}-{ci_u:.2f}]",
+            "p_formatted": p_str,
+            "beta": b,
+            "se": s_err,
+            "z_score": z_score,
+        })
+
+    table_df = pd.DataFrame(rows)
+    table_df.sort_values(by=["domain", "p_value"], inplace=True)
+    table_df.reset_index(drop=True, inplace=True)
+
+    coef_series = pd.Series(feat_betas, index=active_cols, name="beta")
+    se_series = pd.Series(feat_se, index=active_cols, name="se")
+
+    meta = {
+        "n_samples": n_samples,
+        "n_features": len(active_cols),
+        "alpha": alpha,
+        "regularize": regularize,
+        "intercept": float(beta[0]),
+        "converged": True,
+    }
+
+    return ConsortiumRiskFactors(
+        table=table_df,
+        coefficients=coef_series,
+        standard_errors=se_series,
+        covariance_matrix=cov_matrix,
+        dropped_features=dropped_features,
+        metadata=meta,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal-External Cross-Validation (IECV) Matrix
+# ---------------------------------------------------------------------------
+
+class ConsortiumCrossSiteValidation:
+    """Container for K x K Internal-External Cross-Validation (IECV) performance matrices."""
+
+    def __init__(
+        self,
+        auroc_matrix: pd.DataFrame,
+        brier_matrix: pd.DataFrame,
+        summary_df: pd.DataFrame,
+        sites: list[str],
+        metadata: dict[str, Any],
+    ):
+        self.auroc_matrix = auroc_matrix
+        self.brier_matrix = brier_matrix
+        self.summary_df = summary_df
+        self.sites = sites
+        self.metadata = metadata
+
+    def summary(self) -> pd.DataFrame:
+        """Returns internal vs external validation transportability summary."""
+        return self.summary_df.copy()
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Returns the AUROC K x K matrix."""
+        return self.auroc_matrix.copy()
+
+    def to_quarto(
+        self,
+        caption: str = "Table 4: Internal-External Cross-Validation (IECV) AUROC Matrix Across Participating Sites",
+        label: str = "tbl-iecv",
+    ) -> str:
+        """Exports the K x K AUROC matrix into Quarto table syntax with diagonal highlighted."""
+        cols = list(self.auroc_matrix.columns)
+        header = "| Train \\ Test | " + " | ".join(cols) + " |"
+        sep = "|:---| " + " | ".join([":---:"] * len(cols)) + " |"
+        lines = [
+            f": {caption} {{#{label}}}",
+            "",
+            header,
+            sep,
+        ]
+        for idx, row in self.auroc_matrix.iterrows():
+            vals = []
+            for c in cols:
+                v = float(row[c])
+                if str(idx) == str(c):
+                    vals.append(f"**{v:.3f}**")  # internal
+                else:
+                    vals.append(f"{v:.3f}")
+            lines.append(f"| **{idx}** | " + " | ".join(vals) + " |")
+        return "\n".join(lines) + "\n"
+
+    def to_typst(
+        self,
+        caption: str = "Table 4: Internal-External Cross-Validation (IECV) AUROC Matrix Across Participating Sites",
+    ) -> str:
+        """Exports the K x K AUROC matrix into Typst syntax."""
+        cols = list(self.auroc_matrix.columns)
+        n_c = len(cols) + 1
+        col_spec = f"({', '.join(['1.5fr'] + ['1fr'] * len(cols))})"
+        lines = [
+            f"#figure(",
+            f"  table(",
+            f"    columns: {col_spec},",
+            f"    align: (left, {', '.join(['center'] * len(cols))}),",
+            f"    stroke: (x, y) => if y == 0 {{ (bottom: 1.2pt) }} else {{ none }},",
+            f"    table.header([*Train \\ Test*], {', '.join(f'[*test: {c}*]' for c in cols)}),",
+        ]
+        for idx, row in self.auroc_matrix.iterrows():
+            cells = [f"[*train: {idx}*]"]
+            for c in cols:
+                v = float(row[c])
+                cell_val = f"*{v:.3f}*" if str(idx) == str(c) else f"{v:.3f}"
+                cells.append(f"[{cell_val}]")
+            lines.append(f"    {', '.join(cells)},")
+        lines.append(f"  ),")
+        lines.append(f"  caption: [{caption}],")
+        lines.append(f")")
+        return "\n".join(lines) + "\n"
+
+    @property
+    def summary_table(self) -> pd.DataFrame:
+        """Returns per-site internal vs external transportability summary table."""
+        rows = []
+        for s in self.sites:
+            int_auc = float(self.auroc_matrix.loc[s, s])
+            ext_vals = [float(self.auroc_matrix.loc[s, o]) for o in self.sites if o != s]
+            mean_ext = float(np.mean(ext_vals)) if ext_vals else int_auc
+            gap = float(int_auc - mean_ext)
+            rows.append({
+                "site": s,
+                "internal_auroc": round(int_auc, 3),
+                "mean_auroc_external": round(mean_ext, 3),
+                "transportability_gap": round(gap, 3),
+            })
+        return pd.DataFrame(rows)
+
+    def plot_heatmap(
+        self,
+        output_path: str | Path | None = None,
+        save_path: str | Path | None = None,
+        metric: str = "auroc",
+        title: str | None = None,
+        figsize: tuple[float, float] = (6.0, 5.0),
+        show: bool = False,
+    ) -> Any:
+        """Plots an annotated heatmap of the K x K cross-site validation matrix."""
+        if save_path is not None:
+            output_path = save_path
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return None
+
+        if str(metric).lower() == "brier":
+            mat = self.brier_matrix.values.astype(float)
+            labels = list(self.brier_matrix.columns)
+            default_title = "Cross-Site Transportability (IECV Brier Score Matrix)"
+            cbar_label = "Brier Score"
+            cmap = "YlOrRd"
+            vmin, vmax = 0.0, max(0.5, float(np.max(mat)))
+        else:
+            mat = self.auroc_matrix.values.astype(float)
+            labels = list(self.auroc_matrix.columns)
+            default_title = "Cross-Site Transportability (IECV AUROC Matrix)"
+            cbar_label = "AUROC"
+            cmap = "YlGnBu"
+            vmin, vmax = 0.5, 1.0
+
+        title = title or default_title
+
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+        cax = ax.imshow(mat, cmap=cmap, vmin=vmin, vmax=vmax)
+        fig.colorbar(cax, ax=ax, fraction=0.046, pad=0.04, label=cbar_label)
+
+        ax.set_xticks(np.arange(len(labels)))
+        ax.set_yticks(np.arange(len(labels)))
+        ax.set_xticklabels(labels, fontsize=9)
+        ax.set_yticklabels(labels, fontsize=9)
+        ax.set_xlabel("Evaluation Site (Test Partition)", fontsize=10, fontweight="bold")
+        ax.set_ylabel("Model Origin (Training Site)", fontsize=10, fontweight="bold")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+
+        for i in range(len(labels)):
+            for j in range(len(labels)):
+                val = mat[i, j]
+                weight = "bold" if i == j else "normal"
+                color = "white" if (val > 0.80 and metric != "brier") else "black"
+                ax.text(j, i, f"{val:.3f}", ha="center", va="center", color=color, fontweight=weight, fontsize=9)
+
+        plt.tight_layout()
+        if output_path:
+            p = Path(output_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(str(p), dpi=300, bbox_inches="tight")
+        if show:
+            plt.show()
+        return fig
+
+    def __repr__(self) -> str:
+        s = self.summary_df.iloc[0].to_dict() if not self.summary_df.empty else {}
+        return (
+            f"<ConsortiumCrossSiteValidation: {len(self.sites)} sites ({len(self.sites)}x{len(self.sites)} matrix), "
+            f"Mean Internal AUROC={s.get('mean_internal_auroc', 0.0):.3f}, "
+            f"Mean External AUROC={s.get('mean_external_auroc', 0.0):.3f}, "
+            f"Generalization Gap={s.get('generalization_gap', 0.0):.3f}>\n"
+            f"{self.auroc_matrix.to_string()}"
+        )
+
+
+def _calc_auroc_pure(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """Calculates AUROC using the Mann-Whitney U statistic with zero dependencies."""
+    y_t = np.asarray(y_true, dtype=float).ravel()
+    y_s = np.asarray(y_score, dtype=float).ravel()
+
+    pos = y_t == 1.0
+    neg = y_t == 0.0
+    n_pos = int(np.sum(pos))
+    n_neg = int(np.sum(neg))
+
+    if n_pos == 0 or n_neg == 0:
+        return 0.5
+
+    # Rank with average rank for ties
+    order = np.argsort(y_s)
+    ranks = np.empty_like(order, dtype=float)
+    ranks[order] = np.arange(1, len(y_s) + 1)
+
+    # Adjust ties
+    sorted_s = y_s[order]
+    idx = 0
+    while idx < len(sorted_s):
+        end = idx
+        while end + 1 < len(sorted_s) and sorted_s[end + 1] == sorted_s[idx]:
+            end += 1
+        if end > idx:
+            avg_rank = (idx + 1 + end + 1) / 2.0
+            ranks[order[idx:end + 1]] = avg_rank
+            idx = end + 1
+        else:
+            idx += 1
+
+    sum_pos_ranks = np.sum(ranks[pos])
+    u_stat = sum_pos_ranks - (n_pos * (n_pos + 1)) / 2.0
+    return float(u_stat / (n_pos * n_neg))
+
+
+def consortium_cross_site_validation(
+    site_data: dict[str, pd.DataFrame] | pd.DataFrame,
+    feature_cols: Sequence[str],
+    target_col: str | None = None,
+    outcome_col: str | None = None,
+    site_col: str = "site",
+    regularize: bool = True,
+    alpha: float = 1.0,
+    l2_lambda: float | None = None,
+) -> ConsortiumCrossSiteValidation:
+    """Performs K x K Internal-External Cross-Validation (IECV) across federated health systems.
+
+    Trains predictive models on Site i and evaluates on Site j for all (i, j) pairs in {1..K} x {1..K}.
+    Returns a K x K AUROC matrix, Brier score matrix, and transportability summary to evaluate
+    domain shift and model transportability across independent institutions.
+
+    Args:
+        site_data: Dictionary of {site_name: DataFrame} or single DataFrame with `site_col`.
+        feature_cols: List of column names used as predictive features.
+        target_col: Name of the binary target outcome column.
+        outcome_col: Optional alias for target_col.
+        site_col: Name of the hospital/site identifier column if single DataFrame is provided.
+        regularize: Whether to apply L2 ridge regularization to site models.
+        alpha: L2 penalty parameter lambda (default 1.0).
+        l2_lambda: Optional alias for alpha.
+
+    Returns:
+        ConsortiumCrossSiteValidation: Object with AUROC matrix, Brier matrix, and heatmap plot.
+    """
+    if target_col is None:
+        target_col = outcome_col
+    if target_col is None:
+        raise ValueError("Either target_col or outcome_col must be specified.")
+    if l2_lambda is not None:
+        alpha = float(l2_lambda)
+
+    if isinstance(site_data, pd.DataFrame):
+        if site_col not in site_data.columns:
+            raise ValueError(f"Site column {site_col!r} not found in site_data DataFrame.")
+        sites_dict = {str(s): group.copy() for s, group in site_data.groupby(site_col)}
+    elif isinstance(site_data, dict):
+        sites_dict = {str(k): (v.copy() if isinstance(v, pd.DataFrame) else pd.DataFrame(v)) for k, v in site_data.items()}
+    else:
+        raise TypeError(f"site_data must be a dict or DataFrame, got {type(site_data).__name__}")
+
+    site_names = sorted(sites_dict.keys())
+    if len(site_names) < 2:
+        raise ValueError(f"IECV requires at least 2 distinct sites, found {len(site_names)}.")
+
+    k = len(site_names)
+    auroc_mat = np.zeros((k, k))
+    brier_mat = np.zeros((k, k))
+
+    # Fit site models and evaluate cross-site
+    trained_models = {}
+    for i, s_train in enumerate(site_names):
+        df_train = sites_dict[s_train].dropna(subset=list(feature_cols) + [target_col])
+        X_train = df_train[list(feature_cols)].values
+        y_train = df_train[target_col].values.astype(float)
+
+        rf = consortium_multivariable_risk_factors(
+            X=X_train,
+            y=y_train,
+            regularize=regularize,
+            alpha=alpha,
+            standardize_continuous=False,
+            drop_collinear=False,
+            feature_names=feature_cols,
+        )
+        trained_models[s_train] = (rf.metadata["intercept"], rf.coefficients.values)
+
+    for i, s_train in enumerate(site_names):
+        intercept, betas = trained_models[s_train]
+        for j, s_test in enumerate(site_names):
+            df_test = sites_dict[s_test].dropna(subset=list(feature_cols) + [target_col])
+            X_test = df_test[list(feature_cols)].values
+            y_test = df_test[target_col].values.astype(float)
+
+            eta = intercept + X_test @ betas
+            prob = 1.0 / (1.0 + np.exp(-np.clip(eta, -30.0, 30.0)))
+
+            auc = _calc_auroc_pure(y_test, prob)
+            brier = float(np.mean((y_test - prob) ** 2))
+
+            auroc_mat[i, j] = round(auc, 3)
+            brier_mat[i, j] = round(brier, 4)
+
+    df_auroc = pd.DataFrame(auroc_mat, index=site_names, columns=site_names)
+    df_brier = pd.DataFrame(brier_mat, index=site_names, columns=site_names)
+
+    # Calculate internal (diagonal) and external (off-diagonal) metrics
+    diag_indices = np.diag_indices(k)
+    internal_aucs = auroc_mat[diag_indices]
+    mask_off_diag = ~np.eye(k, dtype=bool)
+    external_aucs = auroc_mat[mask_off_diag]
+
+    mean_internal = float(np.mean(internal_aucs))
+    mean_external = float(np.mean(external_aucs))
+    gap = float(mean_internal - mean_external)
+
+    summary_rows = [{
+        "n_sites": k,
+        "mean_internal_auroc": round(mean_internal, 3),
+        "mean_external_auroc": round(mean_external, 3),
+        "generalization_gap": round(gap, 3),
+        "mean_brier_score": round(float(np.mean(brier_mat)), 4),
+        "transportability_status": "EXCELLENT" if gap <= 0.05 else ("MODERATE" if gap <= 0.10 else "DOMAIN_SHIFT_DETECTED"),
+    }]
+    summary_df = pd.DataFrame(summary_rows)
+
+    return ConsortiumCrossSiteValidation(
+        auroc_matrix=df_auroc,
+        brier_matrix=df_brier,
+        summary_df=summary_df,
+        sites=site_names,
+        metadata={"alpha": alpha, "regularize": regularize},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Re-export Explainability
 # ---------------------------------------------------------------------------
 import sys

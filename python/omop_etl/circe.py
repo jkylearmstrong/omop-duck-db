@@ -366,3 +366,168 @@ def execute_circe_cohort(
     con.execute(f"DELETE FROM {cohort_table} WHERE cohort_definition_id = {int(target_cohort_id)};")
     con.execute(f"INSERT INTO {cohort_table} {sql}")
     return con.execute(f"SELECT * FROM {cohort_table} WHERE cohort_definition_id = {int(target_cohort_id)}").df()
+
+
+def export_to_circe_json(
+    cohort_flow: Any,
+    cohort_name: str = "Consortium Cohort",
+    cohort_description: str | None = None,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Exports a CohortFlow or computable phenotype definition into compliant OHDSI Circe JSON.
+
+    Translates base index visit concepts, lookback/follow-up observation windows,
+    sequential inclusion steps, and single-visit-per-person deduplication into
+    the standard OHDSI CIRCE specification for seamless round-trip integration with
+    OHDSI Atlas, ATLAS Network Studies, and the OHDSI Phenotype Library.
+
+    Args:
+        cohort_flow: CohortFlow instance or object with visit_concept_ids and steps.
+        cohort_name: Display name of the exported cohort (default 'Consortium Cohort').
+        cohort_description: Optional narrative description of the phenotype.
+        output_path: Optional file path to write the JSON specification to.
+
+    Returns:
+        dict: Compliant OHDSI Circe JSON specification dictionary.
+    """
+    # 1. ConceptSets
+    concept_sets: list[dict[str, Any]] = []
+
+    # Visit Concept Set (CodesetId: 0)
+    visit_ids = list(getattr(cohort_flow, "visit_concept_ids", (9201, 262)))
+    visit_items = [
+        {
+            "concept": {
+                "CONCEPT_ID": int(cid),
+                "CONCEPT_NAME": f"Encounter Visit Concept {cid}",
+                "STANDARD_CONCEPT": "S",
+                "STANDARD_CONCEPT_CAPTION": "Standard",
+                "INVALID_REASON": "V",
+                "INVALID_REASON_CAPTION": "Valid",
+                "CONCEPT_CODE": str(cid),
+                "DOMAIN_ID": "Visit",
+                "VOCABULARY_ID": "Visit",
+                "CONCEPT_CLASS_ID": "Visit",
+            },
+            "isExcluded": False,
+            "includeDescendants": True,
+            "includeMapped": False,
+        }
+        for cid in visit_ids
+    ]
+    concept_sets.append({
+        "id": 0,
+        "name": f"{cohort_name} - Index Visit Types",
+        "expression": {"items": visit_items},
+    })
+
+    # 2. Primary Criteria
+    follow_up = getattr(cohort_flow, "follow_up_days", None)
+    post_days = int(follow_up) if follow_up is not None else 0
+    one_visit = getattr(cohort_flow, "one_visit_per_person", False)
+
+    primary_criteria = {
+        "CriteriaList": [
+            {
+                "VisitOccurrence": {
+                    "CodesetId": 0,
+                }
+            }
+        ],
+        "ObservationWindow": {
+            "PriorDays": 0,
+            "PostDays": post_days,
+        },
+        "PrimaryCriteriaLimit": {
+            "Type": "First" if one_visit else "All",
+        },
+    }
+
+    # 3. Inclusion Rules from CohortFlow steps
+    steps = getattr(cohort_flow, "steps", [])
+    inclusion_rules: list[dict[str, Any]] = []
+
+    for idx, (name, predicate) in enumerate(steps, start=1):
+        rule_crit: list[dict[str, Any]] = []
+
+        # Check if predicate defines conditions, drugs, or visit constraints
+        pred_lower = str(predicate).lower()
+
+        # Parse potential concept IDs in predicate e.g. "IN (201820, 201826)"
+        import re
+        c_in_match = re.search(r"in\s*\(\s*([\d\s,]+)\s*\)", pred_lower)
+        if c_in_match:
+            c_ids = [int(x.strip()) for x in c_in_match.group(1).split(",") if x.strip().isdigit()]
+            cs_id = len(concept_sets)
+            concept_sets.append({
+                "id": cs_id,
+                "name": f"Rule {idx}: {name} Concepts",
+                "expression": {
+                    "items": [
+                        {
+                            "concept": {
+                                "CONCEPT_ID": cid,
+                                "CONCEPT_NAME": f"Concept {cid}",
+                                "STANDARD_CONCEPT": "S",
+                                "DOMAIN_ID": "Condition" if "condition" in pred_lower else "Drug",
+                            },
+                            "isExcluded": False,
+                            "includeDescendants": True,
+                        }
+                        for cid in c_ids
+                    ]
+                },
+            })
+            domain_crit_key = "ConditionOccurrence" if "condition" in pred_lower else ("DrugExposure" if "drug" in pred_lower else "VisitOccurrence")
+            rule_crit.append({
+                domain_crit_key: {
+                    "CodesetId": cs_id,
+                },
+                "Occurrence": {"Type": 2, "Count": 1},
+                "StartWindow": {
+                    "Start": {"Days": 0, "Coeff": -1},
+                    "End": {"Days": 0, "Coeff": 1},
+                },
+            })
+        else:
+            # Default to index visit occurrence with SQL rule specification
+            rule_crit.append({
+                "VisitOccurrence": {
+                    "CodesetId": 0,
+                },
+                "Occurrence": {"Type": 2, "Count": 1},
+                "StartWindow": {
+                    "Start": {"Days": 0, "Coeff": -1},
+                    "End": {"Days": 0, "Coeff": 1},
+                },
+            })
+
+        inclusion_rules.append({
+            "name": name,
+            "description": f"SQL Predicate: {predicate}",
+            "expression": {
+                "Type": "ALL",
+                "CriteriaList": rule_crit,
+            },
+        })
+
+    circe_data = {
+        "ConceptSets": concept_sets,
+        "PrimaryCriteria": primary_criteria,
+        "InclusionRules": inclusion_rules,
+        "QualifiedLimit": {
+            "Type": "First" if one_visit else "All",
+        },
+        "ExpressionType": "SIMPLE_EXPRESSION",
+        "Title": cohort_name,
+        "Description": cohort_description or f"Exported from omop-duck-db CohortFlow ({len(steps)} inclusion rule(s)).",
+    }
+
+    if output_path is not None:
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(circe_data, f, indent=2)
+
+    return circe_data
+

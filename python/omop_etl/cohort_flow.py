@@ -171,6 +171,30 @@ class CohortFlow:
         lines.append("}")
         return "\n".join(lines)
 
+    def to_circe_json(
+        self,
+        cohort_name: str = "Consortium Cohort",
+        cohort_description: str | None = None,
+        author: str | None = None,
+        output_path: str | Path | None = None,
+        as_dict: bool = False,
+    ) -> str | dict[str, Any]:
+        """Exports this cohort flow into standard OHDSI Circe JSON."""
+        import json
+        from .circe import export_to_circe_json
+        desc = cohort_description
+        if author is not None:
+            desc = f"{desc} (Author: {author})" if desc else f"Author: {author}"
+        res = export_to_circe_json(
+            cohort_flow=self,
+            cohort_name=cohort_name,
+            cohort_description=desc,
+            output_path=output_path,
+        )
+        if as_dict:
+            return res
+        return json.dumps(res, indent=2)
+
 
 class Table2Generator:
     """Completeness / sentinel profiler: N, observed N, % missing, median, IQR, min, max, SD, flags."""

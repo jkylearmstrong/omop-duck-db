@@ -1,3 +1,48 @@
+# omopduckdb 0.6.3
+
+Release 0.6.3 delivers forward-looking consortium intelligence capabilities for federated clinical research, bridging OHDSI network standards and modern medical publishing with complete 1:1 parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
+
+### 1. Complementary / Secondary Cell Suppression (`secondary_suppression = True`)
+- `audit_cell_suppression()` and `consortium_privacy_audit()` (Python & R):
+  - Prevents deductive algebraic disclosure ($Suppressed = Total - \sum Unsuppressed$) in multi-site summary tables with marginal totals.
+  - When exactly one cell in a row or column is suppressed ($1 \le N < 11$), automatically identifies and masks the second-smallest non-zero cell in that row/column.
+  - Distinguishes and tracks `primary_suppressed` vs. `secondary_suppressed` cell counts in `PrivacyAuditResult` and `consortium_privacy_audit` summary diagnostics.
+
+### 2. Robust Multivariable Odds Ratios with L2 / Ridge Inversion (`consortium_multivariable_risk_factors`)
+- `consortium_multivariable_risk_factors()` (Python & R) in `omop_duck_db.ml`:
+  - Eliminates collinear and linearly dependent clinical features via QR orthogonalization.
+  - Uses L2 regularized logistic regression (ridge inversion) to guarantee an invertible parameter covariance matrix $(X^T W X + \lambda I)^{-1}$, eliminating NaN standard errors and missing 95% CIs on high-dimensional clinical feature matrices.
+  - Standardizes continuous features to 1-SD units ("Per 1-SD Increase") while preserving binary indicator features ("Presence vs. Absence").
+  - Emits publication-grade Table 5 outputs with domain groupings (Demographics, Comorbidities, Medications, Procedures, Laboratory & Vitals), Odds Ratios, 95% CIs, and Wald p-values.
+  - Includes camera-ready Forest Plot visualization (`.plot_forest()`, base-R `plot()`) and Quarto/Typst export.
+
+### 3. Pure DuckDB OHDSI Cohort Diagnostics (`consortium_cohort_diagnostics`)
+- `consortium_cohort_diagnostics()` (Python & R):
+  - Fully characterizes study cohorts across federated network sites directly in DuckDB without R/Java, rJava, or DatabaseConnector dependencies.
+  - Computes calendar-year incidence rates (new cases, person-years, incidence rate per 1,000 PY).
+  - Computes time-to-event and follow-up duration distributions (min, p25, median, p75, max, mean, sd).
+  - Generates 10-year age and sex population pyramids stratified by gender.
+  - Identifies top baseline concept prevalence deltas for conditions and medications in the lookback window.
+  - Integrates automated secondary cell suppression to guarantee HIPAA/GDPR compliance before diagnostic outputs leave local environments.
+
+### 4. Internal-External Cross-Validation (IECV) Matrix (`consortium_cross_site_validation`)
+- `consortium_cross_site_validation()` (Python & R):
+  - Fits predictive models on Site $i$ and evaluates on Site $j$ across a $K \times K$ consortium matrix to evaluate multi-hospital transportability and domain shift.
+  - Computes $K \times K$ AUROC and Brier score matrices, mean internal performance (diagonal), mean external performance (off-diagonal), and the multi-site generalization gap.
+  - Provides publication-ready cross-site transportability heatmaps (`.plot_heatmap()`) and Quarto/Typst table exports.
+
+### 5. Bidirectional OHDSI Circe JSON Exporter (`export_to_circe_json`)
+- `export_to_circe_json()` (Python & R) and `CohortFlow.to_circe_json()`:
+  - Exports computable cohorts defined in DuckDB/Python/R back into compliant OHDSI Circe JSON specifications.
+  - Seamlessly integrates with OHDSI Atlas, ATLAS Network Studies, and the OHDSI Phenotype Library.
+  - Achieves 100% round-trip fidelity verified against `compile_circe_to_duckdb`.
+
+### 6. End-to-End Manuscript Scaffold Builder (`build_manuscript_scaffold`)
+- `build_manuscript_scaffold()` (Python & R) and `FederatedConsortium.build_manuscript()`:
+  - Bundles generated consortium study artifacts (Table 1, Table 2 CONSORT flow, Table 5 risk factors, IECV transportability matrix, cohort diagnostics, calibration curves, DCA net benefit, and explainability) into a unified, submission-ready Quarto (`.qmd`) or Typst (`.typ`) document.
+  - Built-in structured formatting presets matching target journal requirements (JAMA, The Lancet Digital Health, JAMIA, and General).
+  - Appends an itemized 22-item TRIPOD Statement reporting compliance checklist table mapped directly to the generated study sections and figures.
+
 # omopduckdb 0.6.2
 
 Release 0.6.2 adds three modular, zero-hard-dependency capabilities for federated health system intelligence, with complete 1:1 parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):

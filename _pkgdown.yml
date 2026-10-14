@@ -45,6 +45,11 @@ reference:
   - with_differential_privacy
   - audit_cell_suppression
   - consortium_privacy_audit
+  - consortium_multivariable_risk_factors
+  - consortium_cross_site_validation
+  - consortium_cohort_diagnostics
+  - export_to_circe_json
+  - build_manuscript_scaffold
   - federated_meta_analysis
   - load_care_site
   - load_cdm_source

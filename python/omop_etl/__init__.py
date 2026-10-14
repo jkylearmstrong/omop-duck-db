@@ -43,6 +43,7 @@ from omop_etl.cohort import (
 from omop_etl.circe import (
     compile_circe_to_duckdb,
     execute_circe_cohort,
+    export_to_circe_json,
 )
 from omop_etl.cluster import (
     build_cluster_command,
@@ -155,15 +156,27 @@ from omop_etl.federation import (
     audit_cell_suppression,
     consortium_privacy_audit,
 )
+from omop_etl.cohort_diagnostics import (
+    ConsortiumCohortDiagnostics,
+    consortium_cohort_diagnostics,
+)
 from omop_etl.ml import (
     CohortExtractor,
     ConsortiumCalibration,
+    ConsortiumCrossSiteValidation,
     ConsortiumExplainability,
+    ConsortiumRiskFactors,
     DecisionCurveAnalysis,
     FeatureMatrixBuilder,
     consortium_calibration,
+    consortium_cross_site_validation,
     consortium_explainability,
+    consortium_multivariable_risk_factors,
     decision_curve_analysis,
+)
+from omop_etl.manuscript import (
+    ConsortiumManuscript,
+    build_manuscript_scaffold,
 )
 from omop_etl.ml_features import (
     ClinicalSequenceTokens,
@@ -402,6 +415,16 @@ __all__ = [
     "estimate_cif",
     "fine_gray_estimator",
     "plot_cif",
+    # 0.6.3 Forward-Looking Consortium Intelligence Additions
+    "export_to_circe_json",
+    "ConsortiumRiskFactors",
+    "consortium_multivariable_risk_factors",
+    "ConsortiumCohortDiagnostics",
+    "consortium_cohort_diagnostics",
+    "ConsortiumCrossSiteValidation",
+    "consortium_cross_site_validation",
+    "ConsortiumManuscript",
+    "build_manuscript_scaffold",
 ]
 
-__version__ = "0.6.1"
+__version__ = "0.6.3"

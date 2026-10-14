@@ -354,3 +354,128 @@ execute_circe_cohort <- function(con,
   DBI::dbExecute(con, sprintf("INSERT INTO %s %s;", cohort_table, sql))
   DBI::dbGetQuery(con, sprintf("SELECT * FROM %s WHERE cohort_definition_id = %d;", cohort_table, as.integer(target_cohort_id)))
 }
+
+#' Export CohortFlow to OHDSI Circe JSON
+#'
+#' @description
+#' Translates a `CohortFlow` computable phenotype definition into compliant
+#' OHDSI CIRCE JSON specification for round-trip compatibility with OHDSI Atlas
+#' and the OHDSI Phenotype Library.
+#'
+#' @param cohort_flow A `cohort_flow` object or list containing visit concepts and steps.
+#' @param cohort_name Display name of the cohort (default `"Consortium Cohort"`).
+#' @param cohort_description Optional narrative description.
+#' @param output_path Optional file path to write JSON.
+#'
+#' @return A named list representing the CIRCE JSON structure.
+#' @export
+export_to_circe_json <- function(cohort_flow,
+                                 cohort_name = "Consortium Cohort",
+                                 cohort_description = NULL,
+                                 output_path = NULL) {
+  v_ids <- if (!is.null(cohort_flow$visit_concept_ids)) {
+    as.integer(cohort_flow$visit_concept_ids)
+  } else {
+    c(9201L, 262L)
+  }
+
+  visit_items <- lapply(v_ids, function(cid) {
+    list(
+      concept = list(
+        CONCEPT_ID = cid,
+        CONCEPT_NAME = sprintf("Encounter Visit Concept %d", cid),
+        STANDARD_CONCEPT = "S",
+        STANDARD_CONCEPT_CAPTION = "Standard",
+        INVALID_REASON = "V",
+        INVALID_REASON_CAPTION = "Valid",
+        CONCEPT_CODE = as.character(cid),
+        DOMAIN_ID = "Visit",
+        VOCABULARY_ID = "Visit",
+        CONCEPT_CLASS_ID = "Visit"
+      ),
+      isExcluded = FALSE,
+      includeDescendants = TRUE,
+      includeMapped = FALSE
+    )
+  })
+
+  concept_sets <- list(
+    list(
+      id = 0L,
+      name = sprintf("%s - Index Visit Types", cohort_name),
+      expression = list(items = visit_items)
+    )
+  )
+
+  post_d <- if (!is.null(cohort_flow$follow_up_days)) as.integer(cohort_flow$follow_up_days) else 0L
+  one_v <- if (!is.null(cohort_flow$one_visit_per_person)) isTRUE(cohort_flow$one_visit_per_person) else FALSE
+
+  primary_criteria <- list(
+    CriteriaList = list(
+      list(
+        VisitOccurrence = list(
+          CodesetId = 0L
+        )
+      )
+    ),
+    ObservationWindow = list(
+      PriorDays = 0L,
+      PostDays = post_d
+    ),
+    PrimaryCriteriaLimit = list(
+      Type = if (one_v) "First" else "All"
+    )
+  )
+
+  steps <- if (!is.null(cohort_flow$steps)) cohort_flow$steps else list()
+  inclusion_rules <- list()
+
+  for (idx in seq_along(steps)) {
+    st <- steps[[idx]]
+    st_name <- if (is.list(st) || is.vector(st)) st[[1]] else sprintf("Step %d", idx)
+    st_pred <- if ((is.list(st) || is.vector(st)) && length(st) >= 2) st[[2]] else ""
+    pred_l <- tolower(as.character(st_pred))
+
+    rule_crit <- list(
+      list(
+        VisitOccurrence = list(
+          CodesetId = 0L
+        ),
+        Occurrence = list(Type = 2L, Count = 1L),
+        StartWindow = list(
+          Start = list(Days = 0L, Coeff = -1L),
+          End = list(Days = 0L, Coeff = 1L)
+        )
+      )
+    )
+
+    inclusion_rules[[idx]] <- list(
+      name = as.character(st_name),
+      description = sprintf("SQL Predicate: %s", as.character(st_pred)),
+      expression = list(
+        Type = "ALL",
+        CriteriaList = rule_crit
+      )
+    )
+  }
+
+  circe_data <- list(
+    ConceptSets = concept_sets,
+    PrimaryCriteria = primary_criteria,
+    InclusionRules = inclusion_rules,
+    QualifiedLimit = list(
+      Type = if (one_v) "First" else "All"
+    ),
+    ExpressionType = "SIMPLE_EXPRESSION",
+    Title = cohort_name,
+    Description = if (!is.null(cohort_description)) cohort_description else sprintf("Exported from omopduckdb cohort_flow (%d inclusion rule(s)).", length(steps))
+  )
+
+  if (!is.null(output_path)) {
+    json_txt <- jsonlite::toJSON(circe_data, auto_unbox = TRUE, pretty = TRUE)
+    writeLines(json_txt, con = output_path)
+  }
+
+  circe_data
+}
+

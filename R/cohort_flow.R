@@ -133,6 +133,20 @@ cohort_flow <- function(con, visit_concept_ids = c(9201L, 262L), anchor = c("adm
   self$to_mermaid <- function() to_mermaid(need())
   self$to_latex <- function() to_tikz(need())
   self$to_graphviz <- function() to_graphviz(need())
+  self$visit_concept_ids <- visit_concept_ids
+  self$anchor <- anchor
+  self$follow_up_days <- follow_up_days
+  self$one_visit_per_person <- one_visit_per_person
+  self$to_circe_json <- function(cohort_name = "Consortium Cohort", cohort_description = NULL, output_path = NULL) {
+    flow_obj <- list(
+      visit_concept_ids = visit_concept_ids,
+      anchor = anchor,
+      follow_up_days = follow_up_days,
+      one_visit_per_person = one_visit_per_person,
+      steps = st$steps
+    )
+    export_to_circe_json(flow_obj, cohort_name = cohort_name, cohort_description = cohort_description, output_path = output_path)
+  }
   self$state <- st
   class(self) <- "cohort_flow"
   self
