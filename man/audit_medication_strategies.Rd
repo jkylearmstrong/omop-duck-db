@@ -11,7 +11,14 @@ audit_medication_strategies(
   kappa_threshold = 0.6,
   concordance_threshold = 0.9,
   prevalence_gap_threshold = 0.1,
-  peer_kappa_gap = 0.25
+  peer_kappa_gap = 0.25,
+  min_n = 0,
+  min_prevalence = NULL,
+  explain = FALSE,
+  con = NULL,
+  medication_specs = NULL,
+  cohort_table = "cohort",
+  ...
 )
 }
 \arguments{
@@ -29,12 +36,27 @@ audit_medication_strategies(
 
 \item{peer_kappa_gap}{With at least 3 sites, flag a site whose kappa trails the median of the \emph{other} sites
 by more than this.}
+
+\item{min_n}{Minimum cohort size to audit (default 0).}
+
+\item{min_prevalence}{Minimum expected prevalence threshold (default NULL).}
+
+\item{explain}{If TRUE, joins disagreement explanation (requires \code{con} and \code{medication_specs}).}
+
+\item{con}{Active DuckDB DBI connection (needed if \code{explain = TRUE}).}
+
+\item{medication_specs}{Medication class specifications (needed if \code{explain = TRUE}).}
+
+\item{cohort_table}{Cohort table name (default 'cohort').}
+
+\item{...}{Forwarded to \code{\link[=explain_medication_disagreement]{explain_medication_disagreement()}} if \code{explain = TRUE}.}
 }
 \value{
 A data frame with one row per (site, class): \code{site}, \code{medication_class}, \code{n}, \code{both},
 \code{source_only}, \code{standard_only}, \code{neither}, \code{source_prevalence}, \code{standard_prevalence}, \code{concordance},
-\code{kappa}, \code{reason} (\code{source_blind}, \code{standard_blind}, \code{low_kappa}, \code{low_concordance}, \code{prevalence_gap},
-\code{peer_outlier}) and \code{flagged}.
+\code{kappa}, \code{reason} (\code{both_blind}, \code{source_blind}, \code{standard_blind}, \code{below_min_prevalence}, \code{low_kappa},
+\code{low_concordance}, \code{prevalence_gap}, \code{peer_outlier}) and \code{flagged}.
+If \code{explain = TRUE}, returns a list \code{list(audit =, explanation =)}.
 }
 \description{
 Computes, for each site and drug class (plus a pooled \code{ALL} row), the 2x2 agreement table of the two

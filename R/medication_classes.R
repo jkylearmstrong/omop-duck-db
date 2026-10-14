@@ -109,8 +109,11 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
                                        crosswalk = NULL, cohort_definition_id = NULL, person_col = NULL,
                                        index_date_col = NULL, site_col = NULL, lookback_days = NULL,
                                        lookahead_days = 0L, window = NULL, end_date_col = NULL,
+                                       on_unresolved = c("raise", "warn", "ignore"),
+                                       exclude_forms = NULL, route_concept_ids = NULL, by_type = FALSE,
                                        return_audit = FALSE, ...) {
   strategy <- match.arg(strategy)
+  on_unresolved <- match.arg(on_unresolved)
   windows <- c("pre_admission", "inpatient", "discharge")
   if (!is.null(window) && !window %in% windows) stop(sprintf("window must be one of %s, got '%s'.", paste(windows, collapse = ", "), window))
   if (isTRUE(return_audit) && strategy != "both") stop("return_audit = TRUE requires strategy = 'both'.")
@@ -159,7 +162,13 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     hi <- sprintf("AND %s <= v.index_date + %d", d, as.integer(lookahead_days))
   }
 
+  route_clause <- ""
+  if (!is.null(route_concept_ids) && length(route_concept_ids) > 0) {
+    route_clause <- sprintf("AND de.route_concept_id IN (%s)", paste(as.integer(route_concept_ids), collapse = ", "))
+  }
+
   flags <- list(source = list(), standard = list())
+  flags_by_type <- list(source = list(), standard = list())
   tmp <- character(0)
   on.exit(for (t in tmp) try(DBI::dbExecute(db_con, paste0("DROP TABLE IF EXISTS ", t)), silent = TRUE), add = TRUE)
   DBI::dbWriteTable(db_con, "_med_cohort", base[, c("row_id", "person_id", "index_date", if (!is.null(ecol)) "end_date")], temporary = TRUE, overwrite = TRUE)
@@ -175,27 +184,63 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
       if (length(spec$atc_codes)) {
         concept <- concept %||% .med_resolve_table(db_con, "concept")
         codes <- paste(.med_q(spec$atc_codes), collapse = ", ")
-        ids <- c(ids, DBI::dbGetQuery(db_con, sprintf(
-          "SELECT concept_id FROM %s WHERE vocabulary_id LIKE 'ATC%%' AND concept_code IN (%s)", concept, codes))$concept_id)
+        found_atc <- DBI::dbGetQuery(db_con, sprintf(
+          "SELECT concept_id FROM %s WHERE vocabulary_id LIKE 'ATC%%' AND concept_code IN (%s)", concept, codes))$concept_id
+        ids <- c(ids, found_atc)
+        if (length(found_atc) == 0 && on_unresolved %in% c("raise", "warn")) {
+          msg <- sprintf("Medication class '%s' ATC codes %s resolved to no concept in vocabulary.", cls, paste(spec$atc_codes, collapse = ", "))
+          if (on_unresolved == "raise") stop(msg) else warning(msg)
+        }
       }
       if (length(ids)) {
         rows[[length(rows) + 1L]] <- data.frame(drug_class = cls, ancestor_concept_id = sort(unique(as.integer(ids))),
                                                 stringsAsFactors = FALSE)
+      } else if (on_unresolved %in% c("raise", "warn")) {
+        msg <- sprintf("Medication class '%s' has no ancestor concepts or ATC codes.", cls)
+        if (on_unresolved == "raise") stop(msg) else warning(msg)
       }
     }
     anc_df <- if (length(rows)) do.call(rbind, rows) else data.frame(drug_class = character(0), ancestor_concept_id = integer(0))
     DBI::dbWriteTable(db_con, "_med_anc", anc_df, temporary = TRUE, overwrite = TRUE)
     tmp <- c(tmp, "_med_anc", "_med_class_concepts")
+
+    exclude_clause <- ""
+    if (!is.null(exclude_forms) && length(exclude_forms) > 0) {
+      concept <- concept %||% .med_resolve_table(db_con, "concept")
+      ex_conds <- paste(sprintf("LOWER(c.concept_name) LIKE '%%%s%%'", tolower(exclude_forms)), collapse = " OR ")
+      exclude_clause <- sprintf("JOIN %s c ON c.concept_id = ca.descendant_concept_id WHERE NOT (%s)", concept, ex_conds)
+    }
+
     DBI::dbExecute(db_con, sprintf(
       paste0("CREATE OR REPLACE TEMPORARY TABLE _med_class_concepts AS ",
              "SELECT DISTINCT a.drug_class, ca.descendant_concept_id AS concept_id FROM _med_anc a ",
-             "JOIN %s ca ON ca.ancestor_concept_id = a.ancestor_concept_id"), anc))
+             "JOIN %s ca ON ca.ancestor_concept_id = a.ancestor_concept_id %s"), anc, exclude_clause))
+
+    if (on_unresolved %in% c("raise", "warn")) {
+      desc_counts <- DBI::dbGetQuery(db_con, "SELECT drug_class, count(*) AS n FROM _med_class_concepts GROUP BY drug_class")
+      for (cls in names(specs)) {
+        cnt <- if (cls %in% desc_counts$drug_class) desc_counts$n[desc_counts$drug_class == cls] else 0
+        if (cnt == 0) {
+          msg <- sprintf("Medication class '%s' resolved to no descendant concepts in concept_ancestor.", cls)
+          if (on_unresolved == "raise") stop(msg) else warning(msg)
+        }
+      }
+    }
+
+    type_sel <- if (isTRUE(by_type)) ", de.drug_type_concept_id" else ""
     hits <- DBI::dbGetQuery(db_con, paste0(
-      "SELECT DISTINCT v.row_id, m.drug_class FROM _med_cohort v ",
+      "SELECT DISTINCT v.row_id, m.drug_class", type_sel, " FROM _med_cohort v ",
       "JOIN drug_exposure de ON de.person_id = v.person_id ",
       "JOIN _med_class_concepts m ON m.concept_id = de.drug_concept_id ",
-      "WHERE TRUE ", lo, " ", hi))
+      "WHERE TRUE ", lo, " ", hi, " ", route_clause))
     flags$standard <- split(hits$row_id, hits$drug_class)
+    if (isTRUE(by_type) && "drug_type_concept_id" %in% names(hits)) {
+      non_na_hits <- hits[!is.na(hits$drug_type_concept_id), , drop = FALSE]
+      if (nrow(non_na_hits) > 0) {
+        keys <- paste0(non_na_hits$drug_class, "_type_", as.integer(non_na_hits$drug_type_concept_id))
+        flags_by_type$standard <- split(non_na_hits$row_id, keys)
+      }
+    }
   }
 
   if (use_source) {
@@ -219,25 +264,42 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
       code_join <- sprintf("LEFT JOIN %s sc ON sc.concept_id = de.drug_source_concept_id", concept_ref)
       code_expr <- "UPPER(TRIM(sc.concept_code))"
     }
+    type_sel <- if (isTRUE(by_type)) ", de.drug_type_concept_id" else ""
     hits <- DBI::dbGetQuery(db_con, paste0(
-      "SELECT DISTINCT v.row_id, x.drug_class FROM _med_cohort v ",
+      "SELECT DISTINCT v.row_id, x.drug_class", type_sel, " FROM _med_cohort v ",
       "JOIN drug_exposure de ON de.person_id = v.person_id ", code_join, " ",
       "JOIN _med_xw x ON x.source_value = UPPER(TRIM(de.drug_source_value)) OR x.source_value = ", code_expr, " ",
-      "WHERE TRUE ", lo, " ", hi))
+      "WHERE TRUE ", lo, " ", hi, " ", route_clause))
     flags$source <- split(hits$row_id, hits$drug_class)
+    if (isTRUE(by_type) && "drug_type_concept_id" %in% names(hits)) {
+      non_na_hits <- hits[!is.na(hits$drug_type_concept_id), , drop = FALSE]
+      if (nrow(non_na_hits) > 0) {
+        keys <- paste0(non_na_hits$drug_class, "_type_", as.integer(non_na_hits$drug_type_concept_id))
+        flags_by_type$source <- split(non_na_hits$row_id, keys)
+      }
+    }
   }
 
   for (cls in names(specs)) {
     present <- character(0)
     if (use_source) {
-      result[[paste0(cls, "_source")]] <- as.integer(base$row_id %in% flags$source[[cls]])
+      result[[paste0(cls, "_source")]] <- as.integer(base$row_id %in% (flags$source[[cls]] %||% integer(0)))
       present <- c(present, paste0(cls, "_source"))
     }
     if (use_standard) {
-      result[[paste0(cls, "_standard")]] <- as.integer(base$row_id %in% flags$standard[[cls]])
+      result[[paste0(cls, "_standard")]] <- as.integer(base$row_id %in% (flags$standard[[cls]] %||% integer(0)))
       present <- c(present, paste0(cls, "_standard"))
     }
     result[[cls]] <- do.call(pmax, unname(as.list(result[present])))
+  }
+
+  if (isTRUE(by_type)) {
+    all_type_keys <- sort(unique(c(names(flags_by_type$source), names(flags_by_type$standard))))
+    for (tkey in all_type_keys) {
+      rows_s <- flags_by_type$source[[tkey]] %||% integer(0)
+      rows_t <- flags_by_type$standard[[tkey]] %||% integer(0)
+      result[[tkey]] <- as.integer(base$row_id %in% union(rows_s, rows_t))
+    }
   }
 
   if (isTRUE(return_audit)) {
@@ -272,14 +334,24 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
 #' @param prevalence_gap_threshold Flag `|prevalence_source - prevalence_standard|` above this.
 #' @param peer_kappa_gap With at least 3 sites, flag a site whose kappa trails the median of the *other* sites
 #'   by more than this.
+#' @param min_n Minimum cohort size to audit (default 0).
+#' @param min_prevalence Minimum expected prevalence threshold (default NULL).
+#' @param explain If TRUE, joins disagreement explanation (requires \code{con} and \code{medication_specs}).
+#' @param con Active DuckDB DBI connection (needed if \code{explain = TRUE}).
+#' @param medication_specs Medication class specifications (needed if \code{explain = TRUE}).
+#' @param cohort_table Cohort table name (default 'cohort').
+#' @param ... Forwarded to [explain_medication_disagreement()] if \code{explain = TRUE}.
 #' @return A data frame with one row per (site, class): `site`, `medication_class`, `n`, `both`,
 #'   `source_only`, `standard_only`, `neither`, `source_prevalence`, `standard_prevalence`, `concordance`,
-#'   `kappa`, `reason` (`source_blind`, `standard_blind`, `low_kappa`, `low_concordance`, `prevalence_gap`,
-#'   `peer_outlier`) and `flagged`.
+#'   `kappa`, `reason` (`both_blind`, `source_blind`, `standard_blind`, `below_min_prevalence`, `low_kappa`,
+#'   `low_concordance`, `prevalence_gap`, `peer_outlier`) and `flagged`.
+#'   If `explain = TRUE`, returns a list `list(audit =, explanation =)`.
 #' @export
 audit_medication_strategies <- function(flags, classes = NULL, site_col = "site", kappa_threshold = 0.6,
                                         concordance_threshold = 0.9, prevalence_gap_threshold = 0.10,
-                                        peer_kappa_gap = 0.25) {
+                                        peer_kappa_gap = 0.25, min_n = 0, min_prevalence = NULL,
+                                        explain = FALSE, con = NULL, medication_specs = NULL,
+                                        cohort_table = "cohort", ...) {
   if (is.null(classes)) {
     src <- sub("_source$", "", grep("_source$", names(flags), value = TRUE))
     classes <- src[paste0(src, "_standard") %in% names(flags)]
@@ -318,10 +390,28 @@ audit_medication_strategies <- function(flags, classes = NULL, site_col = "site"
   reasons <- vector("list", nrow(audit))
   for (i in seq_len(nrow(audit))) {
     r <- audit[i, ]
+    cls <- r$medication_class
     why <- character(0)
-    if (r$n > 0) {
-      if (r$source_prevalence == 0 && r$standard_prevalence > 0) why <- c(why, "source_blind")
-      if (r$standard_prevalence == 0 && r$source_prevalence > 0) why <- c(why, "standard_blind")
+    if (r$n >= min_n) {
+      if (r$source_prevalence == 0 && r$standard_prevalence == 0) {
+        why <- c(why, "both_blind")
+      } else if (r$source_prevalence == 0 && r$standard_prevalence > 0) {
+        why <- c(why, "source_blind")
+      } else if (r$standard_prevalence == 0 && r$source_prevalence > 0) {
+        why <- c(why, "standard_blind")
+      }
+
+      if (!is.null(min_prevalence)) {
+        floor <- if (is.list(min_prevalence) || (is.vector(min_prevalence) && !is.null(names(min_prevalence)))) {
+          min_prevalence[[cls]] %||% 0.0
+        } else {
+          as.numeric(min_prevalence)
+        }
+        if (!is.na(floor) && floor > 0 && (r$source_prevalence < floor || r$standard_prevalence < floor)) {
+          why <- c(why, "below_min_prevalence")
+        }
+      }
+
       if (!is.nan(r$kappa) && r$kappa < kappa_threshold && length(why) == 0) why <- c(why, "low_kappa")
       if (r$concordance < concordance_threshold) why <- c(why, "low_concordance")
       if (abs(r$source_prevalence - r$standard_prevalence) > prevalence_gap_threshold) why <- c(why, "prevalence_gap")
@@ -344,7 +434,319 @@ audit_medication_strategies <- function(flags, classes = NULL, site_col = "site"
   }
   audit$reason <- vapply(reasons, function(x) paste(unique(x), collapse = ","), character(1))
   audit$flagged <- nzchar(audit$reason)
+
+  if (isTRUE(explain)) {
+    if (is.null(con) || is.null(medication_specs)) {
+      stop("explain = TRUE requires con and medication_specs to be provided.")
+    }
+    expl <- explain_medication_disagreement(
+      con = con, flags = flags, medication_specs = medication_specs, cohort_table = cohort_table,
+      classes = classes, site_col = site_col, ...
+    )
+    return(list(audit = audit, explanation = expl))
+  }
+
   audit
+}
+
+#' Assert Non-Zero Medication Exposure Coverage Across Sites
+#'
+#' Verifies that medication classes have non-zero (or expected) exposure coverage across sites,
+#' preventing silent-zero data drops.
+#'
+#' @param flags Data frame with exposure flags (from [extract_medication_classes()]).
+#' @param classes Classes to check (default: all base class columns).
+#' @param min_n Minimum site cohort size required to trigger assertion (default 1000).
+#' @param site_col Site column name (default 'site').
+#' @param min_prevalence Minimum expected prevalence threshold (default 0.0).
+#' @return Invisibly returns NULL; throws an error if assertion fails.
+#' @export
+assert_exposure_coverage <- function(flags, classes = NULL, min_n = 1000, site_col = "site", min_prevalence = 0.0) {
+  df <- flags
+  actual_site <- if (site_col %in% names(df)) site_col else NULL
+  if (is.null(actual_site)) {
+    df[["_site"]] <- "ALL"
+    actual_site <- "_site"
+  }
+
+  if (is.null(classes)) {
+    base_candidates <- setdiff(names(df), c("person_id", "subject_id", "index_date", "site", actual_site))
+    classes <- base_candidates[!grepl("(_source|_standard)$", base_candidates) & !grepl("^_", base_candidates) & !grepl("_type_\\d+$", base_candidates)]
+  }
+
+  sites <- unique(df[[actual_site]])
+  for (site in sites) {
+    grp <- df[df[[actual_site]] == site, , drop = FALSE]
+    n <- nrow(grp)
+    if (n < min_n) next
+    for (cls in classes) {
+      col <- if (cls %in% names(grp)) cls else if (paste0(cls, "_standard") %in% names(grp)) paste0(cls, "_standard") else if (paste0(cls, "_source") %in% names(grp)) paste0(cls, "_source") else NULL
+      if (is.null(col)) next
+      prev <- mean(grp[[col]], na.rm = TRUE)
+      if (is.na(prev) || prev <= min_prevalence || prev == 0.0) {
+        stop(sprintf(
+          "assert_exposure_coverage failed for medication class '%s' at site '%s': observed prevalence %.4f <= threshold %f (N=%d). Check vocabulary mapping and input drug_exposure completeness.",
+          cls, site, if (is.na(prev)) 0 else prev, min_prevalence, n
+        ))
+      }
+    }
+  }
+  invisible(NULL)
+}
+
+#' Explain Strategy Disagreements for Medication Exposure
+#'
+#' Identifies top drug concepts and source values present in one strategy but missing in the other,
+#' applying small-cell count suppression (<11) so output aggregates can safely leave the institution.
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param flags Output of [extract_medication_classes()] with `strategy = 'both'`.
+#' @param medication_specs Medication class specifications list.
+#' @param cohort_table Cohort table name (default 'cohort').
+#' @param classes Classes to audit.
+#' @param site_col Site column name (default 'site').
+#' @param person_col Person identifier column name (default 'person_id' or auto-detected).
+#' @param top_n Maximum top disagreement patterns to return per site and class (default 10).
+#' @param min_cell_count Cell count threshold for privacy suppression (default 11).
+#' @param mask_value Suppression mask string (default '<11').
+#' @return A data frame with columns `site`, `medication_class`, `disagreement_type`,
+#'   `drug_source_value`, `drug_concept_id`, `concept_name`, `concept_class_id`,
+#'   `patient_count`, `row_count`, `is_suppressed`.
+#' @export
+explain_medication_disagreement <- function(con, flags, medication_specs, cohort_table = "cohort",
+                                            classes = NULL, site_col = "site", person_col = NULL,
+                                            top_n = 10, min_cell_count = 11, mask_value = "<11") {
+  if (is.null(classes)) {
+    src <- sub("_source$", "", grep("_source$", names(flags), value = TRUE))
+    classes <- src[paste0(src, "_standard") %in% names(flags)]
+  }
+
+  pcol <- person_col %||% if ("person_id" %in% names(flags)) "person_id" else "subject_id"
+  df <- flags
+  actual_site <- if (site_col %in% names(df)) site_col else NULL
+  if (is.null(actual_site)) {
+    df[["_site"]] <- "ALL"
+    actual_site <- "_site"
+  }
+
+  concept_table <- tryCatch(.med_resolve_table(con, "concept"), error = function(e) "concept")
+  records <- list()
+
+  for (cls in classes) {
+    src_col <- paste0(cls, "_source")
+    std_col <- paste0(cls, "_standard")
+    if (!src_col %in% names(df) || !std_col %in% names(df)) next
+
+    sites <- unique(df[[actual_site]])
+    for (site in sites) {
+      grp <- df[df[[actual_site]] == site, , drop = FALSE]
+
+      # Source only
+      src_only_pids <- unique(grp[[pcol]][grp[[src_col]] == 1 & grp[[std_col]] == 0])
+      if (length(src_only_pids) > 0) {
+        pid_df <- data.frame(pid = as.integer(src_only_pids))
+        DBI::dbWriteTable(con, "_disagree_pids", pid_df, temporary = TRUE, overwrite = TRUE)
+        res <- DBI::dbGetQuery(con, sprintf("
+          SELECT 
+            COALESCE(de.drug_source_value, 'None') AS drug_source_value,
+            COALESCE(de.drug_concept_id, 0) AS drug_concept_id,
+            COALESCE(c.concept_name, 'Unknown Concept') AS concept_name,
+            COALESCE(c.concept_class_id, 'None') AS concept_class_id,
+            COUNT(DISTINCT de.person_id) AS patient_count,
+            COUNT(*) AS row_count
+          FROM drug_exposure de
+          JOIN _disagree_pids dp ON dp.pid = de.person_id
+          LEFT JOIN %s c ON c.concept_id = de.drug_concept_id
+          GROUP BY 1, 2, 3, 4
+          ORDER BY patient_count DESC, row_count DESC
+          LIMIT %d
+        ", concept_table, as.integer(top_n)))
+        try(DBI::dbExecute(con, "DROP TABLE IF EXISTS _disagree_pids"), silent = TRUE)
+
+        if (nrow(res) > 0) {
+          for (r in seq_len(nrow(res))) {
+            p_cnt <- as.integer(res$patient_count[r])
+            r_cnt <- as.integer(res$row_count[r])
+            suppressed <- p_cnt < min_cell_count
+            records[[length(records) + 1L]] <- data.frame(
+              site = site, medication_class = cls, disagreement_type = "source_only",
+              drug_source_value = res$drug_source_value[r],
+              drug_concept_id = as.integer(res$drug_concept_id[r]),
+              concept_name = res$concept_name[r],
+              concept_class_id = res$concept_class_id[r],
+              patient_count = if (suppressed) mask_value else as.character(p_cnt),
+              row_count = if (r_cnt < min_cell_count) mask_value else as.character(r_cnt),
+              is_suppressed = suppressed, stringsAsFactors = FALSE
+            )
+          }
+        }
+      }
+
+      # Standard only
+      std_only_pids <- unique(grp[[pcol]][grp[[src_col]] == 0 & grp[[std_col]] == 1])
+      if (length(std_only_pids) > 0) {
+        pid_df <- data.frame(pid = as.integer(std_only_pids))
+        DBI::dbWriteTable(con, "_disagree_pids", pid_df, temporary = TRUE, overwrite = TRUE)
+        res <- DBI::dbGetQuery(con, sprintf("
+          SELECT 
+            COALESCE(de.drug_source_value, 'None') AS drug_source_value,
+            COALESCE(de.drug_concept_id, 0) AS drug_concept_id,
+            COALESCE(c.concept_name, 'Unknown Concept') AS concept_name,
+            COALESCE(c.concept_class_id, 'None') AS concept_class_id,
+            COUNT(DISTINCT de.person_id) AS patient_count,
+            COUNT(*) AS row_count
+          FROM drug_exposure de
+          JOIN _disagree_pids dp ON dp.pid = de.person_id
+          LEFT JOIN %s c ON c.concept_id = de.drug_concept_id
+          GROUP BY 1, 2, 3, 4
+          ORDER BY patient_count DESC, row_count DESC
+          LIMIT %d
+        ", concept_table, as.integer(top_n)))
+        try(DBI::dbExecute(con, "DROP TABLE IF EXISTS _disagree_pids"), silent = TRUE)
+
+        if (nrow(res) > 0) {
+          for (r in seq_len(nrow(res))) {
+            p_cnt <- as.integer(res$patient_count[r])
+            r_cnt <- as.integer(res$row_count[r])
+            suppressed <- p_cnt < min_cell_count
+            records[[length(records) + 1L]] <- data.frame(
+              site = site, medication_class = cls, disagreement_type = "standard_only",
+              drug_source_value = res$drug_source_value[r],
+              drug_concept_id = as.integer(res$drug_concept_id[r]),
+              concept_name = res$concept_name[r],
+              concept_class_id = res$concept_class_id[r],
+              patient_count = if (suppressed) mask_value else as.character(p_cnt),
+              row_count = if (r_cnt < min_cell_count) mask_value else as.character(r_cnt),
+              is_suppressed = suppressed, stringsAsFactors = FALSE
+            )
+          }
+        }
+      }
+    }
+  }
+
+  out <- if (length(records)) do.call(rbind, records) else data.frame()
+  if (nrow(out) == 0) {
+    return(data.frame(
+      site = character(0), medication_class = character(0), disagreement_type = character(0),
+      drug_source_value = character(0), drug_concept_id = integer(0), concept_name = character(0),
+      concept_class_id = character(0), patient_count = character(0), row_count = character(0),
+      is_suppressed = logical(0), stringsAsFactors = FALSE
+    ))
+  }
+  rownames(out) <- NULL
+  out
+}
+
+#' Export Medication Class Crosswalk from OMOP Hierarchy
+#'
+#' Traverses ATC classes and RxNorm ingredient hierarchies to extract descendant RxNorm concept
+#' codes, plus historical/retired concepts that map to them via OMOP 'Maps to' relationships.
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param medication_specs Medication class specifications list.
+#' @param output_path Optional file path to write exported CSV.
+#' @param include_retired Whether to include older retired RxNorm codes mapped via 'Maps to' (default TRUE).
+#' @param exclude_forms Optional vector of dosage form strings to exclude (e.g. 'Ophthalmic', 'Topical').
+#' @param must_contain Optional vector of required RxNorm codes or source strings; throws error if missing.
+#' @return A data frame with columns `source_value`, `drug_class`, `concept_id`, `concept_name`,
+#'   `concept_class_id`, `vocabulary_id`, `source`.
+#' @export
+export_medication_crosswalk <- function(con, medication_specs, output_path = NULL,
+                                        include_retired = TRUE, exclude_forms = NULL,
+                                        must_contain = NULL) {
+  specs <- .med_normalize_specs(medication_specs)
+  anc <- .med_resolve_table(con, "concept_ancestor")
+  concept <- .med_resolve_table(con, "concept")
+
+  rows <- list()
+  for (cls in names(specs)) {
+    spec <- specs[[cls]]
+    ids <- as.integer(c(spec$ancestor_concept_ids, spec$rxnorm_ingredient_ids))
+    if (length(spec$atc_codes)) {
+      codes <- paste(.med_q(spec$atc_codes), collapse = ", ")
+      ids <- c(ids, DBI::dbGetQuery(con, sprintf(
+        "SELECT concept_id FROM %s WHERE vocabulary_id LIKE 'ATC%%' AND concept_code IN (%s)", concept, codes))$concept_id)
+    }
+    if (length(ids)) {
+      rows[[length(rows) + 1L]] <- data.frame(drug_class = cls, ancestor_concept_id = sort(unique(as.integer(ids))),
+                                              stringsAsFactors = FALSE)
+    }
+  }
+
+  if (length(rows) == 0) {
+    stop("No ancestor concept IDs or ATC codes could be resolved from medication_specs.")
+  }
+
+  anc_df <- do.call(rbind, rows)
+  DBI::dbWriteTable(con, "_exp_anc_df", anc_df, temporary = TRUE, overwrite = TRUE)
+  on.exit(try(DBI::dbExecute(con, "DROP TABLE IF EXISTS _exp_anc_df"), silent = TRUE), add = TRUE)
+
+  curr_sql <- sprintf("
+    SELECT DISTINCT 
+      c.concept_code AS source_value,
+      a.drug_class,
+      c.concept_id,
+      c.concept_name,
+      c.concept_class_id,
+      c.vocabulary_id,
+      'current' AS source
+    FROM _exp_anc_df a
+    JOIN %s ca ON ca.ancestor_concept_id = a.ancestor_concept_id
+    JOIN %s c ON c.concept_id = ca.descendant_concept_id
+  ", anc, concept)
+  curr_df <- DBI::dbGetQuery(con, curr_sql)
+  all_dfs <- list(curr_df)
+
+  if (isTRUE(include_retired) && nrow(curr_df) > 0) {
+    desc_ids <- paste(as.integer(unique(curr_df$concept_id)), collapse = ", ")
+    ret_sql <- sprintf("
+      SELECT DISTINCT 
+        c_old.concept_code AS source_value,
+        a.drug_class,
+        c_old.concept_id,
+        c_old.concept_name,
+        c_old.concept_class_id,
+        c_old.vocabulary_id,
+        'maps_to' AS source
+      FROM concept_relationship cr
+      JOIN %s c_old ON c_old.concept_id = cr.concept_id_1
+      JOIN _exp_anc_df a ON 1=1
+      JOIN %s ca ON ca.ancestor_concept_id = a.ancestor_concept_id AND ca.descendant_concept_id = cr.concept_id_2
+      WHERE cr.relationship_id = 'Maps to'
+        AND cr.concept_id_2 IN (%s)
+        AND c_old.concept_id NOT IN (%s)
+    ", concept, anc, desc_ids, desc_ids)
+    ret_df <- tryCatch(DBI::dbGetQuery(con, ret_sql), error = function(e) data.frame())
+    if (nrow(ret_df) > 0) {
+      all_dfs[[length(all_dfs) + 1L]] <- ret_df
+    }
+  }
+
+  out <- unique(do.call(rbind, all_dfs))
+
+  if (!is.null(exclude_forms) && length(exclude_forms) > 0 && nrow(out) > 0) {
+    for (f in exclude_forms) {
+      out <- out[!grepl(tolower(f), tolower(out$concept_name), fixed = TRUE), , drop = FALSE]
+    }
+  }
+
+  if (!is.null(must_contain) && length(must_contain) > 0) {
+    present_codes <- toupper(trimws(as.character(out$source_value)))
+    req_codes <- toupper(trimws(as.character(must_contain)))
+    missing <- setdiff(req_codes, present_codes)
+    if (length(missing) > 0) {
+      stop(sprintf("Export crosswalk validation failed; missing required codes: %s", paste(missing, collapse = ", ")))
+    }
+  }
+
+  if (!is.null(output_path)) {
+    dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+    utils::write.csv(out, output_path, row.names = FALSE)
+  }
+
+  rownames(out) <- NULL
+  out
 }
 
 #' Medication exposure engine bound to a connection and drug-class specs

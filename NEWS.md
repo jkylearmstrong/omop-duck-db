@@ -1,3 +1,35 @@
+# omopduckdb 0.6.4b
+
+Release 0.6.4b introduces production medication classification guards, explainable strategy auditing, and publication-grade data quality / plausibility assertions with 1:1 cross-language parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
+
+### 1. Medication Classification Guards & Strategy Disagreement Explainer
+- **Silent-Zero & Unresolved Concept Guards (`on_unresolved='raise'|'warn'`)**:
+  - `extract_medication_classes()` detects medication classes whose ATC codes or ingredient concept IDs fail to resolve to any concepts or descendants in `concept_ancestor`, preventing silent-zero exposure drop-offs.
+  - Added `route_concept_ids` and `exclude_forms` (e.g. `['Ophthalmic', 'Topical']`) to cleanly distinguish systemic from non-systemic formulations.
+  - Added `by_type=True` emitting per-source exposure flags (`<class>_type_<id>`) for prescriptions vs. administrations.
+- **Both-Blind Auditing & Exposure Assertions (`audit_medication_strategies`, `assert_exposure_coverage`)**:
+  - Added `both_blind` reason when prevalence is 0 under both source and standard strategies in sites with sufficient sample size (`min_n`).
+  - Added `min_prevalence` floor checks to flag unexpected exposure absences.
+  - Added `assert_exposure_coverage(flags, classes, min_n=1000)` to prevent silent-zero exposure bugs across consortium hospital sites.
+- **Disagreement Explainer with Small-Cell Suppression (`explain_medication_disagreement`)**:
+  - Unpacks disagreements between source crosswalks and OMOP hierarchies, reporting top unmapped source values and standard concepts.
+  - Automatically suppresses cells with counts under 11 (`min_cell_count=11`, `is_suppressed=True`), enabling safe cross-site export.
+- **Standardized Crosswalk Exporter (`export_medication_crosswalk`)**:
+  - Exports OMOP class definitions into standardized crosswalk tables (`source = 'current' | 'maps_to'`).
+  - Supports older retired RxNorm concepts (`include_retired=True`) and strict validation (`must_contain=[...]`).
+
+### 2. Rigorous Data Quality, Plausibility, and Feature Integrity Audits
+- **Code-List Coverage Audit (`audit_code_list_coverage`)**:
+  - Computes the proportion of clinical occurrences captured by supplied ICD/RxNorm/LOINC lists, identifying high-frequency uncaptured concepts ($\ge \text{min\_share}$) per site.
+- **Panel Missingness Audit (`panel_missingness_audit`)**:
+  - Detects component missingness discordance within standard multi-analyte laboratory panels (BMP/CBC) and flags multi-site peer outliers.
+- **Table-Level Physiological Plausibility Report & CI Gate (`plausibility_report`)**:
+  - Audits Table 1 summaries and raw feature matrices against clinical bounds (`DEFAULT_PHYSIOLOGIC_BOUNDS`), extreme variance/SD ratios, negative physiological values, and impossible percentages. Supports strict validation gates (`ci_gate=True`).
+- **Redundant Feature Detector (`detect_redundant_features`)**:
+  - Detects rule-of-three linear conversions (e.g. Hematocrit = 3 * Hemoglobin), constant differences, and near-perfect multicollinearities.
+- **DQD Mathematical Consistency Summary (`dqd_summary`)**:
+  - Recomputes total, passed, failed, and not-applicable checks to verify exact reproducibility of reported pass rates in 1/N increments.
+
 # omopduckdb 0.6.3
 
 Release 0.6.3 delivers forward-looking consortium intelligence capabilities for federated clinical research, bridging OHDSI network standards and modern medical publishing with complete 1:1 parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):

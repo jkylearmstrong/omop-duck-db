@@ -110,8 +110,18 @@ from omop_etl.wide_measurement import (
     load_wide_measurement,
 )
 from omop_etl.medication_classes import (
+    assert_exposure_coverage,
     audit_medication_strategies,
+    explain_medication_disagreement,
+    export_medication_crosswalk,
     extract_medication_classes,
+)
+from omop_etl.quality import (
+    audit_code_list_coverage,
+    detect_redundant_features,
+    dqd_summary,
+    panel_missingness_audit,
+    plausibility_report,
 )
 from omop_etl.phenotype_dsl import (
     ConditionCriteria,
@@ -425,6 +435,15 @@ __all__ = [
     "consortium_cross_site_validation",
     "ConsortiumManuscript",
     "build_manuscript_scaffold",
+    # 0.6.4 Medication & Quality Guards Additions
+    "assert_exposure_coverage",
+    "explain_medication_disagreement",
+    "export_medication_crosswalk",
+    "audit_code_list_coverage",
+    "panel_missingness_audit",
+    "plausibility_report",
+    "detect_redundant_features",
+    "dqd_summary",
 ]
 
 __version__ = "0.6.3"

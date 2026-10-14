@@ -18,6 +18,10 @@ extract_medication_classes(
   lookahead_days = 0L,
   window = NULL,
   end_date_col = NULL,
+  on_unresolved = c("raise", "warn", "ignore"),
+  exclude_forms = NULL,
+  route_concept_ids = NULL,
+  by_type = FALSE,
   return_audit = FALSE,
   ...
 )

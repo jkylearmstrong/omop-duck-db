@@ -16,6 +16,7 @@ agree, per site, so a site whose mapping is broken stands out.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import duckdb
@@ -27,6 +28,9 @@ from omop_etl.paths import read_csv_sql
 __all__ = [
     "extract_medication_classes",
     "audit_medication_strategies",
+    "assert_exposure_coverage",
+    "explain_medication_disagreement",
+    "export_medication_crosswalk",
     "MedicationExtractor",
     "extract_medication_transitions",
     "MedicationTransitions",
@@ -119,6 +123,10 @@ def extract_medication_classes(
     lookahead_days: int = 0,
     window: str | None = None,
     end_date_col: str | None = None,
+    on_unresolved: str = "ignore",
+    exclude_forms: Sequence[str] | None = None,
+    route_concept_ids: Sequence[int] | None = None,
+    by_type: bool = False,
     return_audit: bool = False,
     **audit_kwargs,
 ):
@@ -144,6 +152,11 @@ def extract_medication_classes(
             ``'pre_admission'`` = [index - ``lookback_days`` (default 365), index - 1]; ``'inpatient'`` =
             [index, stay end]; ``'discharge'`` = [stay end, stay end] (orders written at discharge).
             The stay end is ``end_date_col`` (default ``cohort_end_date``/``visit_end_date``).
+        on_unresolved: How to handle unresolvable ATC codes / concepts with no descendants (``'ignore'``,
+            ``'warn'``, or ``'raise'``).
+        exclude_forms: Dosage form strings to exclude from standard hierarchy expansion (e.g. ``['Ophthalmic', 'Topical']``).
+        route_concept_ids: Restrict drug exposure to specific route concept IDs (e.g. systemic/oral administration).
+        by_type: If True, also extract per-source-type flags (``<class>_type_<id>``).
         return_audit: Also return :func:`audit_medication_strategies` output (needs ``strategy='both'``).
         **audit_kwargs: Forwarded to :func:`audit_medication_strategies`.
 
@@ -156,6 +169,8 @@ def extract_medication_classes(
         raise ValueError(f"strategy must be one of {_STRATEGIES}, got {strategy!r}.")
     if return_audit and strategy != "both":
         raise ValueError("return_audit=True requires strategy='both'.")
+    if on_unresolved not in ("ignore", "warn", "raise"):
+        raise ValueError(f"on_unresolved must be one of ('ignore', 'warn', 'raise'), got {on_unresolved!r}.")
     specs = _normalize_specs(medication_specs)
     use_source = strategy in ("source", "both")
     use_standard = strategy in ("standard", "both")
@@ -197,8 +212,14 @@ def extract_medication_classes(
         lo = "" if lookback_days is None else f"AND {d} >= v.index_date - {int(lookback_days)}"
         hi = f"AND {d} <= v.index_date + {int(lookahead_days)}"
 
+    route_clause = ""
+    if route_concept_ids:
+        r_ids = ", ".join(str(int(x)) for x in route_concept_ids)
+        route_clause = f"AND de.route_concept_id IN ({r_ids})"
+
     db_con.register("_med_cohort_df", base[["_row", "person_id", "index_date"] + (["end_date"] if ecol else [])])
     flags: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
+    flags_by_type: dict[str, dict[tuple[str, int], set]] = {"source": {}, "standard": {}}
     tmp_tables = []
     try:
         db_con.execute("CREATE OR REPLACE TEMPORARY VIEW _med_cohort AS "
@@ -213,25 +234,62 @@ def extract_medication_classes(
                 if spec["atc_codes"]:
                     concept = concept or _resolve_table(db_con, "concept")
                     codes = ", ".join(_q(c) for c in spec["atc_codes"])
-                    ids += [int(r[0]) for r in db_con.execute(
+                    found_atc = [int(r[0]) for r in db_con.execute(
                         f"SELECT concept_id FROM {concept} WHERE vocabulary_id LIKE 'ATC%' "
                         f"AND concept_code IN ({codes})").fetchall()]
+                    ids += found_atc
+                    if not found_atc and on_unresolved in ("raise", "warn"):
+                        msg = f"Medication class '{cls}' ATC codes {spec['atc_codes']} resolved to no concept in vocabulary."
+                        if on_unresolved == "raise":
+                            raise ValueError(msg)
+                        import warnings
+                        warnings.warn(msg, UserWarning)
                 if ids:
                     rows += [(cls, i) for i in sorted(set(ids))]
+                elif on_unresolved in ("raise", "warn"):
+                    msg = f"Medication class '{cls}' has no ancestor concepts or ATC codes."
+                    if on_unresolved == "raise":
+                        raise ValueError(msg)
+                    import warnings
+                    warnings.warn(msg, UserWarning)
+
             anc_df = pd.DataFrame(rows, columns=["drug_class", "ancestor_concept_id"])
             db_con.register("_med_anc_df", anc_df)
+
+            exclude_clause = ""
+            if exclude_forms:
+                concept = concept or _resolve_table(db_con, "concept")
+                ex_conds = " OR ".join(f"LOWER(c.concept_name) LIKE '%{str(f).lower()}%'" for f in exclude_forms)
+                exclude_clause = f"JOIN {concept} c ON c.concept_id = ca.descendant_concept_id WHERE NOT ({ex_conds})"
+
             db_con.execute(
                 "CREATE OR REPLACE TEMPORARY TABLE _med_class_concepts AS "
                 f"SELECT DISTINCT a.drug_class, ca.descendant_concept_id AS concept_id FROM _med_anc_df a "
-                f"JOIN {anc} ca ON ca.ancestor_concept_id = a.ancestor_concept_id")
+                f"JOIN {anc} ca ON ca.ancestor_concept_id = a.ancestor_concept_id "
+                f"{exclude_clause}")
             tmp_tables.append("_med_class_concepts")
+
+            if on_unresolved in ("raise", "warn"):
+                desc_counts = dict(db_con.execute("SELECT drug_class, count(*) FROM _med_class_concepts GROUP BY drug_class").fetchall())
+                for cls in specs:
+                    if desc_counts.get(cls, 0) == 0:
+                        msg = f"Medication class '{cls}' resolved to no descendant concepts in concept_ancestor."
+                        if on_unresolved == "raise":
+                            raise ValueError(msg)
+                        import warnings
+                        warnings.warn(msg, UserWarning)
+
+            type_sel = ", de.drug_type_concept_id" if by_type else ""
             hits = db_con.execute(
-                "SELECT DISTINCT v._row, m.drug_class FROM _med_cohort v "
+                f"SELECT DISTINCT v._row, m.drug_class{type_sel} FROM _med_cohort v "
                 "JOIN drug_exposure de ON de.person_id = v.person_id "
                 "JOIN _med_class_concepts m ON m.concept_id = de.drug_concept_id "
-                f"WHERE TRUE {lo} {hi}").fetchall()
-            for row, cls in hits:
+                f"WHERE TRUE {lo} {hi} {route_clause}").fetchall()
+            for hit in hits:
+                row, cls = hit[0], hit[1]
                 flags["standard"].setdefault(cls, set()).add(row)
+                if by_type and len(hit) > 2 and hit[2] is not None:
+                    flags_by_type["standard"].setdefault((cls, int(hit[2])), set()).add(row)
 
         if use_source:
             xw = _load_crosswalk(db_con, crosswalk)
@@ -252,15 +310,20 @@ def extract_medication_classes(
                 code_expr = "UPPER(TRIM(sc.concept_code))"
             except ValueError:
                 code_join, code_expr = "", "NULL"
+
+            type_sel = ", de.drug_type_concept_id" if by_type else ""
             hits = db_con.execute(
-                "SELECT DISTINCT v._row, x.drug_class FROM _med_cohort v "
+                f"SELECT DISTINCT v._row, x.drug_class{type_sel} FROM _med_cohort v "
                 "JOIN drug_exposure de ON de.person_id = v.person_id "
                 f"{code_join} "
                 "JOIN _med_xw_df x ON x.source_value = UPPER(TRIM(de.drug_source_value)) "
                 f"OR x.source_value = {code_expr} "
-                f"WHERE TRUE {lo} {hi}").fetchall()
-            for row, cls in hits:
+                f"WHERE TRUE {lo} {hi} {route_clause}").fetchall()
+            for hit in hits:
+                row, cls = hit[0], hit[1]
                 flags["source"].setdefault(cls, set()).add(row)
+                if by_type and len(hit) > 2 and hit[2] is not None:
+                    flags_by_type["source"].setdefault((cls, int(hit[2])), set()).add(row)
     finally:
         db_con.execute("DROP VIEW IF EXISTS _med_cohort")
         for t in tmp_tables:
@@ -281,6 +344,12 @@ def extract_medication_classes(
             result[f"{cls}_standard"] = np.isin(rows_index, list(flags["standard"].get(cls, ()))).astype(int)
             present.append(f"{cls}_standard")
         result[cls] = result[present].max(axis=1)
+
+    if by_type:
+        all_type_keys = set(flags_by_type["source"].keys()) | set(flags_by_type["standard"].keys())
+        for (cls, type_id) in sorted(all_type_keys):
+            t_rows = set(flags_by_type["source"].get((cls, type_id), ())) | set(flags_by_type["standard"].get((cls, type_id), ()))
+            result[f"{cls}_type_{type_id}"] = np.isin(rows_index, list(t_rows)).astype(int)
 
     if return_audit:
         return result, audit_medication_strategies(result, classes=list(specs), **audit_kwargs)
@@ -308,7 +377,14 @@ def audit_medication_strategies(
     concordance_threshold: float = 0.9,
     prevalence_gap_threshold: float = 0.10,
     peer_kappa_gap: float = 0.25,
-) -> pd.DataFrame:
+    min_n: int = 10,
+    min_prevalence: float | Mapping[str, float] | None = None,
+    explain: bool = False,
+    con=None,
+    medication_specs: Mapping[str, Any] | None = None,
+    cohort_table: str = "cohort",
+    **explain_kwargs,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Per-site agreement between the source-crosswalk and OMOP-hierarchy strategies.
 
     Args:
@@ -320,12 +396,20 @@ def audit_medication_strategies(
         prevalence_gap_threshold: Flag ``|prevalence_source - prevalence_standard|`` above this.
         peer_kappa_gap: With >= 3 sites, flag a site whose kappa trails the median of the *other* sites by
             more than this.
+        min_n: Minimum cohort size in a site to evaluate blind/prevalence reasons (default 10).
+        min_prevalence: Minimum expected prevalence floor; flags if both strategies are below this.
+        explain: If True, also returns disagreement explanation details (needs ``con`` and ``medication_specs``).
+        con: Active DuckDB connection (required if ``explain=True``).
+        medication_specs: Dict of medication specifications (required if ``explain=True``).
+        cohort_table: Cohort table name (default 'cohort').
+        **explain_kwargs: Forwarded to :func:`explain_medication_disagreement`.
 
     Returns:
         One row per (site, class) plus an ``ALL`` pooled row per class: counts (``both``, ``source_only``,
         ``standard_only``, ``neither``), ``source_prevalence``, ``standard_prevalence``, ``concordance``,
-        ``kappa``, ``flagged`` and a ``reason`` string (``source_blind``, ``standard_blind``, ``low_kappa``,
-        ``low_concordance``, ``prevalence_gap``, ``peer_outlier``).
+        ``kappa``, ``flagged`` and a ``reason`` string (``both_blind``, ``source_blind``, ``standard_blind``,
+        ``low_kappa``, ``low_concordance``, ``prevalence_gap``, ``peer_outlier``, ``below_min_prevalence``).
+        With ``explain=True``, returns a ``(audit, explanation)`` tuple.
     """
     if classes is None:
         classes = [c[: -len("_source")] for c in flags.columns
@@ -357,12 +441,21 @@ def audit_medication_strategies(
 
     reasons = []
     for i, r in audit.iterrows():
+        cls = r["medication_class"]
         why = []
-        if r["n"]:
-            if r["source_prevalence"] == 0 and r["standard_prevalence"] > 0:
+        if r["n"] >= min_n:
+            if r["source_prevalence"] == 0 and r["standard_prevalence"] == 0:
+                why.append("both_blind")
+            elif r["source_prevalence"] == 0 and r["standard_prevalence"] > 0:
                 why.append("source_blind")
-            if r["standard_prevalence"] == 0 and r["source_prevalence"] > 0:
+            elif r["standard_prevalence"] == 0 and r["source_prevalence"] > 0:
                 why.append("standard_blind")
+
+            if min_prevalence is not None:
+                floor = min_prevalence.get(cls, 0.0) if isinstance(min_prevalence, Mapping) else float(min_prevalence)
+                if floor > 0 and (r["source_prevalence"] < floor or r["standard_prevalence"] < floor):
+                    why.append("below_min_prevalence")
+
             if r["kappa"] == r["kappa"] and r["kappa"] < kappa_threshold and not why:
                 why.append("low_kappa")
             if r["concordance"] < concordance_threshold:
@@ -382,7 +475,333 @@ def audit_medication_strategies(
                     reasons[i].append("peer_outlier")
     audit["reason"] = [",".join(dict.fromkeys(r)) for r in reasons]
     audit["flagged"] = audit["reason"].ne("")
+
+    if explain:
+        if con is None or medication_specs is None:
+            raise ValueError("explain=True requires con and medication_specs to be provided.")
+        expl = explain_medication_disagreement(
+            con, flags, medication_specs, cohort_table=cohort_table,
+            classes=classes, site_col=site_col, **explain_kwargs
+        )
+        return audit, expl
+
     return audit
+
+
+def assert_exposure_coverage(
+    flags: pd.DataFrame,
+    classes: Sequence[str] | None = None,
+    *,
+    min_n: int = 1000,
+    site_col: str = "site",
+    min_prevalence: float = 0.0,
+) -> None:
+    """Verifies that medication classes have non-zero (or expected) exposure coverage across sites.
+
+    Raises AssertionError if any class has zero prevalence (or below min_prevalence) in a hospital
+    site with at least min_n participants, preventing silent-zero data drops.
+
+    Args:
+        flags: DataFrame with exposure flags (from :func:`extract_medication_classes`).
+        classes: Classes to check (default: all base class columns).
+        min_n: Minimum site cohort size required to trigger assertion (default 1000).
+        site_col: Site column name (default 'site').
+        min_prevalence: Minimum expected prevalence threshold (default 0.0).
+
+    Raises:
+        AssertionError: If coverage is zero or below min_prevalence.
+    """
+    df = flags.copy()
+    actual_site = site_col if site_col in df.columns else None
+    if actual_site is None:
+        df["_site"] = "ALL"
+        actual_site = "_site"
+
+    if classes is None:
+        classes = [c for c in df.columns if not c.endswith(("_source", "_standard")) and not c.startswith("_") and c not in ("person_id", "subject_id", "index_date", "site", actual_site)]
+
+    for site, grp in df.groupby(actual_site):
+        n = len(grp)
+        if n < min_n:
+            continue
+        for cls in classes:
+            if cls in grp.columns:
+                prev = float(grp[cls].mean())
+            elif f"{cls}_standard" in grp.columns:
+                prev = float(grp[f"{cls}_standard"].mean())
+            elif f"{cls}_source" in grp.columns:
+                prev = float(grp[f"{cls}_source"].mean())
+            else:
+                continue
+
+            if prev <= min_prevalence or prev == 0.0:
+                raise AssertionError(
+                    f"assert_exposure_coverage failed for medication class '{cls}' at site '{site}': "
+                    f"observed prevalence {prev:.4f} <= threshold {min_prevalence} (N={n}). "
+                    f"Check vocabulary mapping and input drug_exposure completeness."
+                )
+
+
+def explain_medication_disagreement(
+    con: duckdb.DuckDBPyConnection,
+    flags: pd.DataFrame,
+    medication_specs: Mapping[str, Any],
+    cohort_table: str = "cohort",
+    *,
+    classes: Sequence[str] | None = None,
+    site_col: str = "site",
+    person_col: str | None = None,
+    top_n: int = 10,
+    min_cell_count: int = 11,
+    mask_value: str = "<11",
+) -> pd.DataFrame:
+    """Explains why source-crosswalk and standard OMOP strategies disagree on medication classes.
+
+    Identifies top drug concepts and source values present in one strategy but missing in the other,
+    with small-cell count suppression (<11) so output aggregates can safely leave the institution.
+
+    Args:
+        con: Active DuckDB connection.
+        flags: Output of :func:`extract_medication_classes` with ``strategy='both'``.
+        medication_specs: Medication class specifications dict.
+        cohort_table: Cohort table name.
+        classes: Classes to audit (default: classes present in flags).
+        site_col: Site column name (default 'site').
+        person_col: Person identifier column name (default 'person_id' or auto-detected).
+        top_n: Maximum top disagreement patterns to return per site and class (default 10).
+        min_cell_count: Cell count threshold for privacy suppression (default 11).
+        mask_value: Suppression mask string (default '<11').
+
+    Returns:
+        pd.DataFrame: Table with columns [site, medication_class, disagreement_type,
+            drug_source_value, drug_concept_id, concept_name, concept_class_id,
+            patient_count, row_count, is_suppressed].
+    """
+    if classes is None:
+        classes = [c[: -len("_source")] for c in flags.columns
+                   if c.endswith("_source") and f"{c[: -len('_source')]}_standard" in flags.columns]
+
+    pcol = person_col or ("person_id" if "person_id" in flags.columns else "subject_id")
+    actual_site = site_col if site_col in flags.columns else None
+
+    df = flags.copy()
+    if actual_site is None:
+        df["_site"] = "ALL"
+        actual_site = "_site"
+
+    concept_table = _resolve_table(con, "concept")
+    records = []
+
+    for cls in classes:
+        src_col = f"{cls}_source"
+        std_col = f"{cls}_standard"
+        if src_col not in df.columns or std_col not in df.columns:
+            continue
+
+        for site, grp in df.groupby(actual_site):
+            # Source only
+            src_only_pids = grp.loc[(grp[src_col] == 1) & (grp[std_col] == 0), pcol].unique()
+            if len(src_only_pids) > 0:
+                p_df = pd.DataFrame({"pid": src_only_pids})
+                con.register("_disagree_pids", p_df)
+                try:
+                    res = con.execute(f"""
+                        SELECT 
+                            COALESCE(de.drug_source_value, 'None') AS drug_source_value,
+                            COALESCE(de.drug_concept_id, 0) AS drug_concept_id,
+                            COALESCE(c.concept_name, 'Unknown Concept') AS concept_name,
+                            COALESCE(c.concept_class_id, 'None') AS concept_class_id,
+                            COUNT(DISTINCT de.person_id) AS patient_count,
+                            COUNT(*) AS row_count
+                        FROM drug_exposure de
+                        JOIN _disagree_pids dp ON dp.pid = de.person_id
+                        LEFT JOIN {concept_table} c ON c.concept_id = de.drug_concept_id
+                        GROUP BY 1, 2, 3, 4
+                        ORDER BY patient_count DESC, row_count DESC
+                        LIMIT {int(top_n)}
+                    """).df()
+                    for _, row in res.iterrows():
+                        p_cnt = int(row["patient_count"])
+                        r_cnt = int(row["row_count"])
+                        suppressed = p_cnt < min_cell_count
+                        records.append({
+                            "site": site,
+                            "medication_class": cls,
+                            "disagreement_type": "source_only",
+                            "drug_source_value": row["drug_source_value"],
+                            "drug_concept_id": int(row["drug_concept_id"]),
+                            "concept_name": row["concept_name"],
+                            "concept_class_id": row["concept_class_id"],
+                            "patient_count": mask_value if suppressed else p_cnt,
+                            "row_count": mask_value if r_cnt < min_cell_count else r_cnt,
+                            "is_suppressed": suppressed,
+                        })
+                finally:
+                    con.unregister("_disagree_pids")
+
+            # Standard only
+            std_only_pids = grp.loc[(grp[src_col] == 0) & (grp[std_col] == 1), pcol].unique()
+            if len(std_only_pids) > 0:
+                p_df = pd.DataFrame({"pid": std_only_pids})
+                con.register("_disagree_pids", p_df)
+                try:
+                    res = con.execute(f"""
+                        SELECT 
+                            COALESCE(de.drug_source_value, 'None') AS drug_source_value,
+                            COALESCE(de.drug_concept_id, 0) AS drug_concept_id,
+                            COALESCE(c.concept_name, 'Unknown Concept') AS concept_name,
+                            COALESCE(c.concept_class_id, 'None') AS concept_class_id,
+                            COUNT(DISTINCT de.person_id) AS patient_count,
+                            COUNT(*) AS row_count
+                        FROM drug_exposure de
+                        JOIN _disagree_pids dp ON dp.pid = de.person_id
+                        LEFT JOIN {concept_table} c ON c.concept_id = de.drug_concept_id
+                        GROUP BY 1, 2, 3, 4
+                        ORDER BY patient_count DESC, row_count DESC
+                        LIMIT {int(top_n)}
+                    """).df()
+                    for _, row in res.iterrows():
+                        p_cnt = int(row["patient_count"])
+                        r_cnt = int(row["row_count"])
+                        suppressed = p_cnt < min_cell_count
+                        records.append({
+                            "site": site,
+                            "medication_class": cls,
+                            "disagreement_type": "standard_only",
+                            "drug_source_value": row["drug_source_value"],
+                            "drug_concept_id": int(row["drug_concept_id"]),
+                            "concept_name": row["concept_name"],
+                            "concept_class_id": row["concept_class_id"],
+                            "patient_count": mask_value if suppressed else p_cnt,
+                            "row_count": mask_value if r_cnt < min_cell_count else r_cnt,
+                            "is_suppressed": suppressed,
+                        })
+                finally:
+                    con.unregister("_disagree_pids")
+
+    out = pd.DataFrame(records)
+    if out.empty:
+        return pd.DataFrame(columns=[
+            "site", "medication_class", "disagreement_type",
+            "drug_source_value", "drug_concept_id", "concept_name",
+            "concept_class_id", "patient_count", "row_count", "is_suppressed"
+        ])
+    return out
+
+
+def export_medication_crosswalk(
+    con: duckdb.DuckDBPyConnection,
+    medication_specs: Mapping[str, Any],
+    output_path: str | Path | None = None,
+    *,
+    include_retired: bool = True,
+    exclude_forms: Sequence[str] | None = None,
+    must_contain: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Exports OMOP medication class definitions into a standardized crosswalk file.
+
+    Traverses ATC classes and RxNorm ingredient hierarchies to extract every descendant RxNorm concept
+    code (CUI), plus historical/retired concepts that map to them via OMOP 'Maps to' relationships.
+
+    Args:
+        con: DuckDB connection with concept and concept_ancestor tables.
+        medication_specs: Medication class specification dict.
+        output_path: Optional file path to write exported CSV.
+        include_retired: Whether to include older retired RxNorm codes mapped via 'Maps to' (default True).
+        exclude_forms: Optional list of dosage form strings to exclude (e.g. 'Ophthalmic', 'Topical').
+        must_contain: Optional list of required RxNorm codes or source strings; fails fast if missing.
+
+    Returns:
+        pd.DataFrame: Crosswalk table with columns [source_value, drug_class, concept_id,
+            concept_name, concept_class_id, vocabulary_id, source].
+    """
+    specs = _normalize_specs(medication_specs)
+    anc = _resolve_table(con, "concept_ancestor")
+    concept = _resolve_table(con, "concept")
+
+    rows = []
+    for cls, spec in specs.items():
+        ids = [int(x) for x in spec["ancestor_concept_ids"] + spec["rxnorm_ingredient_ids"]]
+        if spec["atc_codes"]:
+            codes = ", ".join(_q(c) for c in spec["atc_codes"])
+            ids += [int(r[0]) for r in con.execute(
+                f"SELECT concept_id FROM {concept} WHERE vocabulary_id LIKE 'ATC%' "
+                f"AND concept_code IN ({codes})").fetchall()]
+        if ids:
+            rows += [(cls, i) for i in sorted(set(ids))]
+
+    if not rows:
+        raise ValueError("No ancestor concept IDs or ATC codes could be resolved from medication_specs.")
+
+    anc_df = pd.DataFrame(rows, columns=["drug_class", "ancestor_concept_id"])
+    con.register("_exp_anc_df", anc_df)
+
+    try:
+        curr_sql = f"""
+            SELECT DISTINCT 
+                c.concept_code AS source_value,
+                a.drug_class,
+                c.concept_id,
+                c.concept_name,
+                c.concept_class_id,
+                c.vocabulary_id,
+                'current' AS source
+            FROM _exp_anc_df a
+            JOIN {anc} ca ON ca.ancestor_concept_id = a.ancestor_concept_id
+            JOIN {concept} c ON c.concept_id = ca.descendant_concept_id
+        """
+        curr_df = con.execute(curr_sql).df()
+        all_dfs = [curr_df]
+
+        if include_retired and not curr_df.empty:
+            desc_ids = ", ".join(str(int(i)) for i in curr_df["concept_id"].unique())
+            ret_sql = f"""
+                SELECT DISTINCT 
+                    c_old.concept_code AS source_value,
+                    a.drug_class,
+                    c_old.concept_id,
+                    c_old.concept_name,
+                    c_old.concept_class_id,
+                    c_old.vocabulary_id,
+                    'maps_to' AS source
+                FROM concept_relationship cr
+                JOIN {concept} c_old ON c_old.concept_id = cr.concept_id_1
+                JOIN _exp_anc_df a ON 1=1
+                JOIN {anc} ca ON ca.ancestor_concept_id = a.ancestor_concept_id AND ca.descendant_concept_id = cr.concept_id_2
+                WHERE cr.relationship_id = 'Maps to'
+                  AND cr.concept_id_2 IN ({desc_ids})
+                  AND c_old.concept_id NOT IN ({desc_ids})
+            """
+            try:
+                ret_df = con.execute(ret_sql).df()
+                if not ret_df.empty:
+                    all_dfs.append(ret_df)
+            except Exception:
+                pass
+
+        out = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
+
+        if exclude_forms and not out.empty:
+            for form in exclude_forms:
+                out = out[~out["concept_name"].str.lower().str.contains(str(form).lower(), na=False)]
+
+        if must_contain:
+            present_codes = set(out["source_value"].astype(str).str.strip().str.upper())
+            missing = [c for c in must_contain if str(c).strip().upper() not in present_codes]
+            if missing:
+                raise ValueError(f"Export crosswalk validation failed; missing required codes: {missing}")
+
+        if output_path:
+            out_p = Path(output_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            out.to_csv(out_p, index=False)
+
+        return out
+    finally:
+        try:
+            con.unregister("_exp_anc_df")
+        except Exception:
+            pass
 
 
 class MedicationExtractor:
