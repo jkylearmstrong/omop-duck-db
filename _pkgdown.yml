@@ -172,6 +172,23 @@ reference:
   - compile_phenotype
   - execute_phenotype
   - phenotype_serialize
+- title: Bounds, units, domain profiles and cohort flow
+  desc: Physiologic bounding and unit harmonization, clinical domain profiles for Table 1, medication windows, CONSORT cohort flow, completeness profiling and the Arrow hand-off to PatientLevelPrediction.
+  contents:
+  - DEFAULT_PHYSIOLOGIC_BOUNDS
+  - DEFAULT_UNIT_RULES
+  - resolve_bounds
+  - filter_bounds
+  - harmonize_measurement_units
+  - medication_extractor
+  - domain_profiles
+  - domain_profile_names
+  - load_domain_profile
+  - table1_generator
+  - cohort_flow
+  - to_graphviz
+  - generate_table2
+  - as_plp_arrow
 - title: Large-file sync
   desc: Synchronize DuckDB databases and vocabulary files via Google Drive.
   contents:

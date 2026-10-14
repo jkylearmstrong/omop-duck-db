@@ -206,13 +206,68 @@ def test_codes_match_vocabulary_names():
         21600713: "insulin", 21600745: "biguanide", 1503297: "metformin", 21600749: "sulfonylurea",
         1502855: "tolbutamide", 1502809: "tolazamide", 21601855: "hmg coa", 21601782: "renin-angiotensin",
         21600381: "antihypertensive", 21601664: "beta blocking", 21601744: "calcium channel",
-        1314002: "atenolol", 21602722: "corticosteroids", 1506270: "methylprednisolone"}
+        1314002: "atenolol", 21602722: "corticosteroids", 1506270: "methylprednisolone",
+        1539403: "simvastatin", 1545958: "atorvastatin", 1551860: "pravastatin", 21601668: "oxprenolol"}
     for cid, word in expect.items():
         row = v.execute("SELECT concept_name FROM concept WHERE concept_id = ?", [cid]).fetchone()
         assert row and word in row[0].lower(), f"concept {cid}: expected '{word}', found {row}"
+    from omop_etl.table1 import DEFAULT_MEDICATION_CONCEPTS
+    unguarded = {i for ids in DEFAULT_MEDICATION_CONCEPTS.values() for i in ids} - set(expect)
+    assert not unguarded, f"default medication concept ids without a name guard: {sorted(unguarded)}"
     from omop_etl.table1_profiles import DOMAIN_PROFILES
     codes = {c for m in (DEFAULT_LAB_LOINCS,) for cs in m.values() for c in cs}
     codes |= {c for p in DOMAIN_PROFILES.values() for cs in p["labs"].values() for c in cs}
     missing = [c for c in codes if not v.execute(
         "SELECT 1 FROM concept WHERE vocabulary_id='LOINC' AND concept_code=?", [c]).fetchone()]
     assert not missing, f"LOINC codes not in vocabulary: {missing}"
+
+
+def test_domain_profiles_yaml_matches_python():
+    yaml = pytest.importorskip("yaml")
+    from pathlib import Path
+    from omop_etl.table1_profiles import DOMAIN_PROFILES
+    path = Path(__file__).resolve().parent.parent / "inst" / "extdata" / "domain_profiles.yml"
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == DOMAIN_PROFILES, \
+        "inst/extdata/domain_profiles.yml (used by R) is out of sync with omop_etl.table1_profiles.DOMAIN_PROFILES"
+
+
+def test_every_mapped_code_matches_its_feature_name_in_vocabulary():
+    """Opt-in (OMOP_VOCAB_DB): every LOINC / ATC code's concept_name must contain a keyword for its feature.
+
+    This is the guard that would have caught LOINC 48642-3 (eGFR) filed under ``anion_gap``.
+    Keywords live in tests/fixtures/vocab_feature_keywords.csv (shared with the R tests).
+    """
+    import csv
+    import os
+    from pathlib import Path
+    from omop_etl.features import ACUTE_LAB_PANEL, CORE_14_LAB_PANEL
+    from omop_etl.table1 import DEFAULT_VITAL_LOINCS
+    from omop_etl.table1_profiles import DOMAIN_PROFILES
+    path = os.environ.get("OMOP_VOCAB_DB")
+    if not path:
+        pytest.skip("set OMOP_VOCAB_DB to a DuckDB file containing the OMOP concept table")
+    fx = Path(__file__).resolve().parent / "fixtures" / "vocab_feature_keywords.csv"
+    kw = {(r["kind"], r["name"]): r["keywords"].lower().split("|") for r in csv.DictReader(fx.open(encoding="utf-8"))}
+    v = duckdb.connect(path, read_only=True)
+    wanted: dict[tuple, set] = {}
+    for m in (DEFAULT_LAB_LOINCS, DEFAULT_VITAL_LOINCS, CORE_14_LAB_PANEL, ACUTE_LAB_PANEL):
+        for k, cs in m.items():
+            wanted.setdefault(("lab", k), set()).update([cs] if isinstance(cs, str) else cs)
+    for p in DOMAIN_PROFILES.values():
+        for k, cs in p["labs"].items():
+            wanted.setdefault(("lab", k), set()).update(cs)
+        for k, s in p["medications"].items():
+            wanted.setdefault(("med", k), set()).update(s["atc_codes"])
+    problems = []
+    for (kind, name), codes in wanted.items():
+        if (kind, name) not in kw:
+            problems.append(f"{kind} '{name}': add it to vocab_feature_keywords.csv")
+            continue
+        for code in sorted(codes):
+            row = v.execute("SELECT concept_name FROM concept WHERE vocabulary_id = ? AND concept_code = ?",
+                            ["ATC" if kind == "med" else "LOINC", code]).fetchone()
+            if row is None:
+                problems.append(f"{kind} '{name}': {code} not in vocabulary")
+            elif not any(w in row[0].lower() for w in kw[(kind, name)]):
+                problems.append(f"{kind} '{name}': {code} is '{row[0]}'")
+    assert not problems, "\n".join(problems)

@@ -1,6 +1,6 @@
 # omopduckdb 0.5.9
 
-Python (`omop_etl`) additions for "request 2". R mirrors of the new classes are NOT yet written; only the mapping fixes below are applied to `R/table1.R`.
+Request 2 ships with **dual Python and R usage**. R functions are snake_case mirrors of the Python classes: `filter_bounds`, `harmonize_measurement_units`, `medication_extractor`, `table1_generator`, `cohort_flow`, `generate_table2`, `as_plp_arrow` (Python: `filter_bounds`, `harmonize_measurement_units`, `MedicationExtractor`, `Table1Generator`, `CohortFlow`, `Table2Generator`, `as_plp_arrow`). The domain profiles live once, in `inst/extdata/domain_profiles.yml`, and a test keeps the Python dict in sync.
 
 ### Mapping bug fixes (audited against the OMOP vocabulary)
 - **LOINC `48642-3` (eGFR, MDRD) was in `anion_gap`**, giving an Anion Gap mean of ~59.5 mEq/L. Moved to `egfr`; `anion_gap` is now `1863-0` + `33037-3`.
@@ -13,7 +13,11 @@ Python (`omop_etl`) additions for "request 2". R mirrors of the new classes are 
 - `extract_medication_classes(window="pre_admission"|"inpatient"|"discharge")` and `MedicationExtractor` (concept_ancestor track, crosswalk track, per-window flags).
 - `Table1Generator` with `DOMAIN_PROFILES` (heart_failure, nephrology, sepsis_icu, oncology, pulmonary, pharmacotherapy_safety), `add_custom_lab`, YAML/dict profiles. Profile code lists are a starting point for clinician review; LOINC and ATC codes were verified to exist in the OMOP vocabulary.
 - `CohortFlow` (sequential steps, attrition table, Markdown/Mermaid/TikZ/Graphviz output, visit-type / anchor / follow-up preflight), `Table2Generator` (completeness, sentinel and zero-SD flags), `as_plp_arrow` (in-memory Arrow covariate tables for PatientLevelPrediction; no file round-trip).
-- Test `test_codes_match_vocabulary_names` (set `OMOP_VOCAB_DB`) guards the mapping tables.
+- R: `to_graphviz()` for attrition tables; `extract_measurements(measurement_table=)`; `extract_medication_classes(window=, end_date_col=)`. R's `as_plp_arrow()` builds the Arrow tables from DuckDB query results held in R memory (no files); it is not zero-copy.
+
+### Vocabulary guards (Python and R)
+- Always on: no LOINC / concept id may be assigned to two features in the default maps; `domain_profiles.yml` must equal the Python profiles.
+- Opt-in, set `OMOP_VOCAB_DB` to a DuckDB file holding the OMOP `concept` table: every LOINC and ATC code in the default maps and the domain profiles must exist, and its `concept_name` must contain a keyword for the feature it is filed under (`tests/fixtures/vocab_feature_keywords.csv`, shared by both languages); every default medication concept id must be the drug or class it claims to be. Re-introducing the `48642-3` anion-gap bug or the old statin id makes these tests fail. Adding a feature without keywords also fails, by design. The guard already caught a wrong DOAC code (`B01AE06` is bivalirudin) in the new profiles.
 
 # omopduckdb 0.5.8
 

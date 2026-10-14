@@ -1,0 +1,185 @@
+# Clinical domain profiles for Table1Generator (Python) / table1_generator() (R).
+# Mirror of omop_etl.table1_profiles.DOMAIN_PROFILES; tests/test_request2_features.py checks they agree.
+# Starting point for clinician review, not a validated specification.
+heart_failure:
+  labs:
+    troponin_i: [10839-9, 42757-5, 89579-7]
+    troponin_t: [6598-7, 67151-1]
+    nt_probnp: [33762-6, 83107-3]
+    bnp: [30934-4, 42637-9]
+    cholesterol_total: [2093-3]
+    ldl: [13457-7, 2089-1]
+    hdl: [2085-9]
+    triglycerides: [2571-8]
+    potassium: [2823-3, 6298-4]
+    lvef: [10230-1]
+  bounds:
+    potassium: [1.0, 10.0]
+    lvef: [5.0, 90.0]
+    troponin_i: [0.0, 50000.0]
+    troponin_t: [0.0, 50000.0]
+  medications:
+    beta_blockers:
+      atc_codes: [C07]
+    ace_inhibitors:
+      atc_codes: [C09A, C09B]
+    arbs:
+      atc_codes: [C09C, C09D]
+    arni:
+      atc_codes: [C09DX04]
+    mras:
+      atc_codes: [C03DA]
+    sglt2i:
+      atc_codes: [A10BK]
+    loop_diuretics:
+      atc_codes: [C03C]
+    statins:
+      atc_codes: [C10AA]
+  conditions:
+    ischemic_heart_disease: [I20, I21, I22, I24, I25]
+    atrial_fibrillation: [I48]
+    hypertension: [I10, I11, I12, I13, I15]
+    heart_failure: [I50]
+nephrology:
+  labs:
+    creatinine: [2160-0, 38483-4]
+    egfr: [33914-3, 48642-3, 48643-1, 62238-1, 88293-6, 88294-4]
+    bun: [3094-0, 6299-2]
+    phosphorus: [2777-1]
+    calcium: [17861-6]
+    uacr: [9318-7, 14959-1]
+    urine_protein_24h: [21482-5]
+  bounds:
+    creatinine: [0.1, 30.0]
+    egfr: [0.0, 250.0]
+    phosphorus: [0.5, 20.0]
+  medications:
+    raas_inhibitors:
+      atc_codes: [C09]
+    phosphate_binders:
+      atc_codes: [V03AE]
+    esas:
+      atc_codes: [B03XA]
+    vitamin_d_analogs:
+      atc_codes: [A11CC, H05BX]
+    potassium_binders:
+      atc_codes: [V03AE01, V03AE09]
+  conditions:
+    ckd_stage_1: [N181]
+    ckd_stage_2: [N182]
+    ckd_stage_3: [N183]
+    ckd_stage_4: [N184]
+    ckd_stage_5: [N185]
+    esrd: [N186]
+    dialysis_status: [Z992, Z491, Z492]
+    renal_osteodystrophy: [N250]
+sepsis_icu:
+  labs:
+    ph: [2744-1]
+    po2: [2703-7]
+    pco2: [2019-8]
+    lactate: [2524-7, 32693-4]
+    platelets: [777-3, 26515-7]
+    bilirubin_total: [1975-2]
+    base_excess: [11555-0]
+  bounds:
+    ph: [6.5, 8.0]
+    lactate: [0.1, 30.0]
+    platelets: [1.0, 2000.0]
+    bilirubin_total: [0.1, 60.0]
+  medications:
+    vasopressors:
+      atc_codes: [C01CA03, C01CA24, H01BA01]
+    inotropes:
+      atc_codes: [C01CA07]
+    systemic_corticosteroids:
+      atc_codes: [H02AB]
+    broad_spectrum_antibiotics:
+      atc_codes: [J01DH, J01CR05, J01DE, J01DD]
+  conditions:
+    sepsis: [A40, A41, R652]
+    septic_shock: [R6521]
+    mechanical_ventilation: [Z9911, J9600, J9601]
+oncology:
+  labs:
+    anc: [751-8, 26499-4]
+    platelets: [777-3, 26515-7]
+    hemoglobin: [718-7, 59260-0]
+    ldh: [2532-0]
+    cea: [2039-6]
+    psa: [2857-1]
+    ca_125: [10334-1]
+    ca_19_9: [24108-3]
+  bounds:
+    anc: [0.0, 200.0]
+    hemoglobin: [2.0, 25.0]
+    platelets: [1.0, 2000.0]
+  medications:
+    platinum_agents:
+      atc_codes: [L01XA]
+    anthracyclines:
+      atc_codes: [L01DB]
+    taxanes:
+      atc_codes: [L01CD]
+    checkpoint_inhibitors:
+      atc_codes: [L01FF]
+    gcsf:
+      atc_codes: [L03AA]
+  conditions:
+    solid_tumor: [C0, C1, C2, C3, C4, C5, C6, C7]
+    metastatic: [C77, C78, C79, C7B]
+    hematologic_malignancy: [C81, C82, C83, C84, C85, C88, C90, C91, C92, C93, C94, C95, C96]
+    neutropenic_fever: [D700, D701, D702, D703, D704, D708, D709]
+pulmonary:
+  labs:
+    fev1: [20150-9]
+    fvc: [19870-5]
+    fev1_fvc: [19926-5]
+    eosinophils: [711-2, 26449-9]
+    po2: [2703-7]
+    pco2: [2019-8]
+    spo2: [59408-5, 2708-6]
+  bounds:
+    spo2: [30.0, 100.0]
+    fev1_fvc: [0.0, 1.5]
+  medications:
+    ics:
+      atc_codes: [R03BA]
+    laba:
+      atc_codes: [R03AC12, R03AC13, R03AC18]
+    lama:
+      atc_codes: [R03BB]
+    saba:
+      atc_codes: [R03AC02, R03AC03]
+    oral_corticosteroids:
+      atc_codes: [H02AB]
+    biologics:
+      atc_codes: [R03DX]
+  conditions:
+    copd: [J44]
+    asthma: [J45]
+    supplemental_oxygen: [Z9981]
+pharmacotherapy_safety:
+  labs:
+    vancomycin_trough: [4092-3, 39797-6]
+    digoxin: [10535-3]
+    lithium: [14334-7]
+    tacrolimus: [11253-2]
+    inr: [6301-6, 34714-6]
+    pt: [5902-2]
+    aptt: [3173-2]
+  bounds:
+    inr: [0.5, 20.0]
+    aptt: [10.0, 300.0]
+  medications:
+    doacs:
+      atc_codes: [B01AF, B01AE07]
+    heparins:
+      atc_codes: [B01AB]
+    warfarin:
+      atc_codes: [B01AA03]
+    opioids:
+      atc_codes: [N02A]
+    sedatives:
+      atc_codes: [N05B, N05C]
+  conditions: {}

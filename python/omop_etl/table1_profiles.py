@@ -109,7 +109,7 @@ DOMAIN_PROFILES: dict[str, dict[str, Any]] = {
         },
         "bounds": {"inr": [0.5, 20.0], "aptt": [10.0, 300.0]},
         "medications": {
-            "doacs": {"atc_codes": ["B01AF", "B01AE07", "B01AE06"]}, "heparins": {"atc_codes": ["B01AB"]},
+            "doacs": {"atc_codes": ["B01AF", "B01AE07"]}, "heparins": {"atc_codes": ["B01AB"]},
             "warfarin": {"atc_codes": ["B01AA03"]}, "opioids": {"atc_codes": ["N02A"]},
             "sedatives": {"atc_codes": ["N05B", "N05C"]},
         },

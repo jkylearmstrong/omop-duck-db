@@ -94,6 +94,11 @@
 #' @param person_col,index_date_col,site_col Override column auto-detection. A site column
 #'   (`site_anon` / `site_id` / `site`) carries through for per-site auditing.
 #' @param lookback_days,lookahead_days Exposure window around the index date. `NULL` lookback = unbounded.
+#' @param window Optional named temporal frame overriding the lookback/lookahead days: `"pre_admission"` =
+#'   `[index - lookback_days (default 365), index - 1]`; `"inpatient"` = `[index, stay end]`; `"discharge"` =
+#'   `[stay end, stay end]` (orders written at discharge).
+#' @param end_date_col Stay end column for `"inpatient"` / `"discharge"` (default `cohort_end_date` /
+#'   `visit_end_date`).
 #' @param return_audit Also return [audit_medication_strategies()] output (needs `strategy = "both"`).
 #' @param ... Forwarded to [audit_medication_strategies()].
 #' @return A data frame with `person_id`, `index_date`, optional `site`, and per class `<class>_source`,
@@ -103,8 +108,11 @@
 extract_medication_classes <- function(db_con, cohort_table, medication_specs, strategy = c("both", "source", "standard"),
                                        crosswalk = NULL, cohort_definition_id = NULL, person_col = NULL,
                                        index_date_col = NULL, site_col = NULL, lookback_days = NULL,
-                                       lookahead_days = 0L, return_audit = FALSE, ...) {
+                                       lookahead_days = 0L, window = NULL, end_date_col = NULL,
+                                       return_audit = FALSE, ...) {
   strategy <- match.arg(strategy)
+  windows <- c("pre_admission", "inpatient", "discharge")
+  if (!is.null(window) && !window %in% windows) stop(sprintf("window must be one of %s, got '%s'.", paste(windows, collapse = ", "), window))
   if (isTRUE(return_audit) && strategy != "both") stop("return_audit = TRUE requires strategy = 'both'.")
   specs <- .med_normalize_specs(medication_specs)
   use_source <- strategy %in% c("source", "both")
@@ -123,19 +131,38 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     where <- sprintf("WHERE cohort_definition_id = %d", as.integer(cohort_definition_id))
   }
 
+  ecol <- NULL
+  if (!is.null(window) && window %in% c("inpatient", "discharge")) {
+    ecol <- .med_first_present(cols, c("cohort_end_date", "visit_end_date", "discharge_date", "end_date"),
+                               "stay end date", end_date_col)
+  }
+  end_sel <- if (!is.null(ecol)) sprintf(', CAST("%s" AS DATE) AS end_date', ecol) else ""
   site_sel <- if (!is.null(scol)) sprintf(', "%s" AS site', scol) else ""
   base <- DBI::dbGetQuery(db_con, sprintf(
-    'SELECT ROW_NUMBER() OVER () AS row_id, "%s" AS person_id, CAST("%s" AS DATE) AS index_date%s FROM %s %s',
-    pcol, icol, site_sel, cohort_table, where))
-  result <- base[, setdiff(names(base), "row_id"), drop = FALSE]
+    'SELECT ROW_NUMBER() OVER () AS row_id, "%s" AS person_id, CAST("%s" AS DATE) AS index_date%s%s FROM %s %s',
+    pcol, icol, end_sel, site_sel, cohort_table, where))
+  result <- base[, setdiff(names(base), c("row_id", "end_date")), drop = FALSE]
 
-  lo <- if (is.null(lookback_days)) "" else sprintf("AND de.drug_exposure_start_date >= v.index_date - %d", as.integer(lookback_days))
-  hi <- sprintf("AND de.drug_exposure_start_date <= v.index_date + %d", as.integer(lookahead_days))
+  d <- "de.drug_exposure_start_date"
+  if (identical(window, "pre_admission")) {
+    lb <- if (is.null(lookback_days)) 365L else as.integer(lookback_days)
+    lo <- sprintf("AND %s >= v.index_date - %d", d, lb)
+    hi <- sprintf("AND %s <= v.index_date - 1", d)
+  } else if (identical(window, "inpatient")) {
+    lo <- sprintf("AND %s >= v.index_date", d)
+    hi <- sprintf("AND %s <= v.end_date", d)
+  } else if (identical(window, "discharge")) {
+    lo <- sprintf("AND %s >= v.end_date", d)
+    hi <- sprintf("AND %s <= v.end_date", d)
+  } else {
+    lo <- if (is.null(lookback_days)) "" else sprintf("AND %s >= v.index_date - %d", d, as.integer(lookback_days))
+    hi <- sprintf("AND %s <= v.index_date + %d", d, as.integer(lookahead_days))
+  }
 
   flags <- list(source = list(), standard = list())
   tmp <- character(0)
   on.exit(for (t in tmp) try(DBI::dbExecute(db_con, paste0("DROP TABLE IF EXISTS ", t)), silent = TRUE), add = TRUE)
-  DBI::dbWriteTable(db_con, "_med_cohort", base[, c("row_id", "person_id", "index_date")], temporary = TRUE, overwrite = TRUE)
+  DBI::dbWriteTable(db_con, "_med_cohort", base[, c("row_id", "person_id", "index_date", if (!is.null(ecol)) "end_date")], temporary = TRUE, overwrite = TRUE)
   tmp <- c(tmp, "_med_cohort")
 
   if (use_standard) {
@@ -318,4 +345,36 @@ audit_medication_strategies <- function(flags, classes = NULL, site_col = "site"
   audit$reason <- vapply(reasons, function(x) paste(unique(x), collapse = ","), character(1))
   audit$flagged <- nzchar(audit$reason)
   audit
+}
+
+#' Medication exposure engine bound to a connection and drug-class specs
+#'
+#' A thin stateful front-end over [extract_medication_classes()]: RxNorm / ATC `concept_ancestor` roll-up
+#' (`strategy = "standard"`), a local NDC / CUI crosswalk (`"source"`), or both, framed in time with
+#' `window = "pre_admission"`, `"inpatient"` or `"discharge"`. Mirror of `omop_etl.MedicationExtractor`.
+#'
+#' @param con DuckDB DBI connection.
+#' @param medication_specs See [extract_medication_classes()].
+#' @param strategy,crosswalk See [extract_medication_classes()]. Default strategy `"standard"`.
+#' @return A list with functions `extract(cohort_table, window = NULL, ...)` and
+#'   `extract_all_windows(cohort_table, ...)` (one data frame with `<class>__<window>` flag columns).
+#' @export
+medication_extractor <- function(con, medication_specs, strategy = "standard", crosswalk = NULL) {
+  windows <- c("pre_admission", "inpatient", "discharge")
+  extract <- function(cohort_table, window = NULL, ...) {
+    extract_medication_classes(con, cohort_table, medication_specs, strategy = strategy, crosswalk = crosswalk,
+                               window = window, ...)
+  }
+  extract_all_windows <- function(cohort_table, ...) {
+    out <- NULL
+    for (w in windows) {
+      df <- extract(cohort_table, window = w, ...)
+      flag <- df[, names(medication_specs), drop = FALSE]
+      names(flag) <- paste0(names(flag), "__", w)
+      keep <- df[, setdiff(names(df), c(names(medication_specs), grep("_(source|standard)$", names(df), value = TRUE))), drop = FALSE]
+      out <- if (is.null(out)) cbind(keep, flag) else cbind(out, flag)
+    }
+    out
+  }
+  structure(list(extract = extract, extract_all_windows = extract_all_windows), class = "medication_extractor")
 }
