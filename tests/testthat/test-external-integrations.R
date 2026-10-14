@@ -1,5 +1,9 @@
 # Integrations with external OHDSI / ML stacks: DeepPatientLevelPrediction (torch, via reticulate) and
-# OmopOnDuckDB. Each skips cleanly when the package (or torch) is not installed.
+# OmopOnDuckDB. Both are GitHub-only (not on CRAN, so deliberately NOT in DESCRIPTION Suggests); each test skips
+# cleanly when the package (or torch) is not installed, and calls it through getExportedValue() so R CMD check
+# does not complain about an undeclared dependency.
+deep <- function(f) getExportedValue("DeepPatientLevelPrediction", f)
+omop_on_duckdb <- function(f) getExportedValue("OmopOnDuckDB", f)
 
 test_that("DeepPatientLevelPrediction fits an MLP on plpData built from as_plp_arrow and finds the signal", {
   skip_on_cran()
@@ -20,9 +24,9 @@ test_that("DeepPatientLevelPrediction fits an MLP on plpData built from as_plp_a
     featureEngineeringSettings = PatientLevelPrediction::createFeatureEngineeringSettings(),
     preprocessSettings = PatientLevelPrediction::createPreprocessSettings(minFraction = 0, normalize = TRUE,
                                                                           removeRedundancy = FALSE),
-    modelSettings = DeepPatientLevelPrediction::setMultiLayerPerceptron(
+    modelSettings = deep("setMultiLayerPerceptron")(
       numLayers = 1, sizeHidden = 16, dropout = 0.1, sizeEmbedding = 16,
-      estimatorSettings = DeepPatientLevelPrediction::setEstimator(learningRate = 0.01, batchSize = 64, epochs = 15,
+      estimatorSettings = deep("setEstimator")(learningRate = 0.01, batchSize = 64, epochs = 15,
                                                                    device = "cpu", seed = 1),
       hyperParamSearch = "random", randomSample = 1, randomSampleSeed = 1),
     logSettings = PatientLevelPrediction::createLogSettings(verbosity = "ERROR", logName = "deep_smoke"),
@@ -37,7 +41,7 @@ test_that("an omop-duck-db file opens through OmopOnDuckDB::duckdbSource and our
   testthat::skip_if_not_installed("OmopOnDuckDB")
   db <- tempfile(fileext = ".duckdb")
   build_schema(db_path = db)
-  src <- suppressMessages(OmopOnDuckDB::duckdbSource(con = db))
+  src <- suppressMessages(omop_on_duckdb("duckdbSource")(con = db))
   expect_s3_class(src, "duckdb_cdm")
   expect_true(inherits(src$con, "duckdb_connection"))
   on.exit(DBI::dbDisconnect(src$con, shutdown = TRUE), add = TRUE)

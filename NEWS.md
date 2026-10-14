@@ -20,7 +20,7 @@ Request 2 ships with **dual Python and R usage**. R functions are snake_case mir
 - New `plp_arrow_to_plp_data()` turns `as_plp_arrow()` output into a `plpData`; a real `runPlp()` LASSO fit on it recovers the planted lab as its top coefficient.
 - Windows caveat: with R's `arrow` already loaded, python's `pyarrow` fails to import ("DLL load failed while importing lib") and DeepPLP silently produces no model. Import pyarrow first (done in `tests/testthat/helper-plp-arrow.R`); the DeepPLP test asserts a metric exists so this failure cannot pass silently.
 - OmopOnDuckDB 0.1.0 is an unfinished template (placeholder DESCRIPTION, `duckdbSource()` only). Its `validateCon()` returns `NULL` when handed an existing connection, so pass a file path.
-- These tests skip when the package is absent; `DeepPatientLevelPrediction`, `OmopOnDuckDB` and `reticulate` are added to Suggests.
+- These tests skip when the package is absent. `DeepPatientLevelPrediction` and `OmopOnDuckDB` are GitHub-only, so they are deliberately not in Suggests (CI's dependency solver cannot resolve them); `reticulate` is.
 
 ### Vocabulary guards (Python and R)
 - Always on: no LOINC / concept id may be assigned to two features in the default maps; `domain_profiles.yml` must equal the Python profiles.

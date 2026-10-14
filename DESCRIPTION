@@ -44,8 +44,6 @@ Suggests:
     Andromeda,
     DatabaseConnector,
     PatientLevelPrediction,
-    DeepPatientLevelPrediction,
-    OmopOnDuckDB,
     reticulate,
     FeatureExtraction,
     arrow,
