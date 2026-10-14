@@ -241,3 +241,53 @@ reference:
   contents:
   - gdrive_upload_snapshot
   - gdrive_download_latest
+- title: Advanced analytics, causal inference, and data quality (v0.6.4)
+  desc: Negative controls, semantic concept set optimizer, trajectory features, federated survival, and synthetic twins.
+  contents:
+  - add_missing_indicators
+  - assert_exposure_coverage
+  - audit_code_list_coverage
+  - calibrate_estimates
+  - check_vocabulary_provenance
+  - cohort_diagnostics
+  - cohort_flow_tools
+  - cohort_from_index_stays
+  - cohort_overlap
+  - compare_feature_tables
+  - concept_optimizer
+  - consortium_patient_overlap
+  - consortium_propensity_score
+  - consortium_survival_meta_analysis
+  - detect_redundant_features
+  - dqd_summary
+  - explain_medication_disagreement
+  - export_medication_crosswalk
+  - extract_temporal_trajectories
+  - federated_survival
+  - generate_negative_controls
+  - generate_site_patient_tokens
+  - generate_synthetic_omop_twin
+  - integrity
+  - leakage_scan
+  - manuscript
+  - match_nearest_neighbor
+  - missingness_by_outcome
+  - negative_controls
+  - numbers_of_record
+  - observation_period_diagnostics
+  - omopduckdb-package
+  - optimize_concept_set
+  - panel_missingness_audit
+  - planned_readmission_filter
+  - plausibility_report
+  - plot_consort_flow
+  - plot_love_plot
+  - plot_multisite_attrition_heatmap
+  - provenance
+  - quality
+  - reconciliation
+  - run_study_grid
+  - scan_document_numbers
+  - synthetic
+  - trajectories
+  - vocabulary_preflight
