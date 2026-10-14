@@ -7,6 +7,7 @@ or 3D temporal sequence tensors.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Sequence
 import duckdb
@@ -1216,7 +1217,7 @@ def consortium_multivariable_risk_factors(
 
     # Normal CDF approximation for p-values
     def norm_cdf(val: float) -> float:
-        return 0.5 * (1.0 + np.math.erf(val / np.sqrt(2.0)))
+        return 0.5 * (1.0 + math.erf(val / np.sqrt(2.0)))
 
     def infer_domain(fname: str) -> str:
         fn_l = fname.lower()

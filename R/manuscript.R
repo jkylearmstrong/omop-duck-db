@@ -76,11 +76,14 @@ NULL
 #' with automated cross-referencing and an itemized TRIPOD checklist appendix.
 #'
 #' @param title Title of the manuscript.
+#' @param study_title Optional alias for title.
 #' @param authors Vector or list of author names.
 #' @param consortium_name Name of the research network.
 #' @param journal Target journal style: `"JAMA"`, `"Lancet"`, `"JAMIA"`, or `"Generic"`.
+#' @param target_journal Optional alias for journal.
 #' @param format Target format: `"quarto"` or `"typst"`.
 #' @param abstract Structured abstract list or plain text string.
+#' @param tables Optional named list of study tables.
 #' @param table1 Table 1 baseline characteristics data frame or object.
 #' @param table2 Table 2 participant flow / attrition data frame or object.
 #' @param multivariable_table Table 5 risk factors data frame or object.

@@ -29,15 +29,21 @@ build_manuscript_scaffold(
 \arguments{
 \item{title}{Title of the manuscript.}
 
+\item{study_title}{Optional alias for title.}
+
 \item{authors}{Vector or list of author names.}
 
 \item{consortium_name}{Name of the research network.}
 
 \item{journal}{Target journal style: \code{"JAMA"}, \code{"Lancet"}, \code{"JAMIA"}, or \code{"Generic"}.}
 
+\item{target_journal}{Optional alias for journal.}
+
 \item{format}{Target format: \code{"quarto"} or \code{"typst"}.}
 
 \item{abstract}{Structured abstract list or plain text string.}
+
+\item{tables}{Optional named list of study tables.}
 
 \item{table1}{Table 1 baseline characteristics data frame or object.}
 

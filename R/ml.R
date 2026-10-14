@@ -419,6 +419,14 @@ consortium_multivariable_risk_factors <- function(X,
   lam <- if (regularize) as.numeric(alpha) else 1e-9
   Lambda <- diag(c(0.0, rep(lam, p_dim - 1)))
 
+  .pseudo_inv <- function(m) {
+    s <- svd(m)
+    tol <- sqrt(.Machine$double.eps) * max(s$d)
+    pos <- s$d > tol
+    if (!any(pos)) return(matrix(0, nrow = ncol(m), ncol = nrow(m)))
+    s$v[, pos, drop = FALSE] %*% (diag(1.0 / s$d[pos], nrow = sum(pos))) %*% t(s$u[, pos, drop = FALSE])
+  }
+
   for (iter in seq_len(60)) {
     eta <- pmin(pmax(Z %*% beta, -30.0), 30.0)
     prob <- 1.0 / (1.0 + exp(-eta))
@@ -431,7 +439,7 @@ consortium_multivariable_risk_factors <- function(X,
     step <- tryCatch({
       solve(Hessian, grad)
     }, error = function(e) {
-      MASS::ginv(Hessian) %*% grad
+      .pseudo_inv(Hessian) %*% grad
     })
 
     beta <- beta - as.vector(step)
@@ -447,7 +455,7 @@ consortium_multivariable_risk_factors <- function(X,
   cov_mat <- tryCatch({
     solve(H_fin)
   }, error = function(e) {
-    MASS::ginv(H_fin)
+    .pseudo_inv(H_fin)
   })
 
   se <- sqrt(pmax(1e-12, diag(cov_mat)))

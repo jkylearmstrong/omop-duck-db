@@ -127,7 +127,13 @@ def test_consortium_multivariable_risk_factors_irls():
     with tempfile.TemporaryDirectory() as td:
         fp_path = os.path.join(td, "forest_plot.png")
         fig = rf.plot_forest(save_path=fp_path)
-        assert os.path.exists(fp_path)
+        try:
+            import matplotlib.pyplot as plt
+            assert fig is not None
+            assert os.path.exists(fp_path)
+            plt.close(fig)
+        except ImportError:
+            assert fig is None
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +199,13 @@ def test_consortium_cohort_diagnostics():
     with tempfile.TemporaryDirectory() as td:
         pyr_path = os.path.join(td, "pyramid.png")
         fig = diag.plot_pyramid(save_path=pyr_path)
-        assert os.path.exists(pyr_path)
+        try:
+            import matplotlib.pyplot as plt
+            assert fig is not None
+            assert os.path.exists(pyr_path)
+            plt.close(fig)
+        except ImportError:
+            assert fig is None
 
     con.close()
 
@@ -250,7 +262,13 @@ def test_consortium_cross_site_validation():
     with tempfile.TemporaryDirectory() as td:
         hm_path = os.path.join(td, "iecv_heatmap.png")
         fig = iecv.plot_heatmap(metric="auroc", save_path=hm_path)
-        assert os.path.exists(hm_path)
+        try:
+            import matplotlib.pyplot as plt
+            assert fig is not None
+            assert os.path.exists(hm_path)
+            plt.close(fig)
+        except ImportError:
+            assert fig is None
 
 
 # ---------------------------------------------------------------------------
