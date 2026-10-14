@@ -336,7 +336,7 @@ def provenance(
     """
     prov = {
         "package_name": "omopduckdb",
-        "package_version": "0.6.4b",
+        "package_version": "0.6.4",
         "duckdb_version": duckdb.__version__,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "seed": seed,

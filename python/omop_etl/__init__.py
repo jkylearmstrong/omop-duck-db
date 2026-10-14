@@ -524,5 +524,5 @@ __all__ = [
     "generate_synthetic_omop_twin",
 ]
 
-__version__ = "0.6.4b"
+__version__ = "0.6.4"
 

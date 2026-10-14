@@ -1,6 +1,6 @@
-# omopduckdb 0.6.4b
+# omopduckdb 0.6.4
 
-Release 0.6.4b introduces production medication classification guards, explainable strategy auditing, and publication-grade data quality / plausibility assertions with 1:1 cross-language parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
+Release 0.6.4 introduces production medication classification guards, explainable strategy auditing, publication-grade data quality assertions, causal inference nearest-neighbor matching, automated negative controls, semantic concept set optimization, longitudinal trajectory features, and federated survival meta-analysis with complete 1:1 cross-language parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
 
 ### 1. Medication Classification Guards & Strategy Disagreement Explainer
 - **Silent-Zero & Unresolved Concept Guards (`on_unresolved='raise'|'warn'`)**:

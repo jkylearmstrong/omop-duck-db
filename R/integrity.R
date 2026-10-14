@@ -305,7 +305,7 @@ missingness_by_outcome <- function(df, outcome_col, cols = NULL, by = NULL, diff
 provenance <- function(con = NULL, seed = NULL) {
   prov <- list(
     package_name = "omopduckdb",
-    package_version = "0.6.4b",
+    package_version = "0.6.4",
     duckdb_version = as.character(utils::packageVersion("duckdb")),
     timestamp_utc = format(as.POSIXlt(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
     seed = seed,
