@@ -7,3 +7,4 @@
 \description{
 Mirrors of \code{omop_etl.CohortFlow}, \code{Table2Generator} and \code{as_plp_arrow} in Python.
 }
+\keyword{internal}

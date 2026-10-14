@@ -3,6 +3,7 @@
 #'
 #' Mirrors of `omop_etl.CohortFlow`, `Table2Generator` and `as_plp_arrow` in Python.
 #' @name cohort_flow_tools
+#' @keywords internal
 NULL
 
 #' @keywords internal
