@@ -279,8 +279,8 @@ def test_cell_suppression_and_cross_database(mock_cdm, tmp_path):
 
     # Test differential privacy
     fed_con.execute("CREATE TABLE agg_counts_dp AS SELECT 316139 AS concept_id, 100 AS n_patients;")
-    dp_view = with_differential_privacy(fed_con, "agg_counts_dp", epsilon=1.0)
-    samples = [fed_con.execute(f"SELECT n_patients FROM {dp_view}").fetchone()[0] for _ in range(10)]
+    dp_view = with_differential_privacy(fed_con, "agg_counts_dp", epsilon=0.2)
+    samples = [fed_con.execute(f"SELECT n_patients FROM {dp_view}").fetchone()[0] for _ in range(20)]
     assert all(s >= 0 for s in samples)
     # Repeated queries show variation around the true count 100
     assert any(s != 100 for s in samples) or len(set(samples)) > 1

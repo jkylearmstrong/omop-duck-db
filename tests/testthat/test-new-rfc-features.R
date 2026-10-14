@@ -241,8 +241,8 @@ test_that("Cell suppression and cross-database discrepancy check work", {
   expect_equal(res$n_patients[1], "<10")
 
   DBI::dbExecute(con_fed, "CREATE TABLE agg_counts_dp AS SELECT 316139 AS concept_id, 100 AS n_patients;")
-  dp_view <- with_differential_privacy(con_fed, "agg_counts_dp", epsilon = 1.0)
-  dp_samples <- replicate(10, {
+  dp_view <- with_differential_privacy(con_fed, "agg_counts_dp", epsilon = 0.2)
+  dp_samples <- replicate(20, {
     as.numeric(DBI::dbGetQuery(con_fed, sprintf("SELECT n_patients FROM %s", dp_view))$n_patients[1])
   })
   expect_true(all(dp_samples >= 0))
