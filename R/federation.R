@@ -20,7 +20,7 @@ create_federated_consortium <- function(site_dbs, central_vocab_db = NULL, outpu
   federated_tables <- c(
     "person", "visit_occurrence", "condition_occurrence", "procedure_occurrence",
     "drug_exposure", "measurement", "observation", "death", "observation_period",
-    "drug_era", "condition_era", "provider", "care_site", "cdm_source"
+    "drug_era", "condition_era", "cohort", "cohort_definition", "provider", "care_site", "cdm_source"
   )
 
   site_names <- names(site_dbs)
@@ -123,6 +123,15 @@ create_federated_consortium <- function(site_dbs, central_vocab_db = NULL, outpu
       union_sql <- paste(site_selects, collapse = " UNION ALL\n")
       view_sql <- sprintf("CREATE OR REPLACE VIEW v_%s AS\n%s;", tbl, union_sql)
       DBI::dbExecute(con, view_sql)
+
+      # Create convenience alias view for base CDM table name if it does not already exist
+      has_base <- DBI::dbGetQuery(
+        con,
+        sprintf("SELECT 1 FROM information_schema.tables WHERE table_catalog = current_database() AND table_schema = 'main' AND table_name = '%s' AND table_type = 'BASE TABLE'", tbl)
+      )
+      if (nrow(has_base) == 0) {
+        DBI::dbExecute(con, sprintf("CREATE OR REPLACE VIEW %s AS SELECT * FROM v_%s;", tbl, tbl))
+      }
     }
   }
 
@@ -589,6 +598,121 @@ print.federated_consortium <- function(x, ...) {
   cat(sprintf("Federated Consortium Connector [%d participating site(s)]\n", length(x$sites)))
   invisible(x)
 }
+
+#' Generate Consortium-Wide and Site-Stratified Bedside Risk Scores
+#'
+#' Evaluates LACE Index and HOSPITAL bedside risk scores across all participating sites
+#' in a federated consortium in a single pass.
+#'
+#' @param fc A `federated_consortium` object.
+#' @param cohort_table Name of the cohort table or view (default `"cohort"`).
+#' @param scores Character vector of scores to compute (`"lace"`, `"hospital"`, or both).
+#' @param stratify_by_site Logical. If `TRUE` (default), produces site-stratified audit statistics.
+#' @return A `consortium_scores` S3 object containing `$scores`, `$site_summary`, and `$consortium_summary`.
+#' @export
+consortium_calculate_scores <- function(fc, cohort_table = "cohort", scores = c("lace", "hospital"), stratify_by_site = TRUE) {
+  if (!inherits(fc, "federated_consortium")) stop("`fc` must be a federated_consortium object.", call. = FALSE)
+  scores_lower <- tolower(scores)
+  actual_table <- cohort_table
+  has_tbl <- nrow(DBI::dbGetQuery(fc$con, sprintf("SELECT 1 FROM information_schema.tables WHERE table_name = '%s'", actual_table))) > 0
+  if (!has_tbl) {
+    has_v <- nrow(DBI::dbGetQuery(fc$con, sprintf("SELECT 1 FROM information_schema.tables WHERE table_name = 'v_%s'", actual_table))) > 0
+    if (has_v) actual_table <- paste0("v_", actual_table)
+  }
+
+  scores_df <- calculate_bedside_scores(fc$con, cohort_table = actual_table, scores = scores)
+
+  # Attach site identifier if available
+  cols_lower <- tolower(names(scores_df))
+  if (!("site" %in% cols_lower) && ("site_anon" %in% cols_lower)) {
+    scores_df$site <- scores_df$site_anon
+  } else if (!("site" %in% cols_lower)) {
+    cohort_cols <- tolower(DBI::dbGetQuery(fc$con, sprintf("DESCRIBE SELECT * FROM %s LIMIT 0;", cohort_table))$column_name)
+    if ("site" %in% cohort_cols || "site_anon" %in% cohort_cols) {
+      s_col <- if ("site" %in% cohort_cols) "site" else "site_anon"
+      p_col <- if ("subject_id" %in% cohort_cols) "subject_id" else "person_id"
+      st_col <- if ("cohort_start_date" %in% cohort_cols) "cohort_start_date" else "visit_start_date"
+      site_map <- DBI::dbGetQuery(fc$con, sprintf("SELECT DISTINCT %s AS person_id, %s AS cohort_start_date, %s AS site FROM %s", p_col, st_col, s_col, cohort_table))
+      scores_df <- merge(scores_df, site_map, by = c("person_id", "cohort_start_date"), all.x = TRUE)
+    } else {
+      tryCatch({
+        site_map <- DBI::dbGetQuery(fc$con, "SELECT DISTINCT person_id, site_anon AS site FROM v_person")
+        scores_df <- merge(scores_df, site_map, by = "person_id", all.x = TRUE)
+      }, error = function(e) {
+        scores_df$site <<- "Consortium"
+      })
+    }
+  }
+
+  if (!("site" %in% names(scores_df)) || all(is.na(scores_df$site))) {
+    scores_df$site <- "Site 1"
+  } else {
+    scores_df$site[is.na(scores_df$site)] <- "Unknown"
+  }
+
+  calc_stats <- function(sub_df, site_name) {
+    n_pts <- nrow(sub_df)
+    row_data <- data.frame(
+      site = site_name,
+      n_patients = n_pts,
+      los_mean = if (n_pts > 0 && "los_days" %in% names(sub_df)) mean(sub_df$los_days, na.rm = TRUE) else 0.0,
+      los_median = if (n_pts > 0 && "los_days" %in% names(sub_df)) stats::median(sub_df$los_days, na.rm = TRUE) else 0.0,
+      stringsAsFactors = FALSE
+    )
+    if ("lace" %in% scores_lower && "lace_score" %in% names(sub_df)) {
+      row_data$mean_lace_score <- if (n_pts > 0) mean(sub_df$lace_score, na.rm = TRUE) else 0.0
+      row_data$median_lace_score <- if (n_pts > 0) stats::median(sub_df$lace_score, na.rm = TRUE) else 0.0
+      high_lace <- if (n_pts > 0) sum(sub_df$lace_score >= 10, na.rm = TRUE) else 0L
+      mod_lace <- if (n_pts > 0) sum(sub_df$lace_score >= 5 & sub_df$lace_score <= 9, na.rm = TRUE) else 0L
+      row_data$high_lace_count <- high_lace
+      row_data$high_lace_pct <- if (n_pts > 0) high_lace / n_pts * 100.0 else 0.0
+      row_data$moderate_lace_pct <- if (n_pts > 0) mod_lace / n_pts * 100.0 else 0.0
+    }
+    if ("hospital" %in% scores_lower && "hospital_score" %in% names(sub_df)) {
+      row_data$mean_hospital_score <- if (n_pts > 0) mean(sub_df$hospital_score, na.rm = TRUE) else 0.0
+      row_data$median_hospital_score <- if (n_pts > 0) stats::median(sub_df$hospital_score, na.rm = TRUE) else 0.0
+      high_hosp <- if (n_pts > 0) sum(sub_df$hospital_score >= 7, na.rm = TRUE) else 0L
+      int_hosp <- if (n_pts > 0) sum(sub_df$hospital_score >= 5 & sub_df$hospital_score <= 6, na.rm = TRUE) else 0L
+      row_data$high_hospital_count <- high_hosp
+      row_data$high_hospital_pct <- if (n_pts > 0) high_hosp / n_pts * 100.0 else 0.0
+      row_data$intermediate_hospital_pct <- if (n_pts > 0) int_hosp / n_pts * 100.0 else 0.0
+    }
+    row_data
+  }
+
+  sites_unique <- sort(unique(scores_df$site))
+  site_rows <- lapply(sites_unique, function(s) calc_stats(scores_df[scores_df$site == s, , drop = FALSE], as.character(s)))
+  site_summary_df <- do.call(rbind, site_rows)
+  consortium_summary_df <- calc_stats(scores_df, "Consortium (All Sites)")
+
+  res <- list(
+    scores = scores_df,
+    site_summary = site_summary_df,
+    consortium_summary = consortium_summary_df
+  )
+  class(res) <- c("consortium_scores", "list")
+  res
+}
+
+#' @export
+as.data.frame.consortium_scores <- function(x, ...) {
+  x$scores
+}
+
+#' @export
+summary.consortium_scores <- function(object, ...) {
+  rbind(object$site_summary, object$consortium_summary)
+}
+
+#' @export
+print.consortium_scores <- function(x, ...) {
+  cat(sprintf("=== Consortium Bedside Scoring Audit [%d patients across %d site(s)] ===\n",
+              nrow(x$scores), nrow(x$site_summary)))
+  comb <- rbind(x$site_summary, x$consortium_summary)
+  print(comb, row.names = FALSE)
+  invisible(x)
+}
+
 
 
 

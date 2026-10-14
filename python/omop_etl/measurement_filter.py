@@ -257,21 +257,22 @@ def harmonize_measurement_units(
     seeds = pd.DataFrame([(f, str(c)) for f, codes in feats.items() for c in codes], columns=["feature", "code"])
     con.register("_hu_seeds", seeds)
     try:
-        parts = ["SELECT s.feature, m.measurement_concept_id AS cid FROM _hu_seeds s "
+        parts = ["SELECT s.feature, s.code, m.measurement_concept_id AS cid FROM _hu_seeds s "
                  f"JOIN {measurement_table} m ON m.measurement_source_value = s.code"]
         if has_concept:
-            parts.append("SELECT s.feature, c.concept_id FROM _hu_seeds s JOIN concept c "
+            parts.append("SELECT s.feature, s.code, c.concept_id FROM _hu_seeds s JOIN concept c "
                          "ON c.vocabulary_id='LOINC' AND c.concept_code = s.code")
-        parts.append("SELECT s.feature, TRY_CAST(s.code AS BIGINT) FROM _hu_seeds s WHERE regexp_matches(s.code, '^[0-9]+$')")
-        con.execute("CREATE OR REPLACE TEMPORARY TABLE _hu_map AS SELECT CAST(MIN(feature) AS VARCHAR) AS feature, CAST(cid AS BIGINT) AS cid FROM ("
+        parts.append("SELECT s.feature, s.code, TRY_CAST(s.code AS BIGINT) FROM _hu_seeds s WHERE regexp_matches(s.code, '^[0-9]+$')")
+        con.execute("CREATE OR REPLACE TEMPORARY TABLE _hu_map AS SELECT CAST(MIN(feature) AS VARCHAR) AS feature, "
+                    "CAST(MIN(code) AS VARCHAR) AS code, CAST(cid AS BIGINT) AS cid FROM ("
                     + " UNION ".join(parts) + ") WHERE cid IS NOT NULL GROUP BY cid")
         unit_sql = "COALESCE(NULLIF(TRIM(m.unit_source_value), ''), " + (
             "uc.concept_name" if has_concept and "unit_concept_id" in mcols else "NULL") + ")"
         uj = "LEFT JOIN concept uc ON uc.concept_id = m.unit_concept_id" if has_concept and "unit_concept_id" in mcols else ""
         seen = con.execute(
-            f"SELECT mp.feature, {unit_sql} AS unit, COUNT(*) AS n FROM {measurement_table} m "
+            f"SELECT mp.feature, mp.code, {unit_sql} AS unit, COUNT(*) AS n FROM {measurement_table} m "
             f"JOIN _hu_map mp ON mp.cid = m.measurement_concept_id {uj} "
-            "WHERE m.value_as_number IS NOT NULL GROUP BY 1, 2").df()
+            "WHERE m.value_as_number IS NOT NULL GROUP BY 1, 2, 3").df()
     finally:
         con.unregister("_hu_seeds")
 
@@ -279,9 +280,16 @@ def harmonize_measurement_units(
         for r in seen.itertuples(index=False):
             spec = rules[r.feature]
             nu = _norm_unit(r.unit)
+            code_str = str(r.code).strip()
             factor, intercept, status = None, 0.0, "unrecognized"
             if nu == "":
-                factor, intercept, status = 1.0, 0.0, "no_unit"
+                # Automatic LOINC-based scaling when unit string is omitted in EHR:
+                if code_str == "59260-0" and r.feature == "hemoglobin":
+                    factor, intercept, status = 1.611, 0.0, "scaled"
+                elif code_str == "59261-8" and r.feature == "hba1c":
+                    factor, intercept, status = 0.09148, 2.152, "scaled"
+                else:
+                    factor, intercept, status = 1.0, 0.0, "no_unit"
             else:
                 for item in spec["rules"]:
                     pat = item[0]
@@ -291,15 +299,21 @@ def harmonize_measurement_units(
                         factor, intercept = float(mult), float(icpt)
                         status = "canonical" if (factor == 1.0 and intercept == 0.0) else "scaled"
                         break
+                # Fallback to LOINC identity if unit was unrecognized but code is canonical European/IFCC
+                if factor is None:
+                    if code_str == "59260-0" and r.feature == "hemoglobin":
+                        factor, intercept, status = 1.611, 0.0, "scaled"
+                    elif code_str == "59261-8" and r.feature == "hba1c":
+                        factor, intercept, status = 0.09148, 2.152, "scaled"
             rows.append((r.feature, r.unit, spec["canonical"], 1.0 if factor is None else factor, status, int(r.n), intercept))
         report = pd.DataFrame(rows, columns=["feature", "unit", "canonical_unit", "factor", "status", "n", "intercept"])
 
         if create_view:
             fac = report[report.status == "scaled"][["feature", "unit", "factor", "intercept"]].copy()
-            fac["unit"] = fac["unit"].astype(str)
+            fac["unit_key"] = fac["unit"].fillna("").astype(str)
             con.register("_hu_fac_df", fac)
             con.execute("CREATE OR REPLACE TEMPORARY TABLE _hu_fac AS SELECT CAST(feature AS VARCHAR) feature, "
-                        "CAST(unit AS VARCHAR) unit, CAST(factor AS DOUBLE) factor, "
+                        "CAST(unit_key AS VARCHAR) unit_key, CAST(factor AS DOUBLE) factor, "
                         "CAST(intercept AS DOUBLE) intercept FROM _hu_fac_df")
             con.unregister("_hu_fac_df")
             canon = pd.DataFrame([(f, rules[f]["canonical"]) for f in feats], columns=["feature", "canonical_unit"])
@@ -318,9 +332,10 @@ def harmonize_measurement_units(
                 f"FROM {measurement_table} m "
                 "LEFT JOIN _hu_map mp ON mp.cid = m.measurement_concept_id "
                 f"{uj} "
-                f"LEFT JOIN _hu_fac f ON f.feature = mp.feature AND f.unit = {unit_sql} "
-                "LEFT JOIN _hu_canon ca ON ca.feature = f.feature")
+                f"LEFT JOIN _hu_fac f ON f.feature = mp.feature AND f.unit_key = COALESCE({unit_sql}, '') "
+                "LEFT JOIN _hu_canon ca ON ca.feature = mp.feature")
         return report.drop(columns=["intercept"])
+
 
 
 def harmonize_anthropometrics(

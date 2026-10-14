@@ -707,6 +707,10 @@ consortium = FederatedConsortium(
 t1 = consortium.generate_table1(domain="heart_failure")
 t2 = consortium.generate_table2(cohort_table="v_visit_occurrence")
 audit = consortium.site_summaries()
+
+# 5. Consortium Bedside Scoring
+scores = consortium.calculate_scores(cohort_table="inpatient_cohort")
+print(scores.summary())
 consortium.close()
 ```
 
@@ -719,7 +723,87 @@ fc <- federated_consortium(
 t1 <- consortium_generate_table1(fc, domain = "heart_failure")
 t2 <- consortium_generate_table2(fc, cohort_table = "v_visit_occurrence")
 audit <- consortium_site_summaries(fc)
+scores <- consortium_calculate_scores(fc, cohort_table = "inpatient_cohort")
+summary(scores)
 consortium_close(fc)
+```
+
+### 5. Cross-Site Model Calibration & Decile Drift
+Quantify model transportability and risk calibration drift across consortium sites via Greenwood-Nam-D'Agostino $\chi^2$ goodness-of-fit, Brier score decomposition, and decile tracking:
+
+```python
+from omop_duck_db.ml import consortium_calibration
+
+cal = consortium_calibration(
+    y_true=y_val,
+    y_prob=oof_probs,
+    site_labels=site_series,
+    n_bins=10
+)
+print(cal.summary())
+fig = cal.plot()
+```
+
+In R:
+```r
+cal <- consortium_calibration(
+  y_true = y_val,
+  y_prob = oof_probs,
+  site_labels = site_series,
+  n_bins = 10
+)
+summary(cal)
+plot(cal)
+```
+
+### 6. Clinical Decision Curve Analysis (DCA)
+Demonstrate clinical utility of risk stratification models across actionable decision thresholds compared to "treat all" and "treat none" defaults:
+
+```python
+from omop_duck_db.ml import decision_curve_analysis
+
+dca = decision_curve_analysis(
+    y_true=y_val,
+    y_prob=oof_probs,
+    threshold_range=(0.05, 0.35)
+)
+print(dca.summary())
+fig = dca.plot()
+```
+
+In R:
+```r
+dca <- decision_curve_analysis(
+  y_true = y_val,
+  y_prob = oof_probs,
+  threshold_range = c(0.05, 0.35)
+)
+summary(dca)
+plot(dca)
+```
+
+### 7. Competing Risks Cumulative Incidence Function (CIF) & Fine-Gray Modeling
+Estimate non-parametric Aalen-Johansen CIF curves and Fine-Gray subdistribution hazards for 30-day readmissions accounting for inpatient and out-of-hospital mortality:
+
+```python
+from omop_duck_db.survival import estimate_cif, fine_gray_estimator, plot_cif
+
+cif = estimate_cif(surv_df, time_col="time_days", status_col="status")
+print(cif.summary())
+fig = plot_cif(cif)
+
+fg = fine_gray_estimator(surv_df, time_col="time_days", status_col="status", covar_cols=["age", "charlson_score"])
+print(fg.summary())
+```
+
+In R:
+```r
+cif <- estimate_cif(surv_df, time_col = "time_days", status_col = "status")
+summary(cif)
+plot_cif(cif)
+
+fg <- fine_gray_estimator(surv_df, time_col = "time_days", status_col = "status", covar_cols = c("age", "charlson_score"))
+summary(fg)
 ```
 
 ## Testing

@@ -251,3 +251,290 @@ plot.omop_survival_result <- function(x, ...) {
                      col = "blue", lty = c(1, 2), lwd = c(2, 1), bty = "n")
   }
 }
+
+#' Cause-Specific Cumulative Incidence Function (CIF) Estimator
+#'
+#' @description
+#' Estimates non-parametric Cumulative Incidence Functions (CIF) for primary clinical events
+#' (such as 30-day hospital readmission) in the presence of competing events (such as mortality).
+#'
+#' @param df_or_list A `data.frame` or output list from `prepare_competing_risks_data()`.
+#' @param time_col Name of time column (auto-detected if `NULL`).
+#' @param status_col Name of status column (auto-detected if `NULL`).
+#' @param event_code Indicator integer for primary event (default `1L`).
+#' @param competing_code Indicator integer for competing risk (default `2L`).
+#' @param alpha Significance level for confidence intervals (default `0.05`).
+#'
+#' @return A `cif_result` S3 object containing `$cif_table` and `$summary`.
+#' @export
+estimate_cif <- function(df_or_list,
+                         time_col = NULL,
+                         status_col = NULL,
+                         event_code = 1L,
+                         competing_code = 2L,
+                         alpha = 0.05) {
+  surv_res <- estimate_km_survival(
+    df_or_list,
+    time_col = time_col,
+    status_col = status_col,
+    alpha = alpha
+  )
+  tl <- surv_res$timeline
+
+  if (!isTRUE(surv_res$has_competing_risks)) {
+    tl$cif_primary <- 1.0 - tl$survival
+    tl$cif_competing <- 0.0
+    tl$cif_primary_ci_lower <- pmax(0.0, 1.0 - tl$ci_upper)
+    tl$cif_primary_ci_upper <- pmin(1.0, 1.0 - tl$ci_lower)
+    tl$naive_km_primary <- tl$cif_primary
+  } else {
+    z_crit <- stats::qnorm(1 - alpha / 2)
+    ev1 <- tl$events_primary
+    nar <- tl$n_at_risk
+    denom <- nar * pmax(1L, nar - ev1)
+    var_terms <- ifelse(nar > ev1, ev1 / denom, 0.0)
+    var_est <- (tl$cif_primary^2) * cumsum(var_terms)
+    se_cif <- sqrt(pmax(0.0, var_est))
+    tl$cif_primary_ci_lower <- pmax(0.0, tl$cif_primary - z_crit * se_cif)
+    tl$cif_primary_ci_upper <- pmin(1.0, tl$cif_primary + z_crit * se_cif)
+  }
+
+  summary_stats <- surv_res$summary
+  sub30 <- tl[tl$time <= 30.0, ]
+  if (nrow(sub30) > 0) {
+    last_r <- sub30[nrow(sub30), ]
+    summary_stats$cif_primary_30d <- last_r$cif_primary
+    summary_stats$cif_primary_30d_ci_lower <- last_r$cif_primary_ci_lower
+    summary_stats$cif_primary_30d_ci_upper <- last_r$cif_primary_ci_upper
+    summary_stats$cif_competing_30d <- last_r$cif_competing
+    summary_stats$naive_km_30d <- if ("naive_km_primary" %in% names(last_r)) last_r$naive_km_primary else last_r$cif_primary
+    summary_stats$km_overestimation_bias_30d <- summary_stats$naive_km_30d - summary_stats$cif_primary_30d
+  } else {
+    summary_stats$cif_primary_30d <- 0.0
+    summary_stats$cif_primary_30d_ci_lower <- 0.0
+    summary_stats$cif_primary_30d_ci_upper <- 0.0
+    summary_stats$cif_competing_30d <- 0.0
+    summary_stats$naive_km_30d <- 0.0
+    summary_stats$km_overestimation_bias_30d <- 0.0
+  }
+
+  res <- list(
+    cif_table = tl,
+    summary = summary_stats
+  )
+  class(res) <- c("cif_result", "list")
+  res
+}
+
+#' @export
+as.data.frame.cif_result <- function(x, ...) {
+  x$cif_table
+}
+
+#' @export
+summary.cif_result <- function(object, ...) {
+  object$summary
+}
+
+#' @export
+print.cif_result <- function(x, ...) {
+  s <- x$summary
+  cat(sprintf("=== Competing Risks Cumulative Incidence Function (CIF) ===\n"))
+  cat(sprintf("30-Day Readmission CIF: %.2f%% (95%% CI: [%.2f%%, %.2f%%])\n",
+              s$cif_primary_30d * 100, s$cif_primary_30d_ci_lower * 100, s$cif_primary_30d_ci_upper * 100))
+  cat(sprintf("30-Day Competing Mortality CIF: %.2f%%\n", s$cif_competing_30d * 100))
+  cat(sprintf("Naive 1-KM Rate: %.2f%% (Overestimation Bias: +%.2f%%)\n",
+              s$naive_km_30d * 100, s$km_overestimation_bias_30d * 100))
+  invisible(x)
+}
+
+#' Plot Cumulative Incidence Function (CIF)
+#'
+#' @param x A `cif_result` object.
+#' @param title Optional plot title.
+#' @param ... Additional arguments passed to [graphics::plot()].
+#' @export
+plot_cif <- function(x, title = NULL, ...) {
+  tl <- x$cif_table
+  y_max <- max(0.25, max(tl$cif_primary) * 1.35)
+  graphics::plot(
+    tl$time, tl$cif_primary, type = "s", col = "blue", lwd = 2.5,
+    xlim = c(0, max(30, max(tl$time))), ylim = c(0, y_max),
+    xlab = "Follow-up Time (Days)", ylab = "Cumulative Incidence",
+    main = if (!is.null(title)) title else "Fine-Gray Competing Risks Cumulative Incidence (CIF)", ...
+  )
+  if ("cif_competing" %in% names(tl) && max(tl$cif_competing) > 0) {
+    graphics::lines(tl$time, tl$cif_competing, type = "s", col = "red", lwd = 2)
+  }
+  if ("naive_km_primary" %in% names(tl)) {
+    graphics::lines(tl$time, tl$naive_km_primary, type = "s", col = "blue", lty = 2, lwd = 1.5)
+  }
+  graphics::legend(
+    "topleft",
+    legend = c("30-day Readmission (CIF)", "Competing Mortality (CIF)", "Naive (1 - KM)"),
+    col = c("blue", "red", "blue"),
+    lty = c(1, 1, 2),
+    lwd = c(2.5, 2, 1.5),
+    bty = "n"
+  )
+}
+
+#' @export
+plot.cif_result <- function(x, ...) {
+  plot_cif(x, ...)
+}
+
+#' Fine-Gray Subdistribution Hazard Estimator
+#'
+#' @description
+#' Evaluates the subdistribution hazard ratio (sHR) between clinical exposure groups
+#' under competing risks.
+#'
+#' @param df_or_list A `data.frame` or output list from `prepare_competing_risks_data()`.
+#' @param group_col Character column name for group comparison (e.g. `"high_risk"`).
+#' @param time_col Character column name for event times.
+#' @param status_col Character column name for 3-state status.
+#' @param event_code Primary event code (default `1L`).
+#' @param competing_code Competing risk code (default `2L`).
+#'
+#' @return A `fine_gray_result` S3 object containing `$shr`, `$ci_lower`, `$ci_upper`, `$p_value`.
+#' @export
+fine_gray_estimator <- function(df_or_list,
+                                group_col = NULL,
+                                time_col = NULL,
+                                status_col = NULL,
+                                event_code = 1L,
+                                competing_code = 2L) {
+  if (is.list(df_or_list) && !is.data.frame(df_or_list) && "data" %in% names(df_or_list)) {
+    df <- df_or_list$data
+  } else if (is.data.frame(df_or_list)) {
+    df <- df_or_list
+  } else {
+    stop("`df_or_list` must be a data.frame or list with `$data`.", call. = FALSE)
+  }
+
+  if (nrow(df) == 0) stop("Input data is empty.", call. = FALSE)
+
+  if (is.null(time_col)) {
+    candidates <- c("time_days", "time", "followup_days", "duration", "days")
+    matched <- intersect(candidates, names(df))
+    if (length(matched) == 0) stop("Could not auto-detect time column.", call. = FALSE)
+    time_col <- matched[1]
+  }
+
+  if (is.null(status_col)) {
+    candidates <- c("status", "event", "composite_event", "outcome")
+    matched <- intersect(candidates, names(df))
+    if (length(matched) == 0) stop("Could not auto-detect status column.", call. = FALSE)
+    status_col <- matched[1]
+  }
+
+  times <- as.numeric(df[[time_col]])
+  statuses <- as.integer(df[[status_col]])
+  n_samples <- length(times)
+  n_events <- sum(statuses == event_code)
+  n_competing <- sum(statuses == competing_code)
+
+  if (!is.null(group_col) && group_col %in% names(df)) {
+    g_raw <- df[[group_col]]
+    u_vals <- sort(unique(g_raw))
+    if (length(u_vals) >= 2) {
+      z_cov <- as.numeric(g_raw == u_vals[2])
+      group_name <- sprintf("%s (%s vs %s)", group_col, u_vals[2], u_vals[1])
+    } else {
+      z_cov <- rep(0, n_samples)
+      group_name <- as.character(group_col)
+    }
+  } else {
+    z_cov <- rep(1, n_samples)
+    group_name <- "Overall"
+  }
+
+  event_times <- sort(unique(times[statuses == event_code]))
+  score_num <- 0.0
+  score_denom <- 0.0
+
+  for (t in event_times) {
+    in_risk <- (times >= t) | ((times < t) & (statuses == competing_code))
+    n_risk <- sum(in_risk)
+    if (n_risk <= 0) next
+
+    z_risk <- z_cov[in_risk]
+    mean_z <- mean(z_risk)
+    var_z <- stats::var(z_risk)
+    if (is.na(var_z)) var_z <- 0.0
+
+    ev_mask <- (times == t) & (statuses == event_code)
+    d_ev <- sum(ev_mask)
+    z_ev <- sum(z_cov[ev_mask])
+
+    score_num <- score_num + (z_ev - d_ev * mean_z)
+    score_denom <- score_denom + (d_ev * var_z)
+  }
+
+  if (score_denom > 1e-6) {
+    log_shr <- score_num / score_denom
+    se_beta <- 1.0 / sqrt(score_denom)
+  } else {
+    log_shr <- 0.0
+    se_beta <- 1.0
+  }
+
+  z_stat <- if (se_beta > 0) log_shr / se_beta else 0.0
+  p_val <- 2.0 * stats::pnorm(abs(z_stat), lower.tail = FALSE)
+  z_crit <- stats::qnorm(0.975)
+
+  shr <- exp(log_shr)
+  ci_low <- exp(log_shr - z_crit * se_beta)
+  ci_high <- exp(log_shr + z_crit * se_beta)
+
+  res <- list(
+    group_name = group_name,
+    subdistribution_hazard_ratio = shr,
+    shr = shr,
+    log_shr = log_shr,
+    std_err = se_beta,
+    ci_lower = ci_low,
+    ci_upper = ci_high,
+    z_statistic = z_stat,
+    p_value = p_val,
+    n_samples = n_samples,
+    n_events = n_events,
+    n_competing = n_competing
+  )
+  class(res) <- c("fine_gray_result", "list")
+  res
+}
+
+#' @export
+as.data.frame.fine_gray_result <- function(x, ...) {
+  data.frame(
+    group = x$group_name,
+    sHR = x$subdistribution_hazard_ratio,
+    log_sHR = x$log_shr,
+    se = x$std_err,
+    ci_lower = x$ci_lower,
+    ci_upper = x$ci_upper,
+    z = x$z_statistic,
+    p_value = x$p_value,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' @export
+summary.fine_gray_result <- function(object, ...) {
+  as.data.frame(object, ...)
+}
+
+#' @export
+print.fine_gray_result <- function(x, ...) {
+  cat(sprintf("=== Fine-Gray Subdistribution Hazard Model ===\n"))
+  cat(sprintf("Exposure: %s\n", x$group_name))
+  cat(sprintf("Subdistribution Hazard Ratio (sHR): %.3f (95%% CI: [%.3f, %.3f])\n",
+              x$subdistribution_hazard_ratio, x$ci_lower, x$ci_upper))
+  cat(sprintf("Test of Effect: Z = %.2f, p = %.4e\n", x$z_statistic, x$p_value))
+  cat(sprintf("Primary Events: %d | Competing Risks: %d | Total N: %d\n",
+              x$n_events, x$n_competing, x$n_samples))
+  invisible(x)
+}
+

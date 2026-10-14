@@ -70,7 +70,7 @@ DEFAULT_UNIT_RULES <- local({
     platelets = list(canonical = "10*3/uL", rules = list(
       r("^(/ul|/mcl|/mm3|cells/ul)$", 0.001), r("^(10\\*3/ul|10\\^3/ul|k/ul|thou/ul|10\\*9/l|g/l)$", 1))),
     creatinine = list(canonical = "mg/dL", rules = list(
-      r("^(umol/l|micromol/l)$", 1 / 88.42), r("^(mmol/l)$", 1000 / 88.42), r("^(mg/dl)$", 1))),
+      r("^(umol/l|µmol/l|μmol/l|micromol/l)$", 1 / 88.42), r("^(mmol/l)$", 1000 / 88.42), r("^(mg/dl)$", 1))),
     glucose = list(canonical = "mg/dL", rules = list(r("^(mmol/l)$", 18.016), r("^(mg/dl)$", 1), r("^(g/l)$", 100))),
     hemoglobin = list(canonical = "g/dL", rules = list(r("^(g/l)$", 0.1), r("^(mmol/l)$", 1.611), r("^(g/dl)$", 1))),
     hba1c = list(canonical = "%", rules = list(r("^(mmol/mol)$", 0.09148, 2.152), r("^(%|percent)$", 1, 0))),
@@ -237,32 +237,43 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
   }))
   DBI::dbWriteTable(con, "_hu_seeds", seeds, temporary = TRUE, overwrite = TRUE)
   on.exit(try(DBI::dbExecute(con, "DROP TABLE IF EXISTS _hu_seeds"), silent = TRUE), add = TRUE)
-  parts <- c(sprintf("SELECT s.feature, m.measurement_concept_id AS cid FROM _hu_seeds s JOIN %s m ON m.measurement_source_value = s.code",
+  parts <- c(sprintf("SELECT s.feature, s.code, m.measurement_concept_id AS cid FROM _hu_seeds s JOIN %s m ON m.measurement_source_value = s.code",
                      measurement_table))
   if (has_concept) {
-    parts <- c(parts, paste0("SELECT s.feature, c.concept_id FROM _hu_seeds s JOIN concept c ",
+    parts <- c(parts, paste0("SELECT s.feature, s.code, c.concept_id FROM _hu_seeds s JOIN concept c ",
                              "ON c.vocabulary_id = 'LOINC' AND c.concept_code = s.code"))
   }
-  parts <- c(parts, "SELECT s.feature, TRY_CAST(s.code AS BIGINT) FROM _hu_seeds s WHERE regexp_matches(s.code, '^[0-9]+$')")
+  parts <- c(parts, "SELECT s.feature, s.code, TRY_CAST(s.code AS BIGINT) FROM _hu_seeds s WHERE regexp_matches(s.code, '^[0-9]+$')")
   DBI::dbExecute(con, paste0("CREATE OR REPLACE TEMPORARY TABLE _hu_map AS SELECT CAST(MIN(feature) AS VARCHAR) AS feature, ",
-                             "CAST(cid AS BIGINT) AS cid FROM (", paste(parts, collapse = " UNION "),
+                             "CAST(MIN(code) AS VARCHAR) AS code, CAST(cid AS BIGINT) AS cid FROM (", paste(parts, collapse = " UNION "),
                              ") WHERE cid IS NOT NULL GROUP BY cid"))
   unit_sql <- paste0("COALESCE(NULLIF(TRIM(m.unit_source_value), ''), ", if (use_uc) "uc.concept_name" else "NULL", ")")
   uj <- if (use_uc) "LEFT JOIN concept uc ON uc.concept_id = m.unit_concept_id" else ""
-  seen <- DBI::dbGetQuery(con, sprintf(paste0("SELECT mp.feature, %s AS unit, COUNT(*) AS n FROM %s m ",
+  seen <- DBI::dbGetQuery(con, sprintf(paste0("SELECT mp.feature, mp.code, %s AS unit, COUNT(*) AS n FROM %s m ",
                                               "JOIN _hu_map mp ON mp.cid = m.measurement_concept_id %s ",
-                                              "WHERE m.value_as_number IS NOT NULL GROUP BY 1, 2"),
+                                              "WHERE m.value_as_number IS NOT NULL GROUP BY 1, 2, 3"),
                                        unit_sql, measurement_table, uj))
   rows <- lapply(seq_len(nrow(seen)), function(i) {
     spec <- rules[[seen$feature[i]]]
     nu <- .norm_unit(seen$unit[i])
+    code_str <- trimws(as.character(seen$code[i]))
     factor <- NA_real_
     intercept <- 0.0
     status <- "unrecognized"
     if (nu == "") {
-      factor <- 1
-      intercept <- 0
-      status <- "no_unit"
+      if (code_str == "59260-0" && seen$feature[i] == "hemoglobin") {
+        factor <- 1.611
+        intercept <- 0.0
+        status <- "scaled"
+      } else if (code_str == "59261-8" && seen$feature[i] == "hba1c") {
+        factor <- 0.09148
+        intercept <- 2.152
+        status <- "scaled"
+      } else {
+        factor <- 1
+        intercept <- 0
+        status <- "no_unit"
+      }
     } else {
       for (rl in spec$rules) {
         if (grepl(rl[[1]], nu, perl = TRUE)) {
@@ -270,6 +281,17 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
           intercept <- if (length(rl) >= 3) rl[[3]] else 0.0
           status <- if (rl[[2]] == 1 && intercept == 0) "canonical" else "scaled"
           break
+        }
+      }
+      if (is.na(factor)) {
+        if (code_str == "59260-0" && seen$feature[i] == "hemoglobin") {
+          factor <- 1.611
+          intercept <- 0.0
+          status <- "scaled"
+        } else if (code_str == "59261-8" && seen$feature[i] == "hba1c") {
+          factor <- 0.09148
+          intercept <- 2.152
+          status <- "scaled"
         }
       }
     }
@@ -281,10 +303,10 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
 
   if (create_view) {
     fac <- report[report$status == "scaled", c("feature", "unit", "factor", "intercept"), drop = FALSE]
-    fac$unit <- as.character(fac$unit)
+    fac$unit_key <- ifelse(is.na(fac$unit), "", as.character(fac$unit))
     DBI::dbWriteTable(con, "_hu_fac_df", fac, temporary = TRUE, overwrite = TRUE)
     DBI::dbExecute(con, paste0("CREATE OR REPLACE TEMPORARY TABLE _hu_fac AS SELECT CAST(feature AS VARCHAR) feature, ",
-                               "CAST(unit AS VARCHAR) unit, CAST(factor AS DOUBLE) factor, ",
+                               "CAST(unit_key AS VARCHAR) unit_key, CAST(factor AS DOUBLE) factor, ",
                                "CAST(intercept AS DOUBLE) intercept FROM _hu_fac_df"))
     canon <- data.frame(feature = names(feats), canonical_unit = vapply(names(feats), function(f) rules[[f]]$canonical, ""),
                         stringsAsFactors = FALSE)
@@ -300,12 +322,13 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
       "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT %s, COALESCE(f.factor, 1.0) AS harmonization_factor, ",
       "ca.canonical_unit AS unit_harmonized FROM %s m ",
       "LEFT JOIN _hu_map mp ON mp.cid = m.measurement_concept_id %s ",
-      "LEFT JOIN _hu_fac f ON f.feature = mp.feature AND f.unit = %s ",
-      "LEFT JOIN _hu_canon ca ON ca.feature = f.feature"), view_name, sel, measurement_table, uj, unit_sql))
+      "LEFT JOIN _hu_fac f ON f.feature = mp.feature AND f.unit_key = COALESCE(%s, '') ",
+      "LEFT JOIN _hu_canon ca ON ca.feature = mp.feature"), view_name, sel, measurement_table, uj, unit_sql))
   }
   if ("intercept" %in% names(report)) report$intercept <- NULL
   report
 }
+
 
 #' Anthropometric Harmonization (Height, Weight, and Calculated BMI)
 #'

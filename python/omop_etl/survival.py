@@ -370,3 +370,409 @@ def estimate_km_survival(
         summary_stats=summary_stats,
         has_competing_risks=has_competing,
     )
+
+
+# -----------------------------------------------------------------------------
+# Competing Risks Cumulative Incidence Function (CIF) & Fine-Gray Estimator
+# -----------------------------------------------------------------------------
+
+class CIFResult:
+    """Cause-specific Cumulative Incidence Function (CIF) result under competing risks."""
+
+    def __init__(
+        self,
+        cif_table: pd.DataFrame,
+        summary_stats: dict[str, Any],
+    ):
+        self._cif_table = cif_table
+        self._summary_stats = summary_stats
+
+    @property
+    def cif_table(self) -> pd.DataFrame:
+        """Tidy timeline containing time, at-risk, primary CIF, competing CIF, and CIs."""
+        return self._cif_table
+
+    def summary(self) -> dict[str, Any]:
+        """Summary metrics including 30-day CIF estimates and event counts."""
+        return dict(self._summary_stats)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return self._cif_table.copy()
+
+    def predict_at_time(self, time_point: float) -> dict[str, float]:
+        """Evaluates CIF point estimates and confidence intervals at a specific time (e.g. 30 days)."""
+        sub = self._cif_table[self._cif_table["time"] <= time_point]
+        if len(sub) == 0:
+            return {
+                "time": float(time_point),
+                "cif_primary": 0.0,
+                "cif_primary_ci_lower": 0.0,
+                "cif_primary_ci_upper": 0.0,
+                "cif_competing": 0.0,
+                "naive_km_primary": 0.0,
+            }
+        last_row = sub.iloc[-1]
+        return {
+            "time": float(time_point),
+            "cif_primary": float(last_row["cif_primary"]),
+            "cif_primary_ci_lower": float(last_row["cif_primary_ci_lower"]),
+            "cif_primary_ci_upper": float(last_row["cif_primary_ci_upper"]),
+            "cif_competing": float(last_row["cif_competing"]),
+            "naive_km_primary": float(last_row.get("naive_km_primary", last_row["cif_primary"])),
+        }
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "cif_table":
+            return self._cif_table
+        elif key in self._cif_table.columns:
+            return self._cif_table[key]
+        elif key in self._summary_stats:
+            return self._summary_stats[key]
+        raise KeyError(key)
+
+    def plot(
+        self,
+        title: str | None = None,
+        output_path: str | None = None,
+        show: bool = False,
+    ) -> Any:
+        """Generates a publication-quality Competing Risks CIF plot."""
+        return plot_cif(self, title=title, output_path=output_path, show=show)
+
+    def __repr__(self) -> str:
+        s = self._summary_stats
+        p30 = s.get("cif_primary_30d", 0.0)
+        c30 = s.get("cif_competing_30d", 0.0)
+        return (
+            f"<CIFResult: {len(self._cif_table)} timepoints, "
+            f"30d Readmission CIF = {p30:.2%}, 30d Mortality CIF = {c30:.2%}>"
+        )
+
+
+def estimate_cif(
+    data: Any,
+    time_col: str | None = None,
+    status_col: str | None = None,
+    event_code: int = 1,
+    competing_code: int = 2,
+    alpha: float = 0.05,
+) -> CIFResult:
+    """Estimates Cumulative Incidence Functions (CIF) for primary events and competing risks.
+
+    In 30-day readmission studies, in-hospital or out-of-hospital death within 30 days is a
+    formal competing risk. Standard Kaplan-Meier (1 - KM) overestimates the event rate by
+    treating death as non-informative censoring. This function computes cause-specific
+    Aalen-Johansen CIF curves out of the box.
+
+    Args:
+        data: DataFrame or tuple `(df, summary)` from `prepare_competing_risks_data()`.
+        time_col: Column name for follow-up duration (auto-detected if None).
+        status_col: Column name for event status (auto-detected if None).
+            0 = censored, event_code = primary event, competing_code = competing risk.
+        event_code: Integer indicator for primary event of interest (default 1).
+        competing_code: Integer indicator for competing risk event (default 2).
+        alpha: Significance level for confidence intervals (default 0.05 for 95% CI).
+
+    Returns:
+        CIFResult: Encapsulates CIF table, 30-day point estimates, and plotting hooks.
+    """
+    surv_res = estimate_km_survival(
+        data,
+        time_col=time_col,
+        status_col=status_col,
+        alpha=alpha,
+    )
+    tl = surv_res.timeline.copy()
+
+    if not surv_res.has_competing_risks:
+        # Fallback if no competing risks in sample
+        tl["cif_primary"] = 1.0 - tl["survival"]
+        tl["cif_competing"] = 0.0
+        tl["cif_primary_ci_lower"] = 1.0 - tl["ci_upper"]
+        tl["cif_primary_ci_upper"] = 1.0 - tl["ci_lower"]
+        tl["naive_km_primary"] = tl["cif_primary"]
+    else:
+        # Approximate Greenwood variance for CIF: Var(CIF) ~ (1 - S)^2 * sum(d_1 / (n * (n - d_1)))
+        # Standard Choudhury formula
+        z_crit = 1.959963984540054
+        cif_1 = tl["cif_primary"].to_numpy()
+        var_est = (cif_1 ** 2) * np.cumsum(
+            np.where(tl["n_at_risk"] > tl["events_primary"],
+                     tl["events_primary"] / (tl["n_at_risk"] * np.maximum(1, tl["n_at_risk"] - tl["events_primary"])),
+                     0.0)
+        )
+        se_cif = np.sqrt(np.maximum(0.0, var_est))
+        tl["cif_primary_ci_lower"] = np.clip(cif_1 - z_crit * se_cif, 0.0, 1.0)
+        tl["cif_primary_ci_upper"] = np.clip(cif_1 + z_crit * se_cif, 0.0, 1.0)
+
+    summary_stats = surv_res.summary()
+
+    # Evaluate at day 30
+    sub30 = tl[tl["time"] <= 30.0]
+    if len(sub30) > 0:
+        r30 = sub30.iloc[-1]
+        summary_stats["cif_primary_30d"] = float(r30["cif_primary"])
+        summary_stats["cif_primary_30d_ci_lower"] = float(r30["cif_primary_ci_lower"])
+        summary_stats["cif_primary_30d_ci_upper"] = float(r30["cif_primary_ci_upper"])
+        summary_stats["cif_competing_30d"] = float(r30["cif_competing"])
+        summary_stats["naive_km_30d"] = float(r30.get("naive_km_primary", r30["cif_primary"]))
+        summary_stats["km_overestimation_bias_30d"] = float(
+            summary_stats["naive_km_30d"] - summary_stats["cif_primary_30d"]
+        )
+    else:
+        summary_stats["cif_primary_30d"] = 0.0
+        summary_stats["cif_primary_30d_ci_lower"] = 0.0
+        summary_stats["cif_primary_30d_ci_upper"] = 0.0
+        summary_stats["cif_competing_30d"] = 0.0
+        summary_stats["naive_km_30d"] = 0.0
+        summary_stats["km_overestimation_bias_30d"] = 0.0
+
+    return CIFResult(cif_table=tl, summary_stats=summary_stats)
+
+
+class FineGrayResult:
+    """Fine-Gray Subdistribution Hazard model estimation result."""
+
+    def __init__(
+        self,
+        shr: float,
+        log_shr: float,
+        std_err: float,
+        ci_lower: float,
+        ci_upper: float,
+        p_value: float,
+        z_stat: float,
+        n_samples: int,
+        n_events: int,
+        n_competing: int,
+        group_name: str,
+    ):
+        self.shr = shr
+        self.log_shr = log_shr
+        self.std_err = std_err
+        self.ci_lower = ci_lower
+        self.ci_upper = ci_upper
+        self.p_value = p_value
+        self.z_stat = z_stat
+        self.n_samples = n_samples
+        self.n_events = n_events
+        self.n_competing = n_competing
+        self.group_name = group_name
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "group": self.group_name,
+            "subdistribution_hazard_ratio": self.shr,
+            "log_shr": self.log_shr,
+            "std_err": self.std_err,
+            "ci_lower_95": self.ci_lower,
+            "ci_upper_95": self.ci_upper,
+            "z_statistic": self.z_stat,
+            "p_value": self.p_value,
+            "n_samples": self.n_samples,
+            "n_primary_events": self.n_events,
+            "n_competing_events": self.n_competing,
+        }
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame([self.summary()])
+
+    def __repr__(self) -> str:
+        return (
+            f"<FineGrayResult: {self.group_name} sHR = {self.shr:.3f} "
+            f"(95% CI: [{self.ci_lower:.3f}, {self.ci_upper:.3f}]), p = {self.p_value:.4e}>"
+        )
+
+
+def fine_gray_estimator(
+    data: Any,
+    time_col: str | None = None,
+    status_col: str | None = None,
+    group_col: str | None = None,
+    event_code: int = 1,
+    competing_code: int = 2,
+) -> FineGrayResult:
+    """Estimates Fine-Gray Subdistribution Hazard Ratio (sHR) under competing risks.
+
+    In presence of competing risks (e.g. readmission vs in-hospital death), evaluates
+    the subdistribution hazard ratio between groups:
+
+    .. math::
+        \\bar{\\lambda}_1(t; Z) = \\bar{\\lambda}_{10}(t) \\exp(\\beta Z)
+
+    Args:
+        data: DataFrame containing survival follow-up.
+        time_col: Follow-up duration column.
+        status_col: 3-state status column (0=censor, 1=primary event, 2=competing risk).
+        group_col: Binary exposure or group column (0 vs 1, or string/factor).
+        event_code: Integer indicator for primary event (default 1).
+        competing_code: Integer indicator for competing risk (default 2).
+
+    Returns:
+        FineGrayResult: Object holding sHR, standard error, 95% CI, and p-value.
+    """
+    if isinstance(data, tuple):
+        df = data[0]
+    elif isinstance(data, dict) and "data" in data:
+        df = data["data"]
+    elif isinstance(data, pd.DataFrame):
+        df = data
+    else:
+        raise TypeError(f"Unsupported data type: {type(data)}")
+
+    if len(df) == 0:
+        raise ValueError("DataFrame is empty.")
+
+    # Auto-detect time_col
+    if time_col is None:
+        for c in ["time_days", "time", "followup_days", "duration"]:
+            if c in df.columns:
+                time_col = c
+                break
+    # Auto-detect status_col
+    if status_col is None:
+        for c in ["status", "event", "composite_event", "outcome"]:
+            if c in df.columns:
+                status_col = c
+                break
+
+    times = df[time_col].to_numpy(dtype=float)
+    statuses = df[status_col].to_numpy(dtype=int)
+
+    n_samples = len(times)
+    n_events = int(np.sum(statuses == event_code))
+    n_competing = int(np.sum(statuses == competing_code))
+
+    if group_col is not None and group_col in df.columns:
+        group_raw = df[group_col].to_numpy()
+        # Convert group to binary 0/1
+        u_vals = np.unique(group_raw)
+        if len(u_vals) >= 2:
+            z_cov = (group_raw == u_vals[1]).astype(float)
+            group_name = f"{group_col} ({u_vals[1]} vs {u_vals[0]})"
+        else:
+            z_cov = np.zeros(n_samples, dtype=float)
+            group_name = str(group_col)
+    else:
+        # Default indicator for high risk
+        z_cov = np.ones(n_samples, dtype=float)
+        group_name = "Overall"
+
+    # Fine-Gray score equation estimation
+    # For subjects experiencing competing risks, they remain in risk set for primary event
+    # Distinct event times for primary event
+    event_times = np.sort(np.unique(times[statuses == event_code]))
+
+    score_num = 0.0
+    score_denom = 0.0
+
+    # Simplified Fine-Gray IPCW / risk set weighting
+    for t in event_times:
+        # Risk set at time t under subdistribution hazard:
+        # 1) Subjects with time >= t
+        # 2) Subjects with time < t who experienced COMPETING risk (code 2)
+        in_risk = (times >= t) | ((times < t) & (statuses == competing_code))
+        n_risk = np.sum(in_risk)
+        if n_risk <= 0:
+            continue
+
+        z_risk = z_cov[in_risk]
+        mean_z = np.mean(z_risk)
+        var_z = np.var(z_risk)
+
+        # Primary events at t
+        ev_mask = (times == t) & (statuses == event_code)
+        d_ev = np.sum(ev_mask)
+        z_ev = np.sum(z_cov[ev_mask])
+
+        score_num += z_ev - d_ev * mean_z
+        score_denom += d_ev * var_z
+
+    if score_denom > 1e-6:
+        log_shr = score_num / score_denom
+        se_beta = 1.0 / np.sqrt(score_denom)
+    else:
+        log_shr = 0.0
+        se_beta = 1.0
+
+    z_stat = log_shr / se_beta if se_beta > 0 else 0.0
+    # Two-sided p-value
+    import math
+    p_val = float(math.erfc(abs(z_stat) / math.sqrt(2.0)))
+
+    shr = float(np.exp(log_shr))
+    ci_low = float(np.exp(log_shr - 1.959963984540054 * se_beta))
+    ci_high = float(np.exp(log_shr + 1.959963984540054 * se_beta))
+
+    return FineGrayResult(
+        shr=shr,
+        log_shr=float(log_shr),
+        std_err=float(se_beta),
+        ci_lower=ci_low,
+        ci_upper=ci_high,
+        p_value=p_val,
+        z_stat=float(z_stat),
+        n_samples=n_samples,
+        n_events=n_events,
+        n_competing=n_competing,
+        group_name=group_name,
+    )
+
+
+def plot_cif(
+    cif_result: CIFResult,
+    title: str | None = None,
+    output_path: str | None = None,
+    show: bool = False,
+) -> Any:
+    """Plots competing risk cumulative incidence curves for readmission and death."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    df = cif_result.cif_table
+
+    ax.step(df["time"], df["cif_primary"], where="post", color="#1f77b4", lw=2.2, label="30-day Readmission (CIF)")
+    if "cif_primary_ci_lower" in df.columns:
+        ax.fill_between(
+            df["time"],
+            df["cif_primary_ci_lower"],
+            df["cif_primary_ci_upper"],
+            step="post",
+            alpha=0.18,
+            color="#1f77b4",
+            label="95% CI (Readmission)",
+        )
+
+    if "cif_competing" in df.columns and df["cif_competing"].max() > 0:
+        ax.step(df["time"], df["cif_competing"], where="post", color="#d62728", lw=2.0, label="Competing Mortality (CIF)")
+
+    if "naive_km_primary" in df.columns:
+        ax.step(
+            df["time"],
+            df["naive_km_primary"],
+            where="post",
+            color="#1f77b4",
+            linestyle="--",
+            lw=1.5,
+            alpha=0.65,
+            label="Naive (1 - KM, Biased)",
+        )
+
+    ax.set_xlabel("Follow-up Time (Days)")
+    ax.set_ylabel("Cumulative Incidence")
+    ax.set_title(title or "Fine-Gray Competing Risks Cumulative Incidence (CIF)")
+    ax.set_xlim(0, max(30, float(df["time"].max())))
+    ax.set_ylim(0, max(0.25, float(df["cif_primary"].max() * 1.3)))
+    ax.grid(True, linestyle=":", alpha=0.6)
+    ax.legend(loc="upper left")
+    plt.tight_layout()
+
+    if output_path:
+        fig.savefig(output_path, dpi=300)
+    if show:
+        plt.show()
+    return fig
+

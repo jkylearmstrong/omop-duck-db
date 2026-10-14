@@ -92,23 +92,38 @@ calculate_bedside_scores <- function(con,
 
   # HOSPITAL Score
   if ("hospital" %in% scores_lower) {
-    hosp_df <- DBI::dbGetQuery(con, "
+    anc_ref <- NULL
+    for (cand in c("concept_ancestor", "central_vocab.main.concept_ancestor", "central_vocab.concept_ancestor")) {
+      tryCatch({
+        DBI::dbGetQuery(con, sprintf("SELECT 1 FROM %s LIMIT 0", cand))
+        anc_ref <- cand
+        break
+      }, error = function(e) NULL)
+      if (!is.null(anc_ref)) break
+    }
+    onc_anc_expr <- if (!is.null(anc_ref)) {
+      sprintf("cond.condition_concept_id IN (SELECT descendant_concept_id FROM %s WHERE ancestor_concept_id = 443392)", anc_ref)
+    } else {
+      "cond.condition_concept_id = 443392"
+    }
+
+    hosp_sql <- sprintf("
       SELECT
         c.person_id,
         c.cohort_start_date,
         MAX(CASE
           WHEN m.measurement_concept_id IN (3000963, 3004501, 3010813, 3023103, 3023599)
-               OR m.measurement_source_value ILIKE '%hemo%' OR m.measurement_source_value ILIKE '%hgb%'
+               OR m.measurement_source_value ILIKE '%%%%hemo%%%%' OR m.measurement_source_value ILIKE '%%%%hgb%%%%'
           THEN CASE WHEN m.value_as_number < 12.0 THEN 1 ELSE 0 END ELSE 0
         END) AS low_hemoglobin,
         MAX(CASE
-          WHEN m.measurement_concept_id IN (3019550, 3000285, 3014576) OR m.measurement_source_value ILIKE '%sodium%'
+          WHEN m.measurement_concept_id IN (3019550, 3000285, 3014576) OR m.measurement_source_value ILIKE '%%%%sodium%%%%'
           THEN CASE WHEN m.value_as_number < 135.0 THEN 1 ELSE 0 END ELSE 0
         END) AS low_sodium,
         MAX(CASE WHEN pr.procedure_occurrence_id IS NOT NULL THEN 1 ELSE 0 END) AS had_procedure,
         MAX(CASE
-          WHEN cond.condition_concept_id IN (SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 443392)
-               OR cond.condition_source_value ILIKE 'C%' OR cond.condition_source_value ILIKE '14%'
+          WHEN %s
+               OR cond.condition_source_value ILIKE 'C%%%%' OR cond.condition_source_value ILIKE '14%%%%'
           THEN 1 ELSE 0
         END) AS oncology_history,
         COUNT(DISTINCT prev_v.visit_occurrence_id) AS prior_admissions
@@ -128,8 +143,8 @@ calculate_bedside_scores <- function(con,
        AND prev_v.visit_concept_id = 9201
        AND prev_v.visit_start_date >= c.cohort_start_date - INTERVAL '365' DAY
        AND prev_v.visit_start_date < c.cohort_start_date
-      GROUP BY c.person_id, c.cohort_start_date
-    ")
+      GROUP BY c.person_id, c.cohort_start_date", onc_anc_expr)
+    hosp_df <- DBI::dbGetQuery(con, hosp_sql)
     base_df <- merge(base_df, hosp_df, by = c("person_id", "cohort_start_date"), all.x = TRUE)
     base_df$low_hemoglobin[is.na(base_df$low_hemoglobin)] <- 0L
     base_df$low_sodium[is.na(base_df$low_sodium)] <- 0L

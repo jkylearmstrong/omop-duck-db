@@ -142,8 +142,22 @@ def calculate_bedside_scores(
             # Check labs during stay (Hemoglobin < 12, Sodium < 135)
             # Procedures during stay
             # Oncology diagnosis in prior 365 days
-            # Hospital admissions in prior 365 days
-            hosp_metrics = con.execute("""
+            # Defensive check for concept_ancestor table
+            anc_ref = None
+            for cand in ("concept_ancestor", "central_vocab.main.concept_ancestor", "central_vocab.concept_ancestor"):
+                try:
+                    con.execute(f"SELECT 1 FROM {cand} LIMIT 0")
+                    anc_ref = cand
+                    break
+                except Exception:
+                    pass
+            onc_anc_expr = (
+                f"cond.condition_concept_id IN (SELECT descendant_concept_id FROM {anc_ref} WHERE ancestor_concept_id = 443392)"
+                if anc_ref
+                else "cond.condition_concept_id = 443392"
+            )
+
+            hosp_metrics = con.execute(f"""
                 SELECT 
                     c.person_id,
                     c.cohort_start_date,
@@ -166,7 +180,7 @@ def calculate_bedside_scores(
                     MAX(CASE WHEN pr.procedure_occurrence_id IS NOT NULL THEN 1 ELSE 0 END) AS had_procedure,
                     -- Oncology diagnosis in 1-year lookback (neoplasm / cancer)
                     MAX(CASE 
-                        WHEN cond.condition_concept_id IN (SELECT descendant_concept_id FROM concept_ancestor WHERE ancestor_concept_id = 443392)
+                        WHEN {onc_anc_expr}
                              OR cond.condition_source_value ILIKE 'C%' 
                              OR cond.condition_source_value ILIKE '14%'
                              OR cond.condition_source_value ILIKE '15%'

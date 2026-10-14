@@ -142,6 +142,7 @@ from omop_etl.features import (
     extract_temporal_features,
 )
 from omop_etl.federation import (
+    ConsortiumScoreResult,
     FederatedConsortium,
     FederatedMetaAnalysisResult,
     check_cross_database_discrepancy,
@@ -152,7 +153,11 @@ from omop_etl.federation import (
 )
 from omop_etl.ml import (
     CohortExtractor,
+    ConsortiumCalibration,
+    DecisionCurveAnalysis,
     FeatureMatrixBuilder,
+    consortium_calibration,
+    decision_curve_analysis,
 )
 from omop_etl.ml_features import (
     ClinicalSequenceTokens,
@@ -185,8 +190,13 @@ from omop_etl.propensity import (
     generate_propensity_weights,
 )
 from omop_etl.survival import (
+    CIFResult,
+    FineGrayResult,
     SurvivalResult,
+    estimate_cif,
     estimate_km_survival,
+    fine_gray_estimator,
+    plot_cif,
 )
 from omop_etl.lakehouse import (
     omop_connect_lakehouse,
@@ -369,9 +379,17 @@ __all__ = [
     "execute_phenotype",
     "phenotype_from_dict",
     "build_safe_source_view",
+    # 0.6.1 Additions
+    "ConsortiumScoreResult",
+    "ConsortiumCalibration",
+    "consortium_calibration",
+    "DecisionCurveAnalysis",
+    "decision_curve_analysis",
+    "CIFResult",
+    "FineGrayResult",
+    "estimate_cif",
+    "fine_gray_estimator",
+    "plot_cif",
 ]
 
-__version__ = "0.6.0"
-
-
-
+__version__ = "0.6.1"

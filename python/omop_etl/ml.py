@@ -412,3 +412,451 @@ class FeatureMatrixBuilder:
             return torch.as_tensor(tensor_3d, dtype=torch.float32)
         except ImportError:
             return tensor_3d
+
+
+# -----------------------------------------------------------------------------
+# Cross-Site Model Calibration & Decile Drift (ConsortiumCalibration)
+# -----------------------------------------------------------------------------
+
+class ConsortiumCalibration:
+    """Multi-site calibration report with Greenwood-Nam-D'Agostino tests and decile drift."""
+
+    def __init__(
+        self,
+        site_metrics: pd.DataFrame,
+        calibration_curves: pd.DataFrame,
+        decile_drift: pd.DataFrame,
+    ):
+        self._site_metrics = site_metrics
+        self._calibration_curves = calibration_curves
+        self._decile_drift = decile_drift
+
+    @property
+    def site_metrics(self) -> pd.DataFrame:
+        """Per-site and pooled Brier score, calibration slope/intercept, ECE, and GND test."""
+        return self._site_metrics
+
+    @property
+    def calibration_curves(self) -> pd.DataFrame:
+        """Bin-level observed vs expected event rates across sites."""
+        return self._calibration_curves
+
+    @property
+    def decile_drift(self) -> pd.DataFrame:
+        """Cross-site prediction drift matrix across decile bins."""
+        return self._decile_drift
+
+    def summary(self) -> pd.DataFrame:
+        """Returns the site metrics table."""
+        return self._site_metrics.copy()
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return self._site_metrics.copy()
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "site_metrics":
+            return self._site_metrics
+        elif key == "calibration_curves":
+            return self._calibration_curves
+        elif key == "decile_drift":
+            return self._decile_drift
+        elif key in self._site_metrics.columns:
+            return self._site_metrics[key]
+        raise KeyError(key)
+
+    def plot(
+        self,
+        title: str | None = None,
+        output_path: str | None = None,
+        show: bool = False,
+    ) -> Any:
+        """Generates a publication-quality multi-site calibration plot."""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return None
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        # 45 degree ideal line
+        ax.plot([0, 1], [0, 1], "k--", lw=1.5, label="Perfect Calibration")
+
+        sites = [s for s in self._calibration_curves["site"].unique() if s != "Consortium (Pooled)"]
+        for s in sites:
+            sub = self._calibration_curves[self._calibration_curves["site"] == s]
+            ax.plot(sub["pred_mean"], sub["obs_rate"], marker="o", lw=1.8, label=str(s))
+
+        # Pooled if available
+        if "Consortium (Pooled)" in self._calibration_curves["site"].values:
+            pooled = self._calibration_curves[self._calibration_curves["site"] == "Consortium (Pooled)"]
+            ax.plot(pooled["pred_mean"], pooled["obs_rate"], "k-", marker="s", lw=2.5, label="Consortium (Pooled)")
+
+        ax.set_xlabel("Mean Predicted Probability")
+        ax.set_ylabel("Observed Event Rate")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_title(title or "Cross-Site Model Calibration Curves")
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.legend(loc="upper left")
+        plt.tight_layout()
+
+        if output_path:
+            fig.savefig(output_path, dpi=300)
+        if show:
+            plt.show()
+        return fig
+
+    def __repr__(self) -> str:
+        return f"<ConsortiumCalibration: {len(self._site_metrics)} site(s)>\n{self._site_metrics.to_string(index=False)}"
+
+
+def _fit_logistic_calibration(y: np.ndarray, p: np.ndarray) -> tuple[float, float]:
+    """Fit logistic calibration: logit(y) ~ alpha + beta * logit(p) via IRLS."""
+    eps = 1e-7
+    p_clipped = np.clip(p, eps, 1.0 - eps)
+    z = np.log(p_clipped / (1.0 - p_clipped))
+    X = np.column_stack([np.ones_like(z), z])
+    b = np.array([0.0, 1.0], dtype=float)
+
+    for _ in range(25):
+        p_hat = 1.0 / (1.0 + np.exp(-np.clip(X @ b, -25.0, 25.0)))
+        w = np.clip(p_hat * (1.0 - p_hat), 1e-6, 0.25)
+        grad = X.T @ (y - p_hat)
+        hess = -(X.T * w) @ X - np.eye(2) * 1e-6
+        try:
+            step = np.linalg.solve(-hess, grad)
+            b += step
+            if np.max(np.abs(step)) < 1e-5:
+                break
+        except np.linalg.LinAlgError:
+            break
+    return float(b[0]), float(b[1])
+
+
+def _chi2_sf(stat: float, df: int) -> float:
+    """Survival function (1 - CDF) for chi-squared distribution."""
+    try:
+        from scipy.stats import chi2
+        return float(chi2.sf(stat, df))
+    except ImportError:
+        # Wilson-Hilferty transformation approximation to standard normal
+        if df <= 0 or stat <= 0:
+            return 1.0
+        s = stat / df
+        z = (s ** (1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df))) / np.sqrt(2.0 / (9.0 * df))
+        import math
+        return float(0.5 * math.erfc(z / math.sqrt(2.0)))
+
+
+def consortium_calibration(
+    y_true: Sequence[float | int] | np.ndarray | pd.Series,
+    y_prob: Sequence[float] | np.ndarray | pd.Series,
+    site_labels: Sequence[str | int] | np.ndarray | pd.Series,
+    n_bins: int = 10,
+) -> ConsortiumCalibration:
+    """Evaluates cross-site calibration, Greenwood-Nam-D'Agostino tests, and decile drift.
+
+    Clinical Rationale: Multi-site predictive models often suffer from calibration drift
+    when transported across health systems (e.g., systematically over-predicting risk at
+    tertiary centers vs under-predicting in community settings).
+
+    Args:
+        y_true: Ground-truth binary outcome indicators (0 or 1).
+        y_prob: Predicted event probabilities (between 0 and 1).
+        site_labels: Site names or identifiers corresponding to each subject.
+        n_bins: Number of calibration risk quantile bins (default 10 for deciles).
+
+    Returns:
+        ConsortiumCalibration: Encapsulates site_metrics, calibration_curves, and decile_drift.
+    """
+    y = np.asarray(y_true, dtype=float).ravel()
+    p = np.asarray(y_prob, dtype=float).ravel()
+    sites = np.asarray(site_labels).ravel()
+
+    if not (len(y) == len(p) == len(sites)):
+        raise ValueError(f"Lengths of y_true ({len(y)}), y_prob ({len(p)}), and site_labels ({len(sites)}) must match.")
+    if len(y) == 0:
+        raise ValueError("Input arrays must not be empty.")
+
+    p = np.clip(p, 1e-7, 1.0 - 1e-7)
+
+    def _calc_site_cal(y_sub: np.ndarray, p_sub: np.ndarray, site_name: str):
+        n_pts = len(y_sub)
+        n_events = int(np.sum(y_sub))
+        obs_rate = float(n_events / n_pts) if n_pts > 0 else 0.0
+        mean_p = float(np.mean(p_sub)) if n_pts > 0 else 0.0
+        brier = float(np.mean((y_sub - p_sub) ** 2)) if n_pts > 0 else 0.0
+
+        intercept, slope = _fit_logistic_calibration(y_sub, p_sub)
+
+        # Quantile binning
+        g = min(n_bins, max(2, n_pts // 5))
+        # Percentile ranks
+        ranks = np.argsort(np.argsort(p_sub))
+        bin_ids = np.clip((ranks * g) // n_pts, 0, g - 1) + 1
+
+        curve_rows = []
+        ece_sum = 0.0
+        mce = 0.0
+        gnd_stat = 0.0
+
+        for b_id in range(1, g + 1):
+            mask = bin_ids == b_id
+            b_n = int(np.sum(mask))
+            if b_n == 0:
+                continue
+            b_y = y_sub[mask]
+            b_p = p_sub[mask]
+            b_events = int(np.sum(b_y))
+            b_obs = float(b_events / b_n)
+            b_pred = float(np.mean(b_p))
+            b_exp = float(np.sum(b_p))
+            drift = b_obs - b_pred
+
+            diff = abs(drift)
+            ece_sum += (b_n / n_pts) * diff
+            if diff > mce:
+                mce = diff
+
+            # Greenwood-Nam-D'Agostino variance
+            var_gnd = b_n * b_pred * (1.0 - b_pred)
+            if var_gnd > 1e-6:
+                gnd_stat += ((b_events - b_exp) ** 2) / var_gnd
+
+            curve_rows.append({
+                "site": site_name,
+                "bin": b_id,
+                "n": b_n,
+                "events": b_events,
+                "pred_mean": b_pred,
+                "obs_rate": b_obs,
+                "drift": drift,
+            })
+
+        df_g = max(1, g - 2)
+        gnd_p = _chi2_sf(gnd_stat, df_g)
+
+        metrics = {
+            "site": site_name,
+            "n": n_pts,
+            "n_events": n_events,
+            "observed_event_rate": obs_rate,
+            "mean_predicted_prob": mean_p,
+            "brier_score": brier,
+            "calibration_intercept": intercept,
+            "calibration_slope": slope,
+            "ece": ece_sum,
+            "mce": mce,
+            "gnd_statistic": gnd_stat,
+            "gnd_df": df_g,
+            "gnd_p_value": gnd_p,
+        }
+        return metrics, curve_rows
+
+    unique_sites = np.unique(sites)
+    site_metric_list = []
+    all_curves = []
+
+    for s in unique_sites:
+        mask = sites == s
+        met, crv = _calc_site_cal(y[mask], p[mask], str(s))
+        site_metric_list.append(met)
+        all_curves.extend(crv)
+
+    # Pooled consortium calibration
+    pooled_met, pooled_crv = _calc_site_cal(y, p, "Consortium (Pooled)")
+    site_metric_list.append(pooled_met)
+    all_curves.extend(pooled_crv)
+
+    site_metrics_df = pd.DataFrame(site_metric_list)
+    calibration_curves_df = pd.DataFrame(all_curves)
+
+    # Decile drift matrix: site x bin
+    pivot_drift = calibration_curves_df.pivot(index="site", columns="bin", values="drift").reset_index()
+
+    return ConsortiumCalibration(
+        site_metrics=site_metrics_df,
+        calibration_curves=calibration_curves_df,
+        decile_drift=pivot_drift,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Clinical Decision Curve Analysis (DCA)
+# -----------------------------------------------------------------------------
+
+class DecisionCurveAnalysis:
+    """Clinical Decision Curve Analysis (DCA) result according to Vickers et al. (2006)."""
+
+    def __init__(
+        self,
+        net_benefit: pd.DataFrame,
+        summary_stats: dict[str, Any],
+    ):
+        self._net_benefit = net_benefit
+        self._summary_stats = summary_stats
+
+    @property
+    def net_benefit(self) -> pd.DataFrame:
+        """Net Benefit across decision thresholds for Model, Treat All, and Treat None."""
+        return self._net_benefit
+
+    def summary(self) -> dict[str, Any]:
+        """Summary of clinical utility, optimal threshold range, and maximum net benefit."""
+        return dict(self._summary_stats)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return self._net_benefit.copy()
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "net_benefit":
+            return self._net_benefit
+        elif key in self._net_benefit.columns:
+            return self._net_benefit[key]
+        elif key in self._summary_stats:
+            return self._summary_stats[key]
+        raise KeyError(key)
+
+    def plot(
+        self,
+        title: str | None = None,
+        output_path: str | None = None,
+        show: bool = False,
+    ) -> Any:
+        """Generates a publication-quality Decision Curve Analysis plot."""
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return None
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        df = self._net_benefit
+
+        ax.plot(df["threshold"], df["model"], "b-", lw=2.2, label="Prediction Model")
+        ax.plot(df["threshold"], df["all"], color="gray", linestyle="--", lw=1.8, label="Treat All")
+        ax.axhline(0, color="black", linestyle=":", lw=1.2, label="Treat None")
+
+        ax.set_xlabel("Decision Threshold (Probability)")
+        ax.set_ylabel("Net Benefit")
+        ax.set_title(title or "Clinical Decision Curve Analysis (Net Benefit)")
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.legend(loc="upper right")
+
+        # Set sensible Y bounds
+        y_max = max(0.05, float(df[["model", "all"]].max().max() * 1.15))
+        y_min = min(-0.02, float(df["all"].min() * 0.5))
+        ax.set_ylim(y_min, y_max)
+        plt.tight_layout()
+
+        if output_path:
+            fig.savefig(output_path, dpi=300)
+        if show:
+            plt.show()
+        return fig
+
+    def __repr__(self) -> str:
+        s = self._summary_stats
+        return (
+            f"<DecisionCurveAnalysis: {len(self._net_benefit)} thresholds "
+            f"[{self._net_benefit['threshold'].min():.2f} - {self._net_benefit['threshold'].max():.2f}], "
+            f"Max Net Benefit = {s.get('max_net_benefit', 0.0):.4f} at threshold {s.get('threshold_at_max', 0.0):.2f}>"
+        )
+
+
+def decision_curve_analysis(
+    y_true: Sequence[float | int] | np.ndarray | pd.Series,
+    y_prob: Sequence[float] | np.ndarray | pd.Series,
+    threshold_range: tuple[float, float] = (0.05, 0.35),
+    step: float = 0.01,
+    harm: float = 0.0,
+) -> DecisionCurveAnalysis:
+    """Calculates Decision Curve Analysis (Vickers et al., 2006) for clinical utility assessment.
+
+    Evaluates whether using the model to guide clinical decisions yields higher Net Benefit
+    than the default strategies of 'treat all' or 'treat none' across a clinical decision threshold range.
+
+    .. math::
+        \\text{Net Benefit}_{\\text{model}}(p_t) = \\frac{TP}{N} - \\frac{FP}{N} \\left(\\frac{p_t}{1 - p_t}\\right) - \\text{harm}
+
+    .. math::
+        \\text{Net Benefit}_{\\text{all}}(p_t) = \\text{prevalence} - (1 - \\text{prevalence}) \\left(\\frac{p_t}{1 - p_t}\\right) - \\text{harm}
+
+    Args:
+        y_true: Ground-truth binary outcome array (0 or 1).
+        y_prob: Predicted event probabilities (between 0 and 1).
+        threshold_range: Tuple of `(min_threshold, max_threshold)` (default (0.05, 0.35)).
+        step: Threshold increment step (default 0.01).
+        harm: Optional test or intervention harm in units of net benefit (default 0.0).
+
+    Returns:
+        DecisionCurveAnalysis: Object containing .net_benefit DataFrame, .summary(), and .plot().
+    """
+    y = np.asarray(y_true, dtype=float).ravel()
+    p = np.asarray(y_prob, dtype=float).ravel()
+
+    if len(y) != len(p):
+        raise ValueError(f"Lengths of y_true ({len(y)}) and y_prob ({len(p)}) must match.")
+    if len(y) == 0:
+        raise ValueError("Input arrays must not be empty.")
+
+    n = len(y)
+    events = float(np.sum(y))
+    non_events = float(n - events)
+    prevalence = events / n
+
+    t_min, t_max = threshold_range
+    thresholds = np.round(np.arange(t_min, t_max + step / 2.0, step), 4)
+
+    rows = []
+    beneficial_thresholds = []
+
+    for pt in thresholds:
+        if pt <= 0.0 or pt >= 1.0:
+            continue
+        w = pt / (1.0 - pt)
+        pred_pos = p >= pt
+        tp = float(np.sum((pred_pos) & (y == 1.0)))
+        fp = float(np.sum((pred_pos) & (y == 0.0)))
+
+        nb_model = (tp / n) - (fp / n) * w - harm
+        nb_all = prevalence - ((1.0 - prevalence) * w) - harm
+        nb_none = 0.0
+
+        # Net reduction in interventions per 100 patients
+        reduction = max(0.0, ((nb_model - nb_all) / w) * 100.0) if w > 0 else 0.0
+        snb = (nb_model / prevalence) if prevalence > 0 else 0.0
+
+        if nb_model > max(nb_all, nb_none):
+            beneficial_thresholds.append(pt)
+
+        rows.append({
+            "threshold": float(pt),
+            "model": float(nb_model),
+            "all": float(nb_all),
+            "none": 0.0,
+            "net_reduction_interventions": float(reduction),
+            "standardized_net_benefit": float(snb),
+            "tp": int(tp),
+            "fp": int(fp),
+            "n": int(n),
+        })
+
+    nb_df = pd.DataFrame(rows)
+
+    max_idx = nb_df["model"].idxmax() if len(nb_df) > 0 else 0
+    max_row = nb_df.loc[max_idx] if len(nb_df) > 0 else None
+
+    summary_stats = {
+        "n_samples": n,
+        "n_events": int(events),
+        "prevalence": prevalence,
+        "max_net_benefit": float(max_row["model"]) if max_row is not None else 0.0,
+        "threshold_at_max": float(max_row["threshold"]) if max_row is not None else 0.0,
+        "clinical_benefit_range": (
+            float(min(beneficial_thresholds)),
+            float(max(beneficial_thresholds)),
+        ) if beneficial_thresholds else None,
+        "max_reduction_interventions": float(nb_df["net_reduction_interventions"].max()) if len(nb_df) > 0 else 0.0,
+    }
+
+    return DecisionCurveAnalysis(net_benefit=nb_df, summary_stats=summary_stats)
+

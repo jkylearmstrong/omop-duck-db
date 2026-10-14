@@ -26,6 +26,8 @@ FEDERATED_TABLES = [
     "observation_period",
     "drug_era",
     "condition_era",
+    "cohort",
+    "cohort_definition",
     "provider",
     "care_site",
     "cdm_source",
@@ -160,6 +162,12 @@ def create_federated_consortium(
             union_sql = " UNION ALL\n".join(site_selects)
             view_sql = f"CREATE OR REPLACE VIEW v_{tbl} AS\n{union_sql};"
             con.execute(view_sql)
+            # Create base table view alias so functions expecting base CDM table names work seamlessly
+            has_tbl = con.execute(
+                f"SELECT 1 FROM information_schema.tables WHERE table_catalog = current_database() AND table_schema = 'main' AND table_name = '{tbl}' AND table_type = 'BASE TABLE'"
+            ).fetchone()
+            if not has_tbl:
+                con.execute(f"CREATE OR REPLACE VIEW {tbl} AS SELECT * FROM v_{tbl};")
 
     return con
 
@@ -740,6 +748,107 @@ class FederatedConsortium:
         df = self.con.execute(f"SELECT * FROM {cohort_table}").df()
         return t2.generate(df, columns=columns, strata_col=strata_col)
 
+    def calculate_scores(
+        self,
+        cohort_table: str = "cohort",
+        scores: Sequence[str] = ("lace", "hospital"),
+        stratify_by_site: bool = True,
+    ) -> ConsortiumScoreResult:
+        """Calculates consortium-wide and site-stratified LACE Index and HOSPITAL scores.
+
+        In a multi-center study (e.g. eDERRI), computes patient-level risk predictions and
+        site-stratified bedside score distributions across all sites in a single pass.
+
+        Args:
+            cohort_table: Name of cohort table or view. Must contain subject_id / person_id,
+                cohort_start_date, and cohort_end_date.
+            scores: Sequence of scores to calculate: 'lace', 'hospital' (or both).
+            stratify_by_site: Whether to generate site-stratified audit statistics.
+
+        Returns:
+            ConsortiumScoreResult: Object holding patient-level scores (.scores),
+            site-stratified audit (.site_summary), and pooled consortium metrics (.consortium_summary).
+        """
+        from omop_etl.risk_scores import calculate_bedside_scores
+
+        scores_lower = [s.lower() for s in scores]
+        actual_table = cohort_table
+        has_table = self.con.execute(
+            f"SELECT 1 FROM information_schema.tables WHERE table_name = '{actual_table}'"
+        ).fetchone()
+        if not has_table:
+            has_v = self.con.execute(
+                f"SELECT 1 FROM information_schema.tables WHERE table_name = 'v_{actual_table}'"
+            ).fetchone()
+            if has_v:
+                actual_table = f"v_{actual_table}"
+
+        scores_df = calculate_bedside_scores(self.con, cohort_table=actual_table, scores=scores)
+
+        # Attach site provenance if available
+        cols = {c.lower() for c in scores_df.columns}
+        if "site" not in cols and "site_anon" in cols:
+            scores_df["site"] = scores_df["site_anon"]
+        elif "site" not in cols:
+            try:
+                cohort_cols = {c[0].lower() for c in self.con.execute(f"DESCRIBE SELECT * FROM {cohort_table} LIMIT 0;").fetchall()}
+                if "site" in cohort_cols or "site_anon" in cohort_cols:
+                    s_col = "site" if "site" in cohort_cols else "site_anon"
+                    person_col = "subject_id" if "subject_id" in cohort_cols else "person_id"
+                    start_col = "cohort_start_date" if "cohort_start_date" in cohort_cols else "visit_start_date"
+                    site_map = self.con.execute(f"SELECT DISTINCT {person_col} AS person_id, {start_col} AS cohort_start_date, {s_col} AS site FROM {cohort_table}").df()
+                    scores_df = scores_df.merge(site_map, on=["person_id", "cohort_start_date"], how="left")
+                else:
+                    site_map = self.con.execute("SELECT DISTINCT person_id, site_anon AS site FROM v_person").df()
+                    scores_df = scores_df.merge(site_map, on="person_id", how="left")
+            except Exception:
+                scores_df["site"] = "Consortium"
+
+        if "site" not in scores_df.columns or scores_df["site"].isna().all():
+            scores_df["site"] = "Site 1"
+        else:
+            scores_df["site"] = scores_df["site"].fillna("Unknown")
+
+        # Summary statistics per site and overall
+        def _calc_stats(df_sub: pd.DataFrame, site_name: str) -> dict[str, Any]:
+            n_pts = len(df_sub)
+            row = {
+                "site": site_name,
+                "n_patients": n_pts,
+                "los_mean": float(df_sub["los_days"].mean()) if n_pts > 0 and "los_days" in df_sub else 0.0,
+                "los_median": float(df_sub["los_days"].median()) if n_pts > 0 and "los_days" in df_sub else 0.0,
+            }
+            if "lace" in scores_lower and "lace_score" in df_sub:
+                row["mean_lace_score"] = float(df_sub["lace_score"].mean()) if n_pts > 0 else 0.0
+                row["median_lace_score"] = float(df_sub["lace_score"].median()) if n_pts > 0 else 0.0
+                high_lace = (df_sub["lace_score"] >= 10).sum() if n_pts > 0 else 0
+                mod_lace = ((df_sub["lace_score"] >= 5) & (df_sub["lace_score"] <= 9)).sum() if n_pts > 0 else 0
+                row["high_lace_count"] = int(high_lace)
+                row["high_lace_pct"] = float(high_lace / n_pts * 100.0) if n_pts > 0 else 0.0
+                row["moderate_lace_pct"] = float(mod_lace / n_pts * 100.0) if n_pts > 0 else 0.0
+            if "hospital" in scores_lower and "hospital_score" in df_sub:
+                row["mean_hospital_score"] = float(df_sub["hospital_score"].mean()) if n_pts > 0 else 0.0
+                row["median_hospital_score"] = float(df_sub["hospital_score"].median()) if n_pts > 0 else 0.0
+                high_hosp = (df_sub["hospital_score"] >= 7).sum() if n_pts > 0 else 0
+                int_hosp = ((df_sub["hospital_score"] >= 5) & (df_sub["hospital_score"] <= 6)).sum() if n_pts > 0 else 0
+                row["high_hospital_count"] = int(high_hosp)
+                row["high_hospital_pct"] = float(high_hosp / n_pts * 100.0) if n_pts > 0 else 0.0
+                row["intermediate_hospital_pct"] = float(int_hosp / n_pts * 100.0) if n_pts > 0 else 0.0
+            return row
+
+        site_rows = []
+        for s_val, group in scores_df.groupby("site"):
+            site_rows.append(_calc_stats(group, str(s_val)))
+
+        site_summary_df = pd.DataFrame(site_rows)
+        consortium_summary_df = pd.DataFrame([_calc_stats(scores_df, "Consortium (All Sites)")])
+
+        return ConsortiumScoreResult(
+            scores=scores_df,
+            site_summary=site_summary_df,
+            consortium_summary=consortium_summary_df,
+        )
+
     def close(self):
         """Closes the DuckDB connection handle."""
         if self.con is not None:
@@ -753,5 +862,59 @@ class FederatedConsortium:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+class ConsortiumScoreResult:
+    """Consortium-level bedside scores and site-stratified summaries."""
+
+    def __init__(
+        self,
+        scores: pd.DataFrame,
+        site_summary: pd.DataFrame,
+        consortium_summary: pd.DataFrame,
+    ):
+        self._scores = scores
+        self._site_summary = site_summary
+        self._consortium_summary = consortium_summary
+
+    @property
+    def scores(self) -> pd.DataFrame:
+        """Patient/visit-level scores across all participating sites."""
+        return self._scores
+
+    @property
+    def site_summary(self) -> pd.DataFrame:
+        """Site-stratified risk scores, acuity, and predictor distribution."""
+        return self._site_summary
+
+    @property
+    def consortium_summary(self) -> pd.DataFrame:
+        """Consortium-wide pooled score summary."""
+        return self._consortium_summary
+
+    def summary(self) -> pd.DataFrame:
+        """Combined summary table with per-site rows and a pooled Consortium row."""
+        return pd.concat([self._site_summary, self._consortium_summary], ignore_index=True)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return self._scores.copy()
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "scores":
+            return self._scores
+        elif key == "site_summary":
+            return self._site_summary
+        elif key == "consortium_summary":
+            return self._consortium_summary
+        elif key in self._scores.columns:
+            return self._scores[key]
+        raise KeyError(key)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ConsortiumScoreResult: {len(self._scores)} records across "
+            f"{len(self._site_summary)} site(s)>\n"
+            f"{self.summary().to_string()}"
+        )
 
 

@@ -17,6 +17,7 @@ reference:
   - build_schema
   - load_vocabulary
   - attach_central_vocabulary
+  - attach_database
   - omop_connect
   - omop_connect_lakehouse
   - load_from_bigquery
@@ -34,6 +35,7 @@ reference:
   - federated_consortium
   - consortium_query
   - consortium_site_summaries
+  - consortium_calculate_scores
   - consortium_generate_table1
   - consortium_generate_table2
   - consortium_close
@@ -62,6 +64,7 @@ reference:
   contents:
   - define_study_cohort
   - build_readmission_cohort
+  - build_mortality_cohort
   - build_end_of_life_cohort
   - build_treatment_episodes
   - generate_consort_attrition
@@ -107,6 +110,8 @@ reference:
   - extract_standard_labs
   - extract_inpatient_labs
   - extract_prior_utilization
+  - consortium_calibration
+  - decision_curve_analysis
   - CORE_14_LAB_PANEL
   - ACUTE_LAB_PANEL
   - WORST_LAB_DIRECTION
@@ -118,6 +123,8 @@ reference:
   - fit_scoring_pipeline
   - validate_scoring_input
   - predict_scoring_pipeline
+  - predict_scoring_class
+  - load_scoring_pipeline
   - scoring_pipeline_out_of_range
   - save_scoring_pipeline
 - title: Ecosystem bridges (HADES & tidymodels)
@@ -153,6 +160,9 @@ reference:
   contents:
   - generate_propensity_weights
   - estimate_km_survival
+  - estimate_cif
+  - fine_gray_estimator
+  - plot_cif
 - title: Wide-table ingestion, datetime normalization and file paths
   desc: Staged one-concept-per-commit loading of wide measurement tables, vectorized timestamp parsing, safe SQL file paths, and ETL source-view helpers.
   contents:
@@ -165,6 +175,11 @@ reference:
   - sanitize_sql_path
   - sql_path_helpers
   - build_safe_source_view
+  - normalize_time_sql
+  - read_csv_sql
+  - read_parquet_sql
+  - sql_copy_to
+  - sql_path_literal
 - title: Resource governor
   desc: Size DuckDB memory, thread count and disk-spill location to the host.
   contents:
@@ -178,8 +193,16 @@ reference:
   - medication_transitions
   - audit_medication_strategies
   - phenotype_criteria
+  - condition_criteria
+  - drug_criteria
+  - measurement_criteria
   - everyone
   - phenotype_operators
+  - phenotype_union
+  - phenotype_intersect
+  - phenotype_not
+  - phenotype_to_list
+  - phenotype_from_list
   - compile_phenotype
   - execute_phenotype
   - phenotype_serialize

@@ -1,3 +1,43 @@
+# omopduckdb 0.6.1
+
+Release 0.6.1 delivers high-impact multi-site consortium analytics, cross-site model calibration, clinical decision curve analysis, automated international unit scaling, and competing-risk cumulative incidence function modeling with complete 1:1 parity between Python (`omop_etl` / `omop_duck_db`) and R (`omopduckdb`).
+
+### 1. Consortium-Level Bedside Scoring Wrapper
+- `FederatedConsortium.calculate_scores()` (Python) and `consortium_calculate_scores()` (R):
+  - Directly evaluates bedside clinical risk scores (`calculate_lace_index` and `calculate_hospital_score`) across multi-center federated consortia (e.g. eDERRI studies) in a single pass.
+  - Automatically provisions transparent base table alias views (`CREATE OR REPLACE VIEW {tbl} AS SELECT * FROM v_{tbl}`) alongside prefixed `v_{tbl}` views, enabling standard ETL and scoring functions to run on federated DuckDB connections without query modification.
+  - Returns `ConsortiumScoreResult` (Python) / `consortium_scores` (R) with overall and site-stratified risk score distributions, high-risk counts, and risk tier breakdowns, supporting `.summary()`, `.to_dataframe()`, and S3 methods (`print`, `summary`, `as.data.frame`).
+
+### 2. Cross-Site Model Calibration & Decile Drift
+- `consortium_calibration()` and `ConsortiumCalibration` (Python & R):
+  - Solves multi-site model transportability and risk miscalibration across academic medical centers and community health systems.
+  - Computes site-stratified logistic calibration curves via robust pure Iteratively Reweighted Least Squares (IRLS).
+  - Evaluates site-specific Brier scores, Expected Calibration Error (ECE), and Maximum Calibration Error (MCE).
+  - Implements the multi-site Greenwood-Nam-D'Agostino $\chi^2$ goodness-of-fit test assessing cross-site calibration drift.
+  - Quantifies decile drift matrix profiling how predicted risk bins shift across member health systems.
+  - Publication-grade multi-panel calibration plotting via `.plot()` / `plot.consortium_calibration()`.
+
+### 3. Clinical Decision Curve Analysis (DCA)
+- `decision_curve_analysis()` and `DecisionCurveAnalysis` (Python & R):
+  - Evaluates clinical net benefit across decision threshold ranges (Vickers et al., 2006) to demonstrate utility over "treat all" and "treat none" baseline strategies.
+  - Computes Net Benefit ($\text{NB} = \frac{\text{TP}}{N} - \frac{\text{FP}}{N}\left(\frac{p_t}{1-p_t}\right)$), Standardized Net Benefit (sNB), and Net Reduction in Interventions per 100 patients.
+  - Outputs summary tables, optimal clinical threshold range identification, and publication-ready multi-curve plotting (`.plot()` / `plot.decision_curve_analysis()`).
+
+### 4. Automated European & IFCC Metric Unit Scaling
+- Automated LOINC-aware harmonization in `harmonize_measurement_units()` across Python and R:
+  - Hemoglobin in $\text{mmol/L}$ (LOINC `59260-0`): Automatic scaling factor $\times 1.611 \to \text{g/dL}$.
+  - HbA1c in IFCC $\text{mmol/mol}$ (LOINC `59261-8`): Affine formula $\text{HbA1c (\%)} = (0.09148 \times \text{mmol/mol}) + 2.152$ harmonizing to NGSP percent.
+  - Serum Creatinine in $\mu\text{mol/L}$: Multiplier $\div 88.4 \to \text{mg/dL}$ (with regex support for `µmol/l` / `μmol/l`).
+  - Automated LOINC detection applies conversions even when source EHR databases leave `unit_source_value` NULL.
+  - Added European LOINCs `59260-0` and `59261-8` to `DEFAULT_LAB_LOINCS`.
+
+### 5. Competing Risks Cumulative Incidence Function (CIF) & Fine-Gray Estimator
+- `estimate_cif()`, `fine_gray_estimator()`, and `plot_cif()` (Python & R):
+  - Non-parametric Aalen-Johansen Cumulative Incidence Function estimation for 3-state competing risks outcomes (censored alive, 30-day acute readmission, terminal mortality).
+  - Computes step-wise cumulative incidences and Greenwood-type standard errors across all event types.
+  - `fine_gray_estimator()` computes subdistribution hazard ratios using subdistribution risk-set weighting.
+  - Multi-curve CIF visualization via `plot_cif()` / `plot.cif_result()`, allowing direct publication of competing-risk adjusted 30-day readmission curves out of the box.
+
 # omopduckdb 0.6.0
 
 Release 0.6.0 closes all 7 feature gaps from request 4 with complete 1:1 cross-language parity across Python (`omop_etl` / `omop_duck_db`) and R (`omopduckdb`).
