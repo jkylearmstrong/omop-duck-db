@@ -96,6 +96,39 @@ DEFAULT_VITAL_PLAUSIBILITY_FILTERS <- list(
   out
 }
 
+#' @keywords internal
+#' @noRd
+.wm_resolve_coalesce_groups <- function(mapping, coalesce_columns) {
+  if (is.null(coalesce_columns)) return(list())
+  if (is.character(coalesce_columns) && length(coalesce_columns) == 1 && identical(coalesce_columns, "auto")) {
+    ids <- vapply(mapping, function(e) e$concept_id, integer(1))
+    groups <- lapply(unique(ids), function(i) names(mapping)[ids == i])
+    return(Filter(function(g) length(g) > 1, groups))
+  }
+  if (is.character(coalesce_columns) && !is.list(coalesce_columns)) {
+    if (length(coalesce_columns) == 1) {
+      stop("coalesce_columns must be \"auto\", NULL, or a list of column-name groups.")
+    }
+    coalesce_columns <- list(coalesce_columns)
+  }
+  groups <- list()
+  seen <- character()
+  for (g in coalesce_columns) {
+    g <- as.character(g)
+    if (length(g) < 2) stop("coalesce group (", paste(g, collapse = ", "), ") needs at least two columns.")
+    for (col in g) {
+      if (is.null(mapping[[col]])) stop("coalesce column '", col, "' is not in concept_mapping.")
+      if (col %in% seen) stop("coalesce column '", col, "' appears in more than one group.")
+      seen <- c(seen, col)
+    }
+    if (length(unique(vapply(g, function(col) mapping[[col]]$concept_id, integer(1)))) != 1) {
+      stop("coalesce group (", paste(g, collapse = ", "), ") maps to more than one concept_id.")
+    }
+    groups[[length(groups) + 1L]] <- g
+  }
+  groups
+}
+
 #' Staged, sequential ingestion of wide measurement tables
 #'
 #' Unpivoting a wide table (PCORnet `vital`, flowsheets, device streams) with one giant uncommitted
@@ -127,8 +160,16 @@ DEFAULT_VITAL_PLAUSIBILITY_FILTERS <- list(
 #' @param keep_staged Keep the staging table after loading (default: drop it).
 #' @param missing_columns `"raise"` (default) if a mapped column is absent from the source, or `"skip"` to
 #'   ignore it (useful with [DEFAULT_VITAL_CONCEPT_MAPPING] on partial extracts).
+#' @param coalesce_columns Source columns that carry the same measure (e.g. PCORnet `BMI` and `ORIGINAL_BMI`)
+#'   and must yield ONE measurement row per source row instead of one each. `list(c("BMI", "ORIGINAL_BMI"))`
+#'   lists a precedence group: the first column with a value inside its plausibility bounds wins, later
+#'   columns only fill gaps. `"auto"` (default) builds a group, in `concept_mapping` order, from every set of
+#'   columns sharing a `concept_id`; `NULL` disables coalescing (one row per column, as in 0.5.7). Every
+#'   column of a group must map to the same `concept_id`.
 #' @return A data frame with one row per source column: `source_column`, `concept_id`, `rows_non_null`,
-#'   `rows_out_of_range`, `rows_unmatched_person`, `rows_inserted`.
+#'   `rows_out_of_range`, `rows_unmatched_person`, `rows_inserted`, `coalesced_into`. A column folded into an
+#'   earlier one reports `rows_inserted = 0` and the primary column's name in `coalesced_into`; the primary's
+#'   counts cover the whole group.
 #' @export
 load_wide_measurement <- function(
     con, source, concept_mapping,
@@ -142,7 +183,8 @@ load_wide_measurement <- function(
     datetime_formats = NULL,
     datetime_on_error = "null",
     keep_staged = FALSE,
-    missing_columns = c("raise", "skip")) {
+    missing_columns = c("raise", "skip"),
+    coalesce_columns = "auto") {
   batch_execution_mode <- match.arg(batch_execution_mode)
   missing_columns <- match.arg(missing_columns)
   if (length(concept_mapping) == 0) stop("concept_mapping must contain at least one source column.")
@@ -165,6 +207,13 @@ load_wide_measurement <- function(
   mapping <- .wm_normalize_mapping(con, concept_mapping)
   value_src <- vapply(names(mapping), function(col) .wm_resolve_col(columns, col, "measure"), character(1))
   value_cols <- stats::setNames(paste0("v", seq_along(mapping) - 1L), names(mapping))
+  groups <- .wm_resolve_coalesce_groups(mapping, coalesce_columns)
+  primary_of <- list()
+  group_of <- list()
+  for (g in groups) {
+    group_of[[g[[1]]]] <- g
+    for (col in g[-1]) primary_of[[col]] <- g[[1]]
+  }
 
   # ---- 1. stage -------------------------------------------------------------------------------------
   DBI::dbExecute(con, paste0("DROP TABLE IF EXISTS ", staged))
@@ -198,16 +247,26 @@ load_wide_measurement <- function(
     hi <- if (!is.null(f) && length(f) > 1) f[[2]] else if (!is.null(f)) NA else mapping[[col]]$max
     list(lo = if (is.null(lo) || is.na(lo)) NULL else lo, hi = if (is.null(hi) || is.na(hi)) NULL else hi)
   }
-  in_range_sql <- function(col, prefix = "") {
-    v <- paste0(prefix, value_cols[[col]])
+  fmt_num <- function(x) format(as.numeric(x), scientific = FALSE, digits = 15)
+  guarded <- function(col, alias = "s") {
+    v <- paste0(alias, ".", value_cols[[col]])
     b <- bounds(col)
-    c(paste0(v, " IS NOT NULL"),
-      if (!is.null(b$lo)) paste0(v, " >= ", format(as.numeric(b$lo), scientific = FALSE, digits = 15)),
-      if (!is.null(b$hi)) paste0(v, " <= ", format(as.numeric(b$hi), scientific = FALSE, digits = 15)))
+    conds <- c(if (!is.null(b$lo)) paste0(v, " >= ", fmt_num(b$lo)),
+               if (!is.null(b$hi)) paste0(v, " <= ", fmt_num(b$hi)))
+    if (length(conds)) paste0("CASE WHEN ", paste(conds, collapse = " AND "), " THEN ", v, " END") else v
+  }
+  value_expr <- function(col, alias = "s") {
+    members <- if (!is.null(group_of[[col]])) group_of[[col]] else col
+    if (length(members) == 1) guarded(col, alias)
+    else paste0("COALESCE(", paste(vapply(members, guarded, character(1), alias = alias), collapse = ", "), ")")
+  }
+  raw_non_null <- function(col) {
+    members <- if (!is.null(group_of[[col]])) group_of[[col]] else col
+    paste(paste0(value_cols[members], " IS NOT NULL"), collapse = " OR ")
   }
   pass_sql <- function(col, offset) {
     entry <- mapping[[col]]
-    v <- value_cols[[col]]
+    expr <- value_expr(col)
     unit_sql <- if (!is.null(entry$unit)) DBI::dbQuoteString(con, entry$unit) else "NULL"
     src_val <- DBI::dbQuoteString(con, if (!is.null(entry$loinc)) entry$loinc else col)
     unit_cid <- if (!is.null(entry$unit_concept_id)) as.integer(entry$unit_concept_id) else 0L
@@ -215,22 +274,22 @@ load_wide_measurement <- function(
       "INSERT INTO ", target, " (", measurement_columns, ") ",
       "SELECT ", format(offset, scientific = FALSE), " + s.stage_id, p.person_id, ", entry$concept_id, ", ",
       "CAST(s.measure_datetime AS DATE), s.measure_datetime, s.measure_time, ",
-      as.integer(measurement_type_concept_id), ", 0, s.", v, ", 0, ", unit_cid, ", ",
+      as.integer(measurement_type_concept_id), ", 0, ", expr, ", 0, ", unit_cid, ", ",
       "NULL, NULL, NULL, vo.visit_occurrence_id, NULL, ", src_val, ", 0, ", unit_sql, ", ",
-      unit_cid, ", CAST(s.", v, " AS VARCHAR), NULL, 0 ",
+      unit_cid, ", CAST(", expr, " AS VARCHAR), NULL, 0 ",
       "FROM ", staged, " s JOIN person p ON ", person_join, " ",
       "LEFT JOIN visit_occurrence vo ON vo.visit_source_value = s.visit_key ",
-      "WHERE ", paste(in_range_sql(col, "s."), collapse = " AND ")
+      "WHERE (", expr, ") IS NOT NULL"
     )
   }
   count_rows <- function(col) {
-    v <- value_cols[[col]]
-    kept_pred <- paste(in_range_sql(col), collapse = " AND ")
+    expr <- value_expr(col)
     cnt <- DBI::dbGetQuery(con, paste0(
-      "SELECT COUNT(", v, ") AS non_null, COUNT(*) FILTER (WHERE ", kept_pred, ") AS kept FROM ", staged))
+      "SELECT COUNT(*) FILTER (WHERE ", raw_non_null(col), ") AS non_null, ",
+      "COUNT(*) FILTER (WHERE (", expr, ") IS NOT NULL) AS kept FROM ", staged, " s"))
     matched <- DBI::dbGetQuery(con, paste0(
       "SELECT COUNT(*) AS n FROM ", staged, " s JOIN person p ON ", person_join,
-      " WHERE ", paste(in_range_sql(col, "s."), collapse = " AND ")))$n[[1]]
+      " WHERE (", expr, ") IS NOT NULL"))$n[[1]]
     c(non_null = cnt$non_null[[1]], kept = cnt$kept[[1]], matched = matched)
   }
   n_rows <- function() DBI::dbGetQuery(con, paste0("SELECT COUNT(*) AS n FROM ", target))$n[[1]]
@@ -249,6 +308,14 @@ load_wide_measurement <- function(
     in_txn <- TRUE
   }
   for (col in names(mapping)) {
+    if (!is.null(primary_of[[col]])) {
+      nn <- DBI::dbGetQuery(con, paste0("SELECT COUNT(", value_cols[[col]], ") AS n FROM ", staged))$n[[1]]
+      report[[col]] <- data.frame(
+        source_column = col, concept_id = mapping[[col]]$concept_id, rows_non_null = as.numeric(nn),
+        rows_out_of_range = 0, rows_unmatched_person = 0, rows_inserted = 0,
+        coalesced_into = primary_of[[col]], stringsAsFactors = FALSE)
+      next
+    }
     cnt <- count_rows(col)
     before <- n_rows()
     max_id <- DBI::dbGetQuery(con, paste0("SELECT COALESCE(MAX(measurement_id), 0) AS m FROM ", target))$m[[1]]
@@ -267,6 +334,7 @@ load_wide_measurement <- function(
       rows_out_of_range = as.numeric(cnt[["non_null"]] - cnt[["kept"]]),
       rows_unmatched_person = as.numeric(cnt[["kept"]] - cnt[["matched"]]),
       rows_inserted = as.numeric(n_rows() - before),
+      coalesced_into = NA_character_,
       stringsAsFactors = FALSE
     )
   }

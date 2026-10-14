@@ -175,7 +175,10 @@ def test_load_wide_measurement_sequential(con, tmp_path):
     assert by.loc["SYSTOLIC", ["rows_non_null", "rows_out_of_range", "rows_unmatched_person", "rows_inserted"]].tolist() == [4, 1, 1, 2]
     assert by.loc["DIASTOLIC", "rows_inserted"] == 2
     assert by.loc["BMI", "rows_out_of_range"] == 1
-    assert by.loc["ORIGINAL_BMI", "rows_inserted"] == 1
+    # BMI / ORIGINAL_BMI share concept 3038553 -> coalesced: P2 has both populated but yields ONE row
+    assert by.loc["BMI", "rows_inserted"] == 2
+    assert by.loc["ORIGINAL_BMI", "rows_inserted"] == 0 and by.loc["ORIGINAL_BMI", "coalesced_into"] == "BMI"
+    assert con.execute("SELECT COUNT(*) FROM measurement WHERE measurement_concept_id = 3038553").fetchone()[0] == 2
     total = con.execute("SELECT COUNT(*) FROM measurement").fetchone()[0]
     assert total == int(report["rows_inserted"].sum())
     ids = con.execute("SELECT COUNT(DISTINCT measurement_id), COUNT(*) FROM measurement").fetchone()
@@ -185,6 +188,26 @@ def test_load_wide_measurement_sequential(con, tmp_path):
     assert row == (3004249, 120.0, pd.Timestamp(2020, 1, 5, 4, 15), 8876, "8480-6")
     # staging table is cleaned up
     assert not con.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = '_staged_wide_measurement'").fetchall()
+
+
+def test_load_wide_measurement_coalesce_precedence_and_opt_out(con, tmp_path):
+    _add_people(con, 2)
+    p = tmp_path / "bmi.csv"
+    p.write_text("PATID,MEASURE_DATE,BMI,ORIGINAL_BMI\n"
+                 "P1,2020-01-01,25,26\n"      # both: precedence wins
+                 "P1,2020-01-02,2,27\n"       # primary implausible -> falls back
+                 "P2,2020-01-03,,28\n"        # only fallback
+                 "P2,2020-01-04,,\n")
+    mapping = {k: DEFAULT_VITAL_CONCEPT_MAPPING[k] for k in ("BMI", "ORIGINAL_BMI")}
+    load_wide_measurement(con, p, mapping, value_plausibility_filters=DEFAULT_VITAL_PLAUSIBILITY_FILTERS,
+                          coalesce_columns=[("ORIGINAL_BMI", "BMI")], time_col=None, visit_col=None)
+    assert sorted(r[0] for r in con.execute("SELECT value_as_number FROM measurement").fetchall()) == [26, 27, 28]
+    con.execute("DELETE FROM measurement")
+    rep = load_wide_measurement(con, p, mapping, coalesce_columns=None, time_col=None, visit_col=None)
+    assert rep["rows_inserted"].sum() == 5  # no coalescing: BMI x2 + ORIGINAL_BMI x3
+    with pytest.raises(ValueError, match="more than one concept_id"):
+        load_wide_measurement(con, p, {"BMI": 3038553, "ORIGINAL_BMI": 1}, coalesce_columns=[("BMI", "ORIGINAL_BMI")],
+                              time_col=None, visit_col=None)
 
 
 def test_load_wide_measurement_single_mode_and_keep_staged(con, tmp_path):

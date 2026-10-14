@@ -21,7 +21,8 @@ load_wide_measurement(
   datetime_formats = NULL,
   datetime_on_error = "null",
   keep_staged = FALSE,
-  missing_columns = c("raise", "skip")
+  missing_columns = c("raise", "skip"),
+  coalesce_columns = "auto"
 )
 }
 \arguments{
@@ -58,10 +59,19 @@ entry is used when the column has no filter here. See \link{DEFAULT_VITAL_PLAUSI
 
 \item{missing_columns}{\code{"raise"} (default) if a mapped column is absent from the source, or \code{"skip"} to
 ignore it (useful with \link{DEFAULT_VITAL_CONCEPT_MAPPING} on partial extracts).}
+
+\item{coalesce_columns}{Source columns that carry the same measure (e.g. PCORnet \code{BMI} and \code{ORIGINAL_BMI})
+and must yield ONE measurement row per source row instead of one each. \code{list(c("BMI", "ORIGINAL_BMI"))}
+lists a precedence group: the first column with a value inside its plausibility bounds wins, later
+columns only fill gaps. \code{"auto"} (default) builds a group, in \code{concept_mapping} order, from every set of
+columns sharing a \code{concept_id}; \code{NULL} disables coalescing (one row per column, as in 0.5.7). Every
+column of a group must map to the same \code{concept_id}.}
 }
 \value{
 A data frame with one row per source column: \code{source_column}, \code{concept_id}, \code{rows_non_null},
-\code{rows_out_of_range}, \code{rows_unmatched_person}, \code{rows_inserted}.
+\code{rows_out_of_range}, \code{rows_unmatched_person}, \code{rows_inserted}, \code{coalesced_into}. A column folded into an
+earlier one reports \code{rows_inserted = 0} and the primary column's name in \code{coalesced_into}; the primary's
+counts cover the whole group.
 }
 \description{
 Unpivoting a wide table (PCORnet \code{vital}, flowsheets, device streams) with one giant uncommitted

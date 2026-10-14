@@ -1,3 +1,21 @@
+# omopduckdb 0.5.8
+
+Closes the remaining items of the "outstanding requests" review of 0.5.7. Everything ships with **dual Python and R usage** (R functions are snake_case mirrors; Python lives in `omop_etl`). The readmission-cohort engine (`define_study_cohort`), Table 1 / missingness (`generate_table1`) and the Elixhauser / Charlson calculators were already present and are unchanged apart from the guard below.
+
+### `load_wide_measurement(coalesce_columns=)` -- no more duplicate BMI rows
+- Columns that carry the same measure (PCORnet `BMI` and `ORIGINAL_BMI` both map to concept 3038553) now yield ONE measurement row per source row. `coalesce_columns="auto"` (default) groups columns that share a `concept_id`, in `concept_mapping` order; `[("ORIGINAL_BMI", "BMI")]` / `list(c("ORIGINAL_BMI", "BMI"))` sets an explicit precedence; `None` / `NULL` restores the 0.5.7 behaviour. The first value inside its plausibility bounds wins, so an implausible primary never masks a plausible fallback. The report gains a `coalesced_into` column. **Behaviour change:** with the default mapping `ORIGINAL_BMI` no longer inserts its own rows.
+
+### `extract_inpatient_labs` and `extract_measurements(outlier_bounds=, strategy="worst")`
+- Index-stay labs per cohort row: acute labs (lactate, troponin, pO2, pCO2; `ACUTE_LAB_PANEL`) come only from the stay, routine labs from `routine_window` (`stay` / `lookback` / `all`). `selection_rule` is `last_in_stay`, `first_in_stay`, `mean`, `median`, `min`, `max` or `worst` (direction per lab in `WORST_LAB_DIRECTION`). Physiologic outlier bounds are applied BEFORE selection.
+- `extract_measurements` gains `outlier_bounds`, `worst_direction` and the `worst` strategy.
+
+### `extract_prior_utilization`
+- Prior IP / ED / OS visit counts, summed length of stay, days since the last encounter and prior 30-day readmissions in the look-back (`lookback_days`, default 365) strictly before the index admission. The index visit is excluded; `anchor_date="discharge"` is rejected. Visit groups are configurable (`DEFAULT_VISIT_CONCEPT_GROUPS`).
+
+### Train/serve skew guard
+- `extract_elixhauser_comorbidities` and `extract_charlson_index` take `exclude_index_diagnoses=` (default **on**): diagnoses attached to the cohort row's own `visit_occurrence_id` are never counted (they are coded after discharge), and a discharge-like `index_date_col` (`cohort_end_date`, `*discharge*`) is an error. **Behaviour change:** callers that deliberately anchored at discharge must pass `exclude_index_diagnoses=False`.
+- `OMOPScoringPipeline` (Python) / `omop_scoring_pipeline()`, `fit_scoring_pipeline()`, `predict_scoring_pipeline()` (R): a fitted imputer, scaler and model bundled with the ordered feature schema. Scoring raises on missing, unexpected or non-numeric columns and on NaN without an imputer; `out_of_range` / `scoring_pipeline_out_of_range()` is a drift check; bundles save and load (pickle / RDS -- only load files you trust).
+
 # omopduckdb 0.5.7
 
 All request-3 features ship with **dual Python and R usage** (R functions are snake_case mirrors in the `omopduckdb` package; Python lives in `omop_etl`).

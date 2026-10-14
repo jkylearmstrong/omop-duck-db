@@ -218,7 +218,7 @@ def _resolve_concept_ancestor(con) -> tuple[str | None, str]:
 # SQL
 # --------------------------------------------------------------------------------------
 def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_out, cohort_where, lookback_days,
-               concept_ancestor, hierarchy_adjusted):
+               concept_ancestor, hierarchy_adjusted, index_visit_col=None):
     """The profiler as one statement of CTEs.
 
     ``cohort_base`` is the distinct (person, index date) rows and ``cond`` the condition records of those persons with a
@@ -237,6 +237,7 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
         "cond AS (\n"
         "  SELECT co.person_id AS pid, co.condition_concept_id AS cid,\n"
         "         CAST(co.condition_start_date AS DATE) AS cdate,\n"
+        + ("         co.visit_occurrence_id AS vid,\n" if index_visit_col else "") +
         "         upper(replace(regexp_replace(coalesce(co.condition_source_value, ''), '\\s+', '', 'g'), '.', '')) AS src\n"
         "  FROM condition_occurrence AS co\n"
         "  WHERE co.condition_start_date IS NOT NULL\n"
@@ -247,7 +248,8 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
         "  CROSS JOIN (SELECT DISTINCT len FROM icd) AS l\n"
         "  JOIN icd AS i ON i.len = l.len AND i.code = left(s.src, l.len)\n)",
     ]
-    cond_hit = "SELECT c.pid, c.cdate, h.domain FROM cond AS c JOIN src_hit AS h ON h.src = c.src"
+    vid_sel = ", c.vid" if index_visit_col else ""
+    cond_hit = f"SELECT c.pid, c.cdate{vid_sel}, h.domain FROM cond AS c JOIN src_hit AS h ON h.src = c.src"
     if concept_ancestor is not None:
         anc_values = ",\n      ".join(f"({_quote_str(d)}, {int(a)})" for d, a in codes.ancestors)
         ctes.append(
@@ -262,8 +264,19 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
             "    SELECT domain, concept_id FROM anc\n"
             "  )\n)")
         cond_hit += (
-            "\n    UNION ALL\n    SELECT c.pid, c.cdate, h.domain FROM cond AS c JOIN std_hit AS h ON h.concept_id = c.cid")
+            f"\n    UNION ALL\n    SELECT c.pid, c.cdate{vid_sel}, h.domain FROM cond AS c "
+            "JOIN std_hit AS h ON h.concept_id = c.cid")
     window = "ch.cdate < cb.idx_d"
+    if index_visit_col:
+        # train/serve skew guard: diagnoses attached to the index visit itself are coded after discharge
+        ctes.append(
+            "index_visits AS (\n"
+            f"  SELECT DISTINCT c.{_quote_ident(person)} AS person_key, c.{_quote_ident(index_col)} AS index_key,\n"
+            f"         c.{_quote_ident(index_visit_col)} AS vid\n"
+            f"  FROM {qualified} AS c{' WHERE ' + cohort_where if cohort_where else ''}\n"
+            f"  {'AND' if cohort_where else 'WHERE'} c.{_quote_ident(index_visit_col)} IS NOT NULL\n)")
+        window += (" AND NOT EXISTS (SELECT 1 FROM index_visits AS iv WHERE iv.person_key = cb.person_key"
+                   " AND iv.index_key = cb.index_key AND iv.vid = ch.vid)")
     if lookback_days is not None:
         window += f" AND ch.cdate >= cb.idx_d - {int(lookback_days)}"
     ctes.append(f"cond_hit AS (\n    {cond_hit}\n)")
@@ -308,13 +321,14 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
 # Driver
 # --------------------------------------------------------------------------------------
 def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, index_date_col, lookback_days,
-             source_and_standard, hierarchy_adjusted, format):
+             source_and_standard, hierarchy_adjusted, format, exclude_index_diagnoses=True):
     if not isinstance(format, str) or format.lower().strip() not in _FORMATS:
         raise ValueError(f"format must be one of {_FORMATS}; got {format!r}")
     fmt = format.lower().strip()
     lookback = _as_int(lookback_days, "lookback_days", allow_none=True, minimum=0)
     cohort = _as_int(cohort_id, "cohort_id", allow_none=True)
-    for name, value in (("source_and_standard", source_and_standard), ("hierarchy_adjusted", hierarchy_adjusted)):
+    for name, value in (("source_and_standard", source_and_standard), ("hierarchy_adjusted", hierarchy_adjusted),
+                        ("exclude_index_diagnoses", exclude_index_diagnoses)):
         if not isinstance(value, bool):
             raise ValueError(f"{name} must be True or False; got {value!r}")
     if fmt == "polars":
@@ -332,6 +346,11 @@ def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, ind
     index_col = _find_column(cohort_cols, index_date_col, "index_date_col", cohort_table)
     if person == index_col:
         raise ValueError("person_col and index_date_col must be different columns")
+    if exclude_index_diagnoses and re.search(r"(end|discharge)", index_col, re.I):
+        raise ValueError(
+            f"index_date_col {index_date_col!r} looks like a discharge date; a look-back anchored at discharge "
+            "includes diagnoses coded for the index stay, which are unavailable when scoring at the bedside "
+            "(train/serve skew). Anchor at the admission date, or pass exclude_index_diagnoses=False to allow it.")
     clash = sorted({person_col.lower(), index_date_col.lower()} & ({c for _, c, _ in codes.domains}
                                                                     | {spec.score_col, spec.total_col}))
     if clash:
@@ -343,6 +362,13 @@ def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, ind
     missing = [c for c in _CONDITION_COLUMNS if c not in {x.lower() for x in condition_cols}]
     if missing:
         raise ValueError(f"condition_occurrence is missing column(s) {missing}")
+
+    index_visit_col = None
+    if exclude_index_diagnoses:
+        cohort_lower = {c.lower(): c for c in cohort_cols}
+        cond_lower = {x.lower() for x in condition_cols}
+        if "visit_occurrence_id" in cohort_lower and "visit_occurrence_id" in cond_lower:
+            index_visit_col = cohort_lower["visit_occurrence_id"]
 
     cohort_where = ""
     if cohort is not None:
@@ -375,7 +401,7 @@ def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, ind
     sql = _build_sql(
         spec, codes, qualified=qualified, person=person, index_col=index_col, person_out=person_col,
         index_out=index_date_col, cohort_where=cohort_where, lookback_days=lookback,
-        concept_ancestor=concept_ancestor, hierarchy_adjusted=hierarchy_adjusted)
+        concept_ancestor=concept_ancestor, hierarchy_adjusted=hierarchy_adjusted, index_visit_col=index_visit_col)
     res = con.execute(sql)
     if fmt == "df":
         return res.df()
@@ -401,6 +427,7 @@ def extract_elixhauser_comorbidities(
     source_and_standard: bool = True,
     hierarchy_adjusted: bool = True,
     format: str = "df",
+    exclude_index_diagnoses: bool = True,
 ) -> Any:
     """Elixhauser comorbidity profile (31 domains, Quan et al. 2005) with the van Walraven 2009 score.
 
@@ -435,6 +462,13 @@ def extract_elixhauser_comorbidities(
         Apply the hierarchy rules (``dm_comp`` > ``dm_uncomp``, ``mets`` > ``solid_tumor``, ``htn_comp`` >
         ``htn_uncomp``) to the score and to the condition count. The 0/1 domain columns are always the raw flags.
         ``False`` gives the plain weighted sum and the plain count of raw flags.
+    exclude_index_diagnoses : bool, default True
+        Bedside-scoring guard (train/serve skew): diagnoses are coded by medical coders days to weeks after
+        discharge, so a model trained on them cannot be scored at discharge. When True, (a) condition records whose
+        ``visit_occurrence_id`` equals the cohort row's ``visit_occurrence_id`` are never counted (when both tables
+        have that column; the cohorts from :func:`define_study_cohort` do), and (b) an ``index_date_col`` that looks like
+        a discharge / end date raises ``ValueError``, since a window ending at discharge contains the index stay.
+        The window is always ``[index - lookback_days, index)``, i.e. strictly before an admission-anchored index.
     format : {'df', 'arrow', 'polars'}, default 'df'
         Return a pandas DataFrame, a pyarrow Table or a polars DataFrame. ``'polars'`` needs the optional ``polars``
         package and raises ``ImportError`` without it.
@@ -483,7 +517,8 @@ def extract_elixhauser_comorbidities(
     [[1, 1, 7]]
     """
     return _profile(con, _ELIXHAUSER, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
-                    index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format)
+                    index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format,
+                    exclude_index_diagnoses)
 
 
 def extract_charlson_index(
@@ -496,6 +531,7 @@ def extract_charlson_index(
     source_and_standard: bool = True,
     hierarchy_adjusted: bool = True,
     format: str = "df",
+    exclude_index_diagnoses: bool = True,
 ) -> Any:
     """Charlson comorbidity profile (17 categories, Quan et al. 2005 coding) with the Charlson index.
 
@@ -531,6 +567,13 @@ def extract_charlson_index(
         Apply the hierarchy rules (``mod_severe_liver`` > ``mild_liver``, ``dm_comp`` > ``dm_uncomp``, ``mets`` >
         ``malignancy``) to the index and to the condition count. The 0/1 category columns are always the raw flags.
         ``False`` gives the plain weighted sum and the plain count of raw flags.
+    exclude_index_diagnoses : bool, default True
+        Bedside-scoring guard (train/serve skew): diagnoses are coded by medical coders days to weeks after
+        discharge, so a model trained on them cannot be scored at discharge. When True, (a) condition records whose
+        ``visit_occurrence_id`` equals the cohort row's ``visit_occurrence_id`` are never counted (when both tables
+        have that column; the cohorts from :func:`define_study_cohort` do), and (b) an ``index_date_col`` that looks like
+        a discharge / end date raises ``ValueError``, since a window ending at discharge contains the index stay.
+        The window is always ``[index - lookback_days, index)``, i.e. strictly before an admission-anchored index.
     format : {'df', 'arrow', 'polars'}, default 'df'
         Return a pandas DataFrame, a pyarrow Table or a polars DataFrame. ``'polars'`` needs the optional ``polars``
         package and raises ``ImportError`` without it.
@@ -576,4 +619,5 @@ def extract_charlson_index(
     [[1, 1, 6]]
     """
     return _profile(con, _CHARLSON, "extract_charlson_index", cohort_table, cohort_id, person_col,
-                    index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format)
+                    index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format,
+                    exclude_index_diagnoses)

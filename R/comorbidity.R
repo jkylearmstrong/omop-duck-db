@@ -45,6 +45,12 @@
 #'   raised and only the source side is used. `FALSE` uses the source side only, without a warning.
 #' @param hierarchy_adjusted Apply the hierarchy rules to the score and the condition count (default `TRUE`).
 #'   `FALSE` gives the plain weighted sum and the plain count of raw flags.
+#' @param exclude_index_diagnoses Bedside-scoring guard (train/serve skew, default `TRUE`): diagnoses are coded by
+#'   medical coders days to weeks after discharge, so a model trained on them cannot be scored at discharge. When
+#'   `TRUE`, (a) condition records whose `visit_occurrence_id` equals the cohort row's `visit_occurrence_id` are never
+#'   counted (when both tables have that column; cohorts from `define_study_cohort()` do), and (b) an
+#'   `index_date_col` that looks like a discharge / end date is an error, since a window ending at discharge contains
+#'   the index stay. The window is always `[index - lookback_days, index)`.
 #' @return A `data.frame` with the columns, in order: `person_col`, `index_date_col`, the 31 `elix_<domain>` flags
 #'   (integer 0/1: chf, arrhythmia, valvular, pulm_circ, pvd, htn_uncomp, htn_comp, paralysis, neuro_other, copd,
 #'   dm_uncomp, dm_comp, hypothyroid, renal_failure, liver_disease, pud, hiv, lymphoma, mets, solid_tumor, rheumatic,
@@ -70,9 +76,10 @@ extract_elixhauser_comorbidities <- function(con,
                                              index_date_col = "cohort_start_date",
                                              lookback_days = 365,
                                              source_and_standard = TRUE,
-                                             hierarchy_adjusted = TRUE) {
+                                             hierarchy_adjusted = TRUE,
+                                             exclude_index_diagnoses = TRUE) {
   .comorb_profile(con, .comorb_elixhauser, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
-                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted)
+                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses)
 }
 
 #' Charlson comorbidity profile (17 categories, Charlson index)
@@ -130,9 +137,10 @@ extract_charlson_index <- function(con,
                                    index_date_col = "cohort_start_date",
                                    lookback_days = 365,
                                    source_and_standard = TRUE,
-                                   hierarchy_adjusted = TRUE) {
+                                   hierarchy_adjusted = TRUE,
+                                   exclude_index_diagnoses = TRUE) {
   .comorb_profile(con, .comorb_charlson, "extract_charlson_index", cohort_table, cohort_id, person_col,
-                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted)
+                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses)
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -301,7 +309,7 @@ extract_charlson_index <- function(con,
 
 # The profiler as one statement of CTEs (see the Python twin for the walk-through).
 .comorb_build_sql <- function(spec, codes, qualified, person, index_col, person_out, index_out, cohort_where,
-                              lookback_days, concept_ancestor, hierarchy_adjusted) {
+                              lookback_days, concept_ancestor, hierarchy_adjusted, index_visit_col = NULL) {
   icd_values <- paste(sprintf("(%s, %s)", .comorb_qs(codes$icd$domain), .comorb_qs(codes$icd$code)),
                       collapse = ",\n      ")
   ctes <- c(
@@ -314,6 +322,7 @@ extract_charlson_index <- function(con,
     paste0("cond AS (\n",
            "  SELECT co.person_id AS pid, co.condition_concept_id AS cid,\n",
            "         CAST(co.condition_start_date AS DATE) AS cdate,\n",
+           if (!is.null(index_visit_col)) "         co.visit_occurrence_id AS vid,\n" else "",
            "         upper(replace(regexp_replace(coalesce(co.condition_source_value, ''), '\\s+', '', 'g'), '.', '')) AS src\n",
            "  FROM condition_occurrence AS co\n",
            "  WHERE co.condition_start_date IS NOT NULL\n",
@@ -324,7 +333,8 @@ extract_charlson_index <- function(con,
            "  CROSS JOIN (SELECT DISTINCT len FROM icd) AS l\n",
            "  JOIN icd AS i ON i.len = l.len AND i.code = left(s.src, l.len)\n)")
   )
-  cond_hit <- "SELECT c.pid, c.cdate, h.domain FROM cond AS c JOIN src_hit AS h ON h.src = c.src"
+  vid_sel <- if (!is.null(index_visit_col)) ", c.vid" else ""
+  cond_hit <- paste0("SELECT c.pid, c.cdate", vid_sel, ", h.domain FROM cond AS c JOIN src_hit AS h ON h.src = c.src")
   if (!is.null(concept_ancestor)) {
     anc_values <- paste(sprintf("(%s, %s)", .comorb_qs(codes$ancestors$domain), .comorb_num(codes$ancestors$concept_id)),
                         collapse = ",\n      ")
@@ -341,9 +351,19 @@ extract_charlson_index <- function(con,
              "  )\n)")
     )
     cond_hit <- paste0(cond_hit, "\n    UNION ALL\n",
-                       "    SELECT c.pid, c.cdate, h.domain FROM cond AS c JOIN std_hit AS h ON h.concept_id = c.cid")
+                       "    SELECT c.pid, c.cdate", vid_sel, ", h.domain FROM cond AS c JOIN std_hit AS h ON h.concept_id = c.cid")
   }
   window <- "ch.cdate < cb.idx_d"
+  if (!is.null(index_visit_col)) {
+    # train/serve skew guard: diagnoses attached to the index visit itself are coded after discharge
+    ctes <- c(ctes, sprintf(paste0(
+      "index_visits AS (\n  SELECT DISTINCT c.%s AS person_key, c.%s AS index_key, c.%s AS vid\n  FROM %s AS c\n",
+      "  %s c.%s IS NOT NULL\n)"),
+      .comorb_qi(person), .comorb_qi(index_col), .comorb_qi(index_visit_col), qualified,
+      if (nzchar(cohort_where)) paste0("WHERE ", cohort_where, " AND") else "WHERE", .comorb_qi(index_visit_col)))
+    window <- paste0(window, " AND NOT EXISTS (SELECT 1 FROM index_visits AS iv WHERE iv.person_key = cb.person_key",
+                     " AND iv.index_key = cb.index_key AND iv.vid = ch.vid)")
+  }
   if (!is.null(lookback_days)) window <- paste0(window, " AND ch.cdate >= cb.idx_d - ", .comorb_num(lookback_days))
   ctes <- c(
     ctes,
@@ -387,11 +407,12 @@ extract_charlson_index <- function(con,
 }
 
 .comorb_profile <- function(con, spec, fn, cohort_table, cohort_id, person_col, index_date_col, lookback_days,
-                            source_and_standard, hierarchy_adjusted) {
+                            source_and_standard, hierarchy_adjusted, exclude_index_diagnoses = TRUE) {
   lookback <- .comorb_check_int(lookback_days, "lookback_days", allow_null = TRUE, minimum = 0)
   cohort <- .comorb_check_int(cohort_id, "cohort_id", allow_null = TRUE)
   .comorb_check_flag(source_and_standard, "source_and_standard")
   .comorb_check_flag(hierarchy_adjusted, "hierarchy_adjusted")
+  .comorb_check_flag(exclude_index_diagnoses, "exclude_index_diagnoses")
   codes <- .comorb_load_codes(spec)
   qualified <- .comorb_qualified_table(cohort_table)
   if (!inherits(con, "DBIConnection") || !DBI::dbIsValid(con)) stop("con must be an open DBI connection", call. = FALSE)
@@ -403,6 +424,12 @@ extract_charlson_index <- function(con,
   person <- .comorb_find_column(cohort_cols, person_col, "person_col", cohort_table)
   index_col <- .comorb_find_column(cohort_cols, index_date_col, "index_date_col", cohort_table)
   if (identical(person, index_col)) stop("person_col and index_date_col must be different columns", call. = FALSE)
+  if (exclude_index_diagnoses && grepl("(end|discharge)", index_col, ignore.case = TRUE)) {
+    stop("index_date_col '", index_date_col, "' looks like a discharge date; a look-back anchored at discharge ",
+         "includes diagnoses coded for the index stay, which are unavailable when scoring at the bedside ",
+         "(train/serve skew). Anchor at the admission date, or pass exclude_index_diagnoses = FALSE to allow it.",
+         call. = FALSE)
+  }
   clash <- intersect(c(tolower(person_col), tolower(index_date_col)),
                      c(codes$domains$column, spec$score_col, spec$total_col))
   if (length(clash)) {
@@ -415,6 +442,12 @@ extract_charlson_index <- function(con,
   missing <- setdiff(.comorb_condition_columns, tolower(condition_cols))
   if (length(missing)) {
     stop("condition_occurrence is missing column(s) ", paste(missing, collapse = ", "), call. = FALSE)
+  }
+
+  index_visit_col <- NULL
+  if (exclude_index_diagnoses) {
+    i <- match("visit_occurrence_id", tolower(cohort_cols))
+    if (!is.na(i) && "visit_occurrence_id" %in% tolower(condition_cols)) index_visit_col <- cohort_cols[[i]]
   }
 
   cohort_where <- ""
@@ -450,6 +483,6 @@ extract_charlson_index <- function(con,
   }
 
   sql <- .comorb_build_sql(spec, codes, qualified, person, index_col, person_col, index_date_col, cohort_where,
-                           lookback, concept_ancestor, hierarchy_adjusted)
+                           lookback, concept_ancestor, hierarchy_adjusted, index_visit_col)
   DBI::dbGetQuery(con, sql)
 }

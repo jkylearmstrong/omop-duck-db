@@ -96,7 +96,21 @@ reference:
   - aggregate_concept_sets
   - extract_measurements
   - extract_standard_labs
+  - extract_inpatient_labs
+  - extract_prior_utilization
   - CORE_14_LAB_PANEL
+  - ACUTE_LAB_PANEL
+  - WORST_LAB_DIRECTION
+  - DEFAULT_VISIT_CONCEPT_GROUPS
+- title: Production scoring and train/serve skew guard
+  desc: A fitted imputer, scaler and model bundled with the ordered feature schema; scoring refuses frames that do not match it.
+  contents:
+  - omop_scoring_pipeline
+  - fit_scoring_pipeline
+  - validate_scoring_input
+  - predict_scoring_pipeline
+  - scoring_pipeline_out_of_range
+  - save_scoring_pipeline
 - title: Ecosystem bridges (HADES & tidymodels)
   desc: Interoperability with OHDSI HADES PatientLevelPrediction and R tidymodels / orbital scoring.
   contents:

@@ -355,7 +355,12 @@ def aggregate_concept_sets(
         window: Windowing strategy: 'lookback' ([t0-W, t0)), 'stay' ([t0, t_end]), or 'all' (<= t_end).
         as_flag: If True, returns 0/1 binary indicator; if False, returns event count.
         format: Output format ('df', 'arrow', 'polars').
-        
+        outlier_bounds: Optional ``{feature_name: (low, high)}`` inclusive bounds (either may be None). Readings
+                  outside them are discarded BEFORE the strategy is applied, so an impossible last value cannot
+                  mask a valid earlier one. See :data:`PHYSIOLOGIC_LAB_BOUNDS`.
+        worst_direction: For ``strategy='worst'``: ``{feature_name: 'max'|'min'}`` (e.g. creatinine 'max',
+                  albumin 'min'). Defaults to :data:`WORST_LAB_DIRECTION`; a feature with no entry raises.
+
     Returns:
         pd.DataFrame, pyarrow.Table, or polars.DataFrame.
     """
@@ -476,6 +481,8 @@ def extract_measurements(
     window: str = "stay",
     lookback_days: int | None = None,
     format: str = "df",
+    outlier_bounds: dict[str, tuple[float | None, float | None]] | None = None,
+    worst_direction: dict[str, str] | None = None,
 ) -> Any:
     r"""Extracts consolidated laboratory and vital sign measurements with selectable windowing strategies.
     
@@ -489,7 +496,8 @@ def extract_measurements(
         loinc_map: Dictionary mapping measurement feature name to LOINC codes or concept IDs.
                    If None, defaults to the 14 consolidated acute labs and vitals.
         strategy: Aggregation strategy: 'last_before_discharge', 'first_on_admission',
-                  'mean', 'median', 'min', or 'max'.
+                  'mean', 'median', 'min', 'max', or 'worst' (per lab, the max or min according to
+                  ``worst_direction``).
         window: Windowing scope: 'stay' ([t0, t_end]), 'lookback' ([t0-W, t0)), or 'all' (<= t_end).
         lookback_days: Lookback window in days when window='lookback' (default 365).
         format: Output format ('df', 'arrow', 'polars').
@@ -505,11 +513,33 @@ def extract_measurements(
         active_map = loinc_map
 
     strat = strategy.lower().strip()
-    strat_allowed = ("last_before_discharge", "first_on_admission", "mean", "median", "min", "max")
+    strat_allowed = ("last_before_discharge", "first_on_admission", "mean", "median", "min", "max", "worst")
     if strat not in strat_allowed:
         raise ValueError(f"Unsupported strategy '{strategy}'. Use one of {strat_allowed}.")
 
     filter_cohort = f"WHERE c.cohort_definition_id = {int(cohort_id)}" if cohort_id is not None else ""
+
+    def _lit(text: str) -> str:
+        return "'" + str(text).replace("'", "''") + "'"
+
+    bound_conds = []
+    for name, (lo, hi) in (outlier_bounds or {}).items():
+        if name not in active_map:
+            raise ValueError(f"outlier_bounds names unknown feature '{name}'.")
+        bad = []
+        if lo is not None:
+            bad.append(f"m.value_as_number < {float(lo)!r}")
+        if hi is not None:
+            bad.append(f"m.value_as_number > {float(hi)!r}")
+        if bad:
+            bound_conds.append(f"NOT (r.lab_name = {_lit(name)} AND ({' OR '.join(bad)}))")
+    bounds_sql = "".join(f" AND {c}" for c in bound_conds)
+
+    directions = {**WORST_LAB_DIRECTION, **(worst_direction or {})}
+    if strat == "worst":
+        for name in active_map:
+            if directions.get(name) not in ("max", "min"):
+                raise ValueError(f"strategy='worst' needs worst_direction['{name}'] to be 'max' or 'min'.")
 
     con.execute("DROP TABLE IF EXISTS _temp_loinc_seeds;")
     con.execute("CREATE TEMPORARY TABLE _temp_loinc_seeds (lab_name VARCHAR, code_or_id VARCHAR, is_concept_id BOOLEAN);")
@@ -566,7 +596,7 @@ def extract_measurements(
             JOIN measurement m2 ON m2.measurement_source_value = s.code_or_id
         ) r ON m.measurement_concept_id = r.concept_id
         WHERE m.value_as_number IS NOT NULL
-          {cohort_filter_and};
+          {cohort_filter_and}{bounds_sql};
     """)
 
     lab_names = sorted(list(active_map.keys()))
@@ -619,6 +649,15 @@ def extract_measurements(
     elif strat == "max":
         agg_sql = """
             SELECT subject_id, cohort_start_date, lab_name, MAX(value_as_number) AS value_as_number
+            FROM _temp_matching_meas
+            GROUP BY subject_id, cohort_start_date, lab_name
+        """
+    elif strat == "worst":
+        min_labs = ", ".join(_lit(n) for n in active_map if directions[n] == "min") or "NULL"
+        agg_sql = f"""
+            SELECT subject_id, cohort_start_date, lab_name,
+                   CASE WHEN lab_name IN ({min_labs}) THEN MIN(value_as_number)
+                        ELSE MAX(value_as_number) END AS value_as_number
             FROM _temp_matching_meas
             GROUP BY subject_id, cohort_start_date, lab_name
         """
@@ -678,6 +717,22 @@ CORE_14_LAB_PANEL: dict[str, list[str]] = {
     "hba1c": ["4548-4"],
 }
 
+# Direction in which each lab is clinically "worse" (used by ``strategy='worst'``).
+WORST_LAB_DIRECTION: dict[str, str] = {
+    "bun": "max", "creatinine": "max", "sodium": "min", "potassium": "max", "chloride": "min",
+    "bicarbonate": "min", "glucose": "max", "calcium": "min", "albumin": "min", "bilirubin_total": "max",
+    "ast": "max", "alt": "max", "wbc": "max", "hemoglobin": "min", "platelets": "min", "hba1c": "max",
+    "lactate": "max", "troponin": "max", "po2": "min", "pco2": "max",
+}
+
+# Acute inpatient labs (arterial blood gas, lactate, troponin I) that are only meaningful during the stay.
+ACUTE_LAB_PANEL: dict[str, list[str]] = {
+    "lactate": ["2524-7", "32693-4"],
+    "troponin": ["10839-9", "89579-7"],
+    "po2": ["2703-7"],
+    "pco2": ["2019-8"],
+}
+
 PHYSIOLOGIC_LAB_BOUNDS: dict[str, tuple[float, float]] = {
     "bun": (1.0, 250.0),
     "creatinine": (0.1, 30.0),
@@ -695,6 +750,10 @@ PHYSIOLOGIC_LAB_BOUNDS: dict[str, tuple[float, float]] = {
     "hemoglobin": (1.0, 25.0),
     "platelets": (5.0, 2000.0),
     "hba1c": (3.0, 25.0),
+    "lactate": (0.1, 30.0),
+    "troponin": (0.0, 100000.0),
+    "po2": (10.0, 700.0),
+    "pco2": (5.0, 200.0),
 }
 
 
@@ -764,3 +823,81 @@ def extract_standard_labs(
             return df
     return df
 
+
+
+def extract_inpatient_labs(
+    con: duckdb.DuckDBPyConnection,
+    cohort_table: str = "cohort",
+    cohort_id: int | None = None,
+    lab_specs: dict[str, Sequence[str | int]] | None = None,
+    selection_rule: str = "last_in_stay",
+    acute_lab_subset: Sequence[str] | None = None,
+    routine_window: str = "lookback",
+    routine_lookback_days: int = 365,
+    outlier_bounds: dict[str, tuple[float | None, float | None]] | None = None,
+    format: str = "df",
+) -> Any:
+    """Index-stay laboratory values per cohort row, separating acute labs from routine/chronic ones.
+
+    Labs named in ``acute_lab_subset`` (lactate, troponin, blood gases, ...) are only meaningful during the stay, so
+    they are always drawn from ``[cohort_start_date, cohort_end_date]``. The remaining labs (HbA1c, creatinine, ...)
+    use ``routine_window`` so a value measured shortly before admission is not lost. Both blocks use the same
+    ``selection_rule`` and are returned side by side, one row per (subject_id, cohort_start_date).
+
+    Args:
+        con, cohort_table, cohort_id: As in :func:`extract_measurements` (the cohort needs ``subject_id``,
+            ``cohort_start_date`` and ``cohort_end_date``).
+        lab_specs: ``{lab_name: [LOINC codes or concept ids]}``. Default: :data:`CORE_14_LAB_PANEL` plus
+            :data:`ACUTE_LAB_PANEL`.
+        selection_rule: ``'last_in_stay'`` (closest to discharge), ``'first_in_stay'``, ``'mean'``, ``'median'``,
+            ``'min'``, ``'max'`` or ``'worst'`` (direction per lab in :data:`WORST_LAB_DIRECTION`).
+        acute_lab_subset: Names in ``lab_specs`` treated as acute (stay window only). Default (None): the
+            :data:`ACUTE_LAB_PANEL` names (lactate, troponin, po2, pco2) that are present in ``lab_specs``. An
+            explicit list must be a subset of ``lab_specs``.
+        routine_window: Window for the non-acute labs: ``'stay'``, ``'lookback'`` (the ``routine_lookback_days``
+            before admission, excluding the stay) or ``'all'`` (everything up to discharge).
+        routine_lookback_days: Days for the ``'lookback'`` window.
+        outlier_bounds: ``{lab_name: (low, high)}``; defaults to :data:`PHYSIOLOGIC_LAB_BOUNDS`. Pass ``{}`` to
+            disable. Readings outside the bounds are dropped before selection.
+        format: 'df', 'arrow' or 'polars'.
+    """
+    rules = {"last_in_stay": "last_before_discharge", "first_in_stay": "first_on_admission", "mean": "mean",
+             "median": "median", "min": "min", "max": "max", "worst": "worst"}
+    if selection_rule not in rules:
+        raise ValueError(f"selection_rule must be one of {tuple(rules)}.")
+    if routine_window not in ("stay", "lookback", "all"):
+        raise ValueError("routine_window must be 'stay', 'lookback' or 'all'.")
+    specs = dict(lab_specs) if lab_specs is not None else {**CORE_14_LAB_PANEL, **ACUTE_LAB_PANEL}
+    if not specs:
+        raise ValueError("lab_specs is empty.")
+    if acute_lab_subset is None:
+        acute = [n for n in ACUTE_LAB_PANEL if n in specs]
+    else:
+        unknown = [n for n in acute_lab_subset if n not in specs]
+        if unknown:
+            raise ValueError(f"acute_lab_subset names not in lab_specs: {unknown}.")
+        acute = list(acute_lab_subset)
+    routine = [n for n in specs if n not in acute]
+    bounds = PHYSIOLOGIC_LAB_BOUNDS if outlier_bounds is None else outlier_bounds
+
+    blocks = []
+    for names, window in ((acute, "stay"), (routine, routine_window)):
+        if not names:
+            continue
+        blocks.append(extract_measurements(
+            con, cohort_table=cohort_table, cohort_id=cohort_id, loinc_map={n: specs[n] for n in names},
+            strategy=rules[selection_rule], window=window, lookback_days=routine_lookback_days,
+            outlier_bounds={k: v for k, v in bounds.items() if k in names}, format="df"))
+    res = blocks[0]
+    for extra in blocks[1:]:
+        res = res.merge(extra, on=["subject_id", "cohort_start_date"], how="outer")
+    res = res.sort_values(["subject_id", "cohort_start_date"]).reset_index(drop=True)
+
+    fmt = format.lower().strip()
+    if fmt in ("arrow", "pyarrow"):
+        import pyarrow as pa
+        return pa.Table.from_pandas(res)
+    if fmt == "polars":
+        import polars as pl
+        return pl.from_pandas(res)
+    return res

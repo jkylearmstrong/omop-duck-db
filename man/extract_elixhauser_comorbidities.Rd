@@ -12,7 +12,8 @@ extract_elixhauser_comorbidities(
   index_date_col = "cohort_start_date",
   lookback_days = 365,
   source_and_standard = TRUE,
-  hierarchy_adjusted = TRUE
+  hierarchy_adjusted = TRUE,
+  exclude_index_diagnoses = TRUE
 )
 }
 \arguments{
@@ -39,6 +40,13 @@ raised and only the source side is used. \code{FALSE} uses the source side only,
 
 \item{hierarchy_adjusted}{Apply the hierarchy rules to the score and the condition count (default \code{TRUE}).
 \code{FALSE} gives the plain weighted sum and the plain count of raw flags.}
+
+\item{exclude_index_diagnoses}{Bedside-scoring guard (train/serve skew, default \code{TRUE}): diagnoses are coded by
+medical coders days to weeks after discharge, so a model trained on them cannot be scored at discharge. When
+\code{TRUE}, (a) condition records whose \code{visit_occurrence_id} equals the cohort row's \code{visit_occurrence_id} are never
+counted (when both tables have that column; cohorts from \code{define_study_cohort()} do), and (b) an
+\code{index_date_col} that looks like a discharge / end date is an error, since a window ending at discharge contains
+the index stay. The window is always \verb{[index - lookback_days, index)}.}
 }
 \value{
 A \code{data.frame} with the columns, in order: \code{person_col}, \code{index_date_col}, the 31 \verb{elix_<domain>} flags
