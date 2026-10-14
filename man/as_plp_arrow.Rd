@@ -29,4 +29,10 @@ A list with Arrow tables \code{cohorts}, \code{covariates}, \code{covariate_ref}
 Non-null, non-zero numeric features become sparse \verb{(rowId, covariateId, covariateValue)} rows computed by
 DuckDB and returned as Arrow tables, in memory: no Parquet or SQLite round-trip. One stable \code{rowId} is shared
 by \code{cohorts}, \code{covariates} and \code{outcomes}. Mirror of Python \code{as_plp_arrow}. Needs the \code{arrow} package.
+Turn the result into a \code{plpData} with \code{\link[=plp_arrow_to_plp_data]{plp_arrow_to_plp_data()}}.
+}
+\details{
+On Windows, loading R's \code{arrow} before python's \code{pyarrow} makes the latter fail to import in the same process
+("DLL load failed while importing lib"), which breaks DeepPatientLevelPrediction. Import pyarrow first
+(\code{reticulate::import("pyarrow.lib")}) in sessions that use both.
 }

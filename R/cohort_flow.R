@@ -220,6 +220,11 @@ generate_table2 <- function(data, table_name = NULL, columns = NULL, strata_col 
 #' Non-null, non-zero numeric features become sparse `(rowId, covariateId, covariateValue)` rows computed by
 #' DuckDB and returned as Arrow tables, in memory: no Parquet or SQLite round-trip. One stable `rowId` is shared
 #' by `cohorts`, `covariates` and `outcomes`. Mirror of Python `as_plp_arrow`. Needs the `arrow` package.
+#' Turn the result into a `plpData` with [plp_arrow_to_plp_data()].
+#'
+#' On Windows, loading R's `arrow` before python's `pyarrow` makes the latter fail to import in the same process
+#' ("DLL load failed while importing lib"), which breaks DeepPatientLevelPrediction. Import pyarrow first
+#' (`reticulate::import("pyarrow.lib")`) in sessions that use both.
 #'
 #' @param con DuckDB DBI connection.
 #' @param features Data frame or DuckDB table name.
@@ -261,4 +266,81 @@ as_plp_arrow <- function(con, features, id_col = "subject_id", outcome_col = NUL
     res$outcomes <- get(paste0("SELECT rowId, CAST(", q(outcome_col), " AS INTEGER) AS outcomeCount FROM _plp_base"))
   }
   res
+}
+
+#' Turn [as_plp_arrow()] output into a `plpData` object
+#'
+#' Assembles the cohort, outcome and covariate tables from [as_plp_arrow()] into the `plpData` structure that
+#' `PatientLevelPrediction::createStudyPopulation()` and `runPlp()` accept (and so DeepPLP). Observation-period
+#' arithmetic (`daysFromObsStart`, `daysToObsEnd`) and age / gender come from `observation_period` / `person`
+#' on `con`; rows with no observation period around their index date are dropped with a warning. Covariate ids
+#' are the 1-based positions in `covariate_ref` (analysis id 1), not FeatureExtraction's `concept * 1000 + analysis`.
+#'
+#' @param plp_arrow Result of [as_plp_arrow()] built with an `outcome_col`.
+#' @param con DuckDB connection holding `observation_period` and `person`.
+#' @param target_id,outcome_id Ids recorded in the cohort and outcome tables.
+#' @param days_to_event Day (relative to index) at which a positive label is placed (scalar or per row).
+#' @param cohort_end_days Days from index to cohort end.
+#' @return A `plpData` object.
+#' @export
+plp_arrow_to_plp_data <- function(plp_arrow, con, target_id = 1L, outcome_id = 1L, days_to_event = 1, cohort_end_days = 0) {
+  for (pkg in c("Andromeda", "arrow")) {
+    if (!requireNamespace(pkg, quietly = TRUE)) stop(sprintf("plp_arrow_to_plp_data() needs the '%s' package.", pkg), call. = FALSE)
+  }
+  if (is.null(plp_arrow$outcomes)) stop("as_plp_arrow() must be called with an `outcome_col`.", call. = FALSE)
+  coh <- as.data.frame(plp_arrow$cohorts)
+  if (!"cohortStartDate" %in% names(coh)) stop("as_plp_arrow() must be called with a `date_col`.", call. = FALSE)
+  n <- nrow(coh)
+  days_to_event <- rep_len(days_to_event, n)
+  cohort_end_days <- rep_len(cohort_end_days, n)
+  frame <- data.frame(row_id = coh$rowId, person_id = coh$subjectId, index_date = as.Date(coh$cohortStartDate))
+  duckdb::duckdb_register(con, "_plp_cohort", frame)
+  on.exit(duckdb::duckdb_unregister(con, "_plp_cohort"), add = TRUE)
+  obs <- DBI::dbGetQuery(con, "
+    SELECT c.row_id, c.person_id, c.index_date,
+           date_diff('day', o.observation_period_start_date, c.index_date) AS days_from_obs_start,
+           date_diff('day', c.index_date, o.observation_period_end_date) AS days_to_obs_end,
+           date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.index_date) AS age_year,
+           p.gender_concept_id AS gender
+    FROM _plp_cohort c
+    JOIN observation_period o ON o.person_id = c.person_id
+         AND o.observation_period_start_date <= c.index_date AND o.observation_period_end_date >= c.index_date
+    LEFT JOIN person p ON p.person_id = c.person_id
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY c.row_id ORDER BY o.observation_period_start_date DESC) = 1
+    ORDER BY c.row_id")
+  kept <- as.integer(obs$row_id)
+  if (length(kept) < n) {
+    warning(sprintf("%d of %d rows have no observation period around their index date and were dropped.", n - length(kept), n),
+            call. = FALSE)
+  }
+  if (length(kept) == 0) stop("No cohort row falls inside an observation period.", call. = FALSE)
+  pos_idx <- match(kept, coh$rowId)
+  cohorts <- data.frame(rowId = kept, subjectId = obs$person_id, targetId = as.integer(target_id),
+                        cohortStartDate = as.Date(obs$index_date),
+                        daysFromObsStart = as.numeric(obs$days_from_obs_start),
+                        daysToCohortEnd = as.numeric(cohort_end_days[pos_idx]),
+                        daysToObsEnd = as.numeric(obs$days_to_obs_end), ageYear = as.numeric(obs$age_year),
+                        gender = as.numeric(obs$gender))
+  oc <- as.data.frame(plp_arrow$outcomes)
+  pos <- oc$rowId[oc$outcomeCount > 0 & oc$rowId %in% kept]
+  outcomes <- data.frame(rowId = pos, outcomeId = as.integer(outcome_id),
+                         daysToEvent = as.numeric(days_to_event[match(pos, coh$rowId)]))
+  covs <- as.data.frame(plp_arrow$covariates)
+  covs <- covs[covs$rowId %in% kept, c("rowId", "covariateId", "covariateValue"), drop = FALSE]
+  covs$rowId <- as.numeric(covs$rowId)
+  ref <- as.data.frame(plp_arrow$covariate_ref)
+  ref <- data.frame(covariateId = as.numeric(ref$covariateId), covariateName = as.character(ref$covariateName),
+                    analysisId = as.numeric(ref$analysisId), conceptId = as.numeric(ref$conceptId), stringsAsFactors = FALSE)
+  analysis_ref <- data.frame(analysisId = 1, analysisName = "OmopduckdbArrowFeatures", domainId = "Measurement",
+                             startDay = NA_real_, endDay = NA_real_, isBinary = "N", missingMeansZero = "Y",
+                             stringsAsFactors = FALSE)
+  covariate_data <- Andromeda::andromeda(covariates = covs, covariateRef = ref, analysisRef = analysis_ref)
+  attr(covariate_data, "metaData") <- list(populationSize = nrow(cohorts), cohortIds = as.integer(target_id))
+  class(covariate_data) <- "CovariateData"
+  structure(list(cohorts = cohorts, outcomes = outcomes, covariateData = covariate_data, timeRef = NULL,
+                 metaData = list(databaseDetails = list(targetId = as.integer(target_id), outcomeIds = as.integer(outcome_id),
+                                                        cdmDatabaseName = "omopduckdb", cdmDatabaseId = "omopduckdb"),
+                                 restrictPlpDataSettings = NULL,
+                                 covariateSettings = list(source = "omopduckdb::as_plp_arrow"))),
+            class = "plpData")
 }

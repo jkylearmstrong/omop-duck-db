@@ -189,6 +189,7 @@ reference:
   - to_graphviz
   - generate_table2
   - as_plp_arrow
+  - plp_arrow_to_plp_data
 - title: Large-file sync
   desc: Synchronize DuckDB databases and vocabulary files via Google Drive.
   contents:
