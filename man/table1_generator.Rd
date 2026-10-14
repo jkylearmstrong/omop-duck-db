@@ -9,6 +9,7 @@ table1_generator(
   con = NULL,
   read_only = TRUE,
   bounds = NULL,
+  population = "adult",
   harmonize_units = TRUE
 )
 }
@@ -20,6 +21,8 @@ table1_generator(
 \item{read_only}{Open \code{db_path} read-only (default).}
 
 \item{bounds}{\code{NULL} (defaults), a named list of overrides, or \code{FALSE}.}
+
+\item{population}{\code{"adult"}, \code{"pediatric"}, or \code{"neonatal"} (default \code{"adult"}).}
 
 \item{harmonize_units}{Run the unit preflight first (default \code{TRUE}).}
 }

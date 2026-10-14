@@ -68,12 +68,13 @@ load_domain_profile <- function(source) {
 #' @param con An existing DuckDB DBI connection.
 #' @param read_only Open `db_path` read-only (default).
 #' @param bounds `NULL` (defaults), a named list of overrides, or `FALSE`.
+#' @param population `"adult"`, `"pediatric"`, or `"neonatal"` (default `"adult"`).
 #' @param harmonize_units Run the unit preflight first (default `TRUE`).
 #' @return A list of functions: `add_domain_profile`, `add_custom_lab`, `add_custom_medication`,
 #'   `add_custom_condition`, `extract`, `generate`, `state` (the current configuration), `close`. Mutators
 #'   return the generator invisibly so calls can be chained.
 #' @export
-table1_generator <- function(db_path = NULL, con = NULL, read_only = TRUE, bounds = NULL, harmonize_units = TRUE) {
+table1_generator <- function(db_path = NULL, con = NULL, read_only = TRUE, bounds = NULL, population = "adult", harmonize_units = TRUE) {
   if (is.null(con) && is.null(db_path)) stop("Provide db_path or con.", call. = FALSE)
   owns <- is.null(con)
   if (owns) con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = read_only)
@@ -106,9 +107,12 @@ table1_generator <- function(db_path = NULL, con = NULL, read_only = TRUE, bound
   }
   effective_bounds <- function() {
     if (identical(bounds, FALSE)) return(list())
-    eff <- resolve_bounds(NULL)
+    eff <- resolve_bounds(NULL, population = population)
     for (k in names(st$lab_bounds)) eff[[k]] <- st$lab_bounds[[k]]
-    if (is.list(bounds)) for (k in names(bounds)) eff[[k]] <- as.numeric(bounds[[k]])
+    if (is.list(bounds)) {
+      overrides <- resolve_bounds(bounds, population = population)
+      for (k in names(overrides)) eff[[k]] <- overrides[[k]]
+    }
     eff[names(eff) %in% names(st$labs)]
   }
   extract <- function(cohort_table, lab_strategy = "last_before_discharge", med_window = "pre_admission") {

@@ -89,14 +89,14 @@ def calculate_bedside_scores(
                 SELECT 
                     c.person_id,
                     c.cohort_start_date,
-                    COUNT(DISTINCT v.visit_occurrence_id) AS prior_ed_visits,
+                    COUNT(DISTINCT CASE WHEN v.visit_concept_id = 9203 AND v.visit_start_date < c.cohort_start_date THEN v.visit_occurrence_id END) AS prior_ed_visits,
                     MAX(CASE WHEN v.visit_concept_id = 9203 AND v.visit_start_date = c.cohort_start_date THEN 1 ELSE 0 END) AS is_ed_acuity
                 FROM _score_cohort c
                 LEFT JOIN visit_occurrence v
                   ON v.person_id = c.person_id
                  AND v.visit_concept_id = 9203
                  AND v.visit_start_date >= c.cohort_start_date - INTERVAL '180' DAY
-                 AND v.visit_start_date < c.cohort_start_date
+                 AND v.visit_start_date <= c.cohort_start_date
                 GROUP BY c.person_id, c.cohort_start_date
             """).df()
 

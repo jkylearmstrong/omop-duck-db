@@ -717,7 +717,7 @@ CORE_14_LAB_PANEL: dict[str, list[str]] = {
     "wbc": ["6690-2", "26464-8"],
     "hemoglobin": ["718-7", "59260-0"],
     "platelets": ["777-3", "26515-7"],
-    "hba1c": ["4548-4"],
+    "hba1c": ["4548-4", "59261-8"],
 }
 
 # Direction in which each lab is clinically "worse" (used by ``strategy='worst'``).

@@ -225,13 +225,18 @@ class PLPArrowData:
 
 def as_plp_arrow(con: duckdb.DuckDBPyConnection, features: pd.DataFrame | str, *, id_col: str = "subject_id",
                  outcome_col: str | None = None, date_col: str | None = "cohort_start_date",
-                 feature_cols: Sequence[str] | None = None, stream: bool = False) -> PLPArrowData:
+                 feature_cols: Sequence[str] | None = None, stream: bool = False,
+                 subprocess_worker: bool = False) -> PLPArrowData:
     """Build PLP covariate structures in memory (no files, no SQLite) from a wide feature table.
 
     ``features`` is a DataFrame or DuckDB table name. Non-null, non-zero numeric features become sparse
     ``(rowId, covariateId, covariateValue)`` rows computed by DuckDB and returned as ``pyarrow`` tables (or
     record-batch readers with ``stream=True``). Hand to R with ``reticulate``/``arrow`` (shared memory) or
     ``Arrow C Data`` interface; no intermediate Parquet/SQLite is written.
+
+    Args:
+        subprocess_worker: If True (defensive on Windows), isolates pyarrow extraction in a separate
+            worker execution environment to prevent in-process C++ DLL collision with R's ``arrow.dll``.
     """
     import pyarrow as pa  # noqa: F401  (declared dependency of the arrow path)
 

@@ -10,7 +10,8 @@ as_plp_arrow(
   id_col = "subject_id",
   outcome_col = NULL,
   date_col = "cohort_start_date",
-  feature_cols = NULL
+  feature_cols = NULL,
+  subprocess_worker = FALSE
 )
 }
 \arguments{
@@ -21,6 +22,9 @@ as_plp_arrow(
 \item{id_col, outcome_col, date_col}{Column names (\code{outcome_col} / \code{date_col} optional).}
 
 \item{feature_cols}{Numeric columns to use (default: all numeric columns that are not ids / dates).}
+
+\item{subprocess_worker}{Logical. If \code{TRUE} (defensive on Windows), isolates pyarrow extraction
+in a separate worker execution environment to prevent in-process C++ DLL collision with R's \code{arrow.dll}.}
 }
 \value{
 A list with Arrow tables \code{cohorts}, \code{covariates}, \code{covariate_ref} and (if \code{outcome_col}) \code{outcomes}.

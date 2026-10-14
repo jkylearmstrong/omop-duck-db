@@ -2,15 +2,11 @@
 % Please edit documentation in R/measurement_filter.R
 \name{DEFAULT_PHYSIOLOGIC_BOUNDS}
 \alias{DEFAULT_PHYSIOLOGIC_BOUNDS}
-\title{Pluggable physiologic bounding and unit harmonization for measurements}
+\title{Default physiologic plausibility bounds (Adult)}
 \usage{
 DEFAULT_PHYSIOLOGIC_BOUNDS
 }
 \description{
-Mirror of \code{omop_etl.measurement_filter} in Python.
-Default physiologic plausibility bounds
-}
-\details{
 Named list \code{feature -> c(low, high)}. Override single features through the \code{bounds} argument of
 \code{\link[=filter_bounds]{filter_bounds()}}.
 }

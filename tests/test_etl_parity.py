@@ -79,6 +79,8 @@ def _run_r_etl(db_path):
 
 
 def _run_python_etl(db_path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "python") + os.pathsep + env.get("PYTHONPATH", "")
     subprocess.run(
         [
             sys.executable,
@@ -90,6 +92,7 @@ def _run_python_etl(db_path):
         ],
         check=True,
         cwd=REPO_ROOT,
+        env=env,
     )
 
 

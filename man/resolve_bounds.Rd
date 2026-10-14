@@ -4,11 +4,13 @@
 \alias{resolve_bounds}
 \title{Resolve bounds: defaults merged with user overrides}
 \usage{
-resolve_bounds(bounds = NULL)
+resolve_bounds(bounds = NULL, population = c("adult", "pediatric", "neonatal"))
 }
 \arguments{
 \item{bounds}{\code{NULL} / \code{TRUE} = defaults; \code{FALSE} = none; a named list overrides / extends per feature
 (\code{NULL} entry removes a feature's bound).}
+
+\item{population}{\code{"adult"}, \code{"pediatric"}, or \code{"neonatal"}.}
 }
 \value{
 Named list \code{feature -> c(low, high)} (\code{NA} end = open).

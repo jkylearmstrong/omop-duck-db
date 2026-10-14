@@ -56,14 +56,24 @@ from omop_etl.scoring import FeatureSchemaError, OMOPScoringPipeline
 from omop_etl.utilization import extract_prior_utilization
 from omop_etl.measurement_filter import (
     DEFAULT_PHYSIOLOGIC_BOUNDS,
+    POPULATION_PHYSIOLOGIC_BOUNDS,
     filter_bounds,
+    harmonize_anthropometrics,
     harmonize_measurement_units,
 )
-from omop_etl.medication_classes import MedicationExtractor
+from omop_etl.medication_classes import (
+    MedicationExtractor,
+    MedicationTransitions,
+    extract_medication_transitions,
+)
 from omop_etl.table1_profiles import DOMAIN_PROFILES, Table1Generator
 from omop_etl.cohort_flow import CohortFlow, Table2Generator, as_plp_arrow
 from omop_etl.risk_scores import (
     calculate_bedside_scores,
+)
+from omop_etl.scores import (
+    calculate_hospital_score,
+    calculate_lace_index,
 )
 from omop_etl.dqd import (
     run_dqd,
@@ -132,10 +142,11 @@ from omop_etl.features import (
     extract_temporal_features,
 )
 from omop_etl.federation import (
+    FederatedConsortium,
+    FederatedMetaAnalysisResult,
     check_cross_database_discrepancy,
     create_federated_consortium,
     federated_meta_analysis,
-    FederatedMetaAnalysisResult,
     with_cell_suppression,
     with_differential_privacy,
 )
@@ -200,7 +211,10 @@ from omop_etl.vocabulary import (
 )
 
 __all__ = [
-    "DEFAULT_PHYSIOLOGIC_BOUNDS", "filter_bounds", "harmonize_measurement_units", "MedicationExtractor",
+    "DEFAULT_PHYSIOLOGIC_BOUNDS", "POPULATION_PHYSIOLOGIC_BOUNDS", "filter_bounds",
+    "harmonize_measurement_units", "harmonize_anthropometrics", "MedicationExtractor",
+    "MedicationTransitions", "extract_medication_transitions",
+    "calculate_lace_index", "calculate_hospital_score",
     "DOMAIN_PROFILES", "Table1Generator", "CohortFlow", "Table2Generator", "as_plp_arrow",
     "ACUTE_LAB_PANEL",
     "extract_inpatient_labs",
@@ -211,6 +225,7 @@ __all__ = [
     "omop_connect",
     "build_schema",
     "create_federated_consortium",
+    "FederatedConsortium",
     "with_cell_suppression",
     "with_differential_privacy",
     "check_cross_database_discrepancy",
@@ -356,7 +371,7 @@ __all__ = [
     "build_safe_source_view",
 ]
 
-__version__ = "0.5.8"
+__version__ = "0.6.0"
 
 
 

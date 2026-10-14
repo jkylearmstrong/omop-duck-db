@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Sequence, Union
 import os
 import duckdb
+import pandas as pd
 from omop_etl.paths import sql_path_literal
 from .build_omop_cdm import attach_central_vocabulary
 
@@ -28,6 +29,17 @@ FEDERATED_TABLES = [
     "provider",
     "care_site",
     "cdm_source",
+]
+
+__all__ = [
+    "create_federated_consortium",
+    "FederatedConsortium",
+    "with_cell_suppression",
+    "with_differential_privacy",
+    "check_cross_database_discrepancy",
+    "federated_meta_analysis",
+    "FederatedMetaAnalysisResult",
+    "FEDERATED_TABLES",
 ]
 
 
@@ -636,4 +648,110 @@ def federated_meta_analysis(
         out["exp_ci_upper"] = math.exp(ci_upper)
 
     return FederatedMetaAnalysisResult(out)
+
+
+class FederatedConsortium:
+    """High-level Multi-Site Federated Consortium Connector.
+
+    Orchestrates multi-site observational analytics across independent site databases
+    (e.g., in eDERRI consortium studies) attached to a central Athena vocabulary.
+    Provides unified querying and one-call generation of federated Table 1 (demographics & clinical profiles)
+    and Table 2 (missingness audits).
+
+    Example:
+        >>> consortium = FederatedConsortium(
+        ...     sites={"Site A": "omop_Temple.duckdb", "Site B": "omop_PSU.duckdb"},
+        ...     central_vocabulary="central_vocabulary.duckdb"
+        ... )
+        >>> t1 = consortium.generate_table1(domain="heart_failure")
+        >>> t2 = consortium.generate_table2()
+    """
+
+    def __init__(
+        self,
+        sites: Mapping[Union[str, int], str],
+        central_vocabulary: str | None = None,
+        auto_resources: bool = True,
+    ):
+        if not sites:
+            raise ValueError("sites dictionary cannot be empty.")
+        self.sites = dict(sites)
+        self.central_vocabulary = central_vocabulary
+        self.con = create_federated_consortium(self.sites, central_vocab_db=central_vocabulary)
+        if auto_resources:
+            from omop_etl.resources import configure_resources
+            configure_resources(self.con)
+
+    def query(self, sql: str) -> pd.DataFrame:
+        """Executes a query across the unified federated views (v_person, v_visit_occurrence, etc.)."""
+        return self.con.execute(sql).df()
+
+    def execute(self, sql: str):
+        return self.con.execute(sql)
+
+    def site_summaries(self) -> pd.DataFrame:
+        """Audits cohort record counts across all participating consortium sites."""
+        rows = []
+        for site_name in self.sites:
+            s_esc = str(site_name).replace("'", "''")
+            cnts = self.con.execute(f"""
+                SELECT
+                    '{s_esc}' AS site,
+                    (SELECT COUNT(DISTINCT person_id) FROM v_person WHERE site_anon = '{s_esc}') AS n_persons,
+                    (SELECT COUNT(*) FROM v_visit_occurrence WHERE site_anon = '{s_esc}') AS n_visits,
+                    (SELECT COUNT(*) FROM v_condition_occurrence WHERE site_anon = '{s_esc}') AS n_conditions,
+                    (SELECT COUNT(*) FROM v_measurement WHERE site_anon = '{s_esc}') AS n_measurements,
+                    (SELECT COUNT(*) FROM v_drug_exposure WHERE site_anon = '{s_esc}') AS n_drugs
+            """).fetchone()
+            rows.append({
+                "site": cnts[0],
+                "n_persons": cnts[1],
+                "n_visits": cnts[2],
+                "n_conditions": cnts[3],
+                "n_measurements": cnts[4],
+                "n_drugs": cnts[5],
+            })
+        return pd.DataFrame(rows)
+
+    def generate_table1(
+        self,
+        cohort_table: str = "v_visit_occurrence",
+        domain: str | None = None,
+        stratify_by: str | None = None,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """Generates federated Table 1 baseline characteristics across all participating sites."""
+        from omop_etl.table1_profiles import Table1Generator
+        t1 = Table1Generator(con=self.con)
+        if domain:
+            t1.add_domain_profile(domain)
+        return t1.generate(cohort_table=cohort_table, stratify_by=stratify_by, **kwargs)
+
+    def generate_table2(
+        self,
+        cohort_table: str = "v_visit_occurrence",
+        strata_col: str | None = None,
+        columns: Sequence[str] | None = None,
+        **kwargs,
+    ) -> pd.DataFrame:
+        """Generates federated Table 2 missingness and sentinel audit across all sites."""
+        from omop_etl.cohort_flow import Table2Generator
+        t2 = Table2Generator(**kwargs)
+        df = self.con.execute(f"SELECT * FROM {cohort_table}").df()
+        return t2.generate(df, columns=columns, strata_col=strata_col)
+
+    def close(self):
+        """Closes the DuckDB connection handle."""
+        if self.con is not None:
+            try:
+                self.con.close()
+            except Exception:
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
 

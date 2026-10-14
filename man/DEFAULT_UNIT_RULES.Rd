@@ -7,6 +7,6 @@
 DEFAULT_UNIT_RULES
 }
 \description{
-Named list \code{feature -> list(canonical =, rules = list(list(pattern, multiplier), ...))}. Units are matched
+Named list \verb{feature -> list(canonical =, rules = list(list(pattern, multiplier, [intercept]), ...))}. Units are matched
 against lower-cased, whitespace-free text (micro sign read as \code{u}).
 }

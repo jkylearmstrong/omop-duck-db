@@ -147,12 +147,13 @@ class Table1Generator:
 
     def __init__(self, db_path: str | Path | None = None, *, con: duckdb.DuckDBPyConnection | None = None,
                  read_only: bool = True, bounds: Mapping[str, Sequence[float]] | bool | None = None,
-                 harmonize_units: bool = True):
+                 population: str = "adult", harmonize_units: bool = True):
         if con is None and db_path is None:
             raise ValueError("Provide db_path or con.")
         self._owns = con is None
         self.con = con if con is not None else duckdb.connect(str(db_path), read_only=read_only)
         self.bounds = bounds
+        self.population = population
         self.harmonize_units = harmonize_units
         self.labs: dict[str, list[str]] = {}
         self.lab_bounds: dict[str, list] = {}
@@ -197,10 +198,10 @@ class Table1Generator:
     def _effective_bounds(self) -> dict[str, list]:
         if self.bounds is False:
             return {}
-        eff = resolve_bounds(None)
+        eff = resolve_bounds(None, population=self.population)
         eff.update(self.lab_bounds)
         if isinstance(self.bounds, Mapping):
-            eff = {**eff, **resolve_bounds(self.bounds)}
+            eff = {**eff, **resolve_bounds(self.bounds, population=self.population)}
         return {k: v for k, v in eff.items() if k in self.labs}
 
     def extract(self, cohort_table: str, *, lab_strategy: str = "last_before_discharge",

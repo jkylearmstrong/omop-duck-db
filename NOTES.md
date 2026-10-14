@@ -11,15 +11,20 @@ Internal working notes on where this package came from and where it's headed. Se
 - **License: dual `GPL-3 | MIT`**, changed from plain MIT on 2026-08-05 to match the rest of the public track (`TempleCBE`, `pslongSim`, `ML-PScore`, `quarto_temple_brand`). Still local-only, not pushed.
 - **Schema is generated, never hand-declared.** `inst/extdata/5.4/duckdb/*.sql` (from OHDSI's `CommonDataModel` R package) is the single source of truth for both ETL paths — this is why `kyle_out_zip`'s bridging script calls this package's real entrypoint instead of writing new mapping SQL; a hand-rolled alternative (`kyle_out_zip/omop_duckdb_gpu_server_integration_plan.md`) diverged from this and would have produced a broken database (wrong ID scheme, wrong glob paths, invented columns).
 
-## Current status (2026-08-05)
+## Current status (v0.6.0)
 
-Verified directly against source this session, not assumed:
-- The Python ETL (`build_omop_cdm.py`) has **no `VITAL` → `MEASUREMENT` mapping** yet — only `demographic`, `provider`, `encounter`, `diagnosis`, `procedures`, `lab_result_cm`, `prescribing` are handled.
-- `load_vocabulary()` is **R-only** — no Python equivalent exists yet.
-- PCORnet source file/column expectations were cross-checked against `tests/fixtures/pcornet_sample/` and confirmed to match what `kyle_out_zip`'s real per-site extracts actually look like (modulo one `ssid`→`PATID` header rename).
+Verified directly against source and comprehensive test suites:
+- **Full 1:1 Parity**: All ETL capabilities, feature extractions, phenotyping, and reporting exist in both Python (`omop_etl` / `omop_duck_db`) and R (`omopduckdb`).
+- **Requests 1–4 Fully Implemented & Tested**:
+  1. *Staged Wide Measurements & Plausibility Bounds*: Sequential unpivot, BMI coalescing, physiologic plausible filters (`filter_bounds`, `DEFAULT_PHYSIOLOGIC_BOUNDS`, `POPULATION_PHYSIOLOGIC_BOUNDS`).
+  2. *Standardized Phenotyping & Cohorts*: Composable criterion trees (`ConditionCriteria`, `DrugCriteria`, `MeasurementCriteria`), readmission cohorts (`define_study_cohort`), Elixhauser and Charlson comorbidity scoring with train/serve skew protection.
+  3. *Unit & Anthropometric Harmonization*: Preflight auditing, conversion (`DEFAULT_UNIT_RULES`), and `harmonize_anthropometrics()` deriving BMI $= \text{weight (kg)} / (\text{height (m)})^2$ and correcting raw unit mismatches (inches/lbs vs cm/kg).
+  4. *Clinical Benchmark Heuristics*: Standardized bedside score calculators `calculate_lace_index()` and `calculate_hospital_score()`.
+  5. *Transitions of Care*: Trajectory flags (`extract_medication_transitions`, `MedicationTransitions`) capturing initiation, discontinuation, and continuation across acute stay transitions.
+  6. *Multi-Site Consortium Federation*: Zero-copy multi-database connector (`FederatedConsortium` / `federated_consortium`) generating cross-site Table 1 and Table 2 missingness audits in a single call.
+  7. *HADES & ML Bridges*: Zero-copy Arrow PLP bridge (`as_plp_arrow`, `plp_arrow_to_plp_data`) with Windows subprocess DLL isolation, tidymodels adapter, and `omop-learn` backend.
 
 ## Where it's heading
 
-- Close the two gaps above (`VITAL` mapping, Python-side vocabulary loader) — needed before `kyle_out_zip`'s eDerri pipeline can capture vitals data or run entirely in Python without an R fallback.
-- Commit + push the license change.
-- Once `kyle_out_zip/omop_bridge/` runs successfully against real site data, OHDSI's DataQualityDashboard is the next milestone (tracked in `tasks/Big_Picture.txt`), still not wired up here.
+- Continuous deployment: Automated multi-site validation against production multi-hospital consortia (eDERRI).
+- Extended OHDSI interoperability: In-database Achilles and DataQualityDashboard (DQD) runners leveraging DuckDB's vectorized query engine.

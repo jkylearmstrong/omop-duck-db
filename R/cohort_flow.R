@@ -231,10 +231,12 @@ generate_table2 <- function(data, table_name = NULL, columns = NULL, strata_col 
 #' @param features Data frame or DuckDB table name.
 #' @param id_col,outcome_col,date_col Column names (`outcome_col` / `date_col` optional).
 #' @param feature_cols Numeric columns to use (default: all numeric columns that are not ids / dates).
+#' @param subprocess_worker Logical. If `TRUE` (defensive on Windows), isolates pyarrow extraction
+#'   in a separate worker execution environment to prevent in-process C++ DLL collision with R's `arrow.dll`.
 #' @return A list with Arrow tables `cohorts`, `covariates`, `covariate_ref` and (if `outcome_col`) `outcomes`.
 #' @export
 as_plp_arrow <- function(con, features, id_col = "subject_id", outcome_col = NULL, date_col = "cohort_start_date",
-                         feature_cols = NULL) {
+                         feature_cols = NULL, subprocess_worker = FALSE) {
   if (!requireNamespace("arrow", quietly = TRUE)) stop("as_plp_arrow() needs the 'arrow' package.", call. = FALSE)
   rel <- if (is.data.frame(features)) {
     DBI::dbWriteTable(con, "_plp_src", features, temporary = TRUE, overwrite = TRUE)

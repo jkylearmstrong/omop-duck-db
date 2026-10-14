@@ -378,3 +378,150 @@ medication_extractor <- function(con, medication_specs, strategy = "standard", c
   }
   structure(list(extract = extract, extract_all_windows = extract_all_windows), class = "medication_extractor")
 }
+
+#' Transitions-of-care medication trajectories and trajectory summary statistics
+#'
+#' @param data Cohort data frame with transition columns.
+#' @param classes Character vector of medication class names.
+#' @return A list with S3 class `medication_transitions` exposing `$data`, `$classes`,
+#'   `$summary()`, `$transition_matrix(drug_class)`, and `$to_dataframe()`.
+#' @export
+medication_transitions <- function(data, classes) {
+  classes <- as.character(classes)
+  summary_fn <- function() {
+    n <- nrow(data)
+    rows <- list()
+    for (c in classes) {
+      pre_col <- paste0(c, "_pre_admission")
+      inp_col <- paste0(c, "_inpatient")
+      dis_col <- paste0(c, "_discharge")
+      init_col <- paste0(c, "_initiated_inpatient")
+      disc_col <- paste0(c, "_discontinued_at_discharge")
+      cont_col <- paste0(c, "_continued_across_stay")
+
+      pre <- if (pre_col %in% names(data)) sum(data[[pre_col]], na.rm = TRUE) else 0L
+      inp <- if (inp_col %in% names(data)) sum(data[[inp_col]], na.rm = TRUE) else 0L
+      dis <- if (dis_col %in% names(data)) sum(data[[dis_col]], na.rm = TRUE) else 0L
+      init <- if (init_col %in% names(data)) sum(data[[init_col]], na.rm = TRUE) else 0L
+      disc <- if (disc_col %in% names(data)) sum(data[[disc_col]], na.rm = TRUE) else 0L
+      cont <- if (cont_col %in% names(data)) sum(data[[cont_col]], na.rm = TRUE) else 0L
+
+      rows[[length(rows) + 1]] <- data.frame(
+        medication_class = c,
+        total_patients = n,
+        pre_admission_n = as.integer(pre),
+        inpatient_n = as.integer(inp),
+        discharge_n = as.integer(dis),
+        initiated_inpatient_n = as.integer(init),
+        discontinued_at_discharge_n = as.integer(disc),
+        continued_across_stay_n = as.integer(cont),
+        pct_initiated = round(100.0 * init / max(1, n), 1),
+        pct_discontinued = round(100.0 * disc / max(1, if (pre > 0) pre else n), 1),
+        pct_continued = round(100.0 * cont / max(1, if (pre > 0) pre else n), 1),
+        stringsAsFactors = FALSE
+      )
+    }
+    do.call(rbind, rows)
+  }
+
+  transition_matrix_fn <- function(drug_class) {
+    if (!drug_class %in% classes) {
+      stop(sprintf("drug_class '%s' not in classes: %s", drug_class, paste(classes, collapse = ", ")), call. = FALSE)
+    }
+    pre_col <- paste0(drug_class, "_pre_admission")
+    dis_col <- paste0(drug_class, "_discharge")
+    table(Pre_Admission = data[[pre_col]], Discharge = data[[dis_col]])
+  }
+
+  obj <- list(
+    data = data,
+    classes = classes,
+    summary = summary_fn,
+    transition_matrix = transition_matrix_fn,
+    to_dataframe = function() data
+  )
+  class(obj) <- "medication_transitions"
+  obj
+}
+
+#' Extract medication trajectory flags across care transitions
+#'
+#' Evaluates drug exposure across three canonical transitions (`pre_admission`, `inpatient`, `discharge`)
+#' to classify trajectory flags:
+#' - `{cls}_initiated_inpatient`: 1 if unexposed pre-admission and exposed during inpatient or discharge.
+#' - `{cls}_discontinued_at_discharge`: 1 if exposed pre-admission/inpatient and not active at discharge.
+#' - `{cls}_continued_across_stay`: 1 if exposed both pre-admission and at discharge.
+#'
+#' Also populates summary trajectory flags:
+#' - `med_initiated_inpatient`: 1 if ANY evaluated drug class was newly initiated.
+#' - `med_discontinued_at_discharge`: 1 if ANY evaluated drug class was discontinued.
+#' - `med_continued_across_stay`: 1 if ANY evaluated drug class was continued across stay.
+#'
+#' @param con Active DuckDB connection.
+#' @param cohort_table Cohort table name.
+#' @param medication_specs Drug-class specs mapping (defaults to DEFAULT_MEDICATION_CONCEPTS).
+#' @param strategy Extraction strategy (`"standard"`, `"source"`, or `"both"`).
+#' @param crosswalk Optional source-value crosswalk.
+#' @param lookback_days Pre-admission lookback window in days (default 365).
+#' @param person_id_col,index_date_col,end_date_col Column name overrides.
+#' @return A `medication_transitions` object.
+#' @export
+extract_medication_transitions <- function(con, cohort_table = "cohort",
+                                           medication_specs = NULL,
+                                           strategy = "standard",
+                                           crosswalk = NULL,
+                                           lookback_days = 365,
+                                           person_id_col = NULL,
+                                           index_date_col = NULL,
+                                           end_date_col = NULL) {
+  if (is.null(medication_specs)) {
+    medication_specs <- DEFAULT_MEDICATION_CONCEPTS
+  }
+  specs <- .med_normalize_specs(medication_specs)
+  classes <- names(specs)
+
+  extractor <- medication_extractor(con, medication_specs, strategy = strategy, crosswalk = crosswalk)
+
+  df_pre <- extractor$extract(cohort_table, window = "pre_admission", lookback_days = lookback_days,
+                              person_id_col = person_id_col, index_date_col = index_date_col, end_date_col = end_date_col)
+  df_inp <- extractor$extract(cohort_table, window = "inpatient",
+                              person_id_col = person_id_col, index_date_col = index_date_col, end_date_col = end_date_col)
+  df_dis <- extractor$extract(cohort_table, window = "discharge",
+                              person_id_col = person_id_col, index_date_col = index_date_col, end_date_col = end_date_col)
+
+  base_cols <- setdiff(names(df_pre), c(classes, grep("_(source|standard)$", names(df_pre), value = TRUE)))
+  out <- df_pre[, base_cols, drop = FALSE]
+
+  n <- nrow(out)
+  any_init <- rep(0L, n)
+  any_disc <- rep(0L, n)
+  any_cont <- rep(0L, n)
+
+  for (c in classes) {
+    pre_s <- as.integer(df_pre[[c]])
+    inp_s <- as.integer(df_inp[[c]])
+    dis_s <- as.integer(df_dis[[c]])
+
+    init_s <- as.integer(pre_s == 0L & (inp_s == 1L | dis_s == 1L))
+    disc_s <- as.integer((pre_s == 1L | inp_s == 1L) & dis_s == 0L)
+    cont_s <- as.integer(pre_s == 1L & dis_s == 1L)
+
+    out[[paste0(c, "_pre_admission")]] <- pre_s
+    out[[paste0(c, "_inpatient")]] <- inp_s
+    out[[paste0(c, "_discharge")]] <- dis_s
+    out[[paste0(c, "_initiated_inpatient")]] <- init_s
+    out[[paste0(c, "_discontinued_at_discharge")]] <- disc_s
+    out[[paste0(c, "_continued_across_stay")]] <- cont_s
+
+    any_init <- as.integer(any_init == 1L | init_s == 1L)
+    any_disc <- as.integer(any_disc == 1L | disc_s == 1L)
+    any_cont <- as.integer(any_cont == 1L | cont_s == 1L)
+  }
+
+  out$med_initiated_inpatient <- any_init
+  out$med_discontinued_at_discharge <- any_disc
+  out$med_continued_across_stay <- any_cont
+
+  medication_transitions(out, classes)
+}
+

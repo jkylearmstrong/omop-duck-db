@@ -2,30 +2,66 @@
 #'
 #' Mirror of `omop_etl.measurement_filter` in Python.
 
-#' Default physiologic plausibility bounds
+#' Default population-specific physiologic plausibility bounds
+#'
+#' Named list of populations (`adult`, `pediatric`, `neonatal`) mapping `feature -> c(low, high)`.
+#' @export
+POPULATION_PHYSIOLOGIC_BOUNDS <- list(
+  adult = list(
+    wbc = c(0.1, 200),           # 10^3/uL
+    creatinine = c(0.1, 30),     # mg/dL
+    sodium = c(100, 180),        # mEq/L
+    potassium = c(1, 10),        # mEq/L
+    hemoglobin = c(2, 25),       # g/dL
+    glucose = c(10, 2000),       # mg/dL
+    systolic_bp = c(40, 300),    # mmHg
+    diastolic_bp = c(20, 200),   # mmHg
+    bmi = c(10, 120),            # kg/m^2
+    heart_rate = c(20, 250),     # bpm
+    respiratory_rate = c(4, 60)  # breaths/min
+  ),
+  pediatric = list(
+    wbc = c(1.0, 150),           # 10^3/uL
+    creatinine = c(0.1, 15),     # mg/dL
+    sodium = c(110, 175),        # mEq/L
+    potassium = c(1.5, 9),       # mEq/L
+    hemoglobin = c(3, 24),       # g/dL
+    glucose = c(15, 1500),       # mg/dL
+    systolic_bp = c(50, 220),    # mmHg
+    diastolic_bp = c(25, 140),   # mmHg
+    bmi = c(8, 80),              # kg/m^2
+    heart_rate = c(40, 240),     # bpm
+    respiratory_rate = c(10, 80) # breaths/min
+  ),
+  neonatal = list(
+    wbc = c(2.0, 100),           # 10^3/uL
+    creatinine = c(0.1, 5),      # mg/dL
+    sodium = c(115, 170),        # mEq/L
+    potassium = c(2, 10),        # mEq/L
+    hemoglobin = c(5, 26),       # g/dL
+    glucose = c(15, 800),        # mg/dL
+    systolic_bp = c(35, 130),    # mmHg
+    diastolic_bp = c(15, 90),    # mmHg
+    bmi = c(5, 40),              # kg/m^2
+    heart_rate = c(60, 260),     # bpm
+    respiratory_rate = c(15, 120)# breaths/min
+  )
+)
+
+#' Default physiologic plausibility bounds (Adult)
 #'
 #' Named list `feature -> c(low, high)`. Override single features through the `bounds` argument of
 #' [filter_bounds()].
 #' @export
-DEFAULT_PHYSIOLOGIC_BOUNDS <- list(
-  wbc = c(0.1, 200),           # 10^3/uL
-  creatinine = c(0.1, 30),     # mg/dL
-  sodium = c(100, 180),        # mEq/L
-  potassium = c(1, 10),        # mEq/L
-  hemoglobin = c(2, 25),       # g/dL
-  glucose = c(10, 2000),       # mg/dL
-  systolic_bp = c(40, 300),    # mmHg
-  diastolic_bp = c(20, 200),   # mmHg
-  bmi = c(10, 120)             # kg/m^2
-)
+DEFAULT_PHYSIOLOGIC_BOUNDS <- POPULATION_PHYSIOLOGIC_BOUNDS$adult
 
 #' Default unit-conversion rules
 #'
-#' Named list `feature -> list(canonical =, rules = list(list(pattern, multiplier), ...))`. Units are matched
+#' Named list `feature -> list(canonical =, rules = list(list(pattern, multiplier, [intercept]), ...))`. Units are matched
 #' against lower-cased, whitespace-free text (micro sign read as `u`).
 #' @export
 DEFAULT_UNIT_RULES <- local({
-  r <- function(pattern, mult) list(pattern, mult)
+  r <- function(pattern, mult, intercept = 0) list(pattern, mult, intercept)
   list(
     wbc = list(canonical = "10*3/uL", rules = list(
       r("^(/ul|/mcl|/mm3|/mm\\^3|cells/ul|cells/mm3|#/ul|10\\*0/ul)$", 0.001), r("^(10\\*6/l)$", 0.001),
@@ -37,12 +73,22 @@ DEFAULT_UNIT_RULES <- local({
       r("^(umol/l|micromol/l)$", 1 / 88.42), r("^(mmol/l)$", 1000 / 88.42), r("^(mg/dl)$", 1))),
     glucose = list(canonical = "mg/dL", rules = list(r("^(mmol/l)$", 18.016), r("^(mg/dl)$", 1), r("^(g/l)$", 100))),
     hemoglobin = list(canonical = "g/dL", rules = list(r("^(g/l)$", 0.1), r("^(mmol/l)$", 1.611), r("^(g/dl)$", 1))),
+    hba1c = list(canonical = "%", rules = list(r("^(mmol/mol)$", 0.09148, 2.152), r("^(%|percent)$", 1, 0))),
     albumin = list(canonical = "g/dL", rules = list(r("^(g/l)$", 0.1), r("^(g/dl)$", 1))),
     bun = list(canonical = "mg/dL", rules = list(r("^(mmol/l)$", 2.801), r("^(mg/dl)$", 1))),
     calcium = list(canonical = "mg/dL", rules = list(r("^(mmol/l)$", 4.008), r("^(mg/dl)$", 1))),
     ldl = list(canonical = "mg/dL", rules = list(r("^(mmol/l)$", 38.67), r("^(mg/dl)$", 1))),
     bilirubin_total = list(canonical = "mg/dL", rules = list(r("^(umol/l)$", 1 / 17.1), r("^(mg/dl)$", 1))),
-    lactate = list(canonical = "mmol/L", rules = list(r("^(mg/dl)$", 1 / 9.008), r("^(mmol/l|meq/l)$", 1)))
+    lactate = list(canonical = "mmol/L", rules = list(r("^(mg/dl)$", 1 / 9.008), r("^(mmol/l|meq/l)$", 1))),
+    height = list(canonical = "cm", rules = list(
+      r("^(in|\\[in_us\\]|\\[in_i\\]|inches|inch)$", 2.54),
+      r("^(m|meters|meter)$", 100),
+      r("^(cm|centimeters|centimeter)$", 1))),
+    weight = list(canonical = "kg", rules = list(
+      r("^(lb|lbs|\\[lb_av\\]|pounds|pound)$", 0.45359237),
+      r("^(g|grams|gram)$", 0.001),
+      r("^(kg|kilograms|kilogram)$", 1),
+      r("^(oz|\\[oz_av\\]|ounces)$", 0.0283495)))
   )
 })
 
@@ -50,11 +96,13 @@ DEFAULT_UNIT_RULES <- local({
 #'
 #' @param bounds `NULL` / `TRUE` = defaults; `FALSE` = none; a named list overrides / extends per feature
 #'   (`NULL` entry removes a feature's bound).
+#' @param population `"adult"`, `"pediatric"`, or `"neonatal"`.
 #' @return Named list `feature -> c(low, high)` (`NA` end = open).
 #' @export
-resolve_bounds <- function(bounds = NULL) {
+resolve_bounds <- function(bounds = NULL, population = c("adult", "pediatric", "neonatal")) {
   if (identical(bounds, FALSE)) return(list())
-  merged <- DEFAULT_PHYSIOLOGIC_BOUNDS
+  pop <- match.arg(population)
+  merged <- POPULATION_PHYSIOLOGIC_BOUNDS[[pop]]
   if (is.null(bounds) || identical(bounds, TRUE)) return(merged)
   for (k in names(bounds)) {
     v <- bounds[[k]]
@@ -72,16 +120,18 @@ resolve_bounds <- function(bounds = NULL) {
 #'
 #' @param data Wide data frame (one column per feature) when `feature_col` is `NULL`; otherwise a long frame
 #'   with `feature_col` naming the feature and `value_col` the value.
-#' @param bounds `NULL` = [DEFAULT_PHYSIOLOGIC_BOUNDS]; a named list overrides per feature
+#' @param bounds `NULL` = default bounds for `population`; a named list overrides per feature
 #'   (`list(wbc = c(0.5, 150))`); `FALSE` disables filtering. Inclusive; `NA` end = open.
+#' @param population Target population (`"adult"`, `"pediatric"`, or `"neonatal"`).
 #' @param action `"nullify"` (out-of-range -> `NA`; default), `"clip"` or `"drop"`.
 #' @param feature_col,value_col See `data`.
 #' @return The data frame with attribute `bounds_report` (`feature, low, high, n_checked, n_out_of_range`).
 #' @export
-filter_bounds <- function(data, bounds = NULL, action = c("nullify", "clip", "drop"), feature_col = NULL,
+filter_bounds <- function(data, bounds = NULL, population = c("adult", "pediatric", "neonatal"),
+                          action = c("nullify", "clip", "drop"), feature_col = NULL,
                           value_col = "value_as_number") {
   action <- match.arg(action)
-  cfg <- resolve_bounds(bounds)
+  cfg <- resolve_bounds(bounds, population = population)
   df <- data
   report <- list()
   drop_mask <- rep(FALSE, nrow(df))
@@ -170,7 +220,7 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
   for (k in names(unit_rules)) rules[[k]] <- unit_rules[[k]]
   feats <- feats[names(feats) %in% names(rules)]
   empty_report <- data.frame(feature = character(0), unit = character(0), canonical_unit = character(0),
-                             factor = numeric(0), status = character(0), n = integer(0), stringsAsFactors = FALSE)
+                             factor = numeric(0), status = character(0), n = integer(0), intercept = numeric(0), stringsAsFactors = FALSE)
   mcols <- tolower(DBI::dbGetQuery(con, paste0("DESCRIBE ", measurement_table))$column_name)
   if (length(feats) == 0) {
     if (create_view) {
@@ -207,31 +257,35 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
     spec <- rules[[seen$feature[i]]]
     nu <- .norm_unit(seen$unit[i])
     factor <- NA_real_
+    intercept <- 0.0
     status <- "unrecognized"
     if (nu == "") {
       factor <- 1
+      intercept <- 0
       status <- "no_unit"
     } else {
       for (rl in spec$rules) {
         if (grepl(rl[[1]], nu, perl = TRUE)) {
           factor <- rl[[2]]
-          status <- if (rl[[2]] == 1) "canonical" else "scaled"
+          intercept <- if (length(rl) >= 3) rl[[3]] else 0.0
+          status <- if (rl[[2]] == 1 && intercept == 0) "canonical" else "scaled"
           break
         }
       }
     }
     data.frame(feature = seen$feature[i], unit = seen$unit[i], canonical_unit = spec$canonical,
                factor = if (is.na(factor)) 1 else factor, status = status, n = as.integer(seen$n[i]),
-               stringsAsFactors = FALSE)
+               intercept = intercept, stringsAsFactors = FALSE)
   })
   report <- if (length(rows)) do.call(rbind, rows) else empty_report
 
   if (create_view) {
-    fac <- report[report$status == "scaled", c("feature", "unit", "factor"), drop = FALSE]
+    fac <- report[report$status == "scaled", c("feature", "unit", "factor", "intercept"), drop = FALSE]
     fac$unit <- as.character(fac$unit)
     DBI::dbWriteTable(con, "_hu_fac_df", fac, temporary = TRUE, overwrite = TRUE)
     DBI::dbExecute(con, paste0("CREATE OR REPLACE TEMPORARY TABLE _hu_fac AS SELECT CAST(feature AS VARCHAR) feature, ",
-                               "CAST(unit AS VARCHAR) unit, CAST(factor AS DOUBLE) factor FROM _hu_fac_df"))
+                               "CAST(unit AS VARCHAR) unit, CAST(factor AS DOUBLE) factor, ",
+                               "CAST(intercept AS DOUBLE) intercept FROM _hu_fac_df"))
     canon <- data.frame(feature = names(feats), canonical_unit = vapply(names(feats), function(f) rules[[f]]$canonical, ""),
                         stringsAsFactors = FALSE)
     DBI::dbWriteTable(con, "_hu_canon_df", canon, temporary = TRUE, overwrite = TRUE)
@@ -239,7 +293,8 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
                                "CAST(canonical_unit AS VARCHAR) canonical_unit FROM _hu_canon_df"))
     scaled <- c("value_as_number", "range_low", "range_high")
     ord <- DBI::dbGetQuery(con, paste0("DESCRIBE ", measurement_table))$column_name
-    sel <- paste(ifelse(tolower(ord) %in% scaled, sprintf("m.%s * COALESCE(f.factor, 1.0) AS %s", ord, ord),
+    sel <- paste(ifelse(tolower(ord) %in% scaled,
+                        sprintf("(m.%s * COALESCE(f.factor, 1.0) + COALESCE(f.intercept, 0.0)) AS %s", ord, ord),
                         paste0("m.", ord)), collapse = ", ")
     DBI::dbExecute(con, sprintf(paste0(
       "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT %s, COALESCE(f.factor, 1.0) AS harmonization_factor, ",
@@ -248,5 +303,131 @@ harmonize_measurement_units <- function(con, features = NULL, unit_rules = NULL,
       "LEFT JOIN _hu_fac f ON f.feature = mp.feature AND f.unit = %s ",
       "LEFT JOIN _hu_canon ca ON ca.feature = f.feature"), view_name, sel, measurement_table, uj, unit_sql))
   }
+  if ("intercept" %in% names(report)) report$intercept <- NULL
   report
 }
+
+#' Anthropometric Harmonization (Height, Weight, and Calculated BMI)
+#'
+#' Standardizes height to cm and weight to kg, calculating and validating BMI.
+#'
+#' @param con DuckDB DBI connection.
+#' @param measurement_table Name of source measurement table or view.
+#' @param view_name Name of temporary view to create.
+#' @param calculate_bmi Logical. Calculate BMI where height and weight are available.
+#' @param replace_implausible_bmi Logical. Replace implausible BMI (<10 or >120) with calculated BMI.
+#' @param create_view Logical. Whether to register the view.
+#' @return A data frame with counts of standardized records and calculated BMIs.
+#' @export
+harmonize_anthropometrics <- function(con, measurement_table = "measurement",
+                                      view_name = "measurement_harmonized_anthropometrics",
+                                      calculate_bmi = TRUE, replace_implausible_bmi = TRUE,
+                                      create_view = TRUE) {
+  mcols <- tolower(DBI::dbGetQuery(con, paste0("DESCRIBE ", measurement_table))$column_name)
+  date_expr <- if ("measurement_datetime" %in% mcols && "measurement_date" %in% mcols) {
+    "COALESCE(CAST(m.measurement_datetime AS DATE), CAST(m.measurement_date AS DATE))"
+  } else if ("measurement_datetime" %in% mcols) {
+    "CAST(m.measurement_datetime AS DATE)"
+  } else {
+    "CAST(m.measurement_date AS DATE)"
+  }
+
+  ht_sql <- sprintf("
+    SELECT
+      m.person_id,
+      %s AS meas_date,
+      CASE
+        WHEN LOWER(COALESCE(m.unit_source_value, '')) LIKE '%%in%%' OR m.unit_concept_id IN (9326, 9327) THEN m.value_as_number * 2.54
+        WHEN LOWER(COALESCE(m.unit_source_value, '')) LIKE '%%m%%' AND LOWER(COALESCE(m.unit_source_value, '')) NOT LIKE '%%cm%%' AND m.value_as_number < 3.0 THEN m.value_as_number * 100.0
+        WHEN m.value_as_number < 3.0 THEN m.value_as_number * 100.0
+        ELSE m.value_as_number
+      END AS height_cm
+    FROM %s m
+    WHERE (m.measurement_concept_id IN (3036277, 3023540, 3019171)
+           OR m.measurement_source_value ILIKE '%%height%%'
+           OR m.measurement_source_value = 'HT'
+           OR m.measurement_source_value = '8302-2')
+      AND m.value_as_number IS NOT NULL AND m.value_as_number > 0
+  ", date_expr, measurement_table)
+
+  wt_sql <- sprintf("
+    SELECT
+      m.person_id,
+      %s AS meas_date,
+      CASE
+        WHEN LOWER(COALESCE(m.unit_source_value, '')) LIKE '%%lb%%' OR m.unit_concept_id = 8739 THEN m.value_as_number * 0.45359237
+        WHEN LOWER(COALESCE(m.unit_source_value, '')) LIKE '%%oz%%' THEN m.value_as_number * 0.0283495
+        WHEN LOWER(COALESCE(m.unit_source_value, '')) LIKE '%%g%%' AND LOWER(COALESCE(m.unit_source_value, '')) NOT LIKE '%%kg%%' THEN m.value_as_number * 0.001
+        ELSE m.value_as_number
+      END AS weight_kg
+    FROM %s m
+    WHERE (m.measurement_concept_id IN (3025315, 3013762)
+           OR m.measurement_source_value ILIKE '%%weight%%'
+           OR m.measurement_source_value = 'WT'
+           OR m.measurement_source_value = '29463-7')
+      AND m.value_as_number IS NOT NULL AND m.value_as_number > 0
+  ", date_expr, measurement_table)
+
+  n_ht <- DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM (%s)", ht_sql))$n[1]
+  n_wt <- DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM (%s)", wt_sql))$n[1]
+
+  calc_bmi_sql <- sprintf("
+    WITH hts AS (
+      SELECT person_id, meas_date, AVG(height_cm) AS height_cm
+      FROM (%s)
+      WHERE height_cm BETWEEN 30.0 AND 280.0
+      GROUP BY person_id, meas_date
+    ),
+    wts AS (
+      SELECT person_id, meas_date, AVG(weight_kg) AS weight_kg
+      FROM (%s)
+      WHERE weight_kg BETWEEN 1.0 AND 500.0
+      GROUP BY person_id, meas_date
+    )
+    SELECT
+      h.person_id,
+      h.meas_date,
+      ROUND(w.weight_kg / POWER(h.height_cm / 100.0, 2), 2) AS calculated_bmi
+    FROM hts h
+    JOIN wts w ON w.person_id = h.person_id AND w.meas_date = h.meas_date
+    WHERE (w.weight_kg / POWER(h.height_cm / 100.0, 2)) BETWEEN 5.0 AND 120.0
+  ", ht_sql, wt_sql)
+
+  n_calc <- DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM (%s)", calc_bmi_sql))$n[1]
+
+  if (create_view) {
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TEMPORARY VIEW _calc_bmis AS %s", calc_bmi_sql))
+    ord <- DBI::dbGetQuery(con, paste0("DESCRIBE ", measurement_table))$column_name
+    sel_cols <- character(0)
+    for (c in ord) {
+      if (tolower(c) == "value_as_number") {
+        expr <- if (replace_implausible_bmi) {
+          paste0("CASE WHEN (m.measurement_concept_id = 3038553 OR m.measurement_source_value IN ('BMI', 'ORIGINAL_BMI', '39156-5')) ",
+                 "AND (m.value_as_number < 10.0 OR m.value_as_number > 120.0) THEN cb.calculated_bmi ",
+                 "ELSE m.value_as_number END AS value_as_number")
+        } else {
+          "m.value_as_number"
+        }
+        sel_cols <- c(sel_cols, expr)
+      } else {
+        sel_cols <- c(sel_cols, paste0("m.", c))
+      }
+    }
+    DBI::dbExecute(con, sprintf("
+      CREATE OR REPLACE TEMPORARY VIEW %s AS
+      SELECT %s
+      FROM %s m
+      LEFT JOIN _calc_bmis cb
+        ON cb.person_id = m.person_id
+       AND cb.meas_date = %s
+    ", view_name, paste(sel_cols, collapse = ", "), measurement_table, date_expr))
+  }
+
+  data.frame(
+    height_records_checked = as.integer(n_ht),
+    weight_records_checked = as.integer(n_wt),
+    calculated_bmis_derived = as.integer(n_calc),
+    stringsAsFactors = FALSE
+  )
+}
+

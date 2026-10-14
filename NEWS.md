@@ -1,3 +1,56 @@
+# omopduckdb 0.6.0
+
+Release 0.6.0 closes all 7 feature gaps from request 4 with complete 1:1 cross-language parity across Python (`omop_etl` / `omop_duck_db`) and R (`omopduckdb`).
+
+### 1. Anthropometric Harmonization & Calculated BMI
+- `harmonize_anthropometrics()` (Python & R): standardizes raw height (`inches`, `[in_us]` $\times 2.54 \to \text{cm}$; `m` $\times 100 \to \text{cm}$) and weight (`lbs`, `[lb_av]` $\times 0.45359237 \to \text{kg}$; `oz` $\times 0.0283495 \to \text{kg}$; `g` $\times 0.001 \to \text{kg}$).
+- Automatically derives BMI $= \text{weight (kg)} / (\text{height (m)})^2$ and optionally replaces implausible raw BMI measurements ($< 10$ or $> 120$) in the created `measurement_harmonized_anthropometrics` view.
+- Provides robust fallback handling between `measurement_datetime` and `measurement_date`.
+
+### 2. Clinical Benchmark Bedside Risk Scores
+- `calculate_lace_index()` (Python & R): Evaluates the standard bedside LACE Index (0–19 points) for 30-day readmission and mortality risk:
+  - **L**: Length of stay ($<1\text{d}=0$, $1\text{d}=1$, $2\text{d}=2$, $3\text{d}=3$, $4\text{--}6\text{d}=4$, $7\text{--}13\text{d}=5$, $\ge 14\text{d}=7$).
+  - **A**: Acuity of admission ($3$ points for emergency admission).
+  - **C**: Charlson Comorbidity Index score ($0=0$, $1=1$, $2=2$, $3=3$, $\ge 4=5$).
+  - **E**: Emergency department visits in prior 6 months ($0=0$, $1=1$, $2=2$, $3=3$, $\ge 4=4$).
+- `calculate_hospital_score()` (Python & R): Evaluates the bedside HOSPITAL Score (0–10 points) for 30-day potentially avoidable readmissions:
+  - **H**: Hemoglobin at discharge $< 12.0\text{ g/dL}$ ($1$ pt).
+  - **O**: Oncology discharge / neoplasm diagnosis in prior 365 days ($2$ pts).
+  - **S**: Sodium level at discharge $< 135\text{ mEq/L}$ ($1$ pt).
+  - **P**: Procedure during index stay ($1$ pt).
+  - **I**: Index admission type urgent / emergency ($1$ pt).
+  - **T**: Prior hospital admissions in past 12 months ($0=0$, $1=1$, $\ge 2=2$ pts).
+  - **L**: Length of stay $\ge 5$ days ($2$ pts).
+- Fixed query boundary bug where index admission ED visits were excluded from acuity evaluation.
+
+### 3. Transitions-of-Care Medication Trajectories
+- `extract_medication_transitions()` and `MedicationTransitions` (Python) / `medication_transitions` (R):
+  - Trajectory flags per drug class: `{cls}_initiated_inpatient`, `{cls}_discontinued_at_discharge`, `{cls}_continued_across_stay`.
+  - Consortium summary indicators: `med_initiated_inpatient`, `med_discontinued_at_discharge`, `med_continued_across_stay`.
+  - Methods `.summary()` for transition rate percentages and `.transition_matrix(drug_class)` for $2\times 2$ contingency tables.
+
+### 4. Multi-Site Federated Consortium Connector
+- `FederatedConsortium` (Python) / `federated_consortium()` (R): Orchestrates multi-site observational analytics across independent DuckDB databases (e.g. eDERRI studies) attached to a central Athena vocabulary.
+- Unified querying across federated views (`v_person`, `v_visit_occurrence`, etc.).
+- One-call generation of federated Table 1 (`generate_table1()`) and Table 2 missingness audits (`generate_table2()`).
+- Automated multi-site audit summaries (`site_summaries()` / `consortium_site_summaries()`).
+
+### 5. European & Alternative Unit Scaling Factors
+- `DEFAULT_UNIT_RULES` updated with affine linear formulas `(pattern, multiplier, intercept)`:
+  - Hemoglobin in $\text{mmol/L}$ (LOINC `59260-0`): multiplier $\times 1.611 \to \text{g/dL}$.
+  - HbA1c in IFCC $\text{mmol/mol}$ (LOINC `59261-8`): formula $\text{HbA1c (\%)} = (0.09148 \times \text{mmol/mol}) + 2.152$.
+  - Creatinine in $\mu\text{mol/L}$: multiplier $\div 88.42 \to \text{mg/dL}$.
+  - Height: `in`, `[in_us]`, `m` $\to \text{cm}$.
+  - Weight: `lb`, `[lb_av]`, `oz`, `g` $\to \text{kg}$.
+
+### 6. Population-Specific Bounds Profiles
+- `POPULATION_PHYSIOLOGIC_BOUNDS` defines physiologically calibrated ranges for `adult`, `pediatric`, and `neonatal` cohorts.
+- `filter_bounds(population="adult" | "pediatric" | "neonatal")` applies age-appropriate bounds (e.g. Neonatal heart rate 60–260 bpm, systolic BP 35–130 mmHg).
+- `Table1Generator` / `table1_generator()` accepts `population="adult" | "pediatric" | "neonatal"`.
+
+### 7. Windows Python pyarrow / R arrow Subprocess Worker
+- `as_plp_arrow(subprocess_worker=True / FALSE)` provides defensive isolation to prevent in-process C++ DLL collision between R's `arrow.dll` and Python's `pyarrow` under Windows.
+
 # omopduckdb 0.5.9
 
 Request 2 ships with **dual Python and R usage**. R functions are snake_case mirrors of the Python classes: `filter_bounds`, `harmonize_measurement_units`, `medication_extractor`, `table1_generator`, `cohort_flow`, `generate_table2`, `as_plp_arrow` (Python: `filter_bounds`, `harmonize_measurement_units`, `MedicationExtractor`, `Table1Generator`, `CohortFlow`, `Table2Generator`, `as_plp_arrow`). The domain profiles live once, in `inst/extdata/domain_profiles.yml`, and a test keeps the Python dict in sync.

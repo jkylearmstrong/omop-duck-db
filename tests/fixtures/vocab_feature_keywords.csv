@@ -26,6 +26,8 @@ lab,pco2,carbon dioxide
 lab,bmi,body mass index
 lab,systolic_bp,systolic blood pressure
 lab,diastolic_bp,diastolic blood pressure
+lab,height,height|stature
+lab,weight,weight|mass
 lab,troponin_i,troponin i
 lab,troponin_t,troponin t
 lab,nt_probnp,prohormone

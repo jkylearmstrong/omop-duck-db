@@ -7,6 +7,7 @@
 filter_bounds(
   data,
   bounds = NULL,
+  population = c("adult", "pediatric", "neonatal"),
   action = c("nullify", "clip", "drop"),
   feature_col = NULL,
   value_col = "value_as_number"
@@ -16,8 +17,10 @@ filter_bounds(
 \item{data}{Wide data frame (one column per feature) when \code{feature_col} is \code{NULL}; otherwise a long frame
 with \code{feature_col} naming the feature and \code{value_col} the value.}
 
-\item{bounds}{\code{NULL} = \link{DEFAULT_PHYSIOLOGIC_BOUNDS}; a named list overrides per feature
+\item{bounds}{\code{NULL} = default bounds for \code{population}; a named list overrides per feature
 (\code{list(wbc = c(0.5, 150))}); \code{FALSE} disables filtering. Inclusive; \code{NA} end = open.}
+
+\item{population}{Target population (\code{"adult"}, \code{"pediatric"}, or \code{"neonatal"}).}
 
 \item{action}{\code{"nullify"} (out-of-range -> \code{NA}; default), \code{"clip"} or \code{"drop"}.}
 

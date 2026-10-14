@@ -87,7 +87,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\Rtmp8IgMZm\filebdd03b7b616a.duckdb
+#> Schema built at C:\Users\jkyle\AppData\Local\Temp\RtmpoJ2PVA\file6a0864f2dde.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]
@@ -657,7 +657,7 @@ scores <- orbital::augment(orb, dplyr::tbl(con, "to_score")) |> dplyr::collect()
 
 ## Wide tables, messy timestamps, medication classes, phenotypes & resource limits (Python and R)
 
-```python
+``` python
 import duckdb
 from omop_etl import (configure_resources, load_wide_measurement, vectorized_strptime,
                       extract_medication_classes, audit_medication_strategies,
@@ -686,9 +686,10 @@ t2dm = (ConditionCriteria(icd_codes=["E11"], concept_ids=[201826])
 execute_phenotype(con, t2dm & ~ConditionCriteria(icd_codes=["E10"]), "cohort", cohort_definition_id=7)
 ```
 
-The same functions exist in R with identical semantics (snake_case, `library(omopduckdb)`):
+The same functions exist in R with identical semantics (snake_case,
+`library(omopduckdb)`):
 
-```r
+``` r
 library(omopduckdb)
 con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
 configure_resources(con)
@@ -704,7 +705,113 @@ t2dm <- condition_criteria(icd_codes = "E11", concept_ids = 201826) |
 execute_phenotype(con, t2dm & !condition_criteria(icd_codes = "E10"), "cohort", cohort_definition_id = 7)
 ```
 
-All file paths handed to DuckDB go through `omop_etl.paths.sanitize_sql_path`, so Windows paths work in ATTACH, `read_csv`, `read_parquet` and `COPY`.
+All file paths handed to DuckDB go through
+`omop_etl.paths.sanitize_sql_path`, so Windows paths work in ATTACH,
+`read_csv`, `read_parquet` and `COPY`.
+
+## Clinical Risk Scores, Anthropometrics & Consortium Federation (Python & R)
+
+### 1. Bedside Benchmark Heuristics (LACE Index & HOSPITAL Score)
+
+Evaluate standardized clinical heuristics for 30-day readmissions and
+mortality directly inside DuckDB:
+
+``` python
+from omop_duck_db.scores import calculate_lace_index, calculate_hospital_score
+
+# Compute LACE (Length of stay, Acuity, Charlson, ED visits)
+lace_df = calculate_lace_index(con, cohort_table="inpatient_cohort")
+
+# Compute HOSPITAL score (Hemoglobin, Oncology, Sodium, Procedure, Index type, Admissions, LOS)
+hosp_df = calculate_hospital_score(con, cohort_table="inpatient_cohort")
+```
+
+In R:
+
+``` r
+lace_df <- calculate_lace_index(con, cohort_table = "inpatient_cohort")
+hosp_df <- calculate_hospital_score(con, cohort_table = "inpatient_cohort")
+```
+
+### 2. Anthropometric Harmonization & Derived BMI
+
+Standardize inches (`[in_us]`) and pounds (`[lb_av]`) to metric units
+(`cm` and `kg`), recalculate BMI $= \text{weight} / \text{height}^2$,
+and replace implausible raw values ($< 10$ or $> 120$):
+
+``` python
+from omop_etl import harmonize_anthropometrics
+
+report = harmonize_anthropometrics(con, create_view=True, replace_implausible_bmi=True)
+# Created view: measurement_harmonized_anthropometrics
+```
+
+In R:
+
+``` r
+report <- harmonize_anthropometrics(con, create_view = TRUE, replace_implausible_bmi = TRUE)
+```
+
+### 3. Transitions-of-Care Medication Trajectories
+
+Track medication continuation, initiation, and discontinuation across
+care transitions:
+
+``` python
+from omop_etl import extract_medication_transitions
+
+transitions = extract_medication_transitions(con, cohort_table="inpatient_cohort")
+trans_df = transitions.to_dataframe()
+# Generates {class}_initiated_inpatient, {class}_discontinued_at_discharge, {class}_continued_across_stay
+summary = transitions.summary()
+ct = transitions.transition_matrix("raas_inhibitors")
+```
+
+In R:
+
+``` r
+trans <- extract_medication_transitions(con, cohort_table = "inpatient_cohort")
+df <- trans$to_dataframe()
+summ <- trans$summary()
+matrix <- trans$transition_matrix("raas_inhibitors")
+```
+
+### 4. Multi-Site Federated Consortium Connector
+
+Orchestrate multi-center studies (e.g. eDERRI) with independent site
+databases attached to a shared Athena vocabulary:
+
+``` python
+from omop_duck_db import FederatedConsortium
+
+consortium = FederatedConsortium(
+    sites={
+        "Site A": "omop_Temple.duckdb",
+        "Site B": "omop_PSU.duckdb",
+        "Site C": "omop_Hopkins.duckdb"
+    },
+    central_vocabulary="central_vocabulary.duckdb"
+)
+
+# Cross-site Table 1 and Table 2 in a single call:
+t1 = consortium.generate_table1(domain="heart_failure")
+t2 = consortium.generate_table2(cohort_table="v_visit_occurrence")
+audit = consortium.site_summaries()
+consortium.close()
+```
+
+In R:
+
+``` r
+fc <- federated_consortium(
+  sites = c("Site A" = "omop_Temple.duckdb", "Site B" = "omop_PSU.duckdb"),
+  central_vocabulary = "central_vocabulary.duckdb"
+)
+t1 <- consortium_generate_table1(fc, domain = "heart_failure")
+t2 <- consortium_generate_table2(fc, cohort_table = "v_visit_occurrence")
+audit <- consortium_site_summaries(fc)
+consortium_close(fc)
+```
 
 ## Testing
 

@@ -24,7 +24,13 @@ import pandas as pd
 
 from omop_etl.paths import read_csv_sql
 
-__all__ = ["extract_medication_classes", "audit_medication_strategies", "MedicationExtractor"]
+__all__ = [
+    "extract_medication_classes",
+    "audit_medication_strategies",
+    "MedicationExtractor",
+    "extract_medication_transitions",
+    "MedicationTransitions",
+]
 
 _STRATEGIES = ("source", "standard", "both")
 _SOURCE_COLS = ("source_value", "source_code", "source", "code", "cui", "ndc")
@@ -404,3 +410,130 @@ class MedicationExtractor:
             flag = df[[c for c in self.specs]].add_suffix(f"__{w}")
             out = df[[c for c in df.columns if c not in self.specs and not c.endswith(("_source", "_standard"))]]                 .join(flag) if out is None else out.join(flag)
         return out
+
+
+class MedicationTransitions:
+    """Transitions-of-care medication trajectories and trajectory summary statistics."""
+
+    def __init__(self, data: pd.DataFrame, classes: Sequence[str]):
+        self.data = data
+        self.classes = list(classes)
+
+    def summary(self) -> pd.DataFrame:
+        """Calculates cohort-level transition rates per medication class."""
+        n = len(self.data)
+        rows = []
+        for c in self.classes:
+            pre = int(self.data[f"{c}_pre_admission"].sum()) if f"{c}_pre_admission" in self.data else 0
+            inp = int(self.data[f"{c}_inpatient"].sum()) if f"{c}_inpatient" in self.data else 0
+            dis = int(self.data[f"{c}_discharge"].sum()) if f"{c}_discharge" in self.data else 0
+            init = int(self.data[f"{c}_initiated_inpatient"].sum()) if f"{c}_initiated_inpatient" in self.data else 0
+            disc = int(self.data[f"{c}_discontinued_at_discharge"].sum()) if f"{c}_discontinued_at_discharge" in self.data else 0
+            cont = int(self.data[f"{c}_continued_across_stay"].sum()) if f"{c}_continued_across_stay" in self.data else 0
+            rows.append({
+                "medication_class": c,
+                "total_patients": n,
+                "pre_admission_n": pre,
+                "inpatient_n": inp,
+                "discharge_n": dis,
+                "initiated_inpatient_n": init,
+                "discontinued_at_discharge_n": disc,
+                "continued_across_stay_n": cont,
+                "pct_initiated": round(100.0 * init / max(1, n), 1),
+                "pct_discontinued": round(100.0 * disc / max(1, pre if pre > 0 else n), 1),
+                "pct_continued": round(100.0 * cont / max(1, pre if pre > 0 else n), 1),
+            })
+        return pd.DataFrame(rows)
+
+    def transition_matrix(self, drug_class: str) -> pd.DataFrame:
+        """2x2 contingency matrix (Pre-admission vs Discharge) for a single drug class."""
+        if drug_class not in self.classes:
+            raise ValueError(f"drug_class {drug_class!r} not in classes {self.classes}.")
+        pre_col = f"{drug_class}_pre_admission"
+        dis_col = f"{drug_class}_discharge"
+        ct = pd.crosstab(self.data[pre_col], self.data[dis_col], rownames=["Pre-Admission"], colnames=["Discharge"])
+        return ct
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return self.data.copy()
+
+
+def extract_medication_transitions(
+    con: duckdb.DuckDBPyConnection,
+    cohort_table: str = "cohort",
+    medication_specs: Mapping[str, Any] | None = None,
+    *,
+    strategy: str = "standard",
+    crosswalk=None,
+    lookback_days: int = 365,
+    person_id_col: str | None = None,
+    index_date_col: str | None = None,
+    end_date_col: str | None = None,
+) -> MedicationTransitions:
+    """Extract medication trajectory flags across care transitions (pre-admission, inpatient, discharge).
+
+    Identifies drug continuation, discontinuation, and new initiation per drug class:
+    - ``{cls}_initiated_inpatient``: 1 if unexposed pre-admission and exposed during inpatient or discharge.
+    - ``{cls}_discontinued_at_discharge``: 1 if exposed pre-admission/inpatient and not active at discharge.
+    - ``{cls}_continued_across_stay``: 1 if exposed both pre-admission and at discharge.
+
+    Also populates consortium-level summary flags:
+    - ``med_initiated_inpatient``: 1 if ANY evaluated drug class was newly initiated.
+    - ``med_discontinued_at_discharge``: 1 if ANY evaluated drug class was discontinued.
+    - ``med_continued_across_stay``: 1 if ANY evaluated drug class was continued across stay.
+
+    Returns:
+        MedicationTransitions: Object wrapping the trajectory DataFrame with ``.summary()`` and ``.transition_matrix()``.
+    """
+    if medication_specs is None:
+        from omop_etl.table1 import DEFAULT_MEDICATION_CONCEPTS
+        specs = DEFAULT_MEDICATION_CONCEPTS
+    else:
+        specs = dict(medication_specs)
+
+    extractor = MedicationExtractor(con, specs, strategy=strategy, crosswalk=crosswalk)
+
+    # Extract across three canonical transitions
+    df_pre = extractor.extract(
+        cohort_table, window="pre_admission", lookback_days=lookback_days,
+        person_id_col=person_id_col, index_date_col=index_date_col, end_date_col=end_date_col)
+    df_inp = extractor.extract(
+        cohort_table, window="inpatient",
+        person_id_col=person_id_col, index_date_col=index_date_col, end_date_col=end_date_col)
+    df_dis = extractor.extract(
+        cohort_table, window="discharge",
+        person_id_col=person_id_col, index_date_col=index_date_col, end_date_col=end_date_col)
+
+    base_cols = [c for c in df_pre.columns if c not in specs and not c.endswith(("_source", "_standard"))]
+    out = df_pre[base_cols].copy()
+
+    any_init = pd.Series(0, index=out.index)
+    any_disc = pd.Series(0, index=out.index)
+    any_cont = pd.Series(0, index=out.index)
+
+    for c in specs:
+        pre_s = df_pre[c].astype(int)
+        inp_s = df_inp[c].astype(int)
+        dis_s = df_dis[c].astype(int)
+
+        init_s = ((pre_s == 0) & ((inp_s == 1) | (dis_s == 1))).astype(int)
+        disc_s = (((pre_s == 1) | (inp_s == 1)) & (dis_s == 0)).astype(int)
+        cont_s = ((pre_s == 1) & (dis_s == 1)).astype(int)
+
+        out[f"{c}_pre_admission"] = pre_s
+        out[f"{c}_inpatient"] = inp_s
+        out[f"{c}_discharge"] = dis_s
+        out[f"{c}_initiated_inpatient"] = init_s
+        out[f"{c}_discontinued_at_discharge"] = disc_s
+        out[f"{c}_continued_across_stay"] = cont_s
+
+        any_init |= (init_s == 1)
+        any_disc |= (disc_s == 1)
+        any_cont |= (cont_s == 1)
+
+    out["med_initiated_inpatient"] = any_init.astype(int)
+    out["med_discontinued_at_discharge"] = any_disc.astype(int)
+    out["med_continued_across_stay"] = any_cont.astype(int)
+
+    return MedicationTransitions(out, list(specs.keys()))
+

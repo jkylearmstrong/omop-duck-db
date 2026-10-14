@@ -464,4 +464,131 @@ to_mermaid.federated_meta_analysis <- function(x, ...) {
   paste(lines, collapse = "\n")
 }
 
+#' Multi-Site Federated Consortium Connector
+#'
+#' Orchestrates multi-site observational analytics across independent site databases
+#' (e.g. in eDERRI consortium studies) attached to a central Athena vocabulary.
+#' Provides unified querying and one-call generation of federated Table 1 (demographics & clinical profiles)
+#' and Table 2 (missingness audits).
+#'
+#' @param sites Named character vector or list of site database paths (e.g. `c("Site A" = "site_a.duckdb")`).
+#' @param central_vocabulary Path to central Athena vocabulary DuckDB database.
+#' @param auto_resources Logical. If `TRUE` (default), configure memory and thread limits via [configure_resources()].
+#' @return A `federated_consortium` S3 object.
+#' @export
+federated_consortium <- function(sites, central_vocabulary = NULL, auto_resources = TRUE) {
+  if (length(sites) == 0) {
+    stop("sites cannot be empty.")
+  }
+  con <- create_federated_consortium(sites, central_vocab_db = central_vocabulary)
+  if (isTRUE(auto_resources)) {
+    tryCatch(configure_resources(con), error = function(e) NULL)
+  }
+  structure(
+    list(
+      sites = sites,
+      central_vocabulary = central_vocabulary,
+      con = con
+    ),
+    class = "federated_consortium"
+  )
+}
+
+#' Execute a Query Across the Federated Consortium Views
+#'
+#' @param fc A `federated_consortium` object.
+#' @param sql SQL query string.
+#' @return A `data.frame` of query results.
+#' @export
+consortium_query <- function(fc, sql) {
+  if (!inherits(fc, "federated_consortium")) stop("`fc` must be a federated_consortium object.", call. = FALSE)
+  DBI::dbGetQuery(fc$con, sql)
+}
+
+#' Audit Record Counts Across Participating Consortium Sites
+#'
+#' @param fc A `federated_consortium` object.
+#' @return A `data.frame` summarizing patient, visit, condition, measurement, and drug counts per site.
+#' @export
+consortium_site_summaries <- function(fc) {
+  if (!inherits(fc, "federated_consortium")) stop("`fc` must be a federated_consortium object.", call. = FALSE)
+  site_names <- names(fc$sites)
+  if (is.null(site_names)) site_names <- as.character(seq_along(fc$sites))
+
+  rows <- list()
+  for (i in seq_along(fc$sites)) {
+    s_name <- site_names[i]
+    if (is.na(s_name) || s_name == "") s_name <- sprintf("Site %d", i)
+    s_esc <- gsub("'", "''", s_name, fixed = TRUE)
+
+    sql <- sprintf("
+      SELECT
+        '%s' AS site,
+        (SELECT COUNT(DISTINCT person_id) FROM v_person WHERE site_anon = '%s') AS n_persons,
+        (SELECT COUNT(*) FROM v_visit_occurrence WHERE site_anon = '%s') AS n_visits,
+        (SELECT COUNT(*) FROM v_condition_occurrence WHERE site_anon = '%s') AS n_conditions,
+        (SELECT COUNT(*) FROM v_measurement WHERE site_anon = '%s') AS n_measurements,
+        (SELECT COUNT(*) FROM v_drug_exposure WHERE site_anon = '%s') AS n_drugs
+    ", s_esc, s_esc, s_esc, s_esc, s_esc, s_esc)
+
+    res <- DBI::dbGetQuery(fc$con, sql)
+    rows[[length(rows) + 1]] <- res
+  }
+  do.call(rbind, rows)
+}
+
+#' Generate Federated Table 1 Baseline Demographics and Clinical Profiles
+#'
+#' @param fc A `federated_consortium` object.
+#' @param cohort_table Name of the cohort table or view (default `"v_visit_occurrence"`).
+#' @param domain Optional domain profile to add (e.g. `"heart_failure"`, `"diabetes"`).
+#' @param stratify_by Optional stratification column.
+#' @param ... Additional arguments passed to `table1_generator()$generate()`.
+#' @return A `data.frame` representing Table 1.
+#' @export
+consortium_generate_table1 <- function(fc, cohort_table = "v_visit_occurrence", domain = NULL, stratify_by = NULL, ...) {
+  if (!inherits(fc, "federated_consortium")) stop("`fc` must be a federated_consortium object.", call. = FALSE)
+  t1 <- table1_generator(con = fc$con)
+  if (!is.null(domain)) {
+    t1$add_domain_profile(domain)
+  }
+  t1$generate(cohort_table = cohort_table, stratify_by = stratify_by, ...)
+}
+
+#' Generate Federated Table 2 Completeness and Missingness Audit
+#'
+#' @param fc A `federated_consortium` object.
+#' @param cohort_table Name of the cohort table or view (default `"v_visit_occurrence"`).
+#' @param strata_col Optional stratification column.
+#' @param columns Optional subset of columns to evaluate.
+#' @param ... Additional arguments passed to [generate_table2()].
+#' @return A `data.frame` representing Table 2 completeness audit.
+#' @export
+consortium_generate_table2 <- function(fc, cohort_table = "v_visit_occurrence", strata_col = NULL, columns = NULL, ...) {
+  if (!inherits(fc, "federated_consortium")) stop("`fc` must be a federated_consortium object.", call. = FALSE)
+  generate_table2(fc$con, table_name = cohort_table, strata_col = strata_col, columns = columns, ...)
+}
+
+#' Close Federated Consortium DuckDB Connection
+#'
+#' @param fc A `federated_consortium` object.
+#' @export
+consortium_close <- function(fc) {
+  if (inherits(fc, "federated_consortium") && !is.null(fc$con)) {
+    try(DBI::dbDisconnect(fc$con, shutdown = TRUE), silent = TRUE)
+  }
+}
+
+#' @export
+close.federated_consortium <- function(con, ...) {
+  consortium_close(con)
+}
+
+#' @export
+print.federated_consortium <- function(x, ...) {
+  cat(sprintf("Federated Consortium Connector [%d participating site(s)]\n", length(x$sites)))
+  invisible(x)
+}
+
+
 
