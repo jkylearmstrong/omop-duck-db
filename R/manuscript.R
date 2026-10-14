@@ -8,6 +8,7 @@
 #'
 #' @docType class
 #' @name manuscript
+#' @keywords internal
 NULL
 
 .TRIPOD_CHECKLIST_R <- data.frame(

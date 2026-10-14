@@ -5,6 +5,7 @@
 #'
 #' @docType class
 #' @name cohort_diagnostics
+#' @keywords internal
 NULL
 
 #' Generate Pure DuckDB OHDSI Cohort Diagnostics

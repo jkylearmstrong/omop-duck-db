@@ -8,3 +8,4 @@
 Characterizes study cohorts across federated network sites directly in DuckDB
 without requiring R/Java dependencies or DatabaseConnector.
 }
+\keyword{internal}

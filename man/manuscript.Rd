@@ -11,3 +11,4 @@ calibration, DCA, and explainability summaries) into a publication-ready Quarto 
 or Typst (.typ) document formatted according to target journal guidelines
 (e.g., JAMA, Lancet Digital Health, JAMIA) with an itemized TRIPOD checklist appendix.
 }
+\keyword{internal}
