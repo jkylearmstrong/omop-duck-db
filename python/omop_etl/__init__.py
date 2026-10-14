@@ -69,7 +69,13 @@ from omop_etl.medication_classes import (
 )
 from omop_etl.table1_profiles import DOMAIN_PROFILES, Table1Generator
 from omop_etl.table1 import generate_table1, export_table1, table1_to_quarto, table1_to_typst
-from omop_etl.cohort_flow import CohortFlow, Table2Generator, as_plp_arrow
+from omop_etl.cohort_flow import (
+    CohortFlow,
+    Table2Generator,
+    as_plp_arrow,
+    plot_consort_flow,
+    plot_multisite_attrition_heatmap,
+)
 from omop_etl.risk_scores import (
     calculate_bedside_scores,
 )
@@ -250,6 +256,24 @@ from omop_etl.survival import (
     fine_gray_estimator,
     plot_cif,
 )
+from omop_etl.negative_controls import (
+    EmpiricalCalibrationResult,
+    calibrate_estimates,
+    generate_negative_controls,
+)
+from omop_etl.concept_optimizer import (
+    optimize_concept_set,
+)
+from omop_etl.trajectories import (
+    extract_temporal_trajectories,
+)
+from omop_etl.federated_survival import (
+    FederatedSurvivalResult,
+    consortium_survival_meta_analysis,
+)
+from omop_etl.synthetic import (
+    generate_synthetic_omop_twin,
+)
 from omop_etl.lakehouse import (
     omop_connect_lakehouse,
 )
@@ -278,6 +302,7 @@ __all__ = [
     "MedicationTransitions", "extract_medication_transitions",
     "calculate_lace_index", "calculate_hospital_score",
     "DOMAIN_PROFILES", "Table1Generator", "CohortFlow", "Table2Generator", "as_plp_arrow",
+    "plot_consort_flow", "plot_multisite_attrition_heatmap",
     "generate_table1", "export_table1", "table1_to_quarto", "table1_to_typst",
     "ACUTE_LAB_PANEL",
     "extract_inpatient_labs",
@@ -488,6 +513,15 @@ __all__ = [
     "consortium_patient_overlap",
     "planned_readmission_filter",
     "observation_period_diagnostics",
+    # Advanced Causal, Calibration, Trajectories, Survival & Synthetic Additions (v0.6.4)
+    "generate_negative_controls",
+    "calibrate_estimates",
+    "EmpiricalCalibrationResult",
+    "optimize_concept_set",
+    "extract_temporal_trajectories",
+    "consortium_survival_meta_analysis",
+    "FederatedSurvivalResult",
+    "generate_synthetic_omop_twin",
 ]
 
 __version__ = "0.6.4b"

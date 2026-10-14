@@ -69,6 +69,30 @@ Release 0.6.4b introduces production medication classification guards, explainab
 - **Observation Period Diagnostics (`observation_period_diagnostics`)**:
   - Compares patient qualification under constructed `observation_period` vs. first-observed clinical events to assess wash-in validity.
 
+### 5. Advanced Causal Inference, Calibration, Trajectories, Survival & Synthetic Data
+- **Interactive Cohort Attrition Flow & Heatmaps (`plot_consort_flow`, `plot_multisite_attrition_heatmap`)**:
+  - Interactive Plotly Sankey diagrams and camera-ready SVG alluvial flowcharts rendering sequential exclusions and retentions for publication and Quarto manuscripts.
+  - Multi-site attrition heatmaps highlighting outlier patient loss across consortium network partners.
+- **Propensity Score Nearest-Neighbor Matching & Love Plot (`consortium_propensity_score`, `match_nearest_neighbor`, `plot_love_plot`)**:
+  - 1:k greedy nearest-neighbor caliper matching on logit(PS) executing directly on DuckDB feature tables.
+  - Camera-ready SVG Love plots verifying pre- and post-adjustment covariate balance against the SMD $< 0.10$ clinical threshold.
+- **Automated Negative Controls & Empirical Calibration (`generate_negative_controls`, `calibrate_estimates`)**:
+  - Traverses OMOP concept hierarchies (`concept_ancestor`, `concept_relationship`) to identify candidate negative control outcome sets with zero mechanistic or ancestral links.
+  - Fits empirical Gaussian null distributions to calibrate study p-values and confidence intervals against residual systematic bias.
+- **Semantic Concept Set Optimizer & Usagi Auto-Suggester (`optimize_concept_set`)**:
+  - Scans clinical occurrence co-occurrences, sibling hierarchy closures, and lexical synonyms to suggest missing clinical concepts and high-frequency unmapped source codes (`concept_id = 0`).
+- **Longitudinal Temporal Trajectory Features (`extract_temporal_trajectories`)**:
+  - Exploits DuckDB's vectorized `regr_slope`, `regr_r2`, and `stddev_samp` to compute longitudinal rates of change, goodness of fit, and volatility over look-back windows without row-by-row iteration.
+- **Multi-Site Federated Survival Meta-Analysis (`consortium_survival_meta_analysis`)**:
+  - DerSimonian-Laird random-effects pooling of Cox Proportional Hazard Ratios across participating sites.
+  - Federated non-parametric Kaplan-Meier survival curves with small-cell privacy suppression ($< 11$).
+- **Automated Synthetic OMOP Twin Cohort Generator (`generate_synthetic_omop_twin`)**:
+  - Extracts marginal concept distributions, age-sex distributions, and event timings to emit structurally identical, anonymized synthetic OMOP DuckDB databases for open benchmarking without HIPAA/PHI exposure.
+- **PCORnet MED_ADMIN and DISPENSING Loading**:
+  - Maps inpatient administrations (`MED_ADMIN`) and outpatient dispensings (`DISPENSING`) to `drug_exposure` with distinct standard type concepts (`38000180` and `38000175`), dosage units, and administration timestamps.
+- **Row-Level Provenance in Table 1 Footnotes**:
+  - Extends `table1_to_quarto()` and `table1_to_typst()` with lookback windows, anchor dates, bounds, units, fill rules, and concept sets per row.
+
 # omopduckdb 0.6.3
 
 

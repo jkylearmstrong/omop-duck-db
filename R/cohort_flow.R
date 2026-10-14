@@ -361,3 +361,355 @@ plp_arrow_to_plp_data <- function(plp_arrow, con, target_id = 1L, outcome_id = 1
                                  covariateSettings = list(source = "omopduckdb::as_plp_arrow"))),
             class = "plpData")
 }
+
+#' Plot Visual Cohort Attrition Flow (CONSORT / Sankey)
+#'
+#' @description
+#' Renders cohort attrition flow diagrams in standalone SVG or interactive Plotly Sankey structure.
+#'
+#' @param attrition A data.frame, list, or attrition summary object.
+#' @param format Output format: 'svg' (vector diagram) or 'plotly' (interactive list).
+#' @param title Diagram title.
+#' @param output_path Optional file path to write SVG output.
+#'
+#' @return SVG string (for 'svg') or list structure (for 'plotly').
+#' @export
+plot_consort_flow <- function(attrition,
+                              format = c("svg", "plotly"),
+                              title = "Cohort Attrition Flow (CONSORT)",
+                              output_path = NULL) {
+  format <- match.arg(format)
+
+  if (is.data.frame(attrition)) {
+    df <- as.data.frame(attrition)
+  } else if (is.list(attrition) && "summary_table" %in% names(attrition)) {
+    df <- as.data.frame(attrition$summary_table)
+  } else if (is.list(attrition)) {
+    df <- as.data.frame(attrition)
+  } else {
+    stop("`attrition` must be a data.frame or attrition list.")
+  }
+
+  col_map <- c(
+    "step" = "step_number",
+    "step_num" = "step_number",
+    "name" = "step_name",
+    "criteria" = "step_name",
+    "n_subjects" = "subjects_retained",
+    "retained" = "subjects_retained",
+    "count" = "subjects_retained",
+    "n_dropped" = "subjects_dropped",
+    "dropped" = "subjects_dropped",
+    "excluded" = "subjects_dropped",
+    "pct_retained" = "percent_retained",
+    "reason" = "exclusion_reason"
+  )
+  for (orig in names(df)) {
+    low <- tolower(orig)
+    if (low %in% names(col_map) && !col_map[[low]] %in% names(df)) {
+      df[[col_map[[low]]]] <- df[[orig]]
+    }
+  }
+
+  if (!"step_number" %in% names(df)) {
+    df$step_number <- seq_len(nrow(df))
+  }
+  if (!"step_name" %in% names(df)) {
+    df$step_name <- paste("Step", df$step_number)
+  }
+  if (!"subjects_retained" %in% names(df)) {
+    stop("Attrition data must have a retained subject count column.")
+  }
+
+  df$subjects_retained <- as.integer(df$subjects_retained)
+
+  if (!"subjects_dropped" %in% names(df)) {
+    ret <- df$subjects_retained
+    drop_vec <- c(0L)
+    if (length(ret) > 1) {
+      for (i in 2:length(ret)) {
+        drop_vec <- c(drop_vec, max(0L, ret[i - 1] - ret[i]))
+      }
+    }
+    df$subjects_dropped <- drop_vec
+  } else {
+    df$subjects_dropped <- as.integer(ifelse(is.na(df$subjects_dropped), 0L, df$subjects_dropped))
+  }
+
+  if (!"percent_retained" %in% names(df)) {
+    first_n <- if (nrow(df) > 0) max(1, df$subjects_retained[1]) else 1
+    df$percent_retained <- round((df$subjects_retained / first_n) * 100.0, 1)
+  }
+
+  if (!"exclusion_reason" %in% names(df)) {
+    df$exclusion_reason <- "Criteria not met"
+  }
+
+  if (format == "plotly") {
+    node_labels <- character(0)
+    node_colors <- character(0)
+    sources <- integer(0)
+    targets <- integer(0)
+    values <- numeric(0)
+    link_colors <- character(0)
+
+    step_node_indices <- integer(nrow(df))
+    for (i in seq_len(nrow(df))) {
+      s_num <- df$step_number[i]
+      s_name <- df$step_name[i]
+      ret <- df$subjects_retained[i]
+      pct <- df$percent_retained[i]
+      lbl <- sprintf("Step %d: %s<br>N = %s (%.1f%%)", s_num, s_name, format(ret, big.mark = ","), pct)
+      node_idx <- length(node_labels)
+      step_node_indices[i] <- node_idx
+      node_labels <- c(node_labels, lbl)
+      node_colors <- c(node_colors, "#3182ce")
+    }
+
+    if (nrow(df) > 1) {
+      for (i in 2:nrow(df)) {
+        prev_node <- step_node_indices[i - 1]
+        curr_node <- step_node_indices[i]
+        curr_ret <- df$subjects_retained[i]
+        dropped <- df$subjects_dropped[i]
+        reason <- df$exclusion_reason[i]
+
+        if (curr_ret > 0) {
+          sources <- c(sources, prev_node)
+          targets <- c(targets, curr_node)
+          values <- c(values, curr_ret)
+          link_colors <- c(link_colors, "rgba(49, 130, 206, 0.4)")
+        }
+
+        if (dropped > 0) {
+          excl_node <- length(node_labels)
+          node_labels <- c(node_labels, sprintf("Excluded: %s<br>N = %s", reason, format(dropped, big.mark = ",")))
+          node_colors <- c(node_colors, "#e53e3e")
+
+          sources <- c(sources, prev_node)
+          targets <- c(targets, excl_node)
+          values <- c(values, dropped)
+          link_colors <- c(link_colors, "rgba(229, 62, 62, 0.4)")
+        }
+      }
+    }
+
+    res <- list(
+      data = list(list(
+        type = "sankey",
+        orientation = "h",
+        node = list(
+          pad = 15,
+          thickness = 20,
+          line = list(color = "#2d3748", width = 0.5),
+          label = node_labels,
+          color = node_colors
+        ),
+        link = list(
+          source = sources,
+          target = targets,
+          value = values,
+          color = link_colors
+        )
+      )),
+      layout = list(
+        title = list(text = title, font = list(family = "sans-serif", size = 16)),
+        font = list(family = "sans-serif", size = 12),
+        margin = list(l = 20, r = 20, t = 50, b = 20)
+      )
+    )
+    return(res)
+  }
+
+  # SVG format
+  n_steps <- nrow(df)
+  width <- 750
+  height <- max(400, n_steps * 130 + 80)
+  box_w <- 340
+  box_h <- 60
+  margin_top <- 70
+  center_x <- 220
+  excl_x <- 520
+  excl_w <- 200
+
+  svg_elements <- c(
+    sprintf('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" style="background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif;">', width, height, width, height),
+    sprintf('<text x="%f" y="38" text-anchor="middle" font-size="17" font-weight="600" fill="#1a202c">%s</text>', width / 2, title)
+  )
+
+  for (i in seq_len(nrow(df))) {
+    y <- margin_top + (i - 1) * 130
+    idx <- df$step_number[i]
+    name <- df$step_name[i]
+    ret <- df$subjects_retained[i]
+    pct <- df$percent_retained[i]
+    dropped <- df$subjects_dropped[i]
+    reason <- df$exclusion_reason[i]
+
+    svg_elements <- c(
+      svg_elements,
+      sprintf('<rect x="%f" y="%d" width="%d" height="%d" rx="6" fill="#ebf8ff" stroke="#3182ce" stroke-width="1.5" />', center_x - box_w / 2, y, box_w, box_h),
+      sprintf('<text x="%d" y="%d" text-anchor="middle" font-size="13" font-weight="600" fill="#2b6cb0">%d. %s</text>', center_x, y + 24, idx, name),
+      sprintf('<text x="%d" y="%d" text-anchor="middle" font-size="12" fill="#4a5568">N = %s (%.1f%% retained)</text>', center_x, y + 45, format(ret, big.mark = ","), pct)
+    )
+
+    if (i > 1) {
+      prev_y <- margin_top + (i - 2) * 130 + box_h
+      svg_elements <- c(
+        svg_elements,
+        sprintf('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#4a5568" stroke-width="2" />', center_x, prev_y, center_x, y),
+        sprintf('<polygon points="%d,%d %d,%d %d,%d" fill="#4a5568" />', center_x - 4, y - 6, center_x + 4, y - 6, center_x, y)
+      )
+
+      if (dropped > 0) {
+        mid_y <- (prev_y + y) / 2
+        excl_box_h <- 44
+        svg_elements <- c(
+          svg_elements,
+          sprintf('<line x1="%d" y1="%f" x2="%d" y2="%f" stroke="#e53e3e" stroke-width="1.5" stroke-dasharray="3,3" />', center_x, mid_y, excl_x, mid_y),
+          sprintf('<polygon points="%d,%f %d,%f %d,%f" fill="#e53e3e" />', excl_x - 4, mid_y - 3, excl_x - 4, mid_y + 3, excl_x + 2, mid_y),
+          sprintf('<rect x="%d" y="%f" width="%d" height="%d" rx="4" fill="#fff5f5" stroke="#feb2b2" stroke-width="1" stroke-dasharray="3,3" />', excl_x, mid_y - excl_box_h / 2, excl_w, excl_box_h),
+          sprintf('<text x="%d" y="%f" font-size="11" font-weight="600" fill="#c53030">Excluded (N = %s)</text>', excl_x + 10, mid_y - 4, format(dropped, big.mark = ",")),
+          sprintf('<text x="%d" y="%f" font-size="10" fill="#742a2a">%s</text>', excl_x + 10, mid_y + 12, substr(reason, 1, 30))
+        )
+      }
+    }
+  }
+
+  svg_elements <- c(svg_elements, "</svg>")
+  svg_content <- paste(svg_elements, collapse = "\n")
+
+  if (!is.null(output_path)) {
+    writeLines(svg_content, output_path)
+  }
+  svg_content
+}
+
+#' Generate Multi-Site Attrition Heatmap
+#'
+#' @description
+#' Generates an SVG matrix heatmap comparing attrition retention rates across consortium sites.
+#'
+#' @param attrition_df Data frame containing site, step, and retention percent columns.
+#' @param site_col Name of column identifying site (default "site").
+#' @param step_col Name of column identifying step name (default "step_name").
+#' @param retention_col Name of column identifying retention percent (default "percent_retained").
+#' @param title Chart title.
+#' @param output_path Optional file path to write SVG output.
+#'
+#' @return Standalone SVG heatmap string.
+#' @export
+plot_multisite_attrition_heatmap <- function(attrition_df,
+                                            site_col = "site",
+                                            step_col = "step_name",
+                                            retention_col = "percent_retained",
+                                            title = "Multi-Site Attrition Profile (% Retained)",
+                                            output_path = NULL) {
+  df <- as.data.frame(attrition_df)
+  for (c_name in c(site_col, step_col, retention_col)) {
+    if (!c_name %in% names(df)) {
+      match_col <- names(df)[tolower(names(df)) == tolower(c_name)]
+      if (length(match_col) > 0) {
+        df[[c_name]] <- df[[match_col[1]]]
+      } else {
+        stop(sprintf("Column '%s' not found in attrition_df.", c_name))
+      }
+    }
+  }
+
+  sites <- sort(unique(as.character(df[[site_col]])))
+  steps <- unique(as.character(df[[step_col]]))
+
+  n_sites <- length(sites)
+  n_steps <- length(steps)
+
+  cell_w <- 120
+  cell_h <- 36
+  margin_l <- 150
+  margin_t <- 80
+  margin_b <- 60
+  margin_r = 50
+
+  width <- margin_l + n_steps * cell_w + margin_r
+  height <- margin_t + n_sites * cell_h + margin_b
+
+  get_color <- function(val) {
+    if (val >= 90.0) {
+      list(bg = "#dcfce7", fg = "#166534")
+    } else if (val >= 75.0) {
+      list(bg = "#fef9c3", fg = "#854d0e")
+    } else if (val >= 50.0) {
+      list(bg = "#fed7aa", fg = "#9a3412")
+    } else {
+      list(bg = "#fee2e2", fg = "#991b1b")
+    }
+  }
+
+  svg_elements <- c(
+    sprintf('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" style="background-color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif;">', width, height, width, height),
+    sprintf('<text x="%f" y="35" text-anchor="middle" font-size="16" font-weight="600" fill="#1e293b">%s</text>', width / 2, title)
+  )
+
+  for (j in seq_along(steps)) {
+    x <- margin_l + (j - 1) * cell_w + cell_w / 2
+    step_label <- substr(steps[j], 1, 16)
+    svg_elements <- c(
+      svg_elements,
+      sprintf('<text x="%f" y="%d" text-anchor="middle" font-size="11" font-weight="600" fill="#475569">%s</text>', x, margin_t - 15, step_label)
+    )
+  }
+
+  for (i in seq_along(sites)) {
+    y <- margin_t + (i - 1) * cell_h
+    site_name <- sites[i]
+    svg_elements <- c(
+      svg_elements,
+      sprintf('<text x="%d" y="%f" text-anchor="end" font-size="12" font-weight="500" fill="#334155">%s</text>', margin_l - 15, y + cell_h / 2 + 4, site_name)
+    )
+
+    for (j in seq_along(steps)) {
+      x <- margin_l + (j - 1) * cell_w
+      step_name <- steps[j]
+      sub_row <- df[df[[site_col]] == site_name & df[[step_col]] == step_name, , drop = FALSE]
+      if (nrow(sub_row) > 0) {
+        val <- as.numeric(sub_row[[retention_col]][1])
+        txt <- sprintf("%.1f%%", val)
+      } else {
+        val <- 0.0
+        txt <- "N/A"
+      }
+
+      clr <- get_color(val)
+      svg_elements <- c(
+        svg_elements,
+        sprintf('<rect x="%d" y="%d" width="%d" height="%d" rx="4" fill="%s" stroke="#e2e8f0" stroke-width="1" />', x + 2, y + 2, cell_w - 4, cell_h - 4, clr$bg),
+        sprintf('<text x="%f" y="%f" text-anchor="middle" font-size="12" font-weight="600" fill="%s">%s</text>', x + cell_w / 2, y + cell_h / 2 + 4, clr$fg, txt)
+      )
+    }
+  }
+
+  leg_y <- height - 25
+  legend_items <- list(
+    list(lbl = ">= 90% (High Retention)", bg = "#dcfce7", fg = "#166534"),
+    list(lbl = "75-89%", bg = "#fef9c3", fg = "#854d0e"),
+    list(lbl = "50-74%", bg = "#fed7aa", fg = "#9a3412"),
+    list(lbl = "< 50% (Disproportionate Drop)", bg = "#fee2e2", fg = "#991b1b")
+  )
+  cur_x <- margin_l
+  for (item in legend_items) {
+    svg_elements <- c(
+      svg_elements,
+      sprintf('<rect x="%d" y="%d" width="16" height="16" rx="3" fill="%s" stroke="#cbd5e1" />', cur_x, leg_y - 12, item$bg),
+      sprintf('<text x="%d" y="%d" font-size="11" fill="#475569">%s</text>', cur_x + 22, leg_y, item$lbl)
+    )
+    cur_x <- cur_x + 160
+  }
+
+  svg_elements <- c(svg_elements, "</svg>")
+  svg_content <- paste(svg_elements, collapse = "\n")
+
+  if (!is.null(output_path)) {
+    writeLines(svg_content, output_path)
+  }
+  svg_content
+}
