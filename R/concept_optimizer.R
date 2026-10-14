@@ -23,6 +23,7 @@ NULL
 #' @param max_suggestions Maximum number of suggestions to return (default 50L).
 #'
 #' @return A data.frame of suggested concepts with rationale and co-occurrence counts.
+#' @importFrom utils head
 #' @export
 optimize_concept_set <- function(con,
                                  concept_ids,

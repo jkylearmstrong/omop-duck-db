@@ -560,6 +560,8 @@ export_table1 <- function(table1_result,
 #' @param include_loinc_footnotes Logical; whether to generate superscript LOINC code footnotes (default `TRUE`).
 #' @param loinc_map Optional named list of LOINC codes by variable name.
 #' @param loinc_footnotes Optional named list or vector of LOINC codes or footnotes.
+#' @param provenance_notes Optional named list mapping variable names to provenance metadata dictionaries.
+#' @param include_provenance_footnotes Logical; whether to generate superscript provenance footnotes (default \code{TRUE}).
 #' @param ... Additional arguments.
 #' @return Formatted Quarto manuscript character string.
 #' @export
@@ -716,6 +718,8 @@ table1_to_quarto <- function(table1_data,
 #' @param loinc_map Optional named list of LOINC codes by variable name.
 #' @param loinc_footnotes Optional named list or vector of LOINC codes or footnotes.
 #' @param font_size Font size for table content (default: `"9pt"`).
+#' @param provenance_notes Optional named list mapping variable names to provenance metadata dictionaries.
+#' @param include_provenance_footnotes Logical; whether to generate superscript provenance footnotes (default \code{TRUE}).
 #' @param ... Additional arguments.
 #' @return Formatted Typst character string.
 #' @export

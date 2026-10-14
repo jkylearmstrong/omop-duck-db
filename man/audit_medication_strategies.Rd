@@ -12,7 +12,7 @@ audit_medication_strategies(
   concordance_threshold = 0.9,
   prevalence_gap_threshold = 0.1,
   peer_kappa_gap = 0.25,
-  min_n = 0,
+  min_n = 10,
   min_prevalence = NULL,
   explain = FALSE,
   con = NULL,
@@ -37,7 +37,7 @@ audit_medication_strategies(
 \item{peer_kappa_gap}{With at least 3 sites, flag a site whose kappa trails the median of the \emph{other} sites
 by more than this.}
 
-\item{min_n}{Minimum cohort size to audit (default 0).}
+\item{min_n}{Minimum cohort size to audit (default 10).}
 
 \item{min_prevalence}{Minimum expected prevalence threshold (default NULL).}
 

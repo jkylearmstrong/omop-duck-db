@@ -56,6 +56,14 @@ columns like \code{source_value} / \code{drug_class}). Combined with inline \cod
 \item{end_date_col}{Stay end column for \code{"inpatient"} / \code{"discharge"} (default \code{cohort_end_date} /
 \code{visit_end_date}).}
 
+\item{on_unresolved}{Action when concepts or ATC codes fail to resolve (\code{"raise"}, \code{"warn"}, or \code{"ignore"}).}
+
+\item{exclude_forms}{Character vector of dosage/form patterns to exclude (e.g. \code{"topical"}, \code{"ophthalmic"}).}
+
+\item{route_concept_ids}{Vector of standard OMOP route concept IDs to filter exposures by.}
+
+\item{by_type}{Logical; if \code{TRUE}, also extracts flags separated by source concept type.}
+
 \item{return_audit}{Also return \code{\link[=audit_medication_strategies]{audit_medication_strategies()}} output (needs \code{strategy = "both"}).}
 
 \item{...}{Forwarded to \code{\link[=audit_medication_strategies]{audit_medication_strategies()}}.}

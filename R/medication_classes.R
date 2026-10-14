@@ -99,6 +99,10 @@
 #'   `[stay end, stay end]` (orders written at discharge).
 #' @param end_date_col Stay end column for `"inpatient"` / `"discharge"` (default `cohort_end_date` /
 #'   `visit_end_date`).
+#' @param on_unresolved Action when concepts or ATC codes fail to resolve (`"raise"`, `"warn"`, or `"ignore"`).
+#' @param exclude_forms Character vector of dosage/form patterns to exclude (e.g. `"topical"`, `"ophthalmic"`).
+#' @param route_concept_ids Vector of standard OMOP route concept IDs to filter exposures by.
+#' @param by_type Logical; if `TRUE`, also extracts flags separated by source concept type.
 #' @param return_audit Also return [audit_medication_strategies()] output (needs `strategy = "both"`).
 #' @param ... Forwarded to [audit_medication_strategies()].
 #' @return A data frame with `person_id`, `index_date`, optional `site`, and per class `<class>_source`,
@@ -334,7 +338,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
 #' @param prevalence_gap_threshold Flag `|prevalence_source - prevalence_standard|` above this.
 #' @param peer_kappa_gap With at least 3 sites, flag a site whose kappa trails the median of the *other* sites
 #'   by more than this.
-#' @param min_n Minimum cohort size to audit (default 0).
+#' @param min_n Minimum cohort size to audit (default 10).
 #' @param min_prevalence Minimum expected prevalence threshold (default NULL).
 #' @param explain If TRUE, joins disagreement explanation (requires \code{con} and \code{medication_specs}).
 #' @param con Active DuckDB DBI connection (needed if \code{explain = TRUE}).

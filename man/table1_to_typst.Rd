@@ -38,6 +38,10 @@ table1_to_typst(
 
 \item{font_size}{Font size for table content (default: \code{"9pt"}).}
 
+\item{provenance_notes}{Optional named list mapping variable names to provenance metadata dictionaries.}
+
+\item{include_provenance_footnotes}{Logical; whether to generate superscript provenance footnotes (default \code{TRUE}).}
+
 \item{...}{Additional arguments.}
 }
 \value{

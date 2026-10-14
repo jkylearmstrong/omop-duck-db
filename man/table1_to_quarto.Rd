@@ -35,6 +35,10 @@ table1_to_quarto(
 
 \item{loinc_footnotes}{Optional named list or vector of LOINC codes or footnotes.}
 
+\item{provenance_notes}{Optional named list mapping variable names to provenance metadata dictionaries.}
+
+\item{include_provenance_footnotes}{Logical; whether to generate superscript provenance footnotes (default \code{TRUE}).}
+
 \item{...}{Additional arguments.}
 }
 \value{
