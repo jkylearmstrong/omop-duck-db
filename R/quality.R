@@ -72,7 +72,7 @@ NULL
 #' @param table_name Optional custom table or view name override.
 #' @param by_site Whether to stratify results by hospital site (default TRUE).
 #' @param site_col Column name representing site (default 'site').
-#' @param min_share Minimum proportion of uncaptured rows (default 0.01 = 1\%) to flag as an omission.
+#' @param min_share Minimum proportion of uncaptured rows (default 0.01 = 1 percent) to flag as an omission.
 #' @return A data frame with columns:
 #'   \code{site}, \code{total_rows}, \code{covered_rows}, \code{coverage_share},
 #'   \code{omitted_concept_id}, \code{omitted_code}, \code{omitted_concept_name},
@@ -215,8 +215,8 @@ audit_code_list_coverage <- function(con, domain, supplied_codes, concept_set_or
 #' @param features Data frame containing patient features with analyte columns.
 #' @param panels Named list of character vectors mapping panel names to analyte column names (default BMP and CBC).
 #' @param by Column name to stratify by (default 'site'); if NULL or absent, audited as 'ALL'.
-#' @param threshold Maximum allowable missingness gap above panel median (default 0.15 = 15\%).
-#' @param peer_gap Cross-site discrepancy gap flagging peer outliers across hospitals (default 0.20 = 20\%).
+#' @param threshold Maximum allowable missingness gap above panel median (default 0.15 = 15 percent).
+#' @param peer_gap Cross-site discrepancy gap flagging peer outliers across hospitals (default 0.20 = 20 percent).
 #' @return A data frame with columns:
 #'   \code{site}, \code{panel}, \code{analyte}, \code{missing_count}, \code{total_count},
 #'   \code{missing_rate}, \code{panel_median_missing}, \code{missingness_gap}, \code{flagged}, \code{reason}.

@@ -123,6 +123,12 @@ from omop_etl.quality import (
     panel_missingness_audit,
     plausibility_report,
 )
+from omop_etl.reconciliation import (
+    cohort_from_index_stays,
+    compare_feature_tables,
+    cohort_overlap,
+    run_study_grid,
+)
 from omop_etl.phenotype_dsl import (
     ConditionCriteria,
     DrugCriteria,
@@ -444,6 +450,11 @@ __all__ = [
     "plausibility_report",
     "detect_redundant_features",
     "dqd_summary",
+    # Reconciliation & Comparison Additions
+    "cohort_from_index_stays",
+    "compare_feature_tables",
+    "cohort_overlap",
+    "run_study_grid",
 ]
 
 __version__ = "0.6.3"

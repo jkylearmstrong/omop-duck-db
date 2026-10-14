@@ -30,7 +30,25 @@ Release 0.6.4b introduces production medication classification guards, explainab
 - **DQD Mathematical Consistency Summary (`dqd_summary`)**:
   - Recomputes total, passed, failed, and not-applicable checks to verify exact reproducibility of reported pass rates in 1/N increments.
 
+### 3. Pipeline Reconciliation, Forced Index Stays, and Parity Ledger
+- **Forced-Index Cohorts from External Stays (`cohort_from_index_stays`)**:
+  - Ingests external legacy stay files (patient ID, encounter ID, index date, end date) and maps to OMOP `person_id` and `visit_occurrence_id`.
+  - Emits full audit tallies (`total_input_stays`, `matched_patients`, `unmatched_patients`, `patient_match_rate`, `matched_encounters`, `unmatched_encounters`, `encounter_match_rate`).
+  - Registers the forced cohort table in DuckDB for downstream study extraction.
+- **Feature-Table Parity Ledger (`compare_feature_tables`)**:
+  - Matches rows across legacy and new pipelines and evaluates feature-by-feature parity.
+  - Computes Standardized Mean Differences (SMDs), Pearson correlation / binary kappa, and missingness gaps.
+  - Automatically flags discrepancies with clear reason codes: `large_smd` ($>0.10$), `missingness_gap` ($>5\%$), `scale_mismatch` ($>2\times$ or $<0.5\times$ SD ratio), `zero_variance`, and `all_zero`.
+  - Supports site stratification with HIPAA/GDPR-compliant small-cell suppression ($<11$) on sample counts.
+- **Cohort Reconciliation & Overlap (`cohort_overlap`)**:
+  - Reconciles cohort membership between divergent definitions or pipelines.
+  - Reports counts in A-only, B-only, both, Jaccard similarity index, concordance rate, and outcome event rates in intersection and discordant strata.
+- **Multi-Parameter Sensitivity Grid (`run_study_grid`)**:
+  - Executes study definitions across parameter grids (e.g. sampling rules, lookback windows, wash-in periods).
+  - Emits side-by-side N, event counts, and event rates overall and stratified by site.
+
 # omopduckdb 0.6.3
+
 
 Release 0.6.3 delivers forward-looking consortium intelligence capabilities for federated clinical research, bridging OHDSI network standards and modern medical publishing with complete 1:1 parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
 

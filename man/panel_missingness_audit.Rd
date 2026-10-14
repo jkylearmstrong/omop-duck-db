@@ -19,9 +19,9 @@ panel_missingness_audit(
 
 \item{by}{Column name to stratify by (default 'site'); if NULL or absent, audited as 'ALL'.}
 
-\item{threshold}{Maximum allowable missingness gap above panel median (default 0.15 = 15\\%).}
+\item{threshold}{Maximum allowable missingness gap above panel median (default 0.15 = 15 percent).}
 
-\item{peer_gap}{Cross-site discrepancy gap flagging peer outliers across hospitals (default 0.20 = 20\\%).}
+\item{peer_gap}{Cross-site discrepancy gap flagging peer outliers across hospitals (default 0.20 = 20 percent).}
 }
 \value{
 A data frame with columns:

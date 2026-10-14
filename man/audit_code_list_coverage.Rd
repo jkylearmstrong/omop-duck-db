@@ -30,7 +30,7 @@ audit_code_list_coverage(
 
 \item{site_col}{Column name representing site (default 'site').}
 
-\item{min_share}{Minimum proportion of uncaptured rows (default 0.01 = 1\\%) to flag as an omission.}
+\item{min_share}{Minimum proportion of uncaptured rows (default 0.01 = 1 percent) to flag as an omission.}
 }
 \value{
 A data frame with columns:
