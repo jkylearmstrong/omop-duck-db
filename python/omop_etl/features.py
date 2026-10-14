@@ -483,6 +483,7 @@ def extract_measurements(
     format: str = "df",
     outlier_bounds: dict[str, tuple[float | None, float | None]] | None = None,
     worst_direction: dict[str, str] | None = None,
+    measurement_table: str = "measurement",
 ) -> Any:
     r"""Extracts consolidated laboratory and vital sign measurements with selectable windowing strategies.
     
@@ -501,6 +502,8 @@ def extract_measurements(
         window: Windowing scope: 'stay' ([t0, t_end]), 'lookback' ([t0-W, t0)), or 'all' (<= t_end).
         lookback_days: Lookback window in days when window='lookback' (default 365).
         format: Output format ('df', 'arrow', 'polars').
+        measurement_table: Table/view to read from (default ``measurement``); pass the view created by
+                  :func:`omop_etl.measurement_filter.harmonize_measurement_units` to get unit-normalized values.
         
     Returns:
         pd.DataFrame, pyarrow.Table, or polars.DataFrame.
@@ -587,13 +590,13 @@ def extract_measurements(
             m.measurement_datetime,
             m.value_as_number
         FROM {cohort_table} c
-        JOIN measurement m ON c.subject_id = m.person_id AND {date_cond}
+        JOIN {measurement_table} m ON c.subject_id = m.person_id AND {date_cond}
         JOIN (
             SELECT lab_name, concept_id FROM _temp_loinc_resolved
             UNION
             SELECT s.lab_name, m2.measurement_concept_id AS concept_id
             FROM _temp_loinc_seeds s
-            JOIN measurement m2 ON m2.measurement_source_value = s.code_or_id
+            JOIN {measurement_table} m2 ON m2.measurement_source_value = s.code_or_id
         ) r ON m.measurement_concept_id = r.concept_id
         WHERE m.value_as_number IS NOT NULL
           {cohort_filter_and}{bounds_sql};

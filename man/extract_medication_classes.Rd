@@ -16,6 +16,8 @@ extract_medication_classes(
   site_col = NULL,
   lookback_days = NULL,
   lookahead_days = 0L,
+  window = NULL,
+  end_date_col = NULL,
   return_audit = FALSE,
   ...
 )
@@ -42,6 +44,13 @@ columns like \code{source_value} / \code{drug_class}). Combined with inline \cod
 (\code{site_anon} / \code{site_id} / \code{site}) carries through for per-site auditing.}
 
 \item{lookback_days, lookahead_days}{Exposure window around the index date. \code{NULL} lookback = unbounded.}
+
+\item{window}{Optional named temporal frame overriding the lookback/lookahead days: \code{"pre_admission"} =
+\verb{[index - lookback_days (default 365), index - 1]}; \code{"inpatient"} = \verb{[index, stay end]}; \code{"discharge"} =
+\verb{[stay end, stay end]} (orders written at discharge).}
+
+\item{end_date_col}{Stay end column for \code{"inpatient"} / \code{"discharge"} (default \code{cohort_end_date} /
+\code{visit_end_date}).}
 
 \item{return_audit}{Also return \code{\link[=audit_medication_strategies]{audit_medication_strategies()}} output (needs \code{strategy = "both"}).}
 

@@ -447,6 +447,8 @@ aggregate_concept_sets <- function(con,
 #'   mask a valid earlier one.
 #' @param worst_direction For `strategy = "worst"`: named list/vector `feature -> "max"|"min"`. Defaults to
 #'   [WORST_LAB_DIRECTION]; a feature with no entry is an error.
+#' @param measurement_table Table/view to read (default `"measurement"`); pass the view made by
+#'   [harmonize_measurement_units()] for unit-normalized values.
 #' @return A `data.frame` or Arrow Table.
 #' @export
 extract_measurements <- function(con,
@@ -458,7 +460,8 @@ extract_measurements <- function(con,
                                  lookback_days = NULL,
                                  format = "df",
                                  outlier_bounds = NULL,
-                                 worst_direction = NULL) {
+                                 worst_direction = NULL,
+                                 measurement_table = "measurement") {
   active_map <- if (is.null(loinc_map)) c(DEFAULT_LAB_LOINCS, DEFAULT_VITAL_LOINCS) else loinc_map
 
   strat <- tolower(trimws(strategy))
@@ -539,17 +542,17 @@ extract_measurements <- function(con,
         m.measurement_datetime,
         m.value_as_number
     FROM %s c
-    JOIN measurement m ON c.subject_id = m.person_id AND %s
+    JOIN %s m ON c.subject_id = m.person_id AND %s
     JOIN (
         SELECT lab_name, concept_id FROM _temp_loinc_resolved
         UNION
         SELECT s.lab_name, m2.measurement_concept_id AS concept_id
         FROM _temp_loinc_seeds s
-        JOIN measurement m2 ON m2.measurement_source_value = s.code_or_id
+        JOIN %s m2 ON m2.measurement_source_value = s.code_or_id
     ) r ON m.measurement_concept_id = r.concept_id
     WHERE m.value_as_number IS NOT NULL
       %s %s;
-  ", cohort_table, date_cond, cohort_filter_and, bounds_sql))
+  ", cohort_table, measurement_table, date_cond, measurement_table, cohort_filter_and, bounds_sql))
 
 
   lab_names <- sort(names(active_map))

@@ -54,6 +54,14 @@ from omop_etl.comorbidity import (
 )
 from omop_etl.scoring import FeatureSchemaError, OMOPScoringPipeline
 from omop_etl.utilization import extract_prior_utilization
+from omop_etl.measurement_filter import (
+    DEFAULT_PHYSIOLOGIC_BOUNDS,
+    filter_bounds,
+    harmonize_measurement_units,
+)
+from omop_etl.medication_classes import MedicationExtractor
+from omop_etl.table1_profiles import DOMAIN_PROFILES, Table1Generator
+from omop_etl.cohort_flow import CohortFlow, Table2Generator, as_plp_arrow
 from omop_etl.risk_scores import (
     calculate_bedside_scores,
 )
@@ -192,6 +200,8 @@ from omop_etl.vocabulary import (
 )
 
 __all__ = [
+    "DEFAULT_PHYSIOLOGIC_BOUNDS", "filter_bounds", "harmonize_measurement_units", "MedicationExtractor",
+    "DOMAIN_PROFILES", "Table1Generator", "CohortFlow", "Table2Generator", "as_plp_arrow",
     "ACUTE_LAB_PANEL",
     "extract_inpatient_labs",
     "extract_prior_utilization",

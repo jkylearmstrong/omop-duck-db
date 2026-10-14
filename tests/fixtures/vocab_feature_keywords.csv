@@ -1,0 +1,92 @@
+kind,name,keywords
+lab,albumin,albumin
+lab,alt,alanine
+lab,anion_gap,anion gap
+lab,ast,aspartate
+lab,bicarbonate,bicarbonate|carbon dioxide
+lab,bun,urea nitrogen
+lab,creatinine,creatinine
+lab,egfr,glomerular filtration
+lab,glucose,glucose
+lab,hba1c,hemoglobin a1c
+lab,hematocrit,hematocrit
+lab,ldl,ldl
+lab,wbc,leukocytes
+lab,sodium,sodium
+lab,potassium,potassium
+lab,chloride,chloride
+lab,calcium,calcium
+lab,bilirubin_total,bilirubin
+lab,hemoglobin,hemoglobin
+lab,platelets,platelets
+lab,lactate,lactate
+lab,troponin,troponin
+lab,po2,oxygen
+lab,pco2,carbon dioxide
+lab,bmi,body mass index
+lab,systolic_bp,systolic blood pressure
+lab,diastolic_bp,diastolic blood pressure
+lab,troponin_i,troponin i
+lab,troponin_t,troponin t
+lab,nt_probnp,prohormone
+lab,bnp,natriuretic peptide
+lab,cholesterol_total,cholesterol
+lab,hdl,hdl
+lab,triglycerides,triglyceride
+lab,lvef,ejection fraction
+lab,phosphorus,phosphate
+lab,uacr,creatinine
+lab,urine_protein_24h,protein
+lab,ph,ph of
+lab,base_excess,base excess
+lab,anc,neutrophils
+lab,ldh,lactate dehydrogenase
+lab,cea,carcinoembryonic
+lab,psa,prostate specific
+lab,ca_125,125
+lab,ca_19_9,19-9
+lab,fev1,fev1
+lab,fvc,forced vital|fvc
+lab,fev1_fvc,fev1/fvc
+lab,eosinophils,eosinophils
+lab,spo2,oxygen saturation
+lab,vancomycin_trough,vancomycin
+lab,digoxin,digoxin
+lab,lithium,lithium
+lab,tacrolimus,tacrolimus
+lab,inr,inr
+lab,pt,prothrombin
+lab,aptt,aptt
+med,beta_blockers,beta blocking
+med,ace_inhibitors,ace inhibitors
+med,arbs,angiotensin
+med,arni,sacubitril
+med,mras,aldosterone
+med,sglt2i,sodium-glucose
+med,loop_diuretics,high-ceiling
+med,statins,hmg
+med,raas_inhibitors,renin
+med,phosphate_binders,hyperphosphatemia
+med,esas,antianemic
+med,vitamin_d_analogs,vitamin d|parathyroid
+med,potassium_binders,polystyrene|patiromer
+med,vasopressors,norepinephrine|epinephrine|vasopressin
+med,inotropes,dobutamine
+med,systemic_corticosteroids,glucocorticoid
+med,broad_spectrum_antibiotics,piperacillin|cephalosporin|carbapenem
+med,platinum_agents,platinum
+med,anthracyclines,anthracycline
+med,taxanes,taxane
+med,checkpoint_inhibitors,pd-1
+med,gcsf,colony
+med,ics,glucocorticoid
+med,laba,salmeterol|formoterol|indacaterol
+med,lama,anticholinergic
+med,saba,salbutamol|terbutaline
+med,oral_corticosteroids,glucocorticoid
+med,biologics,obstructive airway
+med,doacs,dabigatran|factor xa|rivaroxaban|apixaban
+med,heparins,heparin
+med,warfarin,warfarin
+med,opioids,opioid
+med,sedatives,anxiolytic|hypnotic

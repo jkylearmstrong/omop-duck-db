@@ -9,12 +9,12 @@
 DEFAULT_LAB_LOINCS <- list(
   albumin = c("1751-7", "2862-1"),
   alt = c("1742-6", "1743-4", "1744-2"),
-  anion_gap = c("1863-0", "48642-3"),
+  anion_gap = c("1863-0", "33037-3"),
   ast = c("1920-8", "30239-8"),
   bicarbonate = c("1963-8", "2028-9", "2026-3"),
   bun = c("3094-0", "6299-2"),
   creatinine = c("2160-0", "38483-4"),
-  egfr = c("33914-3", "48643-1", "62238-1", "88293-6", "88294-4"),
+  egfr = c("33914-3", "48642-3", "48643-1", "62238-1", "88293-6", "88294-4"),
   glucose = c("2345-7", "2339-0", "41653-7"),
   hba1c = c("4548-4", "17856-6", "17855-8"),
   hematocrit = c("20570-8", "4544-3", "4545-0"),
@@ -34,12 +34,12 @@ DEFAULT_VITAL_LOINCS <- list(
 #' Default Core Chronic Medication Classes (ATC / RxNorm Ancestors)
 #' @export
 DEFAULT_MEDICATION_CONCEPTS <- list(
-  insulins = c(21600712L, 1782521L, 1502809L),
-  metformin = c(1503297L, 21600744L),
-  sulfonylureas = c(1502855L, 1502826L, 21600749L),
-  statins = c(1539403L, 1545958L, 1551860L, 21601783L),
-  antihypertensives = 21601664L,
-  raas_inhibitors = 21601744L,
+  insulins = 21600713L,
+  metformin = c(1503297L, 21600745L),
+  sulfonylureas = c(1502855L, 1502809L, 21600749L),
+  statins = c(1539403L, 1545958L, 1551860L, 21601855L),
+  antihypertensives = c(21600381L, 21601664L, 21601744L, 21601782L),
+  raas_inhibitors = 21601782L,
   beta_blockers = c(21601664L, 1314002L, 21601668L),
   systemic_corticosteroids = c(21602722L, 1506270L)
 )

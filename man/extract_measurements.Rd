@@ -14,7 +14,8 @@ extract_measurements(
   lookback_days = NULL,
   format = "df",
   outlier_bounds = NULL,
-  worst_direction = NULL
+  worst_direction = NULL,
+  measurement_table = "measurement"
 )
 }
 \arguments{
@@ -42,6 +43,9 @@ mask a valid earlier one.}
 
 \item{worst_direction}{For \code{strategy = "worst"}: named list/vector \code{feature -> "max"|"min"}. Defaults to
 \link{WORST_LAB_DIRECTION}; a feature with no entry is an error.}
+
+\item{measurement_table}{Table/view to read (default \code{"measurement"}); pass the view made by
+\code{\link[=harmonize_measurement_units]{harmonize_measurement_units()}} for unit-normalized values.}
 }
 \value{
 A \code{data.frame} or Arrow Table.

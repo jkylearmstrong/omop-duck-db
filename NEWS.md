@@ -1,3 +1,31 @@
+# omopduckdb 0.5.9
+
+Request 2 ships with **dual Python and R usage**. R functions are snake_case mirrors of the Python classes: `filter_bounds`, `harmonize_measurement_units`, `medication_extractor`, `table1_generator`, `cohort_flow`, `generate_table2`, `as_plp_arrow` (Python: `filter_bounds`, `harmonize_measurement_units`, `MedicationExtractor`, `Table1Generator`, `CohortFlow`, `Table2Generator`, `as_plp_arrow`). The domain profiles live once, in `inst/extdata/domain_profiles.yml`, and a test keeps the Python dict in sync.
+
+### Mapping bug fixes (audited against the OMOP vocabulary)
+- **LOINC `48642-3` (eGFR, MDRD) was in `anion_gap`**, giving an Anion Gap mean of ~59.5 mEq/L. Moved to `egfr`; `anion_gap` is now `1863-0` + `33037-3`.
+- **`DEFAULT_MEDICATION_CONCEPTS` had wrong concept ids** (found by the same audit): `insulins` held isoniazid (1782521) and tolazamide plus the whole A10 "diabetes drugs" class; `metformin` held A10B (all non-insulin glucose-lowering drugs); `sulfonylureas` held nateglinide; `statins` held ACE inhibitors (C09A); `raas_inhibitors` held calcium-channel blockers (C08); `antihypertensives` held only beta blockers. Now A10A, A10BA, A10BB, C10AA, C09 and C02+C07+C08+C09. **Behaviour change:** flag counts for these classes will change.
+- Still open (not changed): `33914-3` is a deprecated LOINC (kept for legacy data); `59260-0` hemoglobin is mmol/L, so mixing it with `718-7` is only safe after unit harmonization; wide-vital `HT`/`WT` use `[in_us]`/`[lb_av]` labels with UCUM concept ids 9326 (British inch) / 8739 (US pound); `PHYSIOLOGIC_LAB_BOUNDS` (e.g. potassium 1.5-10, hemoglobin 1-25) differs from the new `DEFAULT_PHYSIOLOGIC_BOUNDS`.
+
+### New
+- `filter_bounds(df, bounds=None | {...} | False, action="nullify"|"clip"|"drop")` with `DEFAULT_PHYSIOLOGIC_BOUNDS`; wide or long frames; `.attrs["bounds_report"]`.
+- `harmonize_measurement_units(con, ...)`: unit preflight report plus a `measurement_harmonized` view (cells/uL -> 10^3/uL, umol/L -> mg/dL, mmol/L glucose etc.). Unrecognized units are flagged, never guessed. `extract_measurements(measurement_table=)` reads from it.
+- `extract_medication_classes(window="pre_admission"|"inpatient"|"discharge")` and `MedicationExtractor` (concept_ancestor track, crosswalk track, per-window flags).
+- `Table1Generator` with `DOMAIN_PROFILES` (heart_failure, nephrology, sepsis_icu, oncology, pulmonary, pharmacotherapy_safety), `add_custom_lab`, YAML/dict profiles. Profile code lists are a starting point for clinician review; LOINC and ATC codes were verified to exist in the OMOP vocabulary.
+- `CohortFlow` (sequential steps, attrition table, Markdown/Mermaid/TikZ/Graphviz output, visit-type / anchor / follow-up preflight), `Table2Generator` (completeness, sentinel and zero-SD flags), `as_plp_arrow` (in-memory Arrow covariate tables for PatientLevelPrediction; no file round-trip).
+- R: `to_graphviz()` for attrition tables; `extract_measurements(measurement_table=)`; `extract_medication_classes(window=, end_date_col=)`. R's `as_plp_arrow()` builds the Arrow tables from DuckDB query results held in R memory (no files); it is not zero-copy.
+
+### External-stack integration tests
+- Run against the real packages: **PatientLevelPrediction 6.7.0** (+ FeatureExtraction 3.14.0, Andromeda 1.2.1): all six previously skipped `test-hades-bridge.R` tests pass. **DeepPatientLevelPrediction 2.4.0** (torch 2.14.1 CPU through reticulate) fits an MLP on data from `as_plp_arrow()`. **omop-learn** (clinicalml, cloned): the 17 backend tests pass with its real classes (`OMOP_LEARN_SRC`). **OHDSI/OmopOnDuckDB 0.1.0**: an omop-duck-db file opens through `duckdbSource()` and our functions run on its connection.
+- New `plp_arrow_to_plp_data()` turns `as_plp_arrow()` output into a `plpData`; a real `runPlp()` LASSO fit on it recovers the planted lab as its top coefficient.
+- Windows caveat: with R's `arrow` already loaded, python's `pyarrow` fails to import ("DLL load failed while importing lib") and DeepPLP silently produces no model. Import pyarrow first (done in `tests/testthat/helper-plp-arrow.R`); the DeepPLP test asserts a metric exists so this failure cannot pass silently.
+- OmopOnDuckDB 0.1.0 is an unfinished template (placeholder DESCRIPTION, `duckdbSource()` only). Its `validateCon()` returns `NULL` when handed an existing connection, so pass a file path.
+- These tests skip when the package is absent. `DeepPatientLevelPrediction` and `OmopOnDuckDB` are GitHub-only, so they are deliberately not in Suggests (CI's dependency solver cannot resolve them); `reticulate` is.
+
+### Vocabulary guards (Python and R)
+- Always on: no LOINC / concept id may be assigned to two features in the default maps; `domain_profiles.yml` must equal the Python profiles.
+- Opt-in, set `OMOP_VOCAB_DB` to a DuckDB file holding the OMOP `concept` table: every LOINC and ATC code in the default maps and the domain profiles must exist, and its `concept_name` must contain a keyword for the feature it is filed under (`tests/fixtures/vocab_feature_keywords.csv`, shared by both languages); every default medication concept id must be the drug or class it claims to be. Re-introducing the `48642-3` anion-gap bug or the old statin id makes these tests fail. Adding a feature without keywords also fails, by design. The guard already caught a wrong DOAC code (`B01AE06` is bivalirudin) in the new profiles.
+
 # omopduckdb 0.5.8
 
 Closes the remaining items of the "outstanding requests" review of 0.5.7. Everything ships with **dual Python and R usage** (R functions are snake_case mirrors; Python lives in `omop_etl`). The readmission-cohort engine (`define_study_cohort`), Table 1 / missingness (`generate_table1`) and the Elixhauser / Charlson calculators were already present and are unchanged apart from the guard below.
