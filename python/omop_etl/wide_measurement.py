@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
@@ -120,6 +120,37 @@ def _normalize_mapping(con, concept_mapping: Mapping[str, Any]) -> dict[str, dic
     return out
 
 
+def _resolve_coalesce_groups(
+    mapping: Mapping[str, Mapping[str, Any]],
+    coalesce_columns: str | Sequence[Sequence[str]] | None,
+) -> list[tuple[str, ...]]:
+    """Validated precedence groups (each of length >= 2) over the mapped source columns."""
+    if coalesce_columns is None:
+        return []
+    if isinstance(coalesce_columns, str):
+        if coalesce_columns != "auto":
+            raise ValueError("coalesce_columns must be 'auto', None, or a sequence of column-name groups.")
+        by_concept: dict[int, list[str]] = {}
+        for col, entry in mapping.items():
+            by_concept.setdefault(entry["concept_id"], []).append(col)
+        return [tuple(cols) for cols in by_concept.values() if len(cols) > 1]
+    groups, seen = [], set()
+    for group in coalesce_columns:
+        group = tuple(group)
+        if len(group) < 2:
+            raise ValueError(f"coalesce group {group!r} needs at least two columns.")
+        for col in group:
+            if col not in mapping:
+                raise ValueError(f"coalesce column {col!r} is not in concept_mapping.")
+            if col in seen:
+                raise ValueError(f"coalesce column {col!r} appears in more than one group.")
+            seen.add(col)
+        if len({mapping[c]["concept_id"] for c in group}) != 1:
+            raise ValueError(f"coalesce group {group!r} maps to more than one concept_id.")
+        groups.append(group)
+    return groups
+
+
 def load_wide_measurement(
     con,
     source: str | os.PathLike,
@@ -139,6 +170,7 @@ def load_wide_measurement(
     datetime_on_error: str = "null",
     keep_staged: bool = False,
     missing_columns: str = "raise",
+    coalesce_columns: str | Sequence[Sequence[str]] | None = "auto",
 ) -> pd.DataFrame:
     """Load a wide measurement table (one column per measure) into ``measurement`` in staged passes.
 
@@ -166,10 +198,19 @@ def load_wide_measurement(
         keep_staged: Keep the staging table after loading (default: drop it).
         missing_columns: ``'raise'`` (default) if a mapped column is absent from the source, or ``'skip'`` to
             ignore it (useful with :data:`DEFAULT_VITAL_CONCEPT_MAPPING` on partial extracts).
+        coalesce_columns: Source columns that carry the same measure (e.g. PCORnet ``BMI`` and
+            ``ORIGINAL_BMI``) and must yield ONE measurement row per source row instead of one each.
+            ``[("BMI", "ORIGINAL_BMI")]`` lists a precedence group: the first column with a value inside its
+            plausibility bounds wins, and later columns only fill gaps. ``"auto"`` (default) builds a group,
+            in ``concept_mapping`` order, from every set of columns that share a ``concept_id``; ``None``
+            disables coalescing (one row per column, as in v0.5.7). Every column in a group must map to the
+            same ``concept_id``.
 
     Returns:
         DataFrame with one row per source column: ``source_column, concept_id, rows_non_null,
-        rows_out_of_range, rows_unmatched_person, rows_inserted``.
+        rows_out_of_range, rows_unmatched_person, rows_inserted``. A column folded into an earlier one
+        reports ``rows_inserted = 0`` and the primary column's name in ``coalesced_into``; the primary's
+        counts cover the whole group.
     """
     if batch_execution_mode not in ("sequential", "single"):
         raise ValueError("batch_execution_mode must be 'sequential' or 'single'.")
@@ -194,6 +235,10 @@ def load_wide_measurement(
             raise ValueError("None of the mapped columns exist in the source.")
     mapping = _normalize_mapping(con, concept_mapping)
     value_src = {col: _resolve_col(columns, col, "measure") for col in mapping}
+
+    groups = _resolve_coalesce_groups(mapping, coalesce_columns)
+    primary_of = {c: g[0] for g in groups for c in g[1:]}
+    group_of = {g[0]: g for g in groups}
 
     # ---- 1. stage ------------------------------------------------------------------------------
     value_cols = {col: f"v{i}" for i, col in enumerate(mapping)}
@@ -223,14 +268,30 @@ def load_wide_measurement(
         lo, hi = filters.get(col, (mapping[col].get("min"), mapping[col].get("max")))
         return lo, hi
 
-    def pass_sql(col: str, offset_expr: str) -> str:
-        entry, v = mapping[col], value_cols[col]
+    def guarded(col: str, alias: str = "s") -> str:
+        """Column value, NULL when outside its plausibility bounds."""
+        v = f"{alias}.{value_cols[col]}"
         lo, hi = bounds(col)
-        where = [f"s.{v} IS NOT NULL"]
+        conds = []
         if lo is not None:
-            where.append(f"s.{v} >= {float(lo)!r}")
+            conds.append(f"{v} >= {float(lo)!r}")
         if hi is not None:
-            where.append(f"s.{v} <= {float(hi)!r}")
+            conds.append(f"{v} <= {float(hi)!r}")
+        return f"CASE WHEN {' AND '.join(conds)} THEN {v} END" if conds else v
+
+    def value_expr(col: str, alias: str = "s") -> str:
+        members = group_of.get(col, (col,))
+        if len(members) == 1:
+            return guarded(col, alias)
+        return "COALESCE(" + ", ".join(guarded(m, alias) for m in members) + ")"
+
+    def raw_non_null(col: str) -> str:
+        return " OR ".join(f"{value_cols[m]} IS NOT NULL" for m in group_of.get(col, (col,)))
+
+    def pass_sql(col: str, offset_expr: str) -> str:
+        entry = mapping[col]
+        expr = value_expr(col)
+        where = [f"({expr}) IS NOT NULL"]
         unit = entry.get("unit")
         unit_sql = "'" + str(unit).replace("'", "''") + "'" if unit else "NULL"
         loinc = entry.get("loinc")
@@ -239,28 +300,22 @@ def load_wide_measurement(
             f"INSERT INTO {target} ({_MEASUREMENT_COLUMNS}) "
             f"SELECT {offset_expr} + s.stage_id, p.person_id, {entry['concept_id']}, "
             f"CAST(s.measure_datetime AS DATE), s.measure_datetime, s.measure_time, "
-            f"{int(measurement_type_concept_id)}, 0, s.{v}, 0, {entry.get('unit_concept_id') or 0}, "
+            f"{int(measurement_type_concept_id)}, 0, {expr}, 0, {entry.get('unit_concept_id') or 0}, "
             f"NULL, NULL, NULL, vo.visit_occurrence_id, NULL, {src_val}, 0, {unit_sql}, "
-            f"{entry.get('unit_concept_id') or 0}, CAST(s.{v} AS VARCHAR), NULL, 0 "
+            f"{entry.get('unit_concept_id') or 0}, CAST({expr} AS VARCHAR), NULL, 0 "
             f"FROM {staged} s JOIN person p ON {person_join} "
             f"LEFT JOIN visit_occurrence vo ON vo.visit_source_value = s.visit_key "
             f"WHERE {' AND '.join(where)}"
         )
 
     def count_sql(col: str) -> tuple[int, int, int]:
-        v = value_cols[col]
-        lo, hi = bounds(col)
-        in_range = [f"{v} IS NOT NULL"]
-        if lo is not None:
-            in_range.append(f"{v} >= {float(lo)!r}")
-        if hi is not None:
-            in_range.append(f"{v} <= {float(hi)!r}")
         non_null, kept = con.execute(
-            f"SELECT COUNT({v}), COUNT(*) FILTER (WHERE {' AND '.join(in_range)}) FROM {staged}"
+            f"SELECT COUNT(*) FILTER (WHERE {raw_non_null(col)}), "
+            f"COUNT(*) FILTER (WHERE ({value_expr(col, 's')}) IS NOT NULL) FROM {staged} s"
         ).fetchone()
         matched = con.execute(
             f"SELECT COUNT(*) FROM {staged} s JOIN person p ON {person_join} "
-            f"WHERE {' AND '.join('s.' + c for c in in_range)}"
+            f"WHERE ({value_expr(col, 's')}) IS NOT NULL"
         ).fetchone()[0]
         return int(non_null), int(kept), int(matched)
 
@@ -270,6 +325,15 @@ def load_wide_measurement(
         if single:
             con.execute("BEGIN TRANSACTION")
         for col in mapping:
+            if col in primary_of:
+                nn = int(con.execute(
+                    f"SELECT COUNT({value_cols[col]}) FROM {staged}").fetchone()[0])
+                report.append({
+                    "source_column": col, "concept_id": mapping[col]["concept_id"], "rows_non_null": nn,
+                    "rows_out_of_range": 0, "rows_unmatched_person": 0, "rows_inserted": 0,
+                    "coalesced_into": primary_of[col],
+                })
+                continue
             non_null, kept, matched = count_sql(col)
             before = int(con.execute(f"SELECT COUNT(*) FROM {target}").fetchone()[0])
             max_id = int(con.execute(f"SELECT COALESCE(MAX(measurement_id), 0) FROM {target}").fetchone()[0])
@@ -286,6 +350,7 @@ def load_wide_measurement(
                 "rows_out_of_range": non_null - kept,
                 "rows_unmatched_person": kept - matched,
                 "rows_inserted": after - before,
+                "coalesced_into": None,
             })
         if single:
             con.execute("COMMIT")

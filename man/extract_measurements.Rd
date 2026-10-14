@@ -12,7 +12,9 @@ extract_measurements(
   strategy = "last_before_discharge",
   window = "stay",
   lookback_days = NULL,
-  format = "df"
+  format = "df",
+  outlier_bounds = NULL,
+  worst_direction = NULL
 )
 }
 \arguments{
@@ -25,13 +27,21 @@ extract_measurements(
 \item{loinc_map}{Named list mapping measurement feature name to LOINC codes or concept IDs.
 If NULL, defaults to the 14 consolidated acute labs and vitals.}
 
-\item{strategy}{Aggregation strategy: 'last_before_discharge', 'first_on_admission', 'mean', 'median', 'min', 'max'.}
+\item{strategy}{Aggregation strategy: 'last_before_discharge', 'first_on_admission', 'mean', 'median', 'min',
+'max', or 'worst' (per lab, the max or min according to \code{worst_direction}).}
 
 \item{window}{Window scope: 'stay', 'lookback', or 'all'.}
 
 \item{lookback_days}{Lookback window in days when window='lookback' (default 365).}
 
 \item{format}{Output format: 'df' or 'arrow'.}
+
+\item{outlier_bounds}{Optional named list \code{feature -> c(low, high)} of inclusive bounds (either may be \code{NA}).
+Readings outside them are discarded BEFORE the strategy is applied, so an impossible last value cannot
+mask a valid earlier one.}
+
+\item{worst_direction}{For \code{strategy = "worst"}: named list/vector \code{feature -> "max"|"min"}. Defaults to
+\link{WORST_LAB_DIRECTION}; a feature with no entry is an error.}
 }
 \value{
 A \code{data.frame} or Arrow Table.

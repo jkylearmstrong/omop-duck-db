@@ -52,6 +52,8 @@ from omop_etl.comorbidity import (
     extract_charlson_index,
     extract_elixhauser_comorbidities,
 )
+from omop_etl.scoring import FeatureSchemaError, OMOPScoringPipeline
+from omop_etl.utilization import extract_prior_utilization
 from omop_etl.risk_scores import (
     calculate_bedside_scores,
 )
@@ -112,8 +114,10 @@ from omop_etl.andromeda import (
     export_to_andromeda,
 )
 from omop_etl.features import (
+    ACUTE_LAB_PANEL,
     CORE_14_LAB_PANEL,
     aggregate_concept_sets,
+    extract_inpatient_labs,
     extract_measurements,
     extract_patient_features,
     extract_standard_labs,
@@ -188,6 +192,11 @@ from omop_etl.vocabulary import (
 )
 
 __all__ = [
+    "ACUTE_LAB_PANEL",
+    "extract_inpatient_labs",
+    "extract_prior_utilization",
+    "OMOPScoringPipeline",
+    "FeatureSchemaError",
     "attach_central_vocabulary",
     "omop_connect",
     "build_schema",
@@ -337,7 +346,7 @@ __all__ = [
     "build_safe_source_view",
 ]
 
-__version__ = "0.5.7"
+__version__ = "0.5.8"
 
 
 

@@ -125,7 +125,9 @@ test_that("load_wide_measurement stages and inserts one concept per committed pa
   expect_equal(c(sbp$rows_non_null, sbp$rows_out_of_range, sbp$rows_unmatched_person, sbp$rows_inserted), c(4, 1, 1, 2))
   expect_equal(by$DIASTOLIC$rows_inserted, 2)
   expect_equal(by$BMI$rows_out_of_range, 1)
-  expect_equal(by$ORIGINAL_BMI$rows_inserted, 1)
+  expect_equal(by$BMI$rows_inserted, 2)  # BMI / ORIGINAL_BMI share a concept -> coalesced, P2 yields ONE row
+  expect_equal(by$ORIGINAL_BMI$rows_inserted, 0)
+  expect_equal(by$ORIGINAL_BMI$coalesced_into, "BMI")
   total <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM measurement")$n
   expect_equal(total, sum(report$rows_inserted))
   ids <- DBI::dbGetQuery(con, "SELECT COUNT(DISTINCT measurement_id) AS d, COUNT(*) AS n FROM measurement")

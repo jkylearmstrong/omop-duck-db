@@ -437,10 +437,16 @@ aggregate_concept_sets <- function(con,
 #' @param cohort_id Optional integer cohort definition ID filter.
 #' @param loinc_map Named list mapping measurement feature name to LOINC codes or concept IDs.
 #'                  If NULL, defaults to the 14 consolidated acute labs and vitals.
-#' @param strategy Aggregation strategy: 'last_before_discharge', 'first_on_admission', 'mean', 'median', 'min', 'max'.
+#' @param strategy Aggregation strategy: 'last_before_discharge', 'first_on_admission', 'mean', 'median', 'min',
+#'   'max', or 'worst' (per lab, the max or min according to `worst_direction`).
 #' @param window Window scope: 'stay', 'lookback', or 'all'.
 #' @param lookback_days Lookback window in days when window='lookback' (default 365).
 #' @param format Output format: 'df' or 'arrow'.
+#' @param outlier_bounds Optional named list `feature -> c(low, high)` of inclusive bounds (either may be `NA`).
+#'   Readings outside them are discarded BEFORE the strategy is applied, so an impossible last value cannot
+#'   mask a valid earlier one.
+#' @param worst_direction For `strategy = "worst"`: named list/vector `feature -> "max"|"min"`. Defaults to
+#'   [WORST_LAB_DIRECTION]; a feature with no entry is an error.
 #' @return A `data.frame` or Arrow Table.
 #' @export
 extract_measurements <- function(con,
@@ -450,16 +456,41 @@ extract_measurements <- function(con,
                                  strategy = "last_before_discharge",
                                  window = "stay",
                                  lookback_days = NULL,
-                                 format = "df") {
+                                 format = "df",
+                                 outlier_bounds = NULL,
+                                 worst_direction = NULL) {
   active_map <- if (is.null(loinc_map)) c(DEFAULT_LAB_LOINCS, DEFAULT_VITAL_LOINCS) else loinc_map
 
   strat <- tolower(trimws(strategy))
-  strat_allowed <- c("last_before_discharge", "first_on_admission", "mean", "median", "min", "max")
+  strat_allowed <- c("last_before_discharge", "first_on_admission", "mean", "median", "min", "max", "worst")
   if (!strat %in% strat_allowed) {
     stop(sprintf("Unsupported strategy '%s'. Use one of %s.", strategy, paste(strat_allowed, collapse = ", ")))
   }
 
   filter_cohort <- if (!is.null(cohort_id)) sprintf("WHERE c.cohort_definition_id = %d", as.integer(cohort_id)) else ""
+
+  lit <- function(x) paste0("'", gsub("'", "''", as.character(x), fixed = TRUE), "'")
+  bound_conds <- character()
+  for (nm in names(outlier_bounds)) {
+    if (!nm %in% names(active_map)) stop(sprintf("outlier_bounds names unknown feature '%s'.", nm))
+    b <- outlier_bounds[[nm]]
+    lo <- b[[1]]
+    hi <- if (length(b) > 1) b[[2]] else NA
+    bad <- c(if (!is.na(lo)) sprintf("m.value_as_number < %s", format(as.numeric(lo), scientific = FALSE, digits = 15)),
+             if (!is.na(hi)) sprintf("m.value_as_number > %s", format(as.numeric(hi), scientific = FALSE, digits = 15)))
+    if (length(bad)) bound_conds <- c(bound_conds, sprintf("AND NOT (r.lab_name = %s AND (%s))", lit(nm), paste(bad, collapse = " OR ")))
+  }
+  bounds_sql <- paste(bound_conds, collapse = " ")
+
+  directions <- WORST_LAB_DIRECTION
+  for (nm in names(worst_direction)) directions[[nm]] <- worst_direction[[nm]]
+  if (strat == "worst") {
+    for (nm in names(active_map)) {
+      if (!isTRUE(directions[[nm]] %in% c("max", "min"))) {
+        stop(sprintf("strategy='worst' needs worst_direction['%s'] to be 'max' or 'min'.", nm))
+      }
+    }
+  }
 
   DBI::dbExecute(con, "DROP TABLE IF EXISTS _temp_loinc_seeds;")
   DBI::dbExecute(con, "CREATE TEMPORARY TABLE _temp_loinc_seeds (lab_name VARCHAR, code_or_id VARCHAR, is_concept_id BOOLEAN);")
@@ -517,8 +548,8 @@ extract_measurements <- function(con,
         JOIN measurement m2 ON m2.measurement_source_value = s.code_or_id
     ) r ON m.measurement_concept_id = r.concept_id
     WHERE m.value_as_number IS NOT NULL
-      %s;
-  ", cohort_table, date_cond, cohort_filter_and))
+      %s %s;
+  ", cohort_table, date_cond, cohort_filter_and, bounds_sql))
 
 
   lab_names <- sort(names(active_map))
@@ -573,6 +604,15 @@ extract_measurements <- function(con,
       FROM _temp_matching_meas
       GROUP BY subject_id, cohort_start_date, lab_name
     "
+  } else if (strat == "worst") {
+    min_labs <- names(active_map)[vapply(names(active_map), function(n) identical(directions[[n]], "min"), logical(1))]
+    min_in <- if (length(min_labs)) paste(vapply(min_labs, lit, character(1)), collapse = ", ") else "NULL"
+    sprintf("
+      SELECT subject_id, cohort_start_date, lab_name,
+             CASE WHEN lab_name IN (%s) THEN MIN(value_as_number) ELSE MAX(value_as_number) END AS value_as_number
+      FROM _temp_matching_meas
+      GROUP BY subject_id, cohort_start_date, lab_name
+    ", min_in)
   }
 
   DBI::dbExecute(con, "DROP TABLE IF EXISTS _temp_meas_aggregated;")
@@ -623,6 +663,28 @@ CORE_14_LAB_PANEL <- list(
   hba1c = "4548-4"
 )
 
+#' Direction in which each lab is clinically "worse" (used by `strategy = "worst"`)
+#' @format A named list of `"max"` / `"min"`.
+#' @export
+WORST_LAB_DIRECTION <- list(
+  bun = "max", creatinine = "max", sodium = "min", potassium = "max", chloride = "min",
+  bicarbonate = "min", glucose = "max", calcium = "min", albumin = "min", bilirubin_total = "max",
+  ast = "max", alt = "max", wbc = "max", hemoglobin = "min", platelets = "min", hba1c = "max",
+  lactate = "max", troponin = "max", po2 = "min", pco2 = "max"
+)
+
+#' Acute inpatient lab LOINCs (lactate, troponin I, arterial blood gases)
+#'
+#' Labs that are only meaningful during the stay; [extract_inpatient_labs()] draws them from the stay window only.
+#' @format A named list of LOINC codes.
+#' @export
+ACUTE_LAB_PANEL <- list(
+  lactate = c("2524-7", "32693-4"),
+  troponin = c("10839-9", "89579-7"),
+  po2 = "2703-7",
+  pco2 = "2019-8"
+)
+
 .PHYSIOLOGIC_LAB_BOUNDS <- list(
   bun = c(1.0, 250.0),
   creatinine = c(0.1, 30.0),
@@ -639,7 +701,11 @@ CORE_14_LAB_PANEL <- list(
   wbc = c(0.1, 200.0),
   hemoglobin = c(1.0, 25.0),
   platelets = c(5.0, 2000.0),
-  hba1c = c(3.0, 25.0)
+  hba1c = c(3.0, 25.0),
+  lactate = c(0.1, 30.0),
+  troponin = c(0.0, 100000.0),
+  po2 = c(10.0, 700.0),
+  pco2 = c(5.0, 200.0)
 )
 
 #' Extract Harmonized Inpatient Lab Panels with Outlier Sanitization
@@ -706,4 +772,76 @@ extract_standard_labs <- function(con,
   df
 }
 
+#' Index-stay laboratory values per cohort row, separating acute labs from routine ones
+#'
+#' Labs named in `acute_lab_subset` (lactate, troponin, blood gases, ...) are only meaningful during the stay, so
+#' they are always drawn from `[cohort_start_date, cohort_end_date]`. The remaining labs (HbA1c, creatinine, ...)
+#' use `routine_window` so a value measured shortly before admission is not lost. Both blocks use the same
+#' `selection_rule` and are returned side by side, one row per `(subject_id, cohort_start_date)`.
+#' Mirror of `omop_etl.features.extract_inpatient_labs` in Python.
+#'
+#' @param con,cohort_table,cohort_id As in [extract_measurements()] (the cohort needs `subject_id`,
+#'   `cohort_start_date` and `cohort_end_date`).
+#' @param lab_specs Named list `lab_name -> LOINC codes or concept ids`. Default: [CORE_14_LAB_PANEL] plus
+#'   [ACUTE_LAB_PANEL].
+#' @param selection_rule `"last_in_stay"` (closest to discharge), `"first_in_stay"`, `"mean"`, `"median"`,
+#'   `"min"`, `"max"` or `"worst"` (direction per lab in [WORST_LAB_DIRECTION]).
+#' @param acute_lab_subset Names in `lab_specs` treated as acute (stay window only). `NULL` (default): the
+#'   [ACUTE_LAB_PANEL] names present in `lab_specs`. An explicit vector must be a subset of `lab_specs`.
+#' @param routine_window Window for the non-acute labs: `"stay"`, `"lookback"` (the `routine_lookback_days`
+#'   before admission, excluding the stay) or `"all"` (everything up to discharge).
+#' @param routine_lookback_days Days for the `"lookback"` window.
+#' @param outlier_bounds Named list `lab_name -> c(low, high)`; `NULL` uses the physiologic bounds used by
+#'   [extract_standard_labs()]. Pass `list()` to disable. Readings outside the bounds are dropped before selection.
+#' @param format `"df"` or `"arrow"`.
+#' @return A `data.frame` (or Arrow Table).
+#' @export
+extract_inpatient_labs <- function(con,
+                                   cohort_table = "cohort",
+                                   cohort_id = NULL,
+                                   lab_specs = NULL,
+                                   selection_rule = "last_in_stay",
+                                   acute_lab_subset = NULL,
+                                   routine_window = "lookback",
+                                   routine_lookback_days = 365,
+                                   outlier_bounds = NULL,
+                                   format = "df") {
+  rules <- c(last_in_stay = "last_before_discharge", first_in_stay = "first_on_admission", mean = "mean",
+             median = "median", min = "min", max = "max", worst = "worst")
+  if (!selection_rule %in% names(rules)) {
+    stop(sprintf("selection_rule must be one of %s.", paste(names(rules), collapse = ", ")))
+  }
+  if (!routine_window %in% c("stay", "lookback", "all")) stop("routine_window must be 'stay', 'lookback' or 'all'.")
+  specs <- if (is.null(lab_specs)) c(CORE_14_LAB_PANEL, ACUTE_LAB_PANEL) else lab_specs
+  if (length(specs) == 0) stop("lab_specs is empty.")
+  if (is.null(acute_lab_subset)) {
+    acute <- intersect(names(ACUTE_LAB_PANEL), names(specs))
+  } else {
+    unknown <- setdiff(acute_lab_subset, names(specs))
+    if (length(unknown)) stop(sprintf("acute_lab_subset names not in lab_specs: %s.", paste(unknown, collapse = ", ")))
+    acute <- acute_lab_subset
+  }
+  routine <- setdiff(names(specs), acute)
+  bounds <- if (is.null(outlier_bounds)) .PHYSIOLOGIC_LAB_BOUNDS else outlier_bounds
 
+  blocks <- list()
+  for (blk in list(list(acute, "stay"), list(routine, routine_window))) {
+    names_i <- blk[[1]]
+    if (length(names_i) == 0) next
+    blocks[[length(blocks) + 1L]] <- extract_measurements(
+      con, cohort_table = cohort_table, cohort_id = cohort_id, loinc_map = specs[names_i],
+      strategy = rules[[selection_rule]], window = blk[[2]], lookback_days = routine_lookback_days,
+      outlier_bounds = bounds[intersect(names(bounds), names_i)], format = "df")
+  }
+  res <- blocks[[1]]
+  for (extra in blocks[-1]) {
+    res <- merge(res, extra, by = c("subject_id", "cohort_start_date"), all = TRUE)
+  }
+  res <- res[order(res$subject_id, res$cohort_start_date), , drop = FALSE]
+  rownames(res) <- NULL
+  fmt <- tolower(trimws(format))
+  if (fmt == "arrow" && requireNamespace("arrow", quietly = TRUE)) {
+    return(arrow::as_arrow_table(res))
+  }
+  res
+}
