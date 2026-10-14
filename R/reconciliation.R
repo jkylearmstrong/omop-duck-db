@@ -27,6 +27,7 @@ NULL
 #' @param cohort_definition_id OMOP cohort definition identifier (default 1).
 #' @param site_col Site column name if present (default 'site').
 #' @param target_table Optional table name to persist the cohort in DuckDB.
+#' @param group_by Optional column name (e.g. 'SITE') to stratify match diagnostics by.
 #' @return A list with \code{cohort} (data frame) and \code{audit} (list of match metrics).
 #' @export
 cohort_from_index_stays <- function(con, stays, id_type = "person_source_value",
@@ -36,7 +37,8 @@ cohort_from_index_stays <- function(con, stays, id_type = "person_source_value",
                                     end_date_col = "end_date",
                                     cohort_definition_id = 1L,
                                     site_col = "site",
-                                    target_table = NULL) {
+                                    target_table = NULL,
+                                    group_by = NULL) {
   input_df <- if (is.data.frame(stays)) {
     stays
   } else if (is.character(stays) && (grepl("\\.(csv|tsv|parquet)$", stays, ignore.case = TRUE) || file.exists(stays))) {
@@ -102,6 +104,7 @@ cohort_from_index_stays <- function(con, stays, id_type = "person_source_value",
   unmatched_pts <- max(0L, unique_input_pts - matched_pts)
   matched_encs <- if (nrow(cohort_df) > 0) sum(!is.na(cohort_df$visit_occurrence_id)) else 0L
   unmatched_encs <- total_stays - matched_encs
+  enc_match_rate <- if (total_stays > 0) round(matched_encs / total_stays, 4) else 1.0
 
   audit <- list(
     total_input_stays = total_stays,
@@ -109,14 +112,194 @@ cohort_from_index_stays <- function(con, stays, id_type = "person_source_value",
     unmatched_patients = unmatched_pts,
     patient_match_rate = if (unique_input_pts > 0) round(matched_pts / unique_input_pts, 4) else 1.0,
     matched_encounters = matched_encs,
-    unmatched_encounters = unmatched_encs
+    unmatched_encounters = unmatched_encs,
+    encounter_match_rate = enc_match_rate
   )
+
+  if (!is.null(group_by)) {
+    cols_map <- stats::setNames(names(input_df), tolower(names(input_df)))
+    grp_col <- cols_map[[tolower(group_by)]]
+    if (!is.null(grp_col)) {
+      by_group <- list()
+      grp_vals <- unique(input_df[[grp_col]])
+      for (gv in grp_vals) {
+        g_stays <- input_df[input_df[[grp_col]] == gv, , drop = FALSE]
+        g_pts <- if (actual_pid_col %in% names(g_stays)) length(unique(g_stays[[actual_pid_col]])) else nrow(g_stays)
+        g_coh <- if (grp_col %in% names(cohort_df)) {
+          cohort_df[cohort_df[[grp_col]] == gv, , drop = FALSE]
+        } else if ("site" %in% names(cohort_df) && tolower(grp_col) %in% c("site", "site_id", "site_anon")) {
+          cohort_df[cohort_df[["site"]] == gv, , drop = FALSE]
+        } else {
+          cohort_df[cohort_df$subject_id %in% g_stays[[actual_pid_col]], , drop = FALSE]
+        }
+        g_tot <- nrow(g_stays)
+        g_m_pts <- if (nrow(g_coh) > 0) length(unique(g_coh$subject_id)) else 0L
+        g_um_pts <- max(0L, g_pts - g_m_pts)
+        g_m_encs <- if (nrow(g_coh) > 0) sum(!is.na(g_coh$visit_occurrence_id)) else 0L
+        g_um_encs <- g_tot - g_m_encs
+        by_group[[as.character(gv)]] <- list(
+          total_input_stays = g_tot,
+          matched_patients = g_m_pts,
+          unmatched_patients = g_um_pts,
+          patient_match_rate = if (g_pts > 0) round(g_m_pts / g_pts, 4) else 1.0,
+          matched_encounters = g_m_encs,
+          unmatched_encounters = g_um_encs,
+          encounter_match_rate = if (g_tot > 0) round(g_m_encs / g_tot, 4) else 1.0
+        )
+      }
+      audit$by_group <- by_group
+      if (toupper(group_by) %in% c("SITE", "SITE_ID", "SITE_ANON")) {
+        audit$by_site <- by_group
+      }
+    }
+  }
 
   if (!is.null(target_table)) {
     DBI::dbWriteTable(con, target_table, cohort_df, overwrite = TRUE)
   }
 
   list(cohort = cohort_df, audit = audit)
+}
+
+#' Export Companion Identifier Manifest
+#'
+#' Outputs a 5-column manifest:
+#' \code{person_id}, \code{person_source_value}, \code{visit_occurrence_id}, \code{visit_source_value}, \code{index_date}
+#' with strict row-order preservation.
+#'
+#' @param source Input data frame, DuckDB connection, table name, or CSV/Parquet path.
+#' @param output_path Optional path to write output CSV or Parquet file.
+#' @param con Optional active DuckDB connection.
+#' @param cohort_table Table name if source is a connection.
+#' @param person_col Person ID column name in source.
+#' @param visit_col Visit occurrence ID column name in source.
+#' @param index_date_col Index date column name in source.
+#' @param person_source_col Person source value column in source.
+#' @param visit_source_col Visit source value column in source.
+#' @return A data frame with the 5 standardized columns.
+#' @export
+export_companion_manifest <- function(source, output_path = NULL, con = NULL,
+                                      cohort_table = NULL, person_col = NULL,
+                                      visit_col = NULL, index_date_col = NULL,
+                                      person_source_col = NULL, visit_source_col = NULL) {
+  df <- if (is.data.frame(source)) {
+    source
+  } else if (inherits(source, "DBIConnection")) {
+    con <- source
+    tbl <- cohort_table %||% "cohort"
+    DBI::dbGetQuery(source, paste0("SELECT * FROM ", tbl))
+  } else if (is.character(source) && (grepl("\\.(csv|tsv|parquet)$", source, ignore.case = TRUE) || file.exists(source))) {
+    if (grepl("\\.parquet$", source, ignore.case = TRUE)) {
+      if (!is.null(con)) DBI::dbGetQuery(con, sprintf("SELECT * FROM read_parquet('%s')", source)) else stop("Parquet reading requires con connection.")
+    } else {
+      utils::read.csv(source, stringsAsFactors = FALSE)
+    }
+  } else if (is.character(source) && !is.null(con)) {
+    DBI::dbGetQuery(con, paste0("SELECT * FROM ", source))
+  } else {
+    stop("Invalid source provided to export_companion_manifest.")
+  }
+
+  n <- nrow(df)
+  cols_lower <- as.list(stats::setNames(names(df), tolower(names(df))))
+
+  pid_c <- person_col %||% cols_lower[["person_id"]] %||% cols_lower[["subject_id"]] %||% cols_lower[["pid"]]
+  pids <- if (!is.null(pid_c) && pid_c %in% names(df)) df[[pid_c]] else rep(NA_integer_, n)
+
+  psv_c <- person_source_col %||% cols_lower[["person_source_value"]] %||% cols_lower[["mrn"]] %||% cols_lower[["pat_id"]] %||% cols_lower[["patient_id"]]
+  psvs <- if (!is.null(psv_c) && psv_c %in% names(df)) df[[psv_c]] else rep(NA_character_, n)
+
+  vid_c <- visit_col %||% cols_lower[["visit_occurrence_id"]] %||% cols_lower[["visit_id"]] %||% cols_lower[["encounter_id"]] %||% cols_lower[["hadm_id"]]
+  vids <- if (!is.null(vid_c) && vid_c %in% names(df)) df[[vid_c]] else rep(NA_integer_, n)
+
+  vsv_c <- visit_source_col %||% cols_lower[["visit_source_value"]] %||% cols_lower[["encounter_source_value"]] %||% cols_lower[["visit_source"]] %||% cols_lower[["enc_id"]]
+  vsvs <- if (!is.null(vsv_c) && vsv_c %in% names(df)) df[[vsv_c]] else rep(NA_character_, n)
+
+  idx_c <- index_date_col %||% cols_lower[["index_date"]] %||% cols_lower[["cohort_start_date"]] %||% cols_lower[["visit_start_date"]] %||% cols_lower[["admit_date"]]
+  idxs <- if (!is.null(idx_c) && idx_c %in% names(df)) as.character(df[[idx_c]]) else rep(NA_character_, n)
+
+  manifest <- data.frame(
+    person_id = pids,
+    person_source_value = as.character(psvs),
+    visit_occurrence_id = vids,
+    visit_source_value = as.character(vsvs),
+    index_date = as.character(idxs),
+    stringsAsFactors = FALSE
+  )
+
+  if (!is.null(con)) {
+    try({
+      # Fill person_source_value
+      na_psv <- is.na(manifest$person_source_value) & !is.na(manifest$person_id)
+      if (any(na_psv)) {
+        req_pids <- unique(manifest$person_id[na_psv])
+        req_pids <- req_pids[!is.na(req_pids)]
+        if (length(req_pids) > 0) {
+          res <- DBI::dbGetQuery(con, sprintf("SELECT person_id, person_source_value FROM person WHERE person_id IN (%s)", paste(as.integer(req_pids), collapse = ", ")))
+          if (nrow(res) > 0) {
+            m <- match(manifest$person_id, res$person_id)
+            manifest$person_source_value[na_psv & !is.na(m)] <- res$person_source_value[m[na_psv & !is.na(m)]]
+          }
+        }
+      }
+
+      # Fill person_id
+      na_pid <- is.na(manifest$person_id) & !is.na(manifest$person_source_value)
+      if (any(na_pid)) {
+        req_psvs <- unique(manifest$person_source_value[na_pid])
+        req_psvs <- req_psvs[!is.na(req_psvs)]
+        if (length(req_psvs) > 0) {
+          q_psvs <- paste(sprintf("'%s'", req_psvs), collapse = ", ")
+          res <- DBI::dbGetQuery(con, sprintf("SELECT person_source_value, person_id FROM person WHERE UPPER(TRIM(person_source_value)) IN (%s)", toupper(q_psvs)))
+          if (nrow(res) > 0) {
+            m <- match(toupper(trimws(manifest$person_source_value)), toupper(trimws(res$person_source_value)))
+            manifest$person_id[na_pid & !is.na(m)] <- res$person_id[m[na_pid & !is.na(m)]]
+          }
+        }
+      }
+
+      # Fill visit_source_value
+      na_vsv <- is.na(manifest$visit_source_value) & !is.na(manifest$visit_occurrence_id)
+      if (any(na_vsv)) {
+        req_vids <- unique(manifest$visit_occurrence_id[na_vsv])
+        req_vids <- req_vids[!is.na(req_vids)]
+        if (length(req_vids) > 0) {
+          res <- DBI::dbGetQuery(con, sprintf("SELECT visit_occurrence_id, visit_source_value, visit_start_date FROM visit_occurrence WHERE visit_occurrence_id IN (%s)", paste(as.integer(req_vids), collapse = ", ")))
+          if (nrow(res) > 0) {
+            m <- match(manifest$visit_occurrence_id, res$visit_occurrence_id)
+            manifest$visit_source_value[na_vsv & !is.na(m)] <- res$visit_source_value[m[na_vsv & !is.na(m)]]
+            na_idx <- is.na(manifest$index_date)
+            manifest$index_date[na_idx & !is.na(m)] <- as.character(res$visit_start_date[m[na_idx & !is.na(m)]])
+          }
+        }
+      }
+
+      # Fill visit_occurrence_id
+      na_vid <- is.na(manifest$visit_occurrence_id) & !is.na(manifest$visit_source_value)
+      if (any(na_vid)) {
+        req_vsvs <- unique(manifest$visit_source_value[na_vid])
+        req_vsvs <- req_vsvs[!is.na(req_vsvs)]
+        if (length(req_vsvs) > 0) {
+          q_vsvs <- paste(sprintf("'%s'", req_vsvs), collapse = ", ")
+          res <- DBI::dbGetQuery(con, sprintf("SELECT visit_source_value, visit_occurrence_id, visit_start_date FROM visit_occurrence WHERE UPPER(TRIM(visit_source_value)) IN (%s)", toupper(q_vsvs)))
+          if (nrow(res) > 0) {
+            m <- match(toupper(trimws(manifest$visit_source_value)), toupper(trimws(res$visit_source_value)))
+            manifest$visit_occurrence_id[na_vid & !is.na(m)] <- res$visit_occurrence_id[m[na_vid & !is.na(m)]]
+            na_idx <- is.na(manifest$index_date)
+            manifest$index_date[na_idx & !is.na(m)] <- as.character(res$visit_start_date[m[na_idx & !is.na(m)]])
+          }
+        }
+      }
+    }, silent = TRUE)
+  }
+
+  if (!is.null(output_path)) {
+    dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+    utils::write.csv(manifest, output_path, row.names = FALSE)
+  }
+
+  rownames(manifest) <- NULL
+  manifest
 }
 
 #' Feature Parity Ledger Comparing Two Derivations
@@ -133,19 +316,61 @@ cohort_from_index_stays <- function(con, stays, id_type = "person_source_value",
 #' @param missingness_gap_threshold Maximum allowable missingness gap (default 0.05 = 5 percent).
 #' @param scale_ratio_threshold Maximum allowable ratio of standard deviations (default 5.0).
 #' @param min_cell_count Cell count threshold for privacy suppression (default 11).
+#' @param left_manifest Optional companion manifest for left matrix.
+#' @param right_manifest Optional companion manifest for right matrix.
 #' @return A data frame with columns:
 #'   \code{site}, \code{feature}, \code{matched_n}, \code{left_mean}, \code{right_mean},
 #'   \code{left_sd}, \code{right_sd}, \code{smd}, \code{correlation}, \code{left_missing_rate},
 #'   \code{right_missing_rate}, \code{missingness_gap}, \code{flagged}, \code{reason}.
 #' @export
-compare_feature_tables <- function(left, right, keys, by = NULL, tolerances = NULL,
+compare_feature_tables <- function(left, right, keys = NULL, by = NULL, tolerances = NULL,
                                    smd_threshold = 0.10, missingness_gap_threshold = 0.05,
-                                   scale_ratio_threshold = 5.0, min_cell_count = 11L) {
-  key_list <- as.character(keys)
-  common_cols <- setdiff(intersect(names(left), names(right)), key_list)
+                                   scale_ratio_threshold = 5.0, min_cell_count = 11L,
+                                   left_manifest = NULL, right_manifest = NULL) {
+  left_df <- left
+  if (!is.null(left_manifest)) {
+    lm <- if (is.data.frame(left_manifest)) left_manifest else utils::read.csv(left_manifest, stringsAsFactors = FALSE)
+    for (c in c("person_id", "visit_occurrence_id", "index_date", "person_source_value", "visit_source_value")) {
+      if (c %in% names(lm) && !c %in% names(left_df) && nrow(lm) == nrow(left_df)) {
+        left_df[[c]] <- lm[[c]]
+      }
+    }
+  }
+
+  right_df <- right
+  if (!is.null(right_manifest)) {
+    rm <- if (is.data.frame(right_manifest)) right_manifest else utils::read.csv(right_manifest, stringsAsFactors = FALSE)
+    for (c in c("person_id", "visit_occurrence_id", "index_date", "person_source_value", "visit_source_value")) {
+      if (c %in% names(rm) && !c %in% names(right_df) && nrow(rm) == nrow(right_df)) {
+        right_df[[c]] <- rm[[c]]
+      }
+    }
+  }
+
+  if (is.null(keys)) {
+    cand_keys <- list(
+      c("person_id", "visit_occurrence_id"),
+      c("person_id", "index_date"),
+      c("person_id"),
+      c("subject_id", "visit_occurrence_id"),
+      c("subject_id")
+    )
+    found_key <- NULL
+    for (cand in cand_keys) {
+      if (all(cand %in% names(left_df)) && all(cand %in% names(right_df))) {
+        found_key <- cand
+        break
+      }
+    }
+    key_list <- found_key %||% "person_id"
+  } else {
+    key_list <- as.character(keys)
+  }
+
+  common_cols <- setdiff(intersect(names(left_df), names(right_df)), key_list)
   if (!is.null(by) && by %in% common_cols) common_cols <- setdiff(common_cols, by)
 
-  merged <- merge(left, right, by = key_list, suffixes = c("_L", "_R"))
+  merged <- merge(left_df, right_df, by = key_list, suffixes = c("_L", "_R"))
   if (nrow(merged) == 0) {
     return(data.frame(
       site = character(0), feature = character(0), matched_n = character(0), left_mean = numeric(0),

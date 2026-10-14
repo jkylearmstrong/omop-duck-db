@@ -996,7 +996,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     loaded_any <- TRUE
     prepare_source_view(
       con, "_temp_med_admin", path_admin,
-      c("MEDADMINID", "PATID", "ENCOUNTERID", "MEDADMIN_CODE", "MEDADMIN_START_DATE",
+      c("MEDADMINID", "PATID", "ENCOUNTERID", "MEDADMIN_CODE", "MEDADMIN_TYPE", "MEDADMIN_START_DATE",
         "MEDADMIN_START_TIME", "MEDADMIN_STOP_DATE", "RAW_MEDADMIN_MED_NAME",
         "RAW_RX_NDC", "PROVIDERID")
     )
@@ -1039,8 +1039,14 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
       LEFT JOIN visit_occurrence vo
         ON vo.visit_source_value = src.ENCOUNTERID
       LEFT JOIN concept c
-        ON c.vocabulary_id = 'RxNorm'
-       AND c.concept_code = src.MEDADMIN_CODE
+        ON c.vocabulary_id = CASE
+             WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'ND' THEN 'NDC'
+             WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+             WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'RX' THEN 'RxNorm'
+             WHEN src.MEDADMIN_CODE IS NULL AND src.RAW_RX_NDC IS NOT NULL THEN 'NDC'
+             ELSE 'RxNorm'
+           END
+       AND c.concept_code = COALESCE(src.MEDADMIN_CODE, src.RAW_RX_NDC)
       LEFT JOIN (
           SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
           FROM concept_relationship
@@ -1049,14 +1055,20 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
       ) cr
         ON cr.concept_id_1 = c.concept_id
       LEFT JOIN (
-          SELECT source_code, MIN(target_concept_id) AS target_concept_id
+          SELECT source_code, source_vocabulary_id, MIN(target_concept_id) AS target_concept_id
           FROM source_to_concept_map
-          WHERE source_vocabulary_id = 'RxNorm'
-            AND (invalid_reason IS NULL OR invalid_reason = '')
+          WHERE (invalid_reason IS NULL OR invalid_reason = '')
             AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
-          GROUP BY source_code
+          GROUP BY source_code, source_vocabulary_id
       ) stcm
-        ON stcm.source_code = src.MEDADMIN_CODE
+        ON stcm.source_code = COALESCE(src.MEDADMIN_CODE, src.RAW_RX_NDC)
+       AND stcm.source_vocabulary_id = CASE
+             WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'ND' THEN 'NDC'
+             WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+             WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'RX' THEN 'RxNorm'
+             WHEN src.MEDADMIN_CODE IS NULL AND src.RAW_RX_NDC IS NOT NULL THEN 'NDC'
+             ELSE 'RxNorm'
+           END
       WHERE src.MEDADMINID IS NOT NULL
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.MEDADMINID) = 1;
     ", patid_expr, .TYPE_CONCEPT_MED_ADMIN, patid_expr, .today_iso()))
@@ -1070,7 +1082,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     prepare_source_view(
       con, "_temp_dispensing", path_disp,
       c("DISPENSINGID", "PATID", "PRESCRIBINGID", "DISPENSING_DATE",
-        "RAW_RX_NDC", "DISPENSING_SUP", "DISPENSING_AMT")
+        "RAW_RX_NDC", "DISPENSING_SUP", "DISPENSING_AMT", "DISPENSING_TYPE")
     )
     run_insert(con, "DRUG_EXPOSURE (from DISPENSING)", sprintf("
       INSERT INTO drug_exposure
@@ -1107,7 +1119,12 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
       LEFT JOIN person p
         ON p.person_source_value = %s
       LEFT JOIN concept c
-        ON c.vocabulary_id = 'NDC'
+        ON c.vocabulary_id = CASE
+             WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'RX' THEN 'RxNorm'
+             WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+             WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'ND' THEN 'NDC'
+             ELSE 'NDC'
+           END
        AND c.concept_code = src.RAW_RX_NDC
       LEFT JOIN (
           SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
@@ -1117,14 +1134,19 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
       ) cr
         ON cr.concept_id_1 = c.concept_id
       LEFT JOIN (
-          SELECT source_code, MIN(target_concept_id) AS target_concept_id
+          SELECT source_code, source_vocabulary_id, MIN(target_concept_id) AS target_concept_id
           FROM source_to_concept_map
-          WHERE source_vocabulary_id = 'NDC'
-            AND (invalid_reason IS NULL OR invalid_reason = '')
+          WHERE (invalid_reason IS NULL OR invalid_reason = '')
             AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
-          GROUP BY source_code
+          GROUP BY source_code, source_vocabulary_id
       ) stcm
         ON stcm.source_code = src.RAW_RX_NDC
+       AND stcm.source_vocabulary_id = CASE
+             WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'RX' THEN 'RxNorm'
+             WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+             WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'ND' THEN 'NDC'
+             ELSE 'NDC'
+           END
       WHERE src.DISPENSINGID IS NOT NULL
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DISPENSINGID) = 1;
     ", patid_expr, .TYPE_CONCEPT_DISPENSING, patid_expr, .today_iso()))
@@ -1134,6 +1156,17 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   if (!loaded_any) {
     cat("Skipping DRUG_EXPOSURE - no prescribing.csv, med_admin.csv, or dispensing.csv found\n")
   }
+}
+
+#' Load Drug Exposure Records from PCORnet Extract
+#'
+#' @param con Active DuckDB connection.
+#' @param source_dir Directory containing PCORnet CSV files.
+#' @param site_id Optional site ID.
+#' @param disambiguate_patids Logical, whether to disambiguate patient IDs with site ID suffix.
+#' @export
+load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
+  .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
 }
 
 .load_death <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {

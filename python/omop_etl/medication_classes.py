@@ -28,6 +28,7 @@ from omop_etl.paths import read_csv_sql
 __all__ = [
     "extract_medication_classes",
     "audit_medication_strategies",
+    "audit_combination_products",
     "assert_exposure_coverage",
     "explain_medication_disagreement",
     "export_medication_crosswalk",
@@ -62,9 +63,13 @@ def _first_present(columns: Sequence[str], candidates: Sequence[str], what: str,
     raise ValueError(f"Could not find a {what} column among {list(columns)}; pass it explicitly.")
 
 
-def _resolve_table(con, name: str) -> str:
+def _resolve_table(con, name: str, vocab_schema: str | None = None) -> str:
     """First reachable, non-empty copy of a vocabulary table (main, then the attached central vocabulary)."""
-    for ref in (name, f"central_vocab.main.{name}", f"central_vocab.{name}"):
+    candidates = []
+    if vocab_schema:
+        candidates.extend([f"{vocab_schema}.{name}", f"{vocab_schema}.main.{name}"])
+    candidates.extend([name, f"central_vocab.main.{name}", f"central_vocab.{name}"])
+    for ref in candidates:
         try:
             if con.execute(f"SELECT 1 FROM {ref} LIMIT 1").fetchone() is not None:
                 return ref
@@ -108,6 +113,115 @@ def _load_crosswalk(con, crosswalk) -> pd.DataFrame:
     return out[out["source_value"].ne("") & out["source_value"].ne("NAN")].drop_duplicates()
 
 
+def audit_combination_products(
+    con: duckdb.DuckDBPyConnection,
+    class_concept_id: int | Sequence[int],
+    cohort_table: str | None = None,
+    vocab_schema: str | None = None,
+    vocab_db: str | None = None,
+) -> dict[str, Any]:
+    """Audits exposures to an OMOP class/ingredient, disaggregating single-ingredient
+    (plain) vs fixed-dose combination products.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        Active DuckDB database connection.
+    class_concept_id : int or Sequence[int]
+        Concept ID(s) of interest (e.g. RxNorm ingredient ID or ATC class concept ID).
+    cohort_table : Optional[str]
+        Optional cohort table or view. If provided, restricts audit to patients in this cohort.
+    vocab_schema : Optional[str]
+        Schema or attached database containing Athena vocabulary tables.
+    vocab_db : Optional[str]
+        Alias for vocab_schema.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionary of counts: plain_only_patients, combination_only_patients,
+        overlapping_patients, total_patients, plain_only_exposures,
+        combination_only_exposures, total_exposures, combination_share_patients.
+    """
+    v_schema = vocab_schema or vocab_db
+    anc_tbl = _resolve_table(con, "concept_ancestor", v_schema)
+    concept_tbl = _resolve_table(con, "concept", v_schema)
+
+    ids = [class_concept_id] if isinstance(class_concept_id, (int, np.integer)) else list(class_concept_id)
+    ids_str = ", ".join(str(int(x)) for x in ids)
+
+    cohort_join = f"JOIN {cohort_table} coh ON coh.person_id = de.person_id" if cohort_table else ""
+
+    summary_sql = f"""
+    WITH target_descendants AS (
+        SELECT DISTINCT ca.descendant_concept_id AS drug_concept_id
+        FROM {anc_tbl} ca
+        WHERE ca.ancestor_concept_id IN ({ids_str})
+    ),
+    ingredient_counts AS (
+        SELECT td.drug_concept_id, count(DISTINCT ca2.ancestor_concept_id) AS n_ing
+        FROM target_descendants td
+        JOIN {anc_tbl} ca2 ON ca2.descendant_concept_id = td.drug_concept_id
+        JOIN {concept_tbl} c ON c.concept_id = ca2.ancestor_concept_id
+        WHERE c.concept_class_id = 'Ingredient'
+        GROUP BY td.drug_concept_id
+    ),
+    classified_drugs AS (
+        SELECT
+            td.drug_concept_id,
+            CASE WHEN COALESCE(ic.n_ing, 1) > 1 THEN 1 ELSE 0 END AS is_combination
+        FROM target_descendants td
+        LEFT JOIN ingredient_counts ic ON ic.drug_concept_id = td.drug_concept_id
+    ),
+    patient_flags AS (
+        SELECT
+            de.person_id,
+            MAX(cd.is_combination) AS has_combo,
+            MAX(CASE WHEN cd.is_combination = 0 THEN 1 ELSE 0 END) AS has_plain,
+            SUM(cd.is_combination) AS combo_exp,
+            SUM(CASE WHEN cd.is_combination = 0 THEN 1 ELSE 0 END) AS plain_exp
+        FROM drug_exposure de
+        JOIN classified_drugs cd ON cd.drug_concept_id = de.drug_concept_id
+        {cohort_join}
+        GROUP BY de.person_id
+    )
+    SELECT
+        COUNT(DISTINCT person_id) AS total_patients,
+        COUNT(CASE WHEN has_plain = 1 AND has_combo = 0 THEN 1 END) AS plain_only_patients,
+        COUNT(CASE WHEN has_combo = 1 AND has_plain = 0 THEN 1 END) AS combination_only_patients,
+        COUNT(CASE WHEN has_plain = 1 AND has_combo = 1 THEN 1 END) AS overlapping_patients,
+        COALESCE(SUM(plain_exp), 0) AS plain_only_exposures,
+        COALESCE(SUM(combo_exp), 0) AS combination_only_exposures,
+        COALESCE(SUM(plain_exp + combo_exp), 0) AS total_exposures
+    FROM patient_flags;
+    """
+
+    res = con.execute(summary_sql).fetchone()
+    tot_pts = int(res[0] or 0)
+    plain_pts = int(res[1] or 0)
+    combo_pts = int(res[2] or 0)
+    overlap_pts = int(res[3] or 0)
+    plain_exp = int(res[4] or 0)
+    combo_exp = int(res[5] or 0)
+    tot_exp = int(res[6] or 0)
+
+    combo_share = round((combo_pts + overlap_pts) / tot_pts, 4) if tot_pts > 0 else 0.0
+
+    return {
+        "class_concept_ids": ids,
+        "total_patients": tot_pts,
+        "plain_only_patients": plain_pts,
+        "combination_only_patients": combo_pts,
+        "overlapping_patients": overlap_pts,
+        "plain_only_exposures": plain_exp,
+        "combination_only_exposures": combo_exp,
+        "total_exposures": tot_exp,
+        "combination_share_patients": combo_share,
+        "plain_only_share": round(plain_pts / tot_pts, 4) if tot_pts > 0 else 0.0,
+        "overlapping_share": round(overlap_pts / tot_pts, 4) if tot_pts > 0 else 0.0,
+    }
+
+
 def extract_medication_classes(
     db_con,
     cohort_table: str,
@@ -124,7 +238,14 @@ def extract_medication_classes(
     window: str | None = None,
     end_date_col: str | None = None,
     on_unresolved: str = "ignore",
-    exclude_forms: Sequence[str] | None = None,
+    exclude_forms: Sequence[str | int] | None = None,
+    exclude_dose_form_concept_ids: Sequence[int] | None = None,
+    apply_exclude_to_source: bool = False,
+    exclude_forms_source: bool = False,
+    disaggregate_combinations: bool = False,
+    is_combination: bool = False,
+    vocab_schema: str | None = None,
+    vocab_db: str | None = None,
     route_concept_ids: Sequence[int] | None = None,
     by_type: bool = False,
     return_audit: bool = False,
@@ -154,7 +275,14 @@ def extract_medication_classes(
             The stay end is ``end_date_col`` (default ``cohort_end_date``/``visit_end_date``).
         on_unresolved: How to handle unresolvable ATC codes / concepts with no descendants (``'ignore'``,
             ``'warn'``, or ``'raise'``).
-        exclude_forms: Dosage form strings to exclude from standard hierarchy expansion (e.g. ``['Ophthalmic', 'Topical']``).
+        exclude_forms: Dosage form strings or concept IDs to exclude (e.g. ``['Ophthalmic', 'Topical']``).
+        exclude_dose_form_concept_ids: Standard dose form concept IDs to exclude via 'RxNorm has dose form'.
+        apply_exclude_to_source: If True, also apply exclude_forms filters to source/crosswalk matches.
+        exclude_forms_source: Alias for apply_exclude_to_source.
+        disaggregate_combinations: If True, outputs ``<class>_plain`` and ``<class>_combination`` flags.
+        is_combination: Alias for disaggregate_combinations.
+        vocab_schema: Optional schema or attached database name containing Athena vocabulary tables.
+        vocab_db: Alias for vocab_schema.
         route_concept_ids: Restrict drug exposure to specific route concept IDs (e.g. systemic/oral administration).
         by_type: If True, also extract per-source-type flags (``<class>_type_<id>``).
         return_audit: Also return :func:`audit_medication_strategies` output (needs ``strategy='both'``).
@@ -174,6 +302,9 @@ def extract_medication_classes(
     specs = _normalize_specs(medication_specs)
     use_source = strategy in ("source", "both")
     use_standard = strategy in ("standard", "both")
+    v_schema = vocab_schema or vocab_db
+    filter_combo = disaggregate_combinations or is_combination
+    apply_source_filter = apply_exclude_to_source or exclude_forms_source
 
     cols = [r[0] for r in db_con.execute(f"DESCRIBE SELECT * FROM {cohort_table}").fetchall()]
     pcol = _first_present(cols, _PERSON_COLS, "person", person_col)
@@ -219,6 +350,8 @@ def extract_medication_classes(
 
     db_con.register("_med_cohort_df", base[["_row", "person_id", "index_date"] + (["end_date"] if ecol else [])])
     flags: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
+    flags_plain: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
+    flags_combo: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
     flags_by_type: dict[str, dict[tuple[str, int], set]] = {"source": {}, "standard": {}}
     tmp_tables = []
     try:
@@ -226,13 +359,13 @@ def extract_medication_classes(
             "SELECT _row, person_id, CAST(index_date AS DATE) AS index_date"
             + (", CAST(end_date AS DATE) AS end_date" if ecol else "") + " FROM _med_cohort_df")
         if use_standard:
-            anc = _resolve_table(db_con, "concept_ancestor")
+            anc = _resolve_table(db_con, "concept_ancestor", v_schema)
             concept = None
             rows = []
             for cls, spec in specs.items():
                 ids = [int(x) for x in spec["ancestor_concept_ids"] + spec["rxnorm_ingredient_ids"]]
                 if spec["atc_codes"]:
-                    concept = concept or _resolve_table(db_con, "concept")
+                    concept = concept or _resolve_table(db_con, "concept", v_schema)
                     codes = ", ".join(_q(c) for c in spec["atc_codes"])
                     found_atc = [int(r[0]) for r in db_con.execute(
                         f"SELECT concept_id FROM {concept} WHERE vocabulary_id LIKE 'ATC%' "
@@ -257,15 +390,79 @@ def extract_medication_classes(
             db_con.register("_med_anc_df", anc_df)
 
             exclude_clause = ""
+            concept = concept or _resolve_table(db_con, "concept", v_schema)
+            ex_cond_parts = []
+
+            if exclude_dose_form_concept_ids:
+                cr_tbl = _resolve_table(db_con, "concept_relationship", v_schema)
+                df_ids = ", ".join(str(int(x)) for x in exclude_dose_form_concept_ids)
+                ex_cond_parts.append(f"""(
+                    ca.descendant_concept_id IN (
+                        SELECT concept_id_1 FROM {cr_tbl}
+                        WHERE relationship_id = 'RxNorm has dose form'
+                          AND concept_id_2 IN ({df_ids})
+                    )
+                    OR ca.descendant_concept_id IN ({df_ids})
+                )""")
+
             if exclude_forms:
-                concept = concept or _resolve_table(db_con, "concept")
-                ex_conds = " OR ".join(f"LOWER(c.concept_name) LIKE '%{str(f).lower()}%'" for f in exclude_forms)
-                exclude_clause = f"JOIN {concept} c ON c.concept_id = ca.descendant_concept_id WHERE NOT ({ex_conds})"
+                cr_tbl = _resolve_table(db_con, "concept_relationship", v_schema)
+                ex_form_strings = []
+                ex_form_ids = []
+                for f in exclude_forms:
+                    if isinstance(f, (int, np.integer)) or (isinstance(f, str) and f.strip().isdigit()):
+                        ex_form_ids.append(int(f))
+                    else:
+                        ex_form_strings.append(str(f).lower())
+
+                if ex_form_ids:
+                    df_ids = ", ".join(str(x) for x in ex_form_ids)
+                    ex_cond_parts.append(f"""(
+                        ca.descendant_concept_id IN (
+                            SELECT concept_id_1 FROM {cr_tbl}
+                            WHERE relationship_id = 'RxNorm has dose form'
+                              AND concept_id_2 IN ({df_ids})
+                        )
+                        OR ca.descendant_concept_id IN ({df_ids})
+                    )""")
+
+                if ex_form_strings:
+                    c_matches = " OR ".join(f"LOWER(c.concept_name) LIKE '%{s}%'" for s in ex_form_strings)
+                    df_matches = " OR ".join(f"LOWER(df_c.concept_name) LIKE '%{s}%'" for s in ex_form_strings)
+                    ex_cond_parts.append(f"""(
+                        ({c_matches})
+                        OR ca.descendant_concept_id IN (
+                            SELECT cr_sub.concept_id_1
+                            FROM {cr_tbl} cr_sub
+                            JOIN {concept} df_c ON df_c.concept_id = cr_sub.concept_id_2
+                            WHERE cr_sub.relationship_id = 'RxNorm has dose form'
+                              AND ({df_matches})
+                        )
+                    )""")
+
+            if ex_cond_parts:
+                combined_ex = " OR ".join(ex_cond_parts)
+                exclude_clause = f"JOIN {concept} c ON c.concept_id = ca.descendant_concept_id WHERE NOT ({combined_ex})"
+
+            combo_sel = ""
+            combo_join = ""
+            if filter_combo:
+                combo_join = f"""
+                LEFT JOIN (
+                    SELECT ca_ing.descendant_concept_id, count(DISTINCT ca_ing.ancestor_concept_id) AS n_ing
+                    FROM {anc} ca_ing
+                    JOIN {concept} c_ing ON c_ing.concept_id = ca_ing.ancestor_concept_id
+                    WHERE c_ing.concept_class_id = 'Ingredient'
+                    GROUP BY ca_ing.descendant_concept_id
+                ) ic ON ic.descendant_concept_id = ca.descendant_concept_id
+                """
+                combo_sel = ", CASE WHEN COALESCE(ic.n_ing, 1) > 1 THEN 1 ELSE 0 END AS is_combination"
 
             db_con.execute(
                 "CREATE OR REPLACE TEMPORARY TABLE _med_class_concepts AS "
-                f"SELECT DISTINCT a.drug_class, ca.descendant_concept_id AS concept_id FROM _med_anc_df a "
+                f"SELECT DISTINCT a.drug_class, ca.descendant_concept_id AS concept_id{combo_sel} FROM _med_anc_df a "
                 f"JOIN {anc} ca ON ca.ancestor_concept_id = a.ancestor_concept_id "
+                f"{combo_join} "
                 f"{exclude_clause}")
             tmp_tables.append("_med_class_concepts")
 
@@ -280,16 +477,25 @@ def extract_medication_classes(
                         warnings.warn(msg, UserWarning)
 
             type_sel = ", de.drug_type_concept_id" if by_type else ""
+            combo_hit_sel = ", m.is_combination" if filter_combo else ""
             hits = db_con.execute(
-                f"SELECT DISTINCT v._row, m.drug_class{type_sel} FROM _med_cohort v "
+                f"SELECT DISTINCT v._row, m.drug_class{combo_hit_sel}{type_sel} FROM _med_cohort v "
                 "JOIN drug_exposure de ON de.person_id = v.person_id "
                 "JOIN _med_class_concepts m ON m.concept_id = de.drug_concept_id "
                 f"WHERE TRUE {lo} {hi} {route_clause}").fetchall()
             for hit in hits:
                 row, cls = hit[0], hit[1]
                 flags["standard"].setdefault(cls, set()).add(row)
-                if by_type and len(hit) > 2 and hit[2] is not None:
-                    flags_by_type["standard"].setdefault((cls, int(hit[2])), set()).add(row)
+                idx = 2
+                if filter_combo:
+                    is_c = hit[idx]
+                    idx += 1
+                    if is_c:
+                        flags_combo["standard"].setdefault(cls, set()).add(row)
+                    else:
+                        flags_plain["standard"].setdefault(cls, set()).add(row)
+                if by_type and len(hit) > idx and hit[idx] is not None:
+                    flags_by_type["standard"].setdefault((cls, int(hit[idx])), set()).add(row)
 
         if use_source:
             xw = _load_crosswalk(db_con, crosswalk)
@@ -305,11 +511,59 @@ def extract_medication_classes(
                                  "classes in medication_specs.")
             db_con.register("_med_xw_df", xw)
             try:
-                concept = _resolve_table(db_con, "concept")
-                code_join = f"LEFT JOIN {concept} sc ON sc.concept_id = de.drug_source_concept_id"
-                code_expr = "UPPER(TRIM(sc.concept_code))"
-            except ValueError:
+                concept = _resolve_table(db_con, "concept", v_schema)
+                de_cols = [c[0].lower() for c in db_con.execute("DESCRIBE SELECT * FROM drug_exposure LIMIT 0").fetchall()]
+                if "drug_source_concept_id" in de_cols:
+                    code_join = f"LEFT JOIN {concept} sc ON sc.concept_id = de.drug_source_concept_id"
+                    code_expr = "UPPER(TRIM(sc.concept_code))"
+                else:
+                    code_join, code_expr = "", "NULL"
+            except (ValueError, Exception):
                 code_join, code_expr = "", "NULL"
+
+            src_exclude_clause = ""
+            if apply_source_filter and (exclude_forms or exclude_dose_form_concept_ids):
+                cr_tbl = _resolve_table(db_con, "concept_relationship", v_schema)
+                concept = _resolve_table(db_con, "concept", v_schema)
+                src_ex_conds = []
+                if exclude_dose_form_concept_ids:
+                    df_ids = ", ".join(str(int(x)) for x in exclude_dose_form_concept_ids)
+                    src_ex_conds.append(f"""(
+                        de.drug_concept_id IN (
+                            SELECT concept_id_1 FROM {cr_tbl}
+                            WHERE relationship_id = 'RxNorm has dose form'
+                              AND concept_id_2 IN ({df_ids})
+                        )
+                        OR de.drug_concept_id IN ({df_ids})
+                    )""")
+                if exclude_forms:
+                    s_ex_strings = [str(f).lower() for f in exclude_forms if not str(f).isdigit()]
+                    s_ex_ids = [int(f) for f in exclude_forms if str(f).isdigit()]
+                    if s_ex_ids:
+                        df_ids = ", ".join(str(x) for x in s_ex_ids)
+                        src_ex_conds.append(f"""(
+                            de.drug_concept_id IN (
+                                SELECT concept_id_1 FROM {cr_tbl}
+                                WHERE relationship_id = 'RxNorm has dose form'
+                                  AND concept_id_2 IN ({df_ids})
+                            )
+                            OR de.drug_concept_id IN ({df_ids})
+                        )""")
+                    if s_ex_strings:
+                        val_conds = " OR ".join(f"LOWER(de.drug_source_value) LIKE '%{s}%'" for s in s_ex_strings)
+                        df_conds = " OR ".join(f"LOWER(df_c.concept_name) LIKE '%{s}%'" for s in s_ex_strings)
+                        src_ex_conds.append(f"""(
+                            ({val_conds})
+                            OR de.drug_concept_id IN (
+                                SELECT cr_sub.concept_id_1
+                                FROM {cr_tbl} cr_sub
+                                JOIN {concept} df_c ON df_c.concept_id = cr_sub.concept_id_2
+                                WHERE cr_sub.relationship_id = 'RxNorm has dose form'
+                                  AND ({df_conds})
+                            )
+                        )""")
+                if src_ex_conds:
+                    src_exclude_clause = f"AND NOT ({' OR '.join(src_ex_conds)})"
 
             type_sel = ", de.drug_type_concept_id" if by_type else ""
             hits = db_con.execute(
@@ -318,7 +572,7 @@ def extract_medication_classes(
                 f"{code_join} "
                 "JOIN _med_xw_df x ON x.source_value = UPPER(TRIM(de.drug_source_value)) "
                 f"OR x.source_value = {code_expr} "
-                f"WHERE TRUE {lo} {hi} {route_clause}").fetchall()
+                f"WHERE TRUE {lo} {hi} {route_clause} {src_exclude_clause}").fetchall()
             for hit in hits:
                 row, cls = hit[0], hit[1]
                 flags["source"].setdefault(cls, set()).add(row)
@@ -343,6 +597,9 @@ def extract_medication_classes(
         if use_standard:
             result[f"{cls}_standard"] = np.isin(rows_index, list(flags["standard"].get(cls, ()))).astype(int)
             present.append(f"{cls}_standard")
+            if filter_combo:
+                result[f"{cls}_plain"] = np.isin(rows_index, list(flags_plain["standard"].get(cls, ()))).astype(int)
+                result[f"{cls}_combination"] = np.isin(rows_index, list(flags_combo["standard"].get(cls, ()))).astype(int)
         result[cls] = result[present].max(axis=1)
 
     if by_type:
@@ -383,6 +640,8 @@ def audit_medication_strategies(
     con=None,
     medication_specs: Mapping[str, Any] | None = None,
     cohort_table: str = "cohort",
+    vocab_schema: str | None = None,
+    vocab_db: str | None = None,
     **explain_kwargs,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Per-site agreement between the source-crosswalk and OMOP-hierarchy strategies.
@@ -482,7 +741,9 @@ def audit_medication_strategies(
             raise ValueError("explain=True requires con and medication_specs to be provided.")
         expl = explain_medication_disagreement(
             con, flags, medication_specs, cohort_table=cohort_table,
-            classes=classes, site_col=site_col, **explain_kwargs
+            classes=classes, site_col=site_col,
+            vocab_schema=vocab_schema, vocab_db=vocab_db,
+            **explain_kwargs
         )
         return audit, expl
 
@@ -555,6 +816,8 @@ def explain_medication_disagreement(
     top_n: int = 10,
     min_cell_count: int = 11,
     mask_value: str = "<11",
+    vocab_schema: str | None = None,
+    vocab_db: str | None = None,
 ) -> pd.DataFrame:
     """Explains why source-crosswalk and standard OMOP strategies disagree on medication classes.
 
@@ -572,6 +835,8 @@ def explain_medication_disagreement(
         top_n: Maximum top disagreement patterns to return per site and class (default 10).
         min_cell_count: Cell count threshold for privacy suppression (default 11).
         mask_value: Suppression mask string (default '<11').
+        vocab_schema: Optional schema name containing vocabulary tables.
+        vocab_db: Optional attached database containing vocabulary tables.
 
     Returns:
         pd.DataFrame: Table with columns [site, medication_class, disagreement_type,
@@ -590,7 +855,7 @@ def explain_medication_disagreement(
         df["_site"] = "ALL"
         actual_site = "_site"
 
-    concept_table = _resolve_table(con, "concept")
+    concept_table = _resolve_table(con, "concept", vocab_schema=vocab_schema, vocab_db=vocab_db)
     records = []
 
     for cls in classes:
@@ -698,6 +963,8 @@ def export_medication_crosswalk(
     include_retired: bool = True,
     exclude_forms: Sequence[str] | None = None,
     must_contain: Sequence[str] | None = None,
+    vocab_schema: str | None = None,
+    vocab_db: str | None = None,
 ) -> pd.DataFrame:
     """Exports OMOP medication class definitions into a standardized crosswalk file.
 
@@ -711,14 +978,17 @@ def export_medication_crosswalk(
         include_retired: Whether to include older retired RxNorm codes mapped via 'Maps to' (default True).
         exclude_forms: Optional list of dosage form strings to exclude (e.g. 'Ophthalmic', 'Topical').
         must_contain: Optional list of required RxNorm codes or source strings; fails fast if missing.
+        vocab_schema: Optional schema name containing vocabulary tables.
+        vocab_db: Optional attached database containing vocabulary tables.
 
     Returns:
         pd.DataFrame: Crosswalk table with columns [source_value, drug_class, concept_id,
             concept_name, concept_class_id, vocabulary_id, source].
     """
     specs = _normalize_specs(medication_specs)
-    anc = _resolve_table(con, "concept_ancestor")
-    concept = _resolve_table(con, "concept")
+    anc = _resolve_table(con, "concept_ancestor", vocab_schema=vocab_schema, vocab_db=vocab_db)
+    concept = _resolve_table(con, "concept", vocab_schema=vocab_schema, vocab_db=vocab_db)
+    rel = _resolve_table(con, "concept_relationship", vocab_schema=vocab_schema, vocab_db=vocab_db)
 
     rows = []
     for cls, spec in specs.items():
@@ -765,7 +1035,7 @@ def export_medication_crosswalk(
                     c_old.concept_class_id,
                     c_old.vocabulary_id,
                     'maps_to' AS source
-                FROM concept_relationship cr
+                FROM {rel} cr
                 JOIN {concept} c_old ON c_old.concept_id = cr.concept_id_1
                 JOIN _exp_anc_df a ON 1=1
                 JOIN {anc} ca ON ca.ancestor_concept_id = a.ancestor_concept_id AND ca.descendant_concept_id = cr.concept_id_2

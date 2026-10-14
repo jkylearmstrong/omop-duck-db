@@ -51,11 +51,13 @@ DEFAULT_ALIASES = {
     "RXNORM_CUI": ["RXNORM_CUI", "RXNORM", "CUI"],
     "MEDADMINID": ["MEDADMINID", "MEDADMIN_ID"],
     "MEDADMIN_CODE": ["MEDADMIN_CODE", "MED_CODE", "RXNORM_CUI", "RXNORM"],
+    "MEDADMIN_TYPE": ["MEDADMIN_TYPE", "ADMIN_TYPE", "MED_TYPE", "MEDADMIN_CODE_TYPE"],
     "MEDADMIN_START_DATE": ["MEDADMIN_START_DATE", "ADMIN_DATE", "START_DATE"],
     "MEDADMIN_START_TIME": ["MEDADMIN_START_TIME", "ADMIN_TIME", "START_TIME"],
     "MEDADMIN_STOP_DATE": ["MEDADMIN_STOP_DATE", "STOP_DATE"],
     "RAW_MEDADMIN_MED_NAME": ["RAW_MEDADMIN_MED_NAME", "MEDADMIN_MED_NAME", "RAW_RX_MED_NAME", "MED_NAME"],
     "DISPENSINGID": ["DISPENSINGID", "DISPENSING_ID"],
+    "DISPENSING_TYPE": ["DISPENSING_TYPE", "DISP_TYPE", "DISPENSING_SRC", "NDC_TYPE", "DISP_CODE_TYPE"],
     "DISPENSING_DATE": ["DISPENSING_DATE", "DISPENSE_DATE"],
     "DISPENSING_SUP": ["DISPENSING_SUP", "DAYS_SUPPLY", "SUPPLY"],
     "DISPENSING_AMT": ["DISPENSING_AMT", "QUANTITY", "AMOUNT"],
@@ -1110,7 +1112,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             "_temp_med_admin",
             path_admin,
             [
-                "MEDADMINID", "PATID", "ENCOUNTERID", "MEDADMIN_CODE", "MEDADMIN_START_DATE",
+                "MEDADMINID", "PATID", "ENCOUNTERID", "MEDADMIN_CODE", "MEDADMIN_TYPE", "MEDADMIN_START_DATE",
                 "MEDADMIN_START_TIME", "MEDADMIN_STOP_DATE", "RAW_MEDADMIN_MED_NAME",
                 "RAW_RX_NDC", "PROVIDERID"
             ],
@@ -1154,8 +1156,14 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             LEFT JOIN visit_occurrence vo
               ON vo.visit_source_value = src.ENCOUNTERID
             LEFT JOIN concept c
-              ON c.vocabulary_id = 'RxNorm'
-             AND c.concept_code = src.MEDADMIN_CODE
+              ON c.vocabulary_id = CASE
+                   WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'ND' THEN 'NDC'
+                   WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+                   WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'RX' THEN 'RxNorm'
+                   WHEN src.MEDADMIN_CODE IS NULL AND src.RAW_RX_NDC IS NOT NULL THEN 'NDC'
+                   ELSE 'RxNorm'
+                 END
+             AND c.concept_code = COALESCE(src.MEDADMIN_CODE, src.RAW_RX_NDC)
             LEFT JOIN (
                 SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
                 FROM concept_relationship
@@ -1164,14 +1172,20 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             ) cr
               ON cr.concept_id_1 = c.concept_id
             LEFT JOIN (
-                SELECT source_code, MIN(target_concept_id) AS target_concept_id
+                SELECT source_code, source_vocabulary_id, MIN(target_concept_id) AS target_concept_id
                 FROM source_to_concept_map
-                WHERE source_vocabulary_id = 'RxNorm'
-                  AND (invalid_reason IS NULL OR invalid_reason = '')
+                WHERE (invalid_reason IS NULL OR invalid_reason = '')
                   AND (valid_end_date IS NULL OR valid_end_date >= CURRENT_DATE)
-                GROUP BY source_code
+                GROUP BY source_code, source_vocabulary_id
             ) stcm
-              ON stcm.source_code = src.MEDADMIN_CODE
+              ON stcm.source_code = COALESCE(src.MEDADMIN_CODE, src.RAW_RX_NDC)
+             AND stcm.source_vocabulary_id = CASE
+                   WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'ND' THEN 'NDC'
+                   WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+                   WHEN UPPER(TRIM(COALESCE(src.MEDADMIN_TYPE, ''))) = 'RX' THEN 'RxNorm'
+                   WHEN src.MEDADMIN_CODE IS NULL AND src.RAW_RX_NDC IS NOT NULL THEN 'NDC'
+                   ELSE 'RxNorm'
+                 END
             WHERE src.MEDADMINID IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.MEDADMINID) = 1;
         """)
@@ -1187,7 +1201,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             path_disp,
             [
                 "DISPENSINGID", "PATID", "PRESCRIBINGID", "DISPENSING_DATE",
-                "RAW_RX_NDC", "DISPENSING_SUP", "DISPENSING_AMT"
+                "RAW_RX_NDC", "DISPENSING_SUP", "DISPENSING_AMT", "DISPENSING_TYPE"
             ],
         )
         run_insert(con, "DRUG_EXPOSURE (from DISPENSING)", f"""
@@ -1225,7 +1239,12 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             LEFT JOIN person p
               ON p.person_source_value = {patid_expr}
             LEFT JOIN concept c
-              ON c.vocabulary_id = 'NDC'
+              ON c.vocabulary_id = CASE
+                   WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'RX' THEN 'RxNorm'
+                   WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+                   WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'ND' THEN 'NDC'
+                   ELSE 'NDC'
+                 END
              AND c.concept_code = src.RAW_RX_NDC
             LEFT JOIN (
                 SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
@@ -1235,14 +1254,19 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             ) cr
               ON cr.concept_id_1 = c.concept_id
             LEFT JOIN (
-                SELECT source_code, MIN(target_concept_id) AS target_concept_id
+                SELECT source_code, source_vocabulary_id, MIN(target_concept_id) AS target_concept_id
                 FROM source_to_concept_map
-                WHERE source_vocabulary_id = 'NDC'
-                  AND (invalid_reason IS NULL OR invalid_reason = '')
+                WHERE (invalid_reason IS NULL OR invalid_reason = '')
                   AND (valid_end_date IS NULL OR valid_end_date >= CURRENT_DATE)
-                GROUP BY source_code
+                GROUP BY source_code, source_vocabulary_id
             ) stcm
               ON stcm.source_code = src.RAW_RX_NDC
+             AND stcm.source_vocabulary_id = CASE
+                   WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'RX' THEN 'RxNorm'
+                   WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) IN ('CH', 'CP') THEN 'HCPCS'
+                   WHEN UPPER(TRIM(COALESCE(src.DISPENSING_TYPE, ''))) = 'ND' THEN 'NDC'
+                   ELSE 'NDC'
+                 END
             WHERE src.DISPENSINGID IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DISPENSINGID) = 1;
         """)

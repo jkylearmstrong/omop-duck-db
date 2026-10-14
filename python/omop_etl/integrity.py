@@ -318,6 +318,8 @@ def missingness_by_outcome(
 def provenance(
     con: Optional[duckdb.DuckDBPyConnection] = None,
     seed: Optional[int] = None,
+    vocab_schema: Optional[str] = None,
+    vocab_db: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generates a comprehensive provenance stamp capturing library version, DuckDB version,
     active vocabulary releases per vocabulary_id, seed, and git commit.
@@ -328,44 +330,78 @@ def provenance(
         Active DuckDB connection to inspect CDM vocabulary version metadata.
     seed : Optional[int]
         Random seed used for study cohort draws or model training.
+    vocab_schema : Optional[str]
+        Schema or attached database containing Athena vocabulary tables (e.g. 'central_vocab').
+    vocab_db : Optional[str]
+        Alias for vocab_schema.
 
     Returns
     -------
     Dict[str, Any]
         Dictionary with system provenance details.
     """
+    v_schema = vocab_schema or vocab_db
     prov = {
         "package_name": "omopduckdb",
-        "package_version": "0.6.4",
+        "package_version": "0.6.5",
         "duckdb_version": duckdb.__version__,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "seed": seed,
-        "git_commit": "0ec2a6c",
+        "git_commit": "c072171c3c33098101ba7eeff99d3b466abf1da9",
         "vocabularies": {},
     }
 
-    # Try to inspect git HEAD if available
+    # Inspect burned commit or git repository
     try:
-        import subprocess
-        head = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode("utf-8").strip()
-        if head:
-            prov["git_commit"] = head
+        import omop_etl
+        burned = getattr(omop_etl, "__commit__", None)
+        if burned:
+            prov["git_commit"] = burned
     except Exception:
         pass
 
-    # Inspect vocabulary releases in CDM
+    try:
+        import subprocess
+        cur = Path(__file__).resolve().parent
+        for candidate in [cur, cur.parent, cur.parent.parent]:
+            if (candidate / ".git").exists():
+                head = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(candidate),
+                    stderr=subprocess.DEVNULL
+                ).decode("utf-8").strip()
+                if head:
+                    prov["git_commit"] = head
+                    break
+        else:
+            head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+            ).decode("utf-8").strip()
+            if head:
+                prov["git_commit"] = head
+    except Exception:
+        pass
+
+    # Inspect vocabulary releases in CDM or attached vocabulary database
     if con is not None:
         try:
-            has_vocab = con.execute("""
-                SELECT count(*) FROM information_schema.tables
-                WHERE lower(table_name) = 'vocabulary'
-            """).fetchone()[0] > 0
-            if has_vocab:
-                rows = con.execute("""
+            vocab_tbl = f"{v_schema}.vocabulary" if v_schema else "vocabulary"
+            try:
+                con.execute(f"SELECT 1 FROM {vocab_tbl} LIMIT 1")
+            except Exception:
+                if v_schema is None:
+                    try:
+                        con.execute("SELECT 1 FROM central_vocab.vocabulary LIMIT 1")
+                        vocab_tbl = "central_vocab.vocabulary"
+                    except Exception:
+                        vocab_tbl = None
+                else:
+                    vocab_tbl = None
+
+            if vocab_tbl:
+                rows = con.execute(f"""
                     SELECT vocabulary_id, vocabulary_version
-                    FROM vocabulary
+                    FROM {vocab_tbl}
                     WHERE vocabulary_id IN ('None', 'RxNorm', 'SNOMED', 'LOINC', 'ATC', 'ICD10CM')
                        OR vocabulary_version IS NOT NULL
                 """).fetchall()
@@ -374,12 +410,19 @@ def provenance(
         except Exception:
             pass
 
+    prov["vocabulary"] = {
+        "reachable": len(prov["vocabularies"]) > 0,
+        "version_string": prov["vocabularies"].get("RxNorm") or (next(iter(prov["vocabularies"].values())) if prov["vocabularies"] else None),
+    }
+
     return prov
 
 
 def check_vocabulary_provenance(
     con1: duckdb.DuckDBPyConnection,
     con2: duckdb.DuckDBPyConnection,
+    vocab_schema: Optional[str] = None,
+    vocab_db: Optional[str] = None,
 ) -> Tuple[bool, pd.DataFrame]:
     """Verifies that two DuckDB OMOP databases share identical vocabulary releases.
 
@@ -389,14 +432,18 @@ def check_vocabulary_provenance(
         First DuckDB database.
     con2 : duckdb.DuckDBPyConnection
         Second DuckDB database.
+    vocab_schema : Optional[str]
+        Schema or attached database containing Athena vocabulary tables.
+    vocab_db : Optional[str]
+        Alias for vocab_schema.
 
     Returns
     -------
     Tuple[bool, pd.DataFrame]
         Boolean match status, and comparison DataFrame of vocabulary versions.
     """
-    p1 = provenance(con1)["vocabularies"]
-    p2 = provenance(con2)["vocabularies"]
+    p1 = provenance(con1, vocab_schema=vocab_schema, vocab_db=vocab_db)["vocabularies"]
+    p2 = provenance(con2, vocab_schema=vocab_schema, vocab_db=vocab_db)["vocabularies"]
 
     all_vocabs = sorted(set(p1.keys()).union(set(p2.keys())))
     rows = []
@@ -570,9 +617,11 @@ def vocabulary_preflight(
     required: Iterable[str] = ("RxNorm", "ATC", "LOINC", "SNOMED"),
     max_unmapped_rate: float = 0.50,
     fail_fast: bool = True,
+    vocab_schema: Optional[str] = None,
+    vocab_db: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Runs a comprehensive preflight verification of OMOP CDM vocabulary coverage, ATC hierarchies,
-    and unmapped concept 0 rates across clinical tables.
+    unmapped concept 0 rates across clinical tables, and drug exposure types.
 
     Parameters
     ----------
@@ -584,25 +633,57 @@ def vocabulary_preflight(
         Maximum allowable share of concept 0 unmapped rows before flagging (default 0.50 = 50%).
     fail_fast : bool
         If True, raises a ValueError if any required vocabulary has 0 concepts.
+    vocab_schema : Optional[str]
+        Schema or attached database containing Athena vocabulary tables (e.g. 'central_vocab').
+    vocab_db : Optional[str]
+        Alias for vocab_schema.
 
     Returns
     -------
     Dict[str, Any]
-        Dictionary of preflight metrics: vocabularies, unmapped_shares, atc_hierarchy_counts, passed.
+        Dictionary of preflight metrics: vocabularies, unmapped_shares, atc_hierarchy_counts, drug_types, passed.
     """
+    v_schema = vocab_schema or vocab_db
+    concept_tbl = f"{v_schema}.concept" if v_schema else "concept"
+    ca_tbl = f"{v_schema}.concept_ancestor" if v_schema else "concept_ancestor"
+
+    # Fall back to central_vocab if v_schema is None and concept is not in default schema
+    if v_schema is None:
+        try:
+            con.execute("SELECT 1 FROM concept LIMIT 1")
+        except Exception:
+            try:
+                con.execute("SELECT 1 FROM central_vocab.concept LIMIT 1")
+                concept_tbl = "central_vocab.concept"
+                ca_tbl = "central_vocab.concept_ancestor"
+            except Exception:
+                pass
+
     report = {
         "passed": True,
         "vocabularies": {},
         "unmapped_shares": {},
         "atc_counts": {},
+        "drug_types": {
+            "prescribed": 0,
+            "administered": 0,
+            "dispensed": 0,
+            "other": 0,
+            "total": 0,
+            "prescribed_38000177": 0,
+            "administered_38000180": 0,
+            "dispensed_38000175": 0,
+        },
+        "drug_type_breakdown": {},
         "issues": [],
     }
+    report["drug_type_breakdown"] = report["drug_types"]
 
     # Check required vocabularies
     for vocab in required:
         try:
             cnt = con.execute(
-                f"SELECT count(*) FROM concept WHERE vocabulary_id = '{vocab}'"
+                f"SELECT count(*) FROM {concept_tbl} WHERE vocabulary_id = '{vocab}'"
             ).fetchone()[0]
             report["vocabularies"][vocab] = cnt
             if cnt == 0:
@@ -615,10 +696,10 @@ def vocabulary_preflight(
 
     # Check ATC hierarchy descendants in concept_ancestor
     try:
-        atc_desc = con.execute("""
-            SELECT count(DISTINCT descendant_concept_id)
-            FROM concept_ancestor ca
-            JOIN concept c ON ca.ancestor_concept_id = c.concept_id
+        atc_desc = con.execute(f"""
+            SELECT count(DISTINCT ca.descendant_concept_id)
+            FROM {ca_tbl} ca
+            JOIN {concept_tbl} c ON ca.ancestor_concept_id = c.concept_id
             WHERE c.vocabulary_id = 'ATC'
         """).fetchone()[0]
         report["atc_counts"]["total_descendants"] = atc_desc
@@ -627,6 +708,51 @@ def vocabulary_preflight(
             report["issues"].append("ATC concepts have zero descendants in concept_ancestor.")
     except Exception:
         report["atc_counts"]["total_descendants"] = 0
+
+    # Check drug_type_concept_id breakdown in drug_exposure
+    try:
+        has_de = con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE lower(table_name) = 'drug_exposure'"
+        ).fetchone()[0] > 0
+        if has_de:
+            dt_stats = con.execute("""
+                SELECT
+                    count(CASE WHEN drug_type_concept_id = 38000177 THEN 1 END) AS prescribed,
+                    count(CASE WHEN drug_type_concept_id = 38000180 THEN 1 END) AS administered,
+                    count(CASE WHEN drug_type_concept_id = 38000175 THEN 1 END) AS dispensed,
+                    count(CASE WHEN drug_type_concept_id NOT IN (38000177, 38000180, 38000175) OR drug_type_concept_id IS NULL THEN 1 END) AS other,
+                    count(*) AS total
+                FROM drug_exposure
+            """).fetchone()
+            if dt_stats:
+                total_cnt = int(dt_stats[4] or 0)
+                p_cnt = int(dt_stats[0] or 0)
+                a_cnt = int(dt_stats[1] or 0)
+                d_cnt = int(dt_stats[2] or 0)
+                dt_dict = {
+                    "prescribed": p_cnt,
+                    "administered": a_cnt,
+                    "dispensed": d_cnt,
+                    "other": int(dt_stats[3] or 0),
+                    "total": total_cnt,
+                    "prescribed_38000177": p_cnt,
+                    "administered_38000180": a_cnt,
+                    "dispensed_38000175": d_cnt,
+                    "prescribed_pct": round(float(p_cnt) / float(total_cnt) * 100.0, 2) if total_cnt > 0 else 0.0,
+                    "administered_pct": round(float(a_cnt) / float(total_cnt) * 100.0, 2) if total_cnt > 0 else 0.0,
+                    "dispensed_pct": round(float(d_cnt) / float(total_cnt) * 100.0, 2) if total_cnt > 0 else 0.0,
+                }
+                report["drug_types"] = dt_dict
+                report["drug_type_breakdown"] = dt_dict
+    except Exception:
+        pass
+
+    try:
+        report["concept_count"] = int(con.execute(f"SELECT count(*) FROM {concept_tbl}").fetchone()[0])
+        report["vocabulary_reachable"] = True
+    except Exception:
+        report["concept_count"] = sum(report["vocabularies"].values())
+        report["vocabulary_reachable"] = report["concept_count"] > 0
 
     # Check unmapped concept_id = 0 shares in clinical tables
     for tbl, col in [

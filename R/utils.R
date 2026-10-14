@@ -104,6 +104,17 @@ load_mapping_macros <- function(con, temporary = NULL, skip_unresolved = FALSE) 
   invisible(skipped)
 }
 
+#' Load SQL Macros into Connection
+#'
+#' @param con Active DuckDB connection.
+#' @param temporary Logical, whether to load macros as temporary. Default matches read-only state.
+#' @param skip_unresolved Logical, whether to skip macros that fail to bind unresolved dependencies.
+#' @return Character vector of skipped macro names invisibly.
+#' @export
+load_macros <- function(con, temporary = NULL, skip_unresolved = FALSE) {
+  load_mapping_macros(con, temporary = temporary, skip_unresolved = skip_unresolved)
+}
+
 
 #' @keywords internal
 #' @noRd
@@ -124,11 +135,13 @@ load_mapping_macros <- function(con, temporary = NULL, skip_unresolved = FALSE) 
   RXNORM_CUI = c("RXNORM_CUI", "RXNORM", "CUI"),
   MEDADMINID = c("MEDADMINID", "MEDADMIN_ID"),
   MEDADMIN_CODE = c("MEDADMIN_CODE", "MED_CODE", "RXNORM_CUI", "RXNORM"),
+  MEDADMIN_TYPE = c("MEDADMIN_TYPE", "ADMIN_TYPE", "MED_TYPE", "MEDADMIN_CODE_TYPE"),
   MEDADMIN_START_DATE = c("MEDADMIN_START_DATE", "ADMIN_DATE", "START_DATE"),
   MEDADMIN_START_TIME = c("MEDADMIN_START_TIME", "ADMIN_TIME", "START_TIME"),
   MEDADMIN_STOP_DATE = c("MEDADMIN_STOP_DATE", "STOP_DATE"),
   RAW_MEDADMIN_MED_NAME = c("RAW_MEDADMIN_MED_NAME", "MEDADMIN_MED_NAME", "RAW_RX_MED_NAME", "MED_NAME"),
   DISPENSINGID = c("DISPENSINGID", "DISPENSING_ID"),
+  DISPENSING_TYPE = c("DISPENSING_TYPE", "DISP_TYPE", "DISPENSING_SRC", "NDC_TYPE", "DISP_CODE_TYPE"),
   DISPENSING_DATE = c("DISPENSING_DATE", "DISPENSE_DATE"),
   DISPENSING_SUP = c("DISPENSING_SUP", "DAYS_SUPPLY", "SUPPLY"),
   DISPENSING_AMT = c("DISPENSING_AMT", "QUANTITY", "AMOUNT"),

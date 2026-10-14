@@ -218,6 +218,11 @@ class CohortExtractor:
             raise ValueError("Call define_index() before generating flowchart.")
         return self.attrition.to_dataframe()
 
+    def export_companion_manifest(self, output_path: str | Path | None = None) -> pd.DataFrame:
+        """Exports a companion identifier manifest preserving exact cohort row order."""
+        from .reconciliation import export_companion_manifest
+        return export_companion_manifest(self.cohort_df, output_path=output_path, con=self.con)
+
 
 class FeatureMatrixBuilder:
     """Builds tabular feature matrices and 3D temporal tensors for ML/DL."""
@@ -399,6 +404,11 @@ class FeatureMatrixBuilder:
     def to_dataframe(self) -> pd.DataFrame:
         """Returns the complete dataset as a pandas DataFrame."""
         return self.df.copy()
+
+    def export_companion_manifest(self, output_path: str | Path | None = None) -> pd.DataFrame:
+        """Exports a companion identifier manifest preserving exact feature matrix row order."""
+        from .reconciliation import export_companion_manifest
+        return export_companion_manifest(self.df, output_path=output_path, con=self.con)
 
     def to_tensor(self, max_seq_len: int = 107) -> Any:
         """Constructs a 3D temporal sequence tensor of shape (N, max_seq_len, D)."""

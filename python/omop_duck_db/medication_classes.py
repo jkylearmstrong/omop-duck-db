@@ -2,6 +2,7 @@
 
 from omop_etl.medication_classes import (
     assert_exposure_coverage,
+    audit_combination_products,
     audit_medication_strategies,
     explain_medication_disagreement,
     export_medication_crosswalk,
@@ -13,6 +14,7 @@ from omop_etl.medication_classes import (
 
 __all__ = [
     "assert_exposure_coverage",
+    "audit_combination_products",
     "audit_medication_strategies",
     "explain_medication_disagreement",
     "export_medication_crosswalk",

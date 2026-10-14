@@ -300,41 +300,72 @@ missingness_by_outcome <- function(df, outcome_col, cols = NULL, by = NULL, diff
 #'
 #' @param con Optional active DuckDB connection.
 #' @param seed Optional random seed.
+#' @param vocab_schema Optional schema or attached database name for vocabulary tables.
+#' @param vocab_db Alias for vocab_schema.
 #' @return Named list of provenance metadata.
 #' @export
-provenance <- function(con = NULL, seed = NULL) {
+provenance <- function(con = NULL, seed = NULL, vocab_schema = NULL, vocab_db = NULL) {
+  v_schema <- if (!is.null(vocab_schema)) vocab_schema else vocab_db
   prov <- list(
     package_name = "omopduckdb",
-    package_version = "0.6.4",
+    package_version = "0.6.5",
     duckdb_version = as.character(utils::packageVersion("duckdb")),
     timestamp_utc = format(as.POSIXlt(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
     seed = seed,
-    git_commit = "0ec2a6c",
+    git_commit = "c072171c3c33098101ba7eeff99d3b466abf1da9",
     vocabularies = list()
   )
 
-  # Try git HEAD
+  # Try git HEAD from repository root or current directory
   tryCatch({
-    head <- system("git rev-parse HEAD", intern = TRUE, ignore.stderr = TRUE)
-    if (length(head) > 0 && nchar(head[1]) > 0) {
-      prov$git_commit <- head[1]
+    candidate_dirs <- c(getwd(), tryCatch(rprojroot::find_root(rprojroot::is_git_root), error = function(e) ""))
+    found_git <- FALSE
+    for (d in candidate_dirs) {
+      if (nzchar(d) && dir.exists(file.path(d, ".git"))) {
+        head <- system(sprintf("git -C %s rev-parse HEAD", shQuote(d)), intern = TRUE, ignore.stderr = TRUE)
+        if (length(head) > 0 && nchar(head[1]) > 0) {
+          prov$git_commit <- head[1]
+          found_git <- TRUE
+          break
+        }
+      }
+    }
+    if (!found_git) {
+      head <- system("git rev-parse HEAD", intern = TRUE, ignore.stderr = TRUE)
+      if (length(head) > 0 && nchar(head[1]) > 0) {
+        prov$git_commit <- head[1]
+      }
     }
   }, error = function(e) NULL)
 
   if (!is.null(con)) {
     tryCatch({
-      has_vocab <- DBI::dbGetQuery(con, "
-        SELECT count(*) AS n FROM information_schema.tables
-        WHERE lower(table_name) = 'vocabulary'
-      ")$n[1] > 0
+      vocab_tbl <- if (!is.null(v_schema)) sprintf("%s.vocabulary", v_schema) else "vocabulary"
+      has_vocab <- tryCatch({
+        DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s", vocab_tbl))$n[1] >= 0
+      }, error = function(e) {
+        if (is.null(v_schema)) {
+          tryCatch({
+            DBI::dbGetQuery(con, "SELECT count(*) AS n FROM central_vocab.vocabulary")$n[1] >= 0
+          }, error = function(e2) FALSE)
+        } else FALSE
+      })
+      if (is.null(v_schema) && !has_vocab) {
+        # check if central_vocab has it
+        has_central <- tryCatch(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM central_vocab.vocabulary")$n[1] >= 0, error = function(e) FALSE)
+        if (has_central) {
+          vocab_tbl <- "central_vocab.vocabulary"
+          has_vocab <- TRUE
+        }
+      }
 
       if (has_vocab) {
-        rows <- DBI::dbGetQuery(con, "
+        rows <- DBI::dbGetQuery(con, sprintf("
           SELECT vocabulary_id, vocabulary_version
-          FROM vocabulary
+          FROM %s
           WHERE vocabulary_id IN ('None', 'RxNorm', 'SNOMED', 'LOINC', 'ATC', 'ICD10CM')
              OR vocabulary_version IS NOT NULL
-        ")
+        ", vocab_tbl))
         for (i in seq_len(nrow(rows))) {
           vid <- rows$vocabulary_id[i]
           vver <- rows$vocabulary_version[i]
@@ -343,6 +374,11 @@ provenance <- function(con = NULL, seed = NULL) {
       }
     }, error = function(e) NULL)
   }
+
+  prov$vocabulary <- list(
+    reachable = length(prov$vocabularies) > 0,
+    version_string = if ("RxNorm" %in% names(prov$vocabularies)) prov$vocabularies[["RxNorm"]] else if (length(prov$vocabularies) > 0) prov$vocabularies[[1]] else NULL
+  )
 
   prov
 }
@@ -353,11 +389,13 @@ provenance <- function(con = NULL, seed = NULL) {
 #'
 #' @param con1 First DuckDB connection.
 #' @param con2 Second DuckDB connection.
+#' @param vocab_schema Optional schema or attached database name for vocabulary tables.
+#' @param vocab_db Alias for vocab_schema.
 #' @return A list with \code{matched} (logical) and \code{comparison} (data frame).
 #' @export
-check_vocabulary_provenance <- function(con1, con2) {
-  p1 <- provenance(con1)$vocabularies
-  p2 <- provenance(con2)$vocabularies
+check_vocabulary_provenance <- function(con1, con2, vocab_schema = NULL, vocab_db = NULL) {
+  p1 <- provenance(con1, vocab_schema = vocab_schema, vocab_db = vocab_db)$vocabularies
+  p2 <- provenance(con2, vocab_schema = vocab_schema, vocab_db = vocab_db)$vocabularies
 
   all_vocabs <- sort(unique(c(names(p1), names(p2))))
   matched <- TRUE
@@ -532,20 +570,43 @@ scan_document_numbers <- function(doc_text_or_path, manifest, previous_manifest 
 #' @param required Vector of required vocabulary IDs (default RxNorm, ATC, LOINC, SNOMED).
 #' @param max_unmapped_rate Maximum allowable share of concept 0 rows before flagging (default 0.50 = 50 percent).
 #' @param fail_fast If TRUE, raises an error if any required vocabulary is missing.
-#' @return Named list with preflight metrics and passed status.
+#' @param vocab_schema Optional schema or attached database name for vocabulary tables.
+#' @param vocab_db Alias for vocab_schema.
+#' @return Named list with preflight metrics, drug exposure type breakdown, and passed status.
 #' @export
-vocabulary_preflight <- function(con, required = c("RxNorm", "ATC", "LOINC", "SNOMED"), max_unmapped_rate = 0.50, fail_fast = TRUE) {
+vocabulary_preflight <- function(con, required = c("RxNorm", "ATC", "LOINC", "SNOMED"), max_unmapped_rate = 0.50, fail_fast = TRUE, vocab_schema = NULL, vocab_db = NULL) {
+  v_schema <- if (!is.null(vocab_schema)) vocab_schema else vocab_db
+  concept_tbl <- if (!is.null(v_schema)) sprintf("%s.concept", v_schema) else "concept"
+  ca_tbl <- if (!is.null(v_schema)) sprintf("%s.concept_ancestor", v_schema) else "concept_ancestor"
+
+  if (is.null(v_schema)) {
+    has_c <- tryCatch(DBI::dbGetQuery(con, "SELECT 1 FROM concept LIMIT 1"), error = function(e) NULL)
+    if (is.null(has_c)) {
+      has_central <- tryCatch(DBI::dbGetQuery(con, "SELECT 1 FROM central_vocab.concept LIMIT 1"), error = function(e) NULL)
+      if (!is.null(has_central)) {
+        concept_tbl <- "central_vocab.concept"
+        ca_tbl <- "central_vocab.concept_ancestor"
+      }
+    }
+  }
+
   report <- list(
     passed = TRUE,
     vocabularies = list(),
     unmapped_shares = list(),
     atc_counts = list(),
+    drug_types = list(
+      prescribed = 0L, administered = 0L, dispensed = 0L, other = 0L, total = 0L,
+      prescribed_38000177 = 0L, administered_38000180 = 0L, dispensed_38000175 = 0L
+    ),
+    drug_type_breakdown = list(),
     issues = character()
   )
+  report$drug_type_breakdown <- report$drug_types
 
   for (v in required) {
     cnt <- tryCatch({
-      DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM concept WHERE vocabulary_id = '%s'", v))$n[1]
+      DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s WHERE vocabulary_id = '%s'", concept_tbl, v))$n[1]
     }, error = function(e) 0)
     report$vocabularies[[v]] <- cnt
     if (cnt == 0) {
@@ -555,18 +616,57 @@ vocabulary_preflight <- function(con, required = c("RxNorm", "ATC", "LOINC", "SN
   }
 
   atc_desc <- tryCatch({
-    DBI::dbGetQuery(con, "
-      SELECT count(DISTINCT descendant_concept_id) AS n
-      FROM concept_ancestor ca
-      JOIN concept c ON ca.ancestor_concept_id = c.concept_id
+    DBI::dbGetQuery(con, sprintf("
+      SELECT count(DISTINCT ca.descendant_concept_id) AS n
+      FROM %s ca
+      JOIN %s c ON ca.ancestor_concept_id = c.concept_id
       WHERE c.vocabulary_id = 'ATC'
-    ")$n[1]
+    ", ca_tbl, concept_tbl))$n[1]
   }, error = function(e) 0)
   report$atc_counts$total_descendants <- atc_desc
   if (atc_desc == 0 && "ATC" %in% required) {
     report$passed <- FALSE
     report$issues <- c(report$issues, "ATC concepts have zero descendants in concept_ancestor.")
   }
+
+  # Drug type breakdown in drug_exposure
+  tryCatch({
+    has_de <- DBI::dbGetQuery(con, "
+      SELECT count(*) AS n FROM information_schema.tables WHERE lower(table_name) = 'drug_exposure'
+    ")$n[1] > 0
+    if (has_de) {
+      dt_stats <- DBI::dbGetQuery(con, "
+        SELECT
+          count(CASE WHEN drug_type_concept_id = 38000177 THEN 1 END) AS prescribed,
+          count(CASE WHEN drug_type_concept_id = 38000180 THEN 1 END) AS administered,
+          count(CASE WHEN drug_type_concept_id = 38000175 THEN 1 END) AS dispensed,
+          count(CASE WHEN drug_type_concept_id NOT IN (38000177, 38000180, 38000175) OR drug_type_concept_id IS NULL THEN 1 END) AS other,
+          count(*) AS total
+        FROM drug_exposure
+      ")
+      if (nrow(dt_stats) > 0) {
+        p <- as.integer(dt_stats$prescribed[1] %||% 0)
+        a <- as.integer(dt_stats$administered[1] %||% 0)
+        d <- as.integer(dt_stats$dispensed[1] %||% 0)
+        o <- as.integer(dt_stats$other[1] %||% 0)
+        tot <- as.integer(dt_stats$total[1] %||% 0)
+        dt_list <- list(
+          prescribed = p, administered = a, dispensed = d, other = o, total = tot,
+          prescribed_38000177 = p, administered_38000180 = a, dispensed_38000175 = d,
+          prescribed_pct = if (tot > 0) round(p * 100.0 / tot, 2) else 0.0,
+          administered_pct = if (tot > 0) round(a * 100.0 / tot, 2) else 0.0,
+          dispensed_pct = if (tot > 0) round(d * 100.0 / tot, 2) else 0.0
+        )
+        report$drug_types <- dt_list
+        report$drug_type_breakdown <- dt_list
+      }
+    }
+  }, error = function(e) NULL)
+
+  report$concept_count <- tryCatch({
+    as.integer(DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s", concept_tbl))$n[1])
+  }, error = function(e) sum(unlist(report$vocabularies)))
+  report$vocabulary_reachable <- tryCatch(report$concept_count > 0, error = function(e) FALSE)
 
   for (tbl_info in list(
     list(tbl = "drug_exposure", col = "drug_concept_id"),

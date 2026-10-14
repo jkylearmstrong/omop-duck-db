@@ -117,6 +117,7 @@ from omop_etl.wide_measurement import (
 )
 from omop_etl.medication_classes import (
     assert_exposure_coverage,
+    audit_combination_products,
     audit_medication_strategies,
     explain_medication_disagreement,
     export_medication_crosswalk,
@@ -133,6 +134,7 @@ from omop_etl.reconciliation import (
     cohort_from_index_stays,
     compare_feature_tables,
     cohort_overlap,
+    export_companion_manifest,
     run_study_grid,
 )
 from omop_etl.integrity import (
@@ -497,6 +499,8 @@ __all__ = [
     "dqd_summary",
     # Reconciliation & Comparison Additions
     "cohort_from_index_stays",
+    "audit_combination_products",
+    "export_companion_manifest",
     "compare_feature_tables",
     "cohort_overlap",
     "run_study_grid",
@@ -524,5 +528,6 @@ __all__ = [
     "generate_synthetic_omop_twin",
 ]
 
-__version__ = "0.6.4"
+__version__ = "0.6.5"
+__commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 

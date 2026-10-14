@@ -31,6 +31,7 @@ def cohort_from_index_stays(
     cohort_definition_id: int = 1,
     site_col: str = "site",
     target_table: str | None = None,
+    group_by: str | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Forces study cohort index stays from an external legacy list or table.
 
@@ -49,6 +50,7 @@ def cohort_from_index_stays(
         cohort_definition_id: OMOP cohort definition identifier (default 1).
         site_col: Site column name if present (default 'site').
         target_table: Optional table name to persist the cohort in DuckDB.
+        group_by: Optional column name (e.g. 'SITE') to stratify match diagnostics by.
 
     Returns:
         tuple[pd.DataFrame, dict[str, Any]]:
@@ -125,6 +127,7 @@ def cohort_from_index_stays(
     unmatched_pts = max(0, unique_input_pts - matched_pts)
     matched_encs = int(cohort_df["visit_occurrence_id"].notna().sum()) if not cohort_df.empty else 0
     unmatched_encs = total_stays - matched_encs
+    enc_match_rate = round(matched_encs / total_stays, 4) if total_stays > 0 else 1.0
 
     audit = {
         "total_input_stays": total_stays,
@@ -133,7 +136,43 @@ def cohort_from_index_stays(
         "patient_match_rate": round(matched_pts / unique_input_pts, 4) if unique_input_pts > 0 else 1.0,
         "matched_encounters": matched_encs,
         "unmatched_encounters": unmatched_encs,
+        "encounter_match_rate": enc_match_rate,
     }
+
+    if group_by:
+        cols_map = {c.lower(): c for c in input_df.columns}
+        grp_col = cols_map.get(str(group_by).lower())
+        if grp_col:
+            by_group = {}
+            for grp_val, grp_stays in input_df.groupby(grp_col):
+                grp_pts = grp_stays[actual_pid_col].nunique() if actual_pid_col in grp_stays.columns else len(grp_stays)
+                if grp_col in cohort_df.columns:
+                    grp_coh = cohort_df[cohort_df[grp_col] == grp_val]
+                elif "site" in cohort_df.columns and grp_col.lower() in ("site", "site_id", "site_anon"):
+                    grp_coh = cohort_df[cohort_df["site"] == grp_val]
+                else:
+                    sub_pids = set(grp_stays[actual_pid_col])
+                    if id_type == "person_id" or actual_pid_col == "person_id":
+                        grp_coh = cohort_df[cohort_df["subject_id"].isin(sub_pids)]
+                    else:
+                        grp_coh = cohort_df
+                g_tot = len(grp_stays)
+                g_matched_pts = len(grp_coh["subject_id"].unique()) if not grp_coh.empty else 0
+                g_unmatched_pts = max(0, grp_pts - g_matched_pts)
+                g_matched_encs = int(grp_coh["visit_occurrence_id"].notna().sum()) if not grp_coh.empty else 0
+                g_unmatched_encs = g_tot - g_matched_encs
+                by_group[str(grp_val)] = {
+                    "total_input_stays": g_tot,
+                    "matched_patients": g_matched_pts,
+                    "unmatched_patients": g_unmatched_pts,
+                    "patient_match_rate": round(g_matched_pts / grp_pts, 4) if grp_pts > 0 else 1.0,
+                    "matched_encounters": g_matched_encs,
+                    "unmatched_encounters": g_unmatched_encs,
+                    "encounter_match_rate": round(g_matched_encs / g_tot, 4) if g_tot > 0 else 1.0,
+                }
+            audit["by_group"] = by_group
+            if str(group_by).upper() in ("SITE", "SITE_ID", "SITE_ANON"):
+                audit["by_site"] = by_group
 
     if target_table:
         con.register("_cohort_out", cohort_df)
@@ -143,11 +182,165 @@ def cohort_from_index_stays(
     return cohort_df, audit
 
 
+def export_companion_manifest(
+    source: pd.DataFrame | duckdb.DuckDBPyConnection | str | Path,
+    output_path: str | Path | None = None,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    cohort_table: str | None = None,
+    person_col: str | None = None,
+    visit_col: str | None = None,
+    index_date_col: str | None = None,
+    person_source_col: str | None = None,
+    visit_source_col: str | None = None,
+) -> pd.DataFrame:
+    """Exports a lightweight companion identifier manifest with strict row-order preservation.
+
+    Outputs a 5-column manifest:
+    ['person_id', 'person_source_value', 'visit_occurrence_id', 'visit_source_value', 'index_date']
+    allowing privacy-preserving de-identified feature matrices to be joined or reconciled
+    against OMOP records without leaking identifiers into model training arrays.
+
+    Args:
+        source: DataFrame, active connection, table name, or CSV/Parquet path.
+        output_path: Optional file path (.csv or .parquet) to write the manifest.
+        con: Optional DuckDB connection for looking up source or standard IDs.
+        cohort_table: Table name if source is a connection.
+        person_col: Column name for person_id.
+        visit_col: Column name for visit_occurrence_id.
+        index_date_col: Column name for index_date.
+        person_source_col: Column name for person_source_value.
+        visit_source_col: Column name for visit_source_value.
+
+    Returns:
+        pd.DataFrame: Manifest with the 5 required columns and identical row order.
+    """
+    if isinstance(source, (str, Path)):
+        p = str(source)
+        if p.endswith((".csv", ".tsv", ".csv.gz", ".parquet")) or Path(p).exists():
+            if p.endswith(".parquet"):
+                df = pd.read_parquet(p)
+            else:
+                df = pd.read_csv(p)
+        elif con is not None:
+            df = con.execute(f"SELECT * FROM {p}").df()
+        else:
+            raise ValueError(f"Cannot resolve table '{p}' without a database connection.")
+    elif isinstance(source, duckdb.DuckDBPyConnection):
+        tbl = cohort_table or "cohort"
+        df = source.execute(f"SELECT * FROM {tbl}").df()
+        con = source
+    elif hasattr(source, "df") and callable(getattr(source, "df")):
+        df = source.df()
+    elif isinstance(source, pd.DataFrame):
+        df = source.copy()
+    else:
+        df = pd.DataFrame(source)
+
+    orig_order = df.index
+    cols_map = {c.lower(): c for c in df.columns}
+
+    # Resolve person_id
+    pid_c = person_col or cols_map.get("person_id") or cols_map.get("subject_id") or cols_map.get("pid")
+    pids = df[pid_c].values if pid_c else [None] * len(df)
+
+    # Resolve person_source_value
+    psv_c = person_source_col or cols_map.get("person_source_value") or cols_map.get("mrn") or cols_map.get("pat_id") or cols_map.get("patient_id")
+    psvs = df[psv_c].values if psv_c else [None] * len(df)
+
+    # Resolve visit_occurrence_id
+    vid_c = visit_col or cols_map.get("visit_occurrence_id") or cols_map.get("visit_id") or cols_map.get("encounter_id") or cols_map.get("hadm_id")
+    vids = df[vid_c].values if vid_c else [None] * len(df)
+
+    # Resolve visit_source_value
+    vsv_c = visit_source_col or cols_map.get("visit_source_value") or cols_map.get("encounter_source_value") or cols_map.get("visit_source") or cols_map.get("enc_id")
+    vsvs = df[vsv_c].values if vsv_c else [None] * len(df)
+
+    # Resolve index_date
+    idx_c = index_date_col or cols_map.get("index_date") or cols_map.get("cohort_start_date") or cols_map.get("visit_start_date") or cols_map.get("admit_date")
+    idxs = df[idx_c].values if idx_c else [None] * len(df)
+
+    manifest = pd.DataFrame({
+        "person_id": pids,
+        "person_source_value": psvs,
+        "visit_occurrence_id": vids,
+        "visit_source_value": vsvs,
+        "index_date": idxs,
+    }, index=orig_order)
+
+    # If con is provided, fill missing psvs or pids from person table
+    if con is not None:
+        try:
+            # Missing person_source_value
+            if manifest["person_source_value"].isna().any() and not manifest["person_id"].isna().all():
+                needed_pids = manifest.loc[manifest["person_source_value"].isna() & manifest["person_id"].notna(), "person_id"].dropna().unique()
+                if len(needed_pids) > 0:
+                    pids_in = ", ".join(str(int(x)) for x in needed_pids if str(x).isdigit())
+                    if pids_in:
+                        res = con.execute(f"SELECT person_id, person_source_value FROM person WHERE person_id IN ({pids_in})").fetchall()
+                        pmap = {r[0]: r[1] for r in res}
+                        manifest["person_source_value"] = manifest["person_source_value"].combine_first(manifest["person_id"].map(pmap))
+
+            # Missing person_id
+            if manifest["person_id"].isna().any() and not manifest["person_source_value"].isna().all():
+                needed_psvs = manifest.loc[manifest["person_id"].isna() & manifest["person_source_value"].notna(), "person_source_value"].dropna().unique()
+                if len(needed_psvs) > 0:
+                    psvs_in = ", ".join(f"'{str(x).strip()}'" for x in needed_psvs)
+                    res = con.execute(f"SELECT person_source_value, person_id FROM person WHERE UPPER(TRIM(person_source_value)) IN ({psvs_in.upper()})").fetchall()
+                    psv_map = {str(r[0]).strip().upper(): r[1] for r in res}
+                    manifest["person_id"] = manifest["person_id"].combine_first(manifest["person_source_value"].astype(str).str.strip().str.upper().map(psv_map))
+
+            # Missing visit_source_value
+            if manifest["visit_source_value"].isna().any() and not manifest["visit_occurrence_id"].isna().all():
+                needed_vids = manifest.loc[manifest["visit_source_value"].isna() & manifest["visit_occurrence_id"].notna(), "visit_occurrence_id"].dropna().unique()
+                if len(needed_vids) > 0:
+                    vids_in = ", ".join(str(int(x)) for x in needed_vids if str(x).isdigit())
+                    if vids_in:
+                        res = con.execute(f"SELECT visit_occurrence_id, visit_source_value, visit_start_date FROM visit_occurrence WHERE visit_occurrence_id IN ({vids_in})").fetchall()
+                        vmap = {r[0]: r[1] for r in res}
+                        dmap = {r[0]: r[2] for r in res}
+                        manifest["visit_source_value"] = manifest["visit_source_value"].combine_first(manifest["visit_occurrence_id"].map(vmap))
+                        manifest["index_date"] = manifest["index_date"].combine_first(manifest["visit_occurrence_id"].map(dmap))
+
+            # Missing visit_occurrence_id
+            if manifest["visit_occurrence_id"].isna().any() and not manifest["visit_source_value"].isna().all():
+                needed_vsvs = manifest.loc[manifest["visit_occurrence_id"].isna() & manifest["visit_source_value"].notna(), "visit_source_value"].dropna().unique()
+                if len(needed_vsvs) > 0:
+                    vsvs_in = ", ".join(f"'{str(x).strip()}'" for x in needed_vsvs)
+                    res = con.execute(f"SELECT visit_source_value, visit_occurrence_id, visit_start_date FROM visit_occurrence WHERE UPPER(TRIM(visit_source_value)) IN ({vsvs_in.upper()})").fetchall()
+                    vsv_map = {str(r[0]).strip().upper(): r[1] for r in res}
+                    vsv_dmap = {str(r[0]).strip().upper(): r[2] for r in res}
+                    v_keys = manifest["visit_source_value"].astype(str).str.strip().str.upper()
+                    manifest["visit_occurrence_id"] = manifest["visit_occurrence_id"].combine_first(v_keys.map(vsv_map))
+                    manifest["index_date"] = manifest["index_date"].combine_first(v_keys.map(vsv_dmap))
+        except Exception:
+            pass
+
+    # Cast index_date to string YYYY-MM-DD or date if present
+    if not manifest["index_date"].isna().all():
+        try:
+            manifest["index_date"] = pd.to_datetime(manifest["index_date"]).dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    if output_path is not None:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        if out_p.suffix.lower() == ".parquet":
+            manifest.to_parquet(out_p, index=False)
+        else:
+            manifest.to_csv(out_p, index=False)
+
+    return manifest
+
+
 def compare_feature_tables(
     left: pd.DataFrame,
     right: pd.DataFrame,
-    keys: Sequence[str] | str,
+    keys: Sequence[str] | str | None = None,
     *,
+    left_manifest: pd.DataFrame | str | Path | None = None,
+    right_manifest: pd.DataFrame | str | Path | None = None,
     by: str | None = None,
     tolerances: Mapping[str, float] | None = None,
     smd_threshold: float = 0.10,
@@ -164,6 +357,8 @@ def compare_feature_tables(
         left: First feature matrix (e.g. new OMOP pipeline).
         right: Second feature matrix (e.g. legacy pipeline).
         keys: Key column or columns to join on (e.g. 'person_id' or ['person_id', 'index_date']).
+        left_manifest: Optional companion manifest for left matrix.
+        right_manifest: Optional companion manifest for right matrix.
         by: Optional site column to stratify parity ledger by (default None).
         tolerances: Optional dict of custom per-feature SMD tolerances.
         smd_threshold: Standardized mean difference threshold flagging discrepancy (default 0.10).
@@ -176,13 +371,51 @@ def compare_feature_tables(
             right_mean, left_sd, right_sd, smd, correlation, left_missing_rate,
             right_missing_rate, missingness_gap, flagged, reason].
     """
-    key_list = [keys] if isinstance(keys, str) else list(keys)
-    common_cols = sorted(set(left.columns) & set(right.columns) - set(key_list))
+    left_df = left.copy()
+    if left_manifest is not None:
+        if isinstance(left_manifest, (str, Path)):
+            p = str(left_manifest)
+            lm = pd.read_parquet(p) if p.endswith(".parquet") else pd.read_csv(p)
+        else:
+            lm = left_manifest
+        for c in ["person_id", "visit_occurrence_id", "index_date", "person_source_value", "visit_source_value"]:
+            if c in lm.columns and c not in left_df.columns and len(lm) == len(left_df):
+                left_df[c] = lm[c].values
+
+    right_df = right.copy()
+    if right_manifest is not None:
+        if isinstance(right_manifest, (str, Path)):
+            p = str(right_manifest)
+            rm = pd.read_parquet(p) if p.endswith(".parquet") else pd.read_csv(p)
+        else:
+            rm = right_manifest
+        for c in ["person_id", "visit_occurrence_id", "index_date", "person_source_value", "visit_source_value"]:
+            if c in rm.columns and c not in right_df.columns and len(rm) == len(right_df):
+                right_df[c] = rm[c].values
+
+    if keys is None:
+        cand_keys = [
+            ["person_id", "visit_occurrence_id"],
+            ["person_id", "index_date"],
+            ["person_id"],
+            ["subject_id", "visit_occurrence_id"],
+            ["subject_id"],
+        ]
+        found_key = None
+        for cand in cand_keys:
+            if all(k in left_df.columns and k in right_df.columns for k in cand):
+                found_key = cand
+                break
+        key_list = found_key or ["person_id"]
+    else:
+        key_list = [keys] if isinstance(keys, str) else list(keys)
+
+    common_cols = sorted(set(left_df.columns) & set(right_df.columns) - set(key_list))
     if by and by in common_cols:
         common_cols.remove(by)
 
     # Inner merge on keys
-    merged = pd.merge(left, right, on=key_list, suffixes=("_L", "_R"))
+    merged = pd.merge(left_df, right_df, on=key_list, suffixes=("_L", "_R"))
     if merged.empty:
         return pd.DataFrame(columns=[
             "site", "feature", "matched_n", "left_mean", "right_mean", "left_sd", "right_sd",
