@@ -51,6 +51,8 @@
 #'   counted (when both tables have that column; cohorts from `define_study_cohort()` do), and (b) an
 #'   `index_date_col` that looks like a discharge / end date is an error, since a window ending at discharge contains
 #'   the index stay. The window is always `[index - lookback_days, index)`.
+#' @param fallback_on_unmapped Logical; if TRUE, falls back to source-value matching if standard concept ancestor is unavailable (default FALSE).
+#' @param return_mapping_fidelity Logical; if TRUE, attaches mapping fidelity diagnostics attribute (default FALSE).
 #' @return A `data.frame` with the columns, in order: `person_col`, `index_date_col`, the 31 `elix_<domain>` flags
 #'   (integer 0/1: chf, arrhythmia, valvular, pulm_circ, pvd, htn_uncomp, htn_comp, paralysis, neuro_other, copd,
 #'   dm_uncomp, dm_comp, hypothyroid, renal_failure, liver_disease, pud, hiv, lymphoma, mets, solid_tumor, rheumatic,

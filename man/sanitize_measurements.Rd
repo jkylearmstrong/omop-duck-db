@@ -29,6 +29,8 @@ everyone.}
 
 \item{action}{One of \code{"nullify"} (default), \code{"clamp"} or \code{"drop_row"}.}
 
+\item{outlier_action}{Optional alias for \code{action} (e.g. \code{"winsorize"}, \code{"drop"}).}
+
 \item{measurement_concept_ids}{Optional integer vector: only sanitize these \code{measurement_concept_id}
 values. \code{NULL} = all concepts.}
 
@@ -43,6 +45,8 @@ Must be positive and finite.}
 
 \item{person_col}{Person id column of \code{cohort_table} (default \code{"subject_id"}). It must exist; there is no
 fallback to another column.}
+
+\item{measurement_table}{Optional measurement table or view name (default \code{"measurement"}).}
 }
 \value{
 A \code{data.frame} with one row per in-scope measurement (rows whose \code{value_as_number} is \code{NULL} are

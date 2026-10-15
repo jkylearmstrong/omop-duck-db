@@ -81,6 +81,8 @@ extract_features(
 \item{measurement_concept_ids}{Specific measurement concept IDs to extract aggregated features for.}
 
 \item{lookahead_days}{Days after anchor date to include in measurement extraction (default 0).}
+
+\item{...}{Additional arguments.}
 }
 \value{
 A \code{data.frame}, Arrow Table, or sparse covariate data.frame.

@@ -570,20 +570,6 @@ scan_document_numbers <- function(doc_text_or_path, manifest, previous_manifest 
 # 5. Vocabulary and Input Preflight Check
 # -----------------------------------------------------------------------------
 
-#' Vocabulary and Input Preflight Check
-#'
-#' Checks required vocabulary presence, ATC hierarchy descendant coverage, and unmapped concept 0 rates.
-#'
-#' @param con DuckDB connection.
-#' @param required Vector of required vocabulary IDs (default RxNorm, ATC, LOINC, SNOMED).
-#' @param max_unmapped_rate Maximum allowable share of concept 0 rows before flagging (default 0.50 = 50 percent).
-#' Default OMOP CDM concept sets for drug exposure types
-#' @export
-DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS <- c(32838L, 38000177L, 32817L)
-#' @export
-DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS <- c(38000180L, 32828L)
-#' @export
-DEFAULT_DISPENSED_TYPE_CONCEPT_IDS <- c(38000175L, 32823L)
 
 #' Runs a comprehensive preflight verification of OMOP CDM vocabulary coverage, ATC hierarchies,
 #' unmapped concept 0 rates across clinical tables, and drug exposure types.

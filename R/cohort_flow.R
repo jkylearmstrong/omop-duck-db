@@ -182,6 +182,13 @@ cohort_flow <- function(con, visit_concept_ids = c(9201L, 262L), anchor = c("adm
   self
 }
 
+#' Stream object out-of-core to Parquet dataset
+#'
+#' @param x An object supporting streaming out-of-core to Parquet (e.g. `cohort_flow`).
+#' @param output_path Target directory or file path for the Parquet dataset.
+#' @param partition_by Optional vector of columns to partition output files by.
+#' @param ... Additional arguments passed to methods.
+#' @return The output path invisibly or an Arrow Dataset.
 #' @export
 stream_to_parquet <- function(x, output_path, partition_by = NULL, ...) UseMethod("stream_to_parquet")
 
@@ -190,6 +197,11 @@ stream_to_parquet.cohort_flow <- function(x, output_path, partition_by = NULL, .
   x$stream_to_parquet(output_path, partition_by = partition_by)
 }
 
+#' Convert object to Arrow Dataset
+#'
+#' @param x An object supporting Arrow dataset conversion (e.g. `cohort_flow`).
+#' @param ... Additional arguments passed to methods.
+#' @return An Arrow Dataset object.
 #' @export
 to_arrow_dataset <- function(x, ...) UseMethod("to_arrow_dataset")
 

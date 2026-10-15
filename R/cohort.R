@@ -157,6 +157,7 @@ get_concept_ancestors <- function(con,
 #' @param include_concepts Integer vector of concept IDs to include.
 #' @param exclude_concepts Optional integer vector of concept IDs to exclude.
 #' @param include_descendants Logical. If `TRUE` (default), expands included concepts to their descendants.
+#' @param exclude_descendants Logical. If `TRUE` (default), expands excluded concepts to their descendants.
 #' @param patterns Optional list of concept patterns or pattern strings. If supplied, resolves patterns.
 #' @param ... Additional arguments passed to [resolve_concept_patterns()].
 #' @return Sorted integer vector of resolved standard concept IDs or data.frame of concepts.

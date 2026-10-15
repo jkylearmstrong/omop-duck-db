@@ -322,6 +322,7 @@ panel_missingness_audit <- function(features, panels = NULL, by = "site", thresh
 #' @param min_pct Minimum valid percentage (default 0.0).
 #' @param max_pct Maximum valid percentage (default 100.0).
 #' @param ci_gate If TRUE, throws an error if any plausibility violation is detected.
+#' @param audit_unit_discordance Logical; if TRUE, audits multi-site unit discordance.
 #' @return A data frame with columns:
 #'   \code{feature}, \code{metric}, \code{observed_value}, \code{expected_range}, \code{flagged}, \code{reason}.
 #' @export

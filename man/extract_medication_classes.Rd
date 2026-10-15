@@ -88,6 +88,12 @@ columns like \code{source_value} / \code{drug_class}). Combined with inline \cod
 
 \item{by_type}{Logical; if \code{TRUE}, also extracts flags separated by source concept type.}
 
+\item{offset_anchor}{Reference anchor date to evaluate offsets against (\code{"visit_start_date"}, \code{"visit_end_date"}, \code{"index_date"}).}
+
+\item{anchor}{Alias for \code{offset_anchor}.}
+
+\item{drug_type_concept_ids}{Optional vector of concept IDs to restrict drug exposure type concepts.}
+
 \item{return_audit}{Also return \code{\link[=audit_medication_strategies]{audit_medication_strategies()}} output (needs \code{strategy = "both"}).}
 
 \item{...}{Forwarded to \code{\link[=audit_medication_strategies]{audit_medication_strategies()}}.}

@@ -23,6 +23,8 @@ resolve_concept_set(
 
 \item{include_descendants}{Logical. If \code{TRUE} (default), expands included concepts to their descendants.}
 
+\item{exclude_descendants}{Logical. If \code{TRUE} (default), expands excluded concepts to their descendants.}
+
 \item{patterns}{Optional list of concept patterns or pattern strings. If supplied, resolves patterns.}
 
 \item{...}{Additional arguments passed to \code{\link[=resolve_concept_patterns]{resolve_concept_patterns()}}.}

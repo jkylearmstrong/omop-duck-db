@@ -43,6 +43,12 @@ compare_feature_tables(
 \item{left_manifest}{Optional companion manifest for left matrix.}
 
 \item{right_manifest}{Optional companion manifest for right matrix.}
+
+\item{stream_to_parquet}{Optional path to stream results to Parquet file(s).}
+
+\item{partition_by}{Optional column name to partition Parquet outputs by.}
+
+\item{to_arrow_dataset}{Logical; if TRUE, returns an Arrow Dataset object.}
 }
 \value{
 A data frame with columns:

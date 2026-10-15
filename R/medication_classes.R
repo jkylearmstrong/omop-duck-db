@@ -1,8 +1,12 @@
 #' Default OMOP CDM concept sets for drug exposure types
+#' @name DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS
+#' @aliases DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS DEFAULT_DISPENSED_TYPE_CONCEPT_IDS
 #' @export
 DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS <- c(32838L, 38000177L, 32817L)
+#' @rdname DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS
 #' @export
 DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS <- c(38000180L, 32828L)
+#' @rdname DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS
 #' @export
 DEFAULT_DISPENSED_TYPE_CONCEPT_IDS <- c(38000175L, 32823L)
 
@@ -225,6 +229,9 @@ audit_combination_products <- function(con, class_concept_id, cohort_table = NUL
 #' @param vocab_db Optional attached database containing vocabulary tables.
 #' @param route_concept_ids Vector of standard OMOP route concept IDs to filter exposures by.
 #' @param by_type Logical; if `TRUE`, also extracts flags separated by source concept type.
+#' @param offset_anchor Reference anchor date to evaluate offsets against (`"visit_start_date"`, `"visit_end_date"`, `"index_date"`).
+#' @param anchor Alias for `offset_anchor`.
+#' @param drug_type_concept_ids Optional vector of concept IDs to restrict drug exposure type concepts.
 #' @param return_audit Also return [audit_medication_strategies()] output (needs `strategy = "both"`).
 #' @param ... Forwarded to [audit_medication_strategies()].
 #' @return A data frame with `person_id`, `index_date`, optional `site`, and per class `<class>_source`,

@@ -876,6 +876,8 @@ run_dqd <- function(con,
 #' @param z_threshold Cut-off for `"z_score_cutoff"` (default 4). Must be positive and finite.
 #' @param person_col Person id column of `cohort_table` (default `"subject_id"`). It must exist; there is no
 #'   fallback to another column.
+#' @param outlier_action Optional alias for `action` (e.g. `"winsorize"`, `"drop"`).
+#' @param measurement_table Optional measurement table or view name (default `"measurement"`).
 #' @return A `data.frame` with one row per in-scope measurement (rows whose `value_as_number` is `NULL` are
 #'   not part of the result), ordered by `measurement_id`, with columns `measurement_id`, `person_id`,
 #'   `measurement_concept_id`, `measurement_date`, `unit_concept_id`, `value_as_number` (sanitized),
@@ -941,11 +943,12 @@ sanitize_measurements <- function(con,
   describe_cols <- function(table_sql) {
     DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s LIMIT 0", table_sql))$column_name
   }
+  table_display <- if (!is.null(measurement_table) && nzchar(measurement_table)) measurement_table else "measurement"
   meas_ref <- if (!is.null(measurement_table) && nzchar(measurement_table)) .sanitize_table_ref(measurement_table, "measurement_table") else "measurement"
   meas_cols <- tryCatch(
     describe_cols(meas_ref),
     error = function(e) {
-      stop(sprintf("sanitize_measurements() needs a CDM '%s' table on this connection: %s", meas_ref, conditionMessage(e)),
+      stop(sprintf("sanitize_measurements() needs a CDM '%s' table on this connection: %s", table_display, conditionMessage(e)),
            call. = FALSE)
     }
   )

@@ -17,6 +17,7 @@ Depends:
     R (>= 4.1)
 Imports:
     DBI,
+    digest,
     duckdb,
     parallel,
     stringr,

@@ -318,6 +318,9 @@ export_companion_manifest <- function(source, output_path = NULL, con = NULL,
 #' @param min_cell_count Cell count threshold for privacy suppression (default 11).
 #' @param left_manifest Optional companion manifest for left matrix.
 #' @param right_manifest Optional companion manifest for right matrix.
+#' @param stream_to_parquet Optional path to stream results to Parquet file(s).
+#' @param partition_by Optional column name to partition Parquet outputs by.
+#' @param to_arrow_dataset Logical; if TRUE, returns an Arrow Dataset object.
 #' @return A data frame with columns:
 #'   \code{site}, \code{feature}, \code{matched_n}, \code{left_mean}, \code{right_mean},
 #'   \code{left_sd}, \code{right_sd}, \code{smd}, \code{correlation}, \code{left_missing_rate},

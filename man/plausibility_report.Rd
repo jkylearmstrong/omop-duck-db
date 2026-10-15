@@ -26,6 +26,8 @@ plausibility_report(
 \item{max_pct}{Maximum valid percentage (default 100.0).}
 
 \item{ci_gate}{If TRUE, throws an error if any plausibility violation is detected.}
+
+\item{audit_unit_discordance}{Logical; if TRUE, audits multi-site unit discordance.}
 }
 \value{
 A data frame with columns:

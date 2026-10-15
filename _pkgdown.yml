@@ -291,3 +291,37 @@ reference:
   - synthetic
   - trajectories
   - vocabulary_preflight
+- title: EHR prescriptions, adherence, and acute trajectories (v0.6.5 - v0.6.6)
+  desc: Modern multi-vocabulary drug exposure routing, combination products, PDC adherence, unit discordance, and acute lab trajectories.
+  contents:
+  - DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS
+  - KNOWN_UNIT_CONVERSIONS
+  - audit_combination_products
+  - compute_adherence_pdc
+  - compute_drug_eras
+  - detect_unit_discordance
+  - export_companion_manifest
+  - extract_acute_trajectories
+  - impute_encounter_observations
+  - load_drug_exposure
+  - load_macros
+  - normalize_units
+  - stream_to_parquet
+  - to_arrow_dataset
+- title: Hierarchical rollups, concept patterns, fuzzy mappings, domain provenance, and Parquet crosswalk cache (v0.6.7)
+  desc: Declarative multi-domain hierarchical rollups, concept set pattern matching, DuckDB in-database fuzzy string matching, clinical provenance filters, Parquet crosswalk materialization, and vocabulary drift auditing.
+  contents:
+  - audit_concept_drift
+  - concept_pattern
+  - extract_rollup_exposures
+  - filter_conditions
+  - filter_measurements
+  - filter_visits
+  - hierarchical_rollup
+  - materialize_crosswalk
+  - provenance_concept_ids
+  - resolve_concept_patterns
+  - rollup_engine
+  - rollups
+  - spec_hash
+  - suggest_source_mappings

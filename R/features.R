@@ -21,6 +21,7 @@
 #' @param lookahead_days Days after anchor date to include in measurement extraction (default 0).
 #' @param include_measurements Logical. Include measurement counts across lookback windows.
 #' @param format Output format: `"df"` (data.frame), `"arrow"`, or `"sparse"`.
+#' @param ... Additional arguments.
 #' @return A `data.frame`, Arrow Table, or sparse covariate data.frame.
 #' @export
 extract_patient_features <- function(con,

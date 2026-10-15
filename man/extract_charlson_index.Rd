@@ -49,6 +49,10 @@ medical coders days to weeks after discharge, so a model trained on them cannot 
 counted (when both tables have that column; cohorts from \code{define_study_cohort()} do), and (b) an
 \code{index_date_col} that looks like a discharge / end date is an error, since a window ending at discharge contains
 the index stay. The window is always \verb{[index - lookback_days, index)}.}
+
+\item{fallback_on_unmapped}{Logical; if TRUE, falls back to source-value matching if standard concept ancestor is unavailable (default FALSE).}
+
+\item{return_mapping_fidelity}{Logical; if TRUE, attaches mapping fidelity diagnostics attribute (default FALSE).}
 }
 \value{
 A \code{data.frame} with the columns, in order: \code{person_col}, \code{index_date_col}, the 17 \verb{cci_<category>} flags
