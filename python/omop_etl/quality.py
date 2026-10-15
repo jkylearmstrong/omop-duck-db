@@ -26,6 +26,7 @@ __all__ = [
     "dqd_summary",
     "detect_unit_discordance",
     "normalize_units",
+    "suggest_source_mappings",
 ]
 
 _DEFAULT_PANELS = {
@@ -880,3 +881,166 @@ def normalize_units(
         con_or_df.unregister("_temp_norm_df")
 
     return df
+
+
+def suggest_source_mappings(
+    con: duckdb.DuckDBPyConnection | Any,
+    unmapped_table: str | pd.DataFrame | None = None,
+    domain: str = "Drug",
+    min_similarity: float = 0.85,
+    vocab_db: str | None = None,
+    limit_per_code: int = 3,
+    source_column: str | None = None,
+    output_table: str | None = None,
+) -> pd.DataFrame:
+    """In-database fuzzy and partial matching for unmapped clinical source codes (concept_id = 0).
+
+    Uses DuckDB's vectorized string similarity functions (jaro_winkler_similarity) and substring/token
+    matching against standard OMOP concepts to suggest candidate concept IDs.
+    """
+    domain_key = domain.lower().strip()
+    domain_title = domain.capitalize().strip()
+    if domain_key in ("condition", "conditions"):
+        domain_title = "Condition"
+    elif domain_key in ("drug", "drugs", "medication", "medications"):
+        domain_title = "Drug"
+    elif domain_key in ("measurement", "measurements", "lab", "labs"):
+        domain_title = "Measurement"
+    elif domain_key in ("procedure", "procedures"):
+        domain_title = "Procedure"
+
+    # 1. Resolve source strings and unmapped frequencies
+    if isinstance(unmapped_table, pd.DataFrame):
+        con.register("_tmp_unmapped_in", unmapped_table)
+        cols_lower = {c.lower(): c for c in unmapped_table.columns}
+        src_col = source_column or cols_lower.get("source_value") or cols_lower.get("condition_source_value") or cols_lower.get("drug_source_value") or cols_lower.get("measurement_source_value") or list(unmapped_table.columns)[0]
+        unmapped_sql = f"""
+            SELECT 
+                CAST({src_col} AS VARCHAR) AS source_value,
+                COUNT(*) AS unmapped_count
+            FROM _tmp_unmapped_in
+            WHERE {src_col} IS NOT NULL AND TRIM(CAST({src_col} AS VARCHAR)) != ''
+            GROUP BY 1
+        """
+    elif isinstance(unmapped_table, str):
+        cols = [r[0].lower() for r in con.execute(f"DESCRIBE SELECT * FROM {unmapped_table} LIMIT 0").fetchall()]
+        cols_lower = {c: c for c in cols}
+        src_col = source_column or cols_lower.get("source_value") or cols_lower.get("condition_source_value") or cols_lower.get("drug_source_value") or cols_lower.get("measurement_source_value") or cols[0]
+        id_col = cols_lower.get("concept_id") or cols_lower.get("condition_concept_id") or cols_lower.get("drug_concept_id") or cols_lower.get("measurement_concept_id") or cols_lower.get("procedure_concept_id")
+        filter_clause = f"({id_col} = 0 OR {id_col} IS NULL) AND " if id_col else ""
+        unmapped_sql = f"""
+            SELECT 
+                CAST({src_col} AS VARCHAR) AS source_value,
+                COUNT(*) AS unmapped_count
+            FROM {unmapped_table}
+            WHERE {filter_clause}{src_col} IS NOT NULL AND TRIM(CAST({src_col} AS VARCHAR)) != ''
+            GROUP BY 1
+        """
+    else:
+        mapping = _DOMAIN_TABLE_MAP.get(domain_key)
+        if not mapping:
+            raise ValueError(f"Unknown domain {domain!r}; choose one of {list(_DOMAIN_TABLE_MAP.keys())}")
+        tbl, id_col, src_col, _ = mapping
+        unmapped_sql = f"""
+            SELECT 
+                CAST({src_col} AS VARCHAR) AS source_value,
+                COUNT(*) AS unmapped_count
+            FROM {tbl}
+            WHERE ({id_col} = 0 OR {id_col} IS NULL) AND {src_col} IS NOT NULL AND TRIM(CAST({src_col} AS VARCHAR)) != ''
+            GROUP BY 1
+        """
+
+    # 2. Resolve concept table
+    vocab_ref = "concept"
+    if vocab_db:
+        vocab_ref = f"{vocab_db}.concept"
+    else:
+        tables = {r[0].lower() for r in con.execute("SHOW TABLES").fetchall()}
+        if "concept" not in tables:
+            try:
+                if con.execute("SELECT 1 FROM central_vocab.main.concept LIMIT 1").fetchone():
+                    vocab_ref = "central_vocab.main.concept"
+            except Exception:
+                pass
+
+    # 3. Fuzzy matching query
+    match_sql = f"""
+        WITH unmapped_src AS (
+            {unmapped_sql}
+        ),
+        target_concepts AS (
+            SELECT 
+                concept_id,
+                concept_name,
+                domain_id,
+                vocabulary_id,
+                lower(concept_name) AS norm_name
+            FROM {vocab_ref}
+            WHERE domain_id = '{domain_title}'
+              AND standard_concept = 'S'
+        ),
+        scored AS (
+            SELECT 
+                u.source_value,
+                u.unmapped_count,
+                c.concept_id AS suggested_concept_id,
+                c.concept_name AS suggested_concept_name,
+                c.domain_id,
+                c.vocabulary_id,
+                ROUND(GREATEST(
+                    jaro_winkler_similarity(lower(u.source_value), c.norm_name),
+                    CASE 
+                        WHEN lower(u.source_value) LIKE '%' || c.norm_name || '%' 
+                          OR c.norm_name LIKE '%' || lower(u.source_value) || '%' 
+                        THEN 0.90 
+                        ELSE 0.0 
+                    END
+                ), 4) AS similarity_score
+            FROM unmapped_src u
+            CROSS JOIN target_concepts c
+        ),
+        filtered AS (
+            SELECT 
+                source_value,
+                unmapped_count,
+                suggested_concept_id,
+                suggested_concept_name,
+                domain_id,
+                vocabulary_id,
+                similarity_score,
+                ROW_NUMBER() OVER (
+                    PARTITION BY source_value 
+                    ORDER BY similarity_score DESC, unmapped_count DESC, suggested_concept_id ASC
+                ) AS rank
+            FROM scored
+            WHERE similarity_score >= {float(min_similarity)}
+        )
+        SELECT 
+            source_value,
+            unmapped_count,
+            suggested_concept_id,
+            suggested_concept_name,
+            domain_id,
+            vocabulary_id,
+            similarity_score,
+            rank
+        FROM filtered
+        WHERE rank <= {int(limit_per_code)}
+        ORDER BY unmapped_count DESC, source_value, rank;
+    """
+
+    res_df = con.execute(match_sql).df()
+
+    if isinstance(unmapped_table, pd.DataFrame):
+        try:
+            con.unregister("_tmp_unmapped_in")
+        except Exception:
+            pass
+
+    if output_table:
+        con.register("_tmp_suggested_out", res_df)
+        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS SELECT * FROM _tmp_suggested_out")
+        con.unregister("_tmp_suggested_out")
+
+    return res_df
+

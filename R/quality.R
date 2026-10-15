@@ -936,3 +936,174 @@ normalize_units <- function(con_or_df, concept_id = NULL, feature = NULL,
   df
 }
 
+#' In-Database Fuzzy and Partial Matching for Unmapped Codes
+#'
+#' Uses DuckDB's native string similarity functions (jaro_winkler_similarity) and substring/token
+#' matching to suggest candidate standard OMOP concepts for unmapped source values (concept_id = 0).
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param unmapped_table Table name or data.frame with unmapped entries.
+#' @param domain Domain ID ('Drug', 'Condition', 'Measurement', 'Procedure').
+#' @param min_similarity Minimum similarity threshold (default 0.85).
+#' @param vocab_db Optional attached vocabulary schema/database name.
+#' @param limit_per_code Maximum number of suggestions per source code (default 3).
+#' @param source_column Optional explicit column name for source value.
+#' @param output_table Optional table name to persist results.
+#' @return A data.frame of ranked mapping suggestions.
+#' @export
+suggest_source_mappings <- function(con,
+                                    unmapped_table = NULL,
+                                    domain = "Drug",
+                                    min_similarity = 0.85,
+                                    vocab_db = NULL,
+                                    limit_per_code = 3,
+                                    source_column = NULL,
+                                    output_table = NULL) {
+  domain_key <- tolower(trimws(domain))
+  domain_title <- switch(domain_key,
+    condition = , conditions = "Condition",
+    drug = , drugs = , medication = , medications = "Drug",
+    measurement = , measurements = , lab = , labs = "Measurement",
+    procedure = , procedures = "Procedure",
+    tools::toTitleCase(domain_key)
+  )
+
+  # 1. Resolve source strings
+  unmapped_sql <- if (is.data.frame(unmapped_table)) {
+    duckdb::duckdb_register(con, "_tmp_unmapped_in_r", unmapped_table)
+    on.exit(tryCatch(duckdb::duckdb_unregister(con, "_tmp_unmapped_in_r"), error = function(e) NULL), add = TRUE)
+    cols_lower <- as.list(stats::setNames(names(unmapped_table), tolower(names(unmapped_table))))
+    src_col <- source_column %||% cols_lower$source_value %||% cols_lower$condition_source_value %||%
+      cols_lower$drug_source_value %||% cols_lower$measurement_source_value %||% names(unmapped_table)[1]
+    sprintf("
+      SELECT 
+        CAST(%s AS VARCHAR) AS source_value,
+        COUNT(*) AS unmapped_count
+      FROM _tmp_unmapped_in_r
+      WHERE %s IS NOT NULL AND TRIM(CAST(%s AS VARCHAR)) != ''
+      GROUP BY 1
+    ", src_col, src_col, src_col)
+  } else if (is.character(unmapped_table) && nzchar(unmapped_table)) {
+    cols <- tolower(DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s LIMIT 0", unmapped_table))$column_name)
+    cols_lower <- as.list(stats::setNames(cols, cols))
+    src_col <- source_column %||% cols_lower$source_value %||% cols_lower$condition_source_value %||%
+      cols_lower$drug_source_value %||% cols_lower$measurement_source_value %||% cols[1]
+    id_col <- cols_lower$concept_id %||% cols_lower$condition_concept_id %||% cols_lower$drug_concept_id %||%
+      cols_lower$measurement_concept_id %||% cols_lower$procedure_concept_id
+    filter_clause <- if (!is.null(id_col)) sprintf("(%s = 0 OR %s IS NULL) AND ", id_col, id_col) else ""
+    sprintf("
+      SELECT 
+        CAST(%s AS VARCHAR) AS source_value,
+        COUNT(*) AS unmapped_count
+      FROM %s
+      WHERE %s%s IS NOT NULL AND TRIM(CAST(%s AS VARCHAR)) != ''
+      GROUP BY 1
+    ", src_col, unmapped_table, filter_clause, src_col, src_col)
+  } else {
+    table_map <- list(
+      condition = c("condition_occurrence", "condition_concept_id", "condition_source_value"),
+      conditions = c("condition_occurrence", "condition_concept_id", "condition_source_value"),
+      drug = c("drug_exposure", "drug_concept_id", "drug_source_value"),
+      drugs = c("drug_exposure", "drug_concept_id", "drug_source_value"),
+      measurement = c("measurement", "measurement_concept_id", "measurement_source_value"),
+      measurements = c("measurement", "measurement_concept_id", "measurement_source_value"),
+      procedure = c("procedure_occurrence", "procedure_concept_id", "procedure_source_value"),
+      procedures = c("procedure_occurrence", "procedure_concept_id", "procedure_source_value")
+    )
+    mapping <- table_map[[domain_key]]
+    if (is.null(mapping)) stop("Unknown domain: ", domain, call. = FALSE)
+    sprintf("
+      SELECT 
+        CAST(%s AS VARCHAR) AS source_value,
+        COUNT(*) AS unmapped_count
+      FROM %s
+      WHERE (%s = 0 OR %s IS NULL) AND %s IS NOT NULL AND TRIM(CAST(%s AS VARCHAR)) != ''
+      GROUP BY 1
+    ", mapping[3], mapping[1], mapping[2], mapping[2], mapping[3], mapping[3])
+  }
+
+  vocab_ref <- if (!is.null(vocab_db) && nzchar(vocab_db)) sprintf("%s.concept", vocab_db) else "concept"
+  tables <- tolower(DBI::dbGetQuery(con, "SHOW TABLES")$name)
+  if (!("concept" %in% tables) && is.null(vocab_db)) {
+    tryCatch({
+      if (!is.null(DBI::dbGetQuery(con, "SELECT 1 FROM central_vocab.main.concept LIMIT 1"))) {
+        vocab_ref <- "central_vocab.main.concept"
+      }
+    }, error = function(e) NULL)
+  }
+
+  match_sql <- sprintf("
+    WITH unmapped_src AS (
+      %s
+    ),
+    target_concepts AS (
+      SELECT 
+        concept_id,
+        concept_name,
+        domain_id,
+        vocabulary_id,
+        lower(concept_name) AS norm_name
+      FROM %s
+      WHERE domain_id = '%s'
+        AND standard_concept = 'S'
+    ),
+    scored AS (
+      SELECT 
+        u.source_value,
+        u.unmapped_count,
+        c.concept_id AS suggested_concept_id,
+        c.concept_name AS suggested_concept_name,
+        c.domain_id,
+        c.vocabulary_id,
+        ROUND(GREATEST(
+          jaro_winkler_similarity(lower(u.source_value), c.norm_name),
+          CASE 
+            WHEN lower(u.source_value) LIKE '%%' || c.norm_name || '%%' 
+              OR c.norm_name LIKE '%%' || lower(u.source_value) || '%%' 
+            THEN 0.90 
+            ELSE 0.0 
+          END
+        ), 4) AS similarity_score
+      FROM unmapped_src u
+      CROSS JOIN target_concepts c
+    ),
+    filtered AS (
+      SELECT 
+        source_value,
+        unmapped_count,
+        suggested_concept_id,
+        suggested_concept_name,
+        domain_id,
+        vocabulary_id,
+        similarity_score,
+        ROW_NUMBER() OVER (
+          PARTITION BY source_value 
+          ORDER BY similarity_score DESC, unmapped_count DESC, suggested_concept_id ASC
+        ) AS rank
+      FROM scored
+      WHERE similarity_score >= %f
+    )
+    SELECT 
+      source_value,
+      unmapped_count,
+      suggested_concept_id,
+      suggested_concept_name,
+      domain_id,
+      vocabulary_id,
+      similarity_score,
+      rank
+    FROM filtered
+    WHERE rank <= %d
+    ORDER BY unmapped_count DESC, source_value, rank;
+  ", unmapped_sql, vocab_ref, domain_title, as.numeric(min_similarity), as.integer(limit_per_code))
+
+  res_df <- DBI::dbGetQuery(con, match_sql)
+
+  if (!is.null(output_table) && nzchar(output_table)) {
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, match_sql))
+  }
+
+  res_df
+}
+
+

@@ -6,10 +6,12 @@
 \usage{
 resolve_concept_set(
   con,
-  include_concepts,
+  include_concepts = NULL,
   exclude_concepts = NULL,
   include_descendants = TRUE,
-  exclude_descendants = TRUE
+  exclude_descendants = TRUE,
+  patterns = NULL,
+  ...
 )
 }
 \arguments{
@@ -21,10 +23,12 @@ resolve_concept_set(
 
 \item{include_descendants}{Logical. If \code{TRUE} (default), expands included concepts to their descendants.}
 
-\item{exclude_descendants}{Logical. If \code{TRUE} (default), expands excluded concepts to their descendants.}
+\item{patterns}{Optional list of concept patterns or pattern strings. If supplied, resolves patterns.}
+
+\item{...}{Additional arguments passed to \code{\link[=resolve_concept_patterns]{resolve_concept_patterns()}}.}
 }
 \value{
-Sorted integer vector of resolved standard concept IDs.
+Sorted integer vector of resolved standard concept IDs or data.frame of concepts.
 }
 \description{
 Evaluates concept set expressions with inclusive and exclusive lists and optional descendant expansion.

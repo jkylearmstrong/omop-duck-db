@@ -340,10 +340,11 @@ def provenance(
     Dict[str, Any]
         Dictionary with system provenance details.
     """
-    v_schema = vocab_schema or vocab_db
+    import omop_etl as _omop_etl
+    pkg_ver = getattr(_omop_etl, "__version__", "0.6.7")
     prov = {
         "package_name": "omopduckdb",
-        "package_version": "0.6.5",
+        "package_version": pkg_ver,
         "duckdb_version": duckdb.__version__,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "seed": seed,
@@ -381,6 +382,8 @@ def provenance(
                 prov["git_commit"] = head
     except Exception:
         pass
+
+    v_schema = vocab_schema or vocab_db
 
     # Inspect vocabulary releases in CDM or attached vocabulary database
     if con is not None:

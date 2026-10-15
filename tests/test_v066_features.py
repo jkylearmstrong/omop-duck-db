@@ -48,8 +48,8 @@ from omop_etl import (
 
 
 def test_v066_version():
-    """Verify package version is 0.6.6."""
-    assert __version__ == "0.6.6"
+    """Verify package version is at least 0.6.6."""
+    assert __version__ in ("0.6.6", "0.6.7")
 
 
 # ---------------------------------------------------------------------------

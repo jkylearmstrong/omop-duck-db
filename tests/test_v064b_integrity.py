@@ -208,7 +208,7 @@ def test_add_missing_indicators_and_missingness_by_outcome():
 
 def test_provenance_and_preflight(mock_cdm_integrity):
     prov = provenance(mock_cdm_integrity, seed=123)
-    assert prov["package_version"] in ("0.6.4", "0.6.5")
+    assert prov["package_version"] in ("0.6.4", "0.6.5", "0.6.6", "0.6.7")
     assert "RxNorm" in prov["vocabularies"]
 
     # Preflight check

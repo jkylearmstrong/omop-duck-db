@@ -39,6 +39,21 @@ from omop_etl.cohort import (
     get_concept_relationships,
     prepare_competing_risks_data,
     resolve_concept_set,
+    DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS,
+    DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS,
+    DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS,
+    VISIT_PROVENANCE_MAP,
+    DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS,
+    DEFAULT_ADMITTING_CONDITION_TYPE_CONCEPT_IDS,
+    DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS,
+    CONDITION_PROVENANCE_MAP,
+    DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS,
+    DEFAULT_ORDER_MEASUREMENT_TYPE_CONCEPT_IDS,
+    DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS,
+    MEASUREMENT_PROVENANCE_MAP,
+    filter_visits,
+    filter_conditions,
+    filter_measurements,
 )
 from omop_etl.circe import (
     compile_circe_to_duckdb,
@@ -136,6 +151,14 @@ from omop_etl.quality import (
     normalize_units,
     panel_missingness_audit,
     plausibility_report,
+    suggest_source_mappings,
+)
+from omop_etl.rollups import (
+    ConceptPattern,
+    HierarchicalRollup,
+    RollupEngine,
+    audit_concept_drift,
+    materialize_crosswalk,
 )
 from omop_etl.reconciliation import (
     cohort_from_index_stays,
@@ -547,8 +570,30 @@ __all__ = [
     "extract_acute_trajectories",
     "impute_encounter_observations",
     "extract_features",
+    # 0.6.7 Hierarchical Rollups, Concept Code Patterns, Fuzzy Matching & Provenance Additions
+    "ConceptPattern",
+    "HierarchicalRollup",
+    "RollupEngine",
+    "materialize_crosswalk",
+    "audit_concept_drift",
+    "suggest_source_mappings",
+    "DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS",
+    "DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS",
+    "DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS",
+    "VISIT_PROVENANCE_MAP",
+    "DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS",
+    "DEFAULT_ADMITTING_CONDITION_TYPE_CONCEPT_IDS",
+    "DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS",
+    "CONDITION_PROVENANCE_MAP",
+    "DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS",
+    "DEFAULT_ORDER_MEASUREMENT_TYPE_CONCEPT_IDS",
+    "DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS",
+    "MEASUREMENT_PROVENANCE_MAP",
+    "filter_visits",
+    "filter_conditions",
+    "filter_measurements",
 ]
 
-__version__ = "0.6.6"
+__version__ = "0.6.7"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 

@@ -308,7 +308,7 @@ provenance <- function(con = NULL, seed = NULL, vocab_schema = NULL, vocab_db = 
   v_schema <- if (!is.null(vocab_schema)) vocab_schema else vocab_db
   prov <- list(
     package_name = "omopduckdb",
-    package_version = "0.6.6",
+    package_version = tryCatch(as.character(utils::packageVersion("omopduckdb")), error = function(e) "0.6.7"),
     duckdb_version = as.character(utils::packageVersion("duckdb")),
     timestamp_utc = format(as.POSIXlt(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
     seed = seed,

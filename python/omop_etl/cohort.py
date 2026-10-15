@@ -192,16 +192,27 @@ def get_concept_relationships(
 
 def resolve_concept_set(
     con: duckdb.DuckDBPyConnection,
-    include_concepts: int | Sequence[int],
+    include_concepts: int | Sequence[int] | None = None,
     exclude_concepts: int | Sequence[int] | None = None,
     include_descendants: bool = True,
     exclude_descendants: bool = True,
-) -> list[int]:
-    r"""Evaluates concept set algebra (A ∪ Desc(A) \ (B ∪ Desc(B))) matching OHDSI ATLAS.
-    
+    patterns: Sequence[Any] | None = None,
+    **kwargs,
+) -> Any:
+    r"""Evaluates concept set algebra or resolves concept patterns with wildcards/regexes.
+
+    If `patterns` is provided, resolves concept patterns via `omop_etl.rollups.resolve_concept_set`.
+    Otherwise evaluates standard OHDSI ATLAS concept set algebra: (A ∪ Desc(A) \ (B ∪ Desc(B))).
+
     Returns:
-        list[int]: Sorted list of resolved standard concept IDs.
+        list[int] or pd.DataFrame: Resolved standard concept IDs or DataFrame.
     """
+    if patterns is not None:
+        from omop_etl.rollups import resolve_concept_set as _resolve_patterns
+        return _resolve_patterns(con, patterns=patterns, **kwargs)
+
+    if include_concepts is None:
+        return []
     if isinstance(include_concepts, int):
         inc_ids = [include_concepts]
     else:
@@ -2149,6 +2160,129 @@ def build_treatment_episodes(
         con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
         return con.execute(f"SELECT * FROM {output_table}").df()
     return con.execute(sql).df()
+
+
+# ----------------------------------------------------------------------------------------
+# Multi-Domain Provenance & Type Concept Disambiguation (RFC v0.6.7)
+# ----------------------------------------------------------------------------------------
+DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS = (32035, 9201, 32827)
+DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS = (9202, 38000251)
+DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS = (9203, 262)
+
+VISIT_PROVENANCE_MAP = {
+    "inpatient": DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS,
+    "acute": DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS,
+    "outpatient": DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS,
+    "ambulatory": DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS,
+    "emergency": DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS,
+    "er": DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS,
+}
+
+DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS = (38000230, 32821)
+DEFAULT_ADMITTING_CONDITION_TYPE_CONCEPT_IDS = (38000199,)
+DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS = (32020,)
+
+CONDITION_PROVENANCE_MAP = {
+    "primary": DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS,
+    "discharge": DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS,
+    "admitting": DEFAULT_ADMITTING_CONDITION_TYPE_CONCEPT_IDS,
+    "problem_list": DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS,
+    "history": DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS,
+}
+
+DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS = (44818702,)
+DEFAULT_ORDER_MEASUREMENT_TYPE_CONCEPT_IDS = (32836,)
+DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS = (32828,)
+
+MEASUREMENT_PROVENANCE_MAP = {
+    "lab_result": DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS,
+    "result": DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS,
+    "order": DEFAULT_ORDER_MEASUREMENT_TYPE_CONCEPT_IDS,
+    "point_of_care": DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS,
+    "poc": DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS,
+}
+
+
+def filter_visits(
+    con: duckdb.DuckDBPyConnection | Any,
+    visit_table: str = "visit_occurrence",
+    kind: str | Sequence[str] = ("inpatient", "emergency"),
+    type_concept_ids: Sequence[int] | None = None,
+    output_table: str | None = None,
+) -> pd.DataFrame:
+    """Filter visits by provenance / visit_type_concept_id (e.g. inpatient, emergency, outpatient)."""
+    if type_concept_ids is not None:
+        cids = list(type_concept_ids)
+    else:
+        kinds = [kind] if isinstance(kind, str) else list(kind)
+        cids = []
+        for k in kinds:
+            k_clean = k.lower().strip()
+            cids.extend(VISIT_PROVENANCE_MAP.get(k_clean, []))
+        cids = list(set(cids))
+    if not cids:
+        raise ValueError(f"No valid visit type concept IDs resolved for kind={kind!r}")
+    cid_str = ", ".join(str(int(c)) for c in cids)
+    sql = f"SELECT * FROM {visit_table} WHERE visit_type_concept_id IN ({cid_str})"
+    if output_table:
+        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        return con.execute(f"SELECT * FROM {output_table}").df()
+    return con.execute(sql).df()
+
+
+def filter_conditions(
+    con: duckdb.DuckDBPyConnection | Any,
+    condition_table: str = "condition_occurrence",
+    kind: str | Sequence[str] = ("primary", "discharge"),
+    type_concept_ids: Sequence[int] | None = None,
+    output_table: str | None = None,
+) -> pd.DataFrame:
+    """Filter conditions by diagnostic provenance / condition_type_concept_id."""
+    if type_concept_ids is not None:
+        cids = list(type_concept_ids)
+    else:
+        kinds = [kind] if isinstance(kind, str) else list(kind)
+        cids = []
+        for k in kinds:
+            k_clean = k.lower().strip()
+            cids.extend(CONDITION_PROVENANCE_MAP.get(k_clean, []))
+        cids = list(set(cids))
+    if not cids:
+        raise ValueError(f"No valid condition type concept IDs resolved for kind={kind!r}")
+    cid_str = ", ".join(str(int(c)) for c in cids)
+    sql = f"SELECT * FROM {condition_table} WHERE condition_type_concept_id IN ({cid_str})"
+    if output_table:
+        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        return con.execute(f"SELECT * FROM {output_table}").df()
+    return con.execute(sql).df()
+
+
+def filter_measurements(
+    con: duckdb.DuckDBPyConnection | Any,
+    measurement_table: str = "measurement",
+    kind: str | Sequence[str] = ("lab_result", "point_of_care"),
+    type_concept_ids: Sequence[int] | None = None,
+    output_table: str | None = None,
+) -> pd.DataFrame:
+    """Filter measurements by clinical provenance / measurement_type_concept_id."""
+    if type_concept_ids is not None:
+        cids = list(type_concept_ids)
+    else:
+        kinds = [kind] if isinstance(kind, str) else list(kind)
+        cids = []
+        for k in kinds:
+            k_clean = k.lower().strip()
+            cids.extend(MEASUREMENT_PROVENANCE_MAP.get(k_clean, []))
+        cids = list(set(cids))
+    if not cids:
+        raise ValueError(f"No valid measurement type concept IDs resolved for kind={kind!r}")
+    cid_str = ", ".join(str(int(c)) for c in cids)
+    sql = f"SELECT * FROM {measurement_table} WHERE measurement_type_concept_id IN ({cid_str})"
+    if output_table:
+        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        return con.execute(f"SELECT * FROM {output_table}").df()
+    return con.execute(sql).df()
+
 
 
 

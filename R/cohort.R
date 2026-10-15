@@ -157,14 +157,21 @@ get_concept_ancestors <- function(con,
 #' @param include_concepts Integer vector of concept IDs to include.
 #' @param exclude_concepts Optional integer vector of concept IDs to exclude.
 #' @param include_descendants Logical. If `TRUE` (default), expands included concepts to their descendants.
-#' @param exclude_descendants Logical. If `TRUE` (default), expands excluded concepts to their descendants.
-#' @return Sorted integer vector of resolved standard concept IDs.
+#' @param patterns Optional list of concept patterns or pattern strings. If supplied, resolves patterns.
+#' @param ... Additional arguments passed to [resolve_concept_patterns()].
+#' @return Sorted integer vector of resolved standard concept IDs or data.frame of concepts.
 #' @export
 resolve_concept_set <- function(con,
-                                include_concepts,
+                                include_concepts = NULL,
                                 exclude_concepts = NULL,
                                 include_descendants = TRUE,
-                                exclude_descendants = TRUE) {
+                                exclude_descendants = TRUE,
+                                patterns = NULL,
+                                ...) {
+  if (!is.null(patterns)) {
+    return(resolve_concept_patterns(con, patterns = patterns, ...))
+  }
+  if (is.null(include_concepts)) return(integer(0))
   include_concepts <- as.integer(include_concepts)
   if (length(include_concepts) == 0) return(integer(0))
 
@@ -2141,5 +2148,164 @@ build_treatment_episodes <- function(con,
   }
   DBI::dbGetQuery(con, sql)
 }
+
+
+# ----------------------------------------------------------------------------------------
+# Multi-Domain Provenance & Type Concept Disambiguation (RFC v0.6.7)
+# ----------------------------------------------------------------------------------------
+
+#' Modern OMOP CDM Visit, Condition, and Measurement Provenance Concept IDs
+#' @name provenance_concept_ids
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS <- c(32035L, 9201L, 32827L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS <- c(9202L, 38000251L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS <- c(9203L, 262L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS <- c(38000230L, 32821L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_ADMITTING_CONDITION_TYPE_CONCEPT_IDS <- c(38000199L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS <- c(32020L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS <- c(44818702L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_ORDER_MEASUREMENT_TYPE_CONCEPT_IDS <- c(32836L)
+
+#' @rdname provenance_concept_ids
+#' @export
+DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS <- c(32828L)
+
+.visit_prov_map <- list(
+  inpatient = DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS,
+  acute = DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS,
+  outpatient = DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS,
+  ambulatory = DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS,
+  emergency = DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS,
+  er = DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS
+)
+
+.condition_prov_map <- list(
+  primary = DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS,
+  discharge = DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS,
+  admitting = DEFAULT_ADMITTING_CONDITION_TYPE_CONCEPT_IDS,
+  problem_list = DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS,
+  history = DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS
+)
+
+.measurement_prov_map <- list(
+  lab_result = DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS,
+  result = DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS,
+  order = DEFAULT_ORDER_MEASUREMENT_TYPE_CONCEPT_IDS,
+  point_of_care = DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS,
+  poc = DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS
+)
+
+#' Filter Visits by Clinical Provenance
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param visit_table Table name (default 'visit_occurrence').
+#' @param kind Character vector of visit kinds ('inpatient', 'emergency', 'outpatient').
+#' @param type_concept_ids Optional explicit vector of visit_type_concept_ids.
+#' @param output_table Optional table name to persist results.
+#' @return A data.frame of filtered visit occurrences.
+#' @export
+filter_visits <- function(con,
+                          visit_table = "visit_occurrence",
+                          kind = c("inpatient", "emergency"),
+                          type_concept_ids = NULL,
+                          output_table = NULL) {
+  cids <- if (!is.null(type_concept_ids)) {
+    as.numeric(type_concept_ids)
+  } else {
+    unlist(lapply(tolower(trimws(kind)), function(k) .visit_prov_map[[k]]))
+  }
+  cids <- unique(stats::na.omit(cids))
+  if (length(cids) == 0) stop("No valid visit type concept IDs resolved.", call. = FALSE)
+  cid_str <- paste(cids, collapse = ", ")
+  sql <- sprintf("SELECT * FROM %s WHERE visit_type_concept_id IN (%s)", visit_table, cid_str)
+  if (!is.null(output_table) && nzchar(output_table)) {
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
+  }
+  DBI::dbGetQuery(con, sql)
+}
+
+#' Filter Conditions by Diagnostic Provenance
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param condition_table Table name (default 'condition_occurrence').
+#' @param kind Character vector of condition kinds ('primary', 'discharge', 'admitting', 'problem_list').
+#' @param type_concept_ids Optional explicit vector of condition_type_concept_ids.
+#' @param output_table Optional table name to persist results.
+#' @return A data.frame of filtered condition occurrences.
+#' @export
+filter_conditions <- function(con,
+                              condition_table = "condition_occurrence",
+                              kind = c("primary", "discharge"),
+                              type_concept_ids = NULL,
+                              output_table = NULL) {
+  cids <- if (!is.null(type_concept_ids)) {
+    as.numeric(type_concept_ids)
+  } else {
+    unlist(lapply(tolower(trimws(kind)), function(k) .condition_prov_map[[k]]))
+  }
+  cids <- unique(stats::na.omit(cids))
+  if (length(cids) == 0) stop("No valid condition type concept IDs resolved.", call. = FALSE)
+  cid_str <- paste(cids, collapse = ", ")
+  sql <- sprintf("SELECT * FROM %s WHERE condition_type_concept_id IN (%s)", condition_table, cid_str)
+  if (!is.null(output_table) && nzchar(output_table)) {
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
+  }
+  DBI::dbGetQuery(con, sql)
+}
+
+#' Filter Measurements by Clinical Provenance
+#'
+#' @param con Active DuckDB DBI connection.
+#' @param measurement_table Table name (default 'measurement').
+#' @param kind Character vector of measurement kinds ('lab_result', 'point_of_care', 'order').
+#' @param type_concept_ids Optional explicit vector of measurement_type_concept_ids.
+#' @param output_table Optional table name to persist results.
+#' @return A data.frame of filtered measurements.
+#' @export
+filter_measurements <- function(con,
+                                measurement_table = "measurement",
+                                kind = c("lab_result", "point_of_care"),
+                                type_concept_ids = NULL,
+                                output_table = NULL) {
+  cids <- if (!is.null(type_concept_ids)) {
+    as.numeric(type_concept_ids)
+  } else {
+    unlist(lapply(tolower(trimws(kind)), function(k) .measurement_prov_map[[k]]))
+  }
+  cids <- unique(stats::na.omit(cids))
+  if (length(cids) == 0) stop("No valid measurement type concept IDs resolved.", call. = FALSE)
+  cid_str <- paste(cids, collapse = ", ")
+  sql <- sprintf("SELECT * FROM %s WHERE measurement_type_concept_id IN (%s)", measurement_table, cid_str)
+  if (!is.null(output_table) && nzchar(output_table)) {
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
+  }
+  DBI::dbGetQuery(con, sql)
+}
+
 
 

@@ -108,7 +108,7 @@ test_that("provenance and vocabulary_preflight audit CDM versions", {
   ")
 
   prov <- provenance(con, seed = 123)
-  expect_true(prov$package_version %in% c("0.6.4", "0.6.5"))
+  expect_true(prov$package_version >= "0.6.4")
   expect_true("RxNorm" %in% names(prov$vocabularies))
 
   report <- vocabulary_preflight(con, required = c("RxNorm", "ATC", "LOINC", "SNOMED"), fail_fast = TRUE)

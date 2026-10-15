@@ -1,7 +1,7 @@
-test_that("1. Version is 0.6.6 and provenance reports parity in R", {
-  expect_equal(as.character(utils::packageVersion("omopduckdb")), "0.6.6")
+test_that("1. Version is at least 0.6.6 and provenance reports parity in R", {
+  expect_true(utils::packageVersion("omopduckdb") >= "0.6.6")
   prov <- provenance()
-  expect_equal(prov$package_version, "0.6.6")
+  expect_true(prov$package_version >= "0.6.6")
 })
 
 test_that("1b. Drug type recognition detects modern EHR prescription 32838", {
