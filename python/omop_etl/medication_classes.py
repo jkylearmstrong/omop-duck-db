@@ -63,11 +63,12 @@ def _first_present(columns: Sequence[str], candidates: Sequence[str], what: str,
     raise ValueError(f"Could not find a {what} column among {list(columns)}; pass it explicitly.")
 
 
-def _resolve_table(con, name: str, vocab_schema: str | None = None) -> str:
+def _resolve_table(con, name: str, vocab_schema: str | None = None, vocab_db: str | None = None) -> str:
     """First reachable, non-empty copy of a vocabulary table (main, then the attached central vocabulary)."""
+    schema = vocab_schema or vocab_db
     candidates = []
-    if vocab_schema:
-        candidates.extend([f"{vocab_schema}.{name}", f"{vocab_schema}.main.{name}"])
+    if schema:
+        candidates.extend([f"{schema}.{name}", f"{schema}.main.{name}"])
     candidates.extend([name, f"central_vocab.main.{name}", f"central_vocab.{name}"])
     for ref in candidates:
         try:
