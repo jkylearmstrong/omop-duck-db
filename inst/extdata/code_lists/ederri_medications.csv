@@ -1,0 +1,38 @@
+CLASS,CATEGORY,CODE,RXNORM_CUI,VOCABULARY,NAME
+Biguanides,Non-Insulin Antidiabetic,6809,6809,RxNorm,Metformin
+Biguanides,Non-Insulin Antidiabetic,861004,861004,RxNorm,Metformin 500 MG Oral Tablet
+Biguanides,Non-Insulin Antidiabetic,861007,861007,RxNorm,Metformin 850 MG Oral Tablet
+Biguanides,Non-Insulin Antidiabetic,861010,861010,RxNorm,Metformin 1000 MG Oral Tablet
+Biguanides,Non-Insulin Antidiabetic,A10BA02,A10BA02,ATC,metformin
+Sulfonylureas,Non-Insulin Antidiabetic,4815,4815,RxNorm,Glipizide
+Sulfonylureas,Non-Insulin Antidiabetic,4821,4821,RxNorm,Glyburide
+Sulfonylureas,Non-Insulin Antidiabetic,25789,25789,RxNorm,Glimepiride
+Sulfonylureas,Non-Insulin Antidiabetic,1502855,1502855,RxNorm,Tolbutamide
+Sulfonylureas,Non-Insulin Antidiabetic,A10BB01,A10BB01,ATC,glibenclamide
+Sulfonylureas,Non-Insulin Antidiabetic,A10BB09,A10BB09,ATC,gliclazide
+Sulfonylureas,Non-Insulin Antidiabetic,A10BB12,A10BB12,ATC,glimepiride
+Thiazolidinediones,Non-Insulin Antidiabetic,33738,33738,RxNorm,Pioglitazone
+Thiazolidinediones,Non-Insulin Antidiabetic,84108,84108,RxNorm,Rosiglitazone
+Thiazolidinediones,Non-Insulin Antidiabetic,A10BG03,A10BG03,ATC,pioglitazone
+DPP4_Inhibitors,Non-Insulin Antidiabetic,593411,593411,RxNorm,Sitagliptin
+DPP4_Inhibitors,Non-Insulin Antidiabetic,616440,616440,RxNorm,Saxagliptin
+DPP4_Inhibitors,Non-Insulin Antidiabetic,854873,854873,RxNorm,Linagliptin
+DPP4_Inhibitors,Non-Insulin Antidiabetic,1373458,1373458,RxNorm,Alogliptin
+DPP4_Inhibitors,Non-Insulin Antidiabetic,A10BH01,A10BH01,ATC,sitagliptin
+SGLT2_Inhibitors,Non-Insulin Antidiabetic,1373479,1373479,RxNorm,Canagliflozin
+SGLT2_Inhibitors,Non-Insulin Antidiabetic,1488564,1488564,RxNorm,Dapagliflozin
+SGLT2_Inhibitors,Non-Insulin Antidiabetic,1545653,1545653,RxNorm,Empagliflozin
+SGLT2_Inhibitors,Non-Insulin Antidiabetic,1992672,1992672,RxNorm,Ertugliflozin
+SGLT2_Inhibitors,Non-Insulin Antidiabetic,A10BK01,A10BK01,ATC,dapagliflozin
+GLP1_Receptor_Agonists,Non-Insulin Antidiabetic,60548,60548,RxNorm,Exenatide
+GLP1_Receptor_Agonists,Non-Insulin Antidiabetic,476254,476254,RxNorm,Liraglutide
+GLP1_Receptor_Agonists,Non-Insulin Antidiabetic,1536644,1536644,RxNorm,Dulaglutide
+GLP1_Receptor_Agonists,Non-Insulin Antidiabetic,1991302,1991302,RxNorm,Semaglutide
+GLP1_Receptor_Agonists,Non-Insulin Antidiabetic,A10BJ02,A10BJ02,ATC,liraglutide
+Insulins,Insulin,5856,5856,RxNorm,Insulin Regular
+Insulins,Insulin,274783,274783,RxNorm,Insulin Glargine
+Insulins,Insulin,285018,285018,RxNorm,Insulin Lispro
+Insulins,Insulin,352385,352385,RxNorm,Insulin Aspart
+Insulins,Insulin,358263,358263,RxNorm,Insulin Detemir
+Insulins,Insulin,1363699,1363699,RxNorm,Insulin Degludec
+Insulins,Insulin,A10A,A10A,ATC,insulins and analogues

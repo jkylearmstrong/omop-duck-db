@@ -1,0 +1,38 @@
+CLASS,RXNORM_CUI,NAME
+Biguanides,6809,Metformin
+Biguanides,861004,Metformin 500 MG Oral Tablet
+Biguanides,861007,Metformin 850 MG Oral Tablet
+Biguanides,861010,Metformin 1000 MG Oral Tablet
+Biguanides,A10BA02,metformin
+Sulfonylureas,4815,Glipizide
+Sulfonylureas,4821,Glyburide
+Sulfonylureas,25789,Glimepiride
+Sulfonylureas,1502855,Tolbutamide
+Sulfonylureas,A10BB01,glibenclamide
+Sulfonylureas,A10BB09,gliclazide
+Sulfonylureas,A10BB12,glimepiride
+Thiazolidinediones,33738,Pioglitazone
+Thiazolidinediones,84108,Rosiglitazone
+Thiazolidinediones,A10BG03,pioglitazone
+DPP4_Inhibitors,593411,Sitagliptin
+DPP4_Inhibitors,616440,Saxagliptin
+DPP4_Inhibitors,854873,Linagliptin
+DPP4_Inhibitors,1373458,Alogliptin
+DPP4_Inhibitors,A10BH01,sitagliptin
+SGLT2_Inhibitors,1373479,Canagliflozin
+SGLT2_Inhibitors,1488564,Dapagliflozin
+SGLT2_Inhibitors,1545653,Empagliflozin
+SGLT2_Inhibitors,1992672,Ertugliflozin
+SGLT2_Inhibitors,A10BK01,dapagliflozin
+GLP1_Receptor_Agonists,60548,Exenatide
+GLP1_Receptor_Agonists,476254,Liraglutide
+GLP1_Receptor_Agonists,1536644,Dulaglutide
+GLP1_Receptor_Agonists,1991302,Semaglutide
+GLP1_Receptor_Agonists,A10BJ02,liraglutide
+Insulins,5856,Insulin Regular
+Insulins,274783,Insulin Glargine
+Insulins,285018,Insulin Lispro
+Insulins,352385,Insulin Aspart
+Insulins,358263,Insulin Detemir
+Insulins,1363699,Insulin Degludec
+Insulins,A10A,insulins and analogues

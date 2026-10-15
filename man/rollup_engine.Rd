@@ -10,7 +10,10 @@ rollup_engine(
   exclude_forms = NULL,
   exclude_dose_forms = NULL,
   domain = "Drug",
-  combination_policy = "attribute_all"
+  combination_policy = "attribute_all",
+  rollups = NULL,
+  source_files = NULL,
+  source_file_hashes = NULL
 )
 }
 \arguments{
@@ -25,6 +28,12 @@ rollup_engine(
 \item{domain}{Domain ID (default 'Drug').}
 
 \item{combination_policy}{Combination product policy.}
+
+\item{rollups}{Optional list of child hierarchical_rollup objects.}
+
+\item{source_files}{Optional vector of source file paths.}
+
+\item{source_file_hashes}{Optional list of source file hashes.}
 }
 \value{
 A rollup_engine object.

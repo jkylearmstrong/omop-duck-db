@@ -58,6 +58,65 @@ concept_pattern <- function(vocabulary_id = NULL,
   stop(sprintf("Vocabulary table '%s' is not reachable on this connection.", name), call. = FALSE)
 }
 
+.code_list_path_r <- function(name) {
+  if (file.exists(name)) return(normalizePath(name, winslash = "/"))
+  base <- name
+  for (ext in c("", ".csv", ".xlsx")) {
+    fname <- if (!nzchar(ext) || grepl(paste0("\\", ext, "$"), base, ignore.case = TRUE)) base else paste0(base, ext)
+    path <- system.file("extdata", "code_lists", fname, package = "omopduckdb")
+    if (nzchar(path) && file.exists(path)) return(normalizePath(path, winslash = "/"))
+    local_path <- file.path(getwd(), "inst", "extdata", "code_lists", fname)
+    if (file.exists(local_path)) return(normalizePath(local_path, winslash = "/"))
+  }
+  stop(sprintf("Bundled code list '%s' not found. Searched under inst/extdata/code_lists/", name), call. = FALSE)
+}
+
+.find_column_r <- function(df, col_spec, required = TRUE) {
+  if (is.null(col_spec)) return(NULL)
+  cnames <- names(df)
+  if (is.numeric(col_spec)) {
+    idx <- as.integer(col_spec)
+    if (idx == 0L) idx <- 1L
+    if (idx >= 1L && idx <= length(cnames)) return(cnames[idx])
+    if (isTRUE(required)) stop(sprintf("Column index %d out of bounds for table with %d columns", col_spec, length(cnames)), call. = FALSE)
+    return(NULL)
+  }
+  col_str <- as.character(col_spec)
+  if (col_str %in% cnames) return(col_str)
+  match_idx <- which(tolower(trimws(cnames)) == tolower(trimws(col_str)))
+  if (length(match_idx) > 0) return(cnames[match_idx[1]])
+  if (grepl("^[0-9]+$", trimws(col_str))) {
+    idx <- as.integer(trimws(col_str))
+    if (idx == 0L) idx <- 1L
+    if (idx >= 1L && idx <= length(cnames)) return(cnames[idx])
+  }
+  if (isTRUE(required)) stop(sprintf("Column '%s' not found in columns: %s", col_str, paste(cnames, collapse = ", ")), call. = FALSE)
+  return(NULL)
+}
+
+.clean_code_val_r <- function(val) {
+  if (is.null(val) || is.na(val)) return(NULL)
+  s <- trimws(as.character(val))
+  if (!nzchar(s) || tolower(s) %in% c("na", "nan", "null", "none")) return(NULL)
+  if (grepl("^[0-9]+\\.0$", s)) s <- sub("\\.0$", "", s)
+  s
+}
+
+.read_table_r <- function(path, sheet = NULL, header = TRUE) {
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("xlsx", "xls")) {
+    if (!requireNamespace("readxl", quietly = TRUE)) {
+      stop("Package 'readxl' is required to read Excel files. Please install it with install.packages('readxl').", call. = FALSE)
+    }
+    target_sheet <- if (is.null(sheet)) 1 else sheet
+    df <- as.data.frame(readxl::read_excel(path, sheet = target_sheet, col_names = isTRUE(header)))
+    return(df)
+  } else {
+    df <- utils::read.csv(path, header = isTRUE(header), stringsAsFactors = FALSE, check.names = FALSE, encoding = "UTF-8")
+    return(df)
+  }
+}
+
 #' Resolve Concept Patterns with Wildcards and Hierarchy Closures
 #'
 #' Evaluates wildcard patterns (LIKE/ILIKE) and regular expressions on concept codes and names.
@@ -253,6 +312,8 @@ resolve_concept_patterns <- function(con,
 #' @param exclude_dose_forms Character vector of dose forms to exclude (e.g. 'Topical', 'Ophthalmic').
 #' @param combination_policy Combination product attribution policy ('attribute_all' | 'split' | 'disallow').
 #' @param rules Optional list of `concept_pattern` objects.
+#' @param source_file Optional path to the source file from which this rollup was loaded.
+#' @param source_file_hash Optional cryptographic SHA-256 hash of the source file.
 #' @return A list representing the hierarchical rollup.
 #' @export
 hierarchical_rollup <- function(name,
@@ -264,7 +325,9 @@ hierarchical_rollup <- function(name,
                                 include_retired_maps_to = TRUE,
                                 exclude_dose_forms = NULL,
                                 combination_policy = "attribute_all",
-                                rules = NULL) {
+                                rules = NULL,
+                                source_file = NULL,
+                                source_file_hash = NULL) {
   norm_rules <- list()
   if (!is.null(rules)) {
     norm_rules <- rules
@@ -291,10 +354,274 @@ hierarchical_rollup <- function(name,
     include_retired_maps_to = isTRUE(include_retired_maps_to),
     exclude_dose_forms = exclude_dose_forms,
     combination_policy = combination_policy,
-    rules = norm_rules
+    rules = norm_rules,
+    source_file = source_file,
+    source_file_hash = source_file_hash
   )
   class(spec) <- "hierarchical_rollup"
   spec
+}
+
+#' Load Hierarchical Rollup from an Excel Worksheet
+#'
+#' @param path Path to Excel workbook (.xlsx / .xls).
+#' @param sheet Sheet name or numeric index (default 1).
+#' @param name Name of the rollup. If NULL, derived from sheet name or file stem.
+#' @param code_col Column name or index for concept code / CUI.
+#' @param class_col Optional column name or index for class filtering.
+#' @param vocabulary_col Optional column name or index for vocabulary ID.
+#' @param vocabulary_id Default vocabulary ID.
+#' @param root_vocabulary Alias for vocabulary_id.
+#' @param domain Domain ID (default 'Drug').
+#' @param target_vocabulary Target vocabulary ID (default 'RxNorm' for Drug).
+#' @param expand Hierarchy expansion ('descendants' | 'ancestors' | NULL).
+#' @param expansion_direction Alias for expand.
+#' @param include_retired_maps_to Logical. Include backward 'Maps to' mappings for retired codes.
+#' @param exclude_dose_forms Character vector of dose forms to exclude.
+#' @param combination_policy Combination attribution policy.
+#' @param header Logical. Whether the sheet has a header row.
+#' @param ... Additional arguments passed to readxl::read_excel.
+#' @return A hierarchical_rollup object.
+#' @export
+hierarchical_rollup_from_excel <- function(path,
+                                           sheet = 1,
+                                           name = NULL,
+                                           code_col = "RXNORM_CUI",
+                                           class_col = NULL,
+                                           vocabulary_col = NULL,
+                                           vocabulary_id = NULL,
+                                           root_vocabulary = NULL,
+                                           domain = "Drug",
+                                           target_vocabulary = NULL,
+                                           expand = "descendants",
+                                           expansion_direction = NULL,
+                                           include_retired_maps_to = TRUE,
+                                           exclude_dose_forms = NULL,
+                                           combination_policy = "attribute_all",
+                                           header = TRUE,
+                                           ...) {
+  if (!file.exists(path)) stop(sprintf("Excel file not found at: %s", path), call. = FALSE)
+  norm_path <- normalizePath(path, winslash = "/")
+  fhash <- digest::digest(file = norm_path, algo = "sha256")
+  df <- .read_table_r(norm_path, sheet = sheet, header = header)
+
+  c_code <- .find_column_r(df, code_col, required = FALSE)
+  if (is.null(c_code) && "CODE" %in% names(df)) c_code <- "CODE"
+  if (is.null(c_code)) c_code <- .find_column_r(df, code_col, required = TRUE)
+
+  c_class <- if (!is.null(class_col)) .find_column_r(df, class_col, required = FALSE) else NULL
+  c_vocab <- if (!is.null(vocabulary_col)) .find_column_r(df, vocabulary_col, required = FALSE) else NULL
+
+  if (!is.null(c_class) && !is.null(name)) {
+    match_mask <- tolower(trimws(as.character(df[[c_class]]))) == tolower(trimws(as.character(name)))
+    if (!any(match_mask, na.rm = TRUE)) {
+      norm_target <- gsub("[- _]+", "", tolower(name))
+      match_mask <- gsub("[- _]+", "", tolower(as.character(df[[c_class]]))) == norm_target
+    }
+    df <- df[match_mask & !is.na(match_mask), , drop = FALSE]
+  }
+
+  eff_name <- if (!is.null(name)) name else if (!is.null(sheet) && !identical(sheet, 1) && !identical(sheet, 1L)) as.character(sheet) else tools::file_path_sans_ext(basename(norm_path))
+  eff_expand <- if (!is.null(expansion_direction)) expansion_direction else expand
+  eff_vocab <- if (!is.null(vocabulary_id)) vocabulary_id else if (!is.null(root_vocabulary)) root_vocabulary else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+  eff_target <- if (!is.null(target_vocabulary)) target_vocabulary else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+
+  roots <- character(0)
+  rules <- list()
+  if (nrow(df) > 0) {
+    for (i in seq_len(nrow(df))) {
+      c_val <- .clean_code_val_r(df[[c_code]][i])
+      if (is.null(c_val) || !nzchar(c_val)) next
+      roots <- c(roots, c_val)
+      row_vocab <- if (!is.null(c_vocab) && !is.na(df[[c_vocab]][i])) trimws(as.character(df[[c_vocab]][i])) else eff_vocab
+      rules[[length(rules) + 1]] <- concept_pattern(
+        vocabulary_id = row_vocab,
+        code_pattern = c_val,
+        domain_id = domain,
+        expand = eff_expand,
+        target_vocabulary = eff_target,
+        include_retired = isTRUE(include_retired_maps_to)
+      )
+    }
+  }
+
+  hierarchical_rollup(
+    name = eff_name,
+    domain = domain,
+    root_vocabulary = eff_vocab,
+    roots = roots,
+    target_vocabulary = eff_target,
+    expansion_direction = eff_expand,
+    include_retired_maps_to = isTRUE(include_retired_maps_to),
+    exclude_dose_forms = exclude_dose_forms,
+    combination_policy = combination_policy,
+    rules = rules,
+    source_file = norm_path,
+    source_file_hash = fhash
+  )
+}
+
+#' Load Hierarchical Rollup from a CSV File
+#'
+#' @param path Path to CSV file.
+#' @param name Name of the rollup. If NULL, derived from file name stem.
+#' @param code_col Column name or index for concept code / CUI.
+#' @param class_col Optional column name or index for class filtering.
+#' @param vocabulary_col Optional column name or index for vocabulary ID.
+#' @param vocabulary_id Default vocabulary ID.
+#' @param root_vocabulary Alias for vocabulary_id.
+#' @param domain Domain ID (default 'Drug').
+#' @param target_vocabulary Target vocabulary ID (default 'RxNorm' for Drug).
+#' @param expand Hierarchy expansion ('descendants' | 'ancestors' | NULL).
+#' @param expansion_direction Alias for expand.
+#' @param include_retired_maps_to Logical. Include backward 'Maps to' mappings for retired codes.
+#' @param exclude_dose_forms Character vector of dose forms to exclude.
+#' @param combination_policy Combination attribution policy.
+#' @param header Logical. Whether the CSV has a header row.
+#' @param ... Additional arguments passed to utils::read.csv.
+#' @return A hierarchical_rollup object.
+#' @export
+hierarchical_rollup_from_csv <- function(path,
+                                         name = NULL,
+                                         code_col = "RXNORM_CUI",
+                                         class_col = NULL,
+                                         vocabulary_col = NULL,
+                                         vocabulary_id = NULL,
+                                         root_vocabulary = NULL,
+                                         domain = "Drug",
+                                         target_vocabulary = NULL,
+                                         expand = "descendants",
+                                         expansion_direction = NULL,
+                                         include_retired_maps_to = TRUE,
+                                         exclude_dose_forms = NULL,
+                                         combination_policy = "attribute_all",
+                                         header = TRUE,
+                                         ...) {
+  if (!file.exists(path)) stop(sprintf("CSV file not found at: %s", path), call. = FALSE)
+  norm_path <- normalizePath(path, winslash = "/")
+  fhash <- digest::digest(file = norm_path, algo = "sha256")
+  df <- .read_table_r(norm_path, header = header)
+
+  c_code <- .find_column_r(df, code_col, required = FALSE)
+  if (is.null(c_code) && "CODE" %in% names(df)) c_code <- "CODE"
+  if (is.null(c_code) && !is.null(class_col) && is.numeric(class_col) && (class_col == 0 || class_col == 1) && ncol(df) > 1) {
+    c_code <- names(df)[2]
+  }
+  if (is.null(c_code)) c_code <- .find_column_r(df, code_col, required = TRUE)
+
+  c_class <- if (!is.null(class_col)) .find_column_r(df, class_col, required = FALSE) else NULL
+  c_vocab <- if (!is.null(vocabulary_col)) .find_column_r(df, vocabulary_col, required = FALSE) else NULL
+
+  if (!is.null(c_class) && !is.null(name)) {
+    match_mask <- tolower(trimws(as.character(df[[c_class]]))) == tolower(trimws(as.character(name)))
+    if (!any(match_mask, na.rm = TRUE)) {
+      norm_target <- gsub("[- _]+", "", tolower(name))
+      match_mask <- gsub("[- _]+", "", tolower(as.character(df[[c_class]]))) == norm_target
+    }
+    df <- df[match_mask & !is.na(match_mask), , drop = FALSE]
+  }
+
+  eff_name <- if (!is.null(name)) name else tools::file_path_sans_ext(basename(norm_path))
+  eff_expand <- if (!is.null(expansion_direction)) expansion_direction else expand
+  eff_vocab <- if (!is.null(vocabulary_id)) vocabulary_id else if (!is.null(root_vocabulary)) root_vocabulary else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+  eff_target <- if (!is.null(target_vocabulary)) target_vocabulary else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+
+  roots <- character(0)
+  rules <- list()
+  if (nrow(df) > 0) {
+    for (i in seq_len(nrow(df))) {
+      c_val <- .clean_code_val_r(df[[c_code]][i])
+      if (is.null(c_val) || !nzchar(c_val)) next
+      roots <- c(roots, c_val)
+      row_vocab <- if (!is.null(c_vocab) && !is.na(df[[c_vocab]][i])) trimws(as.character(df[[c_vocab]][i])) else eff_vocab
+      rules[[length(rules) + 1]] <- concept_pattern(
+        vocabulary_id = row_vocab,
+        code_pattern = c_val,
+        domain_id = domain,
+        expand = eff_expand,
+        target_vocabulary = eff_target,
+        include_retired = isTRUE(include_retired_maps_to)
+      )
+    }
+  }
+
+  hierarchical_rollup(
+    name = eff_name,
+    domain = domain,
+    root_vocabulary = eff_vocab,
+    roots = roots,
+    target_vocabulary = eff_target,
+    expansion_direction = eff_expand,
+    include_retired_maps_to = isTRUE(include_retired_maps_to),
+    exclude_dose_forms = exclude_dose_forms,
+    combination_policy = combination_policy,
+    rules = rules,
+    source_file = norm_path,
+    source_file_hash = fhash
+  )
+}
+
+#' Load Hierarchical Rollup from Bundled Reference Code Lists
+#'
+#' @param bundle_name Name of bundled code list (e.g. 'ederri_medications').
+#' @param name Name of clinical class (e.g. 'Biguanides').
+#' @param class_col Column name for class filtering.
+#' @param code_col Column name for concept code.
+#' @param vocabulary_col Column name for vocabulary.
+#' @param vocabulary_id Default vocabulary ID.
+#' @param domain Domain ID (default 'Drug').
+#' @param expand Hierarchy expansion direction.
+#' @param include_retired_maps_to Logical. Include backward maps to.
+#' @param exclude_dose_forms Character vector of dose forms to exclude.
+#' @param ... Additional arguments.
+#' @return A hierarchical_rollup object.
+#' @export
+hierarchical_rollup_from_bundled <- function(name = "Biguanides",
+                                             bundle_name = "ederri_medications",
+                                             resource_name = NULL,
+                                             class_col = "CLASS",
+                                             code_col = NULL,
+                                             vocabulary_col = "VOCABULARY",
+                                             vocabulary_id = NULL,
+                                             domain = "Drug",
+                                             expand = "descendants",
+                                             include_retired_maps_to = TRUE,
+                                             exclude_dose_forms = NULL,
+                                             ...) {
+  res_target <- if (!is.null(resource_name)) resource_name else bundle_name
+  res_path <- .code_list_path_r(res_target)
+  ext <- tolower(tools::file_ext(res_path))
+  if (ext %in% c("xlsx", "xls")) {
+    c_col <- if (!is.null(code_col)) code_col else "CODE"
+    hierarchical_rollup_from_excel(
+      path = res_path,
+      name = name,
+      class_col = class_col,
+      code_col = c_col,
+      vocabulary_col = vocabulary_col,
+      vocabulary_id = vocabulary_id,
+      domain = domain,
+      expand = expand,
+      include_retired_maps_to = include_retired_maps_to,
+      exclude_dose_forms = exclude_dose_forms,
+      ...
+    )
+  } else {
+    c_col <- if (!is.null(code_col)) code_col else "RXNORM_CUI"
+    hierarchical_rollup_from_csv(
+      path = res_path,
+      name = name,
+      class_col = class_col,
+      code_col = c_col,
+      vocabulary_col = vocabulary_col,
+      vocabulary_id = vocabulary_id,
+      domain = domain,
+      expand = expand,
+      include_retired_maps_to = include_retired_maps_to,
+      exclude_dose_forms = exclude_dose_forms,
+      ...
+    )
+  }
 }
 
 .strip_class <- function(x) {
@@ -363,6 +690,9 @@ spec_hash <- function(rollup) {
 #' @param exclude_dose_forms Character vector of dose forms to exclude.
 #' @param domain Domain ID (default 'Drug').
 #' @param combination_policy Combination product policy.
+#' @param rollups Optional list of child hierarchical_rollup objects.
+#' @param source_files Optional vector of source file paths.
+#' @param source_file_hashes Optional list of source file hashes.
 #' @return A rollup_engine object.
 #' @export
 rollup_engine <- function(name = "custom_rollup_engine",
@@ -370,17 +700,419 @@ rollup_engine <- function(name = "custom_rollup_engine",
                           exclude_forms = NULL,
                           exclude_dose_forms = NULL,
                           domain = "Drug",
-                          combination_policy = "attribute_all") {
+                          combination_policy = "attribute_all",
+                          rollups = NULL,
+                          source_files = NULL,
+                          source_file_hashes = NULL) {
   forms <- if (!is.null(exclude_forms)) exclude_forms else exclude_dose_forms
+  norm_rollups <- list()
+  if (!is.null(rollups) && length(rollups) > 0) {
+    for (r in rollups) {
+      norm_rollups[[r$name]] <- r
+    }
+  } else {
+    single_r <- hierarchical_rollup(
+      name = name,
+      domain = domain,
+      rules = rules,
+      exclude_dose_forms = forms,
+      combination_policy = combination_policy
+    )
+    norm_rollups[[name]] <- single_r
+  }
+
   obj <- list(
     name = name,
     domain = domain,
     rules = rules,
     exclude_dose_forms = forms,
-    combination_policy = combination_policy
+    combination_policy = combination_policy,
+    rollups = norm_rollups,
+    source_files = source_files,
+    source_file_hashes = source_file_hashes
   )
   class(obj) <- c("rollup_engine", "hierarchical_rollup")
   obj
+}
+
+#' @export
+`[[.rollup_engine` <- function(x, i, ...) {
+  if (is.character(i)) {
+    if (i %in% names(x$rollups)) return(x$rollups[[i]])
+    norm_i <- gsub("[- _]+", "", tolower(i))
+    for (k in names(x$rollups)) {
+      if (gsub("[- _]+", "", tolower(k)) == norm_i) return(x$rollups[[k]])
+    }
+  }
+  x$rollups[[i]]
+}
+
+#' Load Rollup Engine from an Excel Workbook
+#'
+#' @param path Path to Excel workbook (.xlsx / .xls).
+#' @param sheet Sheet name or numeric index (default 1).
+#' @param class_col Column name or index identifying clinical classes.
+#' @param code_col Column name or index identifying concept codes.
+#' @param vocabulary_col Optional column name for vocabulary.
+#' @param vocabulary_id Default vocabulary ID (e.g. 'RxNorm').
+#' @param domain Domain ID (default 'Drug').
+#' @param target_vocabulary Target vocabulary ID (default 'RxNorm').
+#' @param expand Hierarchy expansion direction ('descendants' | 'ancestors' | NULL).
+#' @param include_retired_maps_to Logical. Include backward maps to.
+#' @param exclude_dose_forms Character vector of dose forms to exclude.
+#' @param combination_policy Combination policy.
+#' @param name Name of engine.
+#' @param header Logical. Whether header is present.
+#' @param ... Additional arguments.
+#' @return A rollup_engine object.
+#' @export
+rollup_engine_from_excel <- function(path,
+                                     sheet = 1,
+                                     class_col = "CLASS",
+                                     code_col = "CODE",
+                                     vocabulary_col = "VOCABULARY",
+                                     vocabulary_id = NULL,
+                                     domain = "Drug",
+                                     target_vocabulary = NULL,
+                                     expand = "descendants",
+                                     include_retired_maps_to = TRUE,
+                                     exclude_dose_forms = NULL,
+                                     combination_policy = "attribute_all",
+                                     name = NULL,
+                                     header = TRUE,
+                                     ...) {
+  if (!file.exists(path)) stop(sprintf("Excel file not found at: %s", path), call. = FALSE)
+  norm_path <- normalizePath(path, winslash = "/")
+  fhash <- digest::digest(file = norm_path, algo = "sha256")
+  df <- .read_table_r(norm_path, sheet = sheet, header = header)
+
+  c_code <- .find_column_r(df, code_col, required = FALSE)
+  if (is.null(c_code) && "RXNORM_CUI" %in% names(df)) c_code <- "RXNORM_CUI"
+  if (is.null(c_code) && "CODE" %in% names(df)) c_code <- "CODE"
+  if (is.null(c_code)) c_code <- .find_column_r(df, code_col, required = TRUE)
+
+  c_class <- if (!is.null(class_col)) .find_column_r(df, class_col, required = FALSE) else NULL
+  c_vocab <- if (!is.null(vocabulary_col)) .find_column_r(df, vocabulary_col, required = FALSE) else NULL
+
+  eff_vocab <- if (!is.null(vocabulary_id)) vocabulary_id else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+  eff_target <- if (!is.null(target_vocabulary)) target_vocabulary else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+
+  rollups <- list()
+  if (!is.null(c_class)) {
+    classes <- unique(stats::na.omit(df[[c_class]]))
+    for (cls in classes) {
+      cls_name <- trimws(as.character(cls))
+      if (!nzchar(cls_name)) next
+      sub <- df[trimws(as.character(df[[c_class]])) == cls_name, , drop = FALSE]
+      roots <- character(0)
+      rules <- list()
+      for (i in seq_len(nrow(sub))) {
+        c_val <- .clean_code_val_r(sub[[c_code]][i])
+        if (is.null(c_val) || !nzchar(c_val)) next
+        roots <- c(roots, c_val)
+        row_vocab <- if (!is.null(c_vocab) && !is.na(sub[[c_vocab]][i])) trimws(as.character(sub[[c_vocab]][i])) else eff_vocab
+        rules[[length(rules) + 1]] <- concept_pattern(
+          vocabulary_id = row_vocab,
+          code_pattern = c_val,
+          domain_id = domain,
+          expand = expand,
+          target_vocabulary = eff_target,
+          include_retired = isTRUE(include_retired_maps_to)
+        )
+      }
+      r <- hierarchical_rollup(
+        name = cls_name,
+        domain = domain,
+        root_vocabulary = eff_vocab,
+        roots = roots,
+        target_vocabulary = eff_target,
+        expansion_direction = expand,
+        include_retired_maps_to = isTRUE(include_retired_maps_to),
+        exclude_dose_forms = exclude_dose_forms,
+        combination_policy = combination_policy,
+        rules = rules,
+        source_file = norm_path,
+        source_file_hash = fhash
+      )
+      rollups[[cls_name]] <- r
+    }
+  } else {
+    cls_name <- if (!is.null(name)) name else tools::file_path_sans_ext(basename(norm_path))
+    r <- hierarchical_rollup_from_excel(
+      path = norm_path, sheet = sheet, name = cls_name, code_col = code_col,
+      vocabulary_col = vocabulary_col, vocabulary_id = vocabulary_id, domain = domain,
+      target_vocabulary = target_vocabulary, expand = expand, include_retired_maps_to = include_retired_maps_to,
+      exclude_dose_forms = exclude_dose_forms, combination_policy = combination_policy, header = header, ...
+    )
+    rollups[[cls_name]] <- r
+  }
+
+  eng_name <- if (!is.null(name)) name else tools::file_path_sans_ext(basename(norm_path))
+  f_hashes <- list()
+  f_hashes[[norm_path]] <- fhash
+  rollup_engine(
+    name = eng_name,
+    domain = domain,
+    rollups = rollups,
+    exclude_dose_forms = exclude_dose_forms,
+    combination_policy = combination_policy,
+    source_files = c(norm_path),
+    source_file_hashes = f_hashes
+  )
+}
+
+#' Load Rollup Engine from a Sequence of CSV Files
+#'
+#' @param paths Character vector of paths to CSV files.
+#' @param class_col Column name or index identifying clinical classes.
+#' @param code_col Column name or index identifying concept codes.
+#' @param vocabulary_col Optional column name for vocabulary.
+#' @param vocabulary_id Default vocabulary ID.
+#' @param domain Domain ID (default 'Drug').
+#' @param target_vocabulary Target vocabulary ID (default 'RxNorm').
+#' @param expand Hierarchy expansion direction.
+#' @param include_retired_maps_to Logical. Include backward maps to.
+#' @param exclude_dose_forms Character vector of dose forms to exclude.
+#' @param combination_policy Combination policy.
+#' @param name Name of engine.
+#' @param header Logical. Whether header is present.
+#' @param ... Additional arguments.
+#' @return A rollup_engine object.
+#' @export
+rollup_engine_from_csvs <- function(paths,
+                                    class_col = "CLASS",
+                                    code_col = "CODE",
+                                    vocabulary_col = NULL,
+                                    vocabulary_id = NULL,
+                                    domain = "Drug",
+                                    target_vocabulary = NULL,
+                                    expand = "descendants",
+                                    include_retired_maps_to = TRUE,
+                                    exclude_dose_forms = NULL,
+                                    combination_policy = "attribute_all",
+                                    name = NULL,
+                                    header = TRUE,
+                                    ...) {
+  source_files <- character(0)
+  source_file_hashes <- list()
+  class_data <- list()
+  eff_vocab <- if (!is.null(vocabulary_id)) vocabulary_id else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+  eff_target <- if (!is.null(target_vocabulary)) target_vocabulary else (if (identical(domain, "Drug")) "RxNorm" else NULL)
+
+  for (p in paths) {
+    if (!file.exists(p)) stop(sprintf("CSV file not found at: %s", p), call. = FALSE)
+    norm_p <- normalizePath(p, winslash = "/")
+    source_files <- c(source_files, norm_p)
+    fhash <- digest::digest(file = norm_p, algo = "sha256")
+    source_file_hashes[[norm_p]] <- fhash
+
+    df <- .read_table_r(norm_p, header = header)
+    c_code <- .find_column_r(df, code_col, required = FALSE)
+    if (is.null(c_code) && "RXNORM_CUI" %in% names(df)) c_code <- "RXNORM_CUI"
+    if (is.null(c_code) && "CODE" %in% names(df)) c_code <- "CODE"
+    if (is.null(c_code) && !is.null(class_col) && is.numeric(class_col) && (class_col == 0 || class_col == 1) && ncol(df) > 1) {
+      c_code <- names(df)[2]
+    }
+    if (is.null(c_code)) c_code <- .find_column_r(df, code_col, required = TRUE)
+
+    c_class <- if (!is.null(class_col)) .find_column_r(df, class_col, required = FALSE) else NULL
+    c_vocab <- if (!is.null(vocabulary_col)) .find_column_r(df, vocabulary_col, required = FALSE) else NULL
+
+    if (!is.null(c_class)) {
+      classes <- unique(stats::na.omit(df[[c_class]]))
+      for (cls in classes) {
+        cls_name <- trimws(as.character(cls))
+        if (!nzchar(cls_name)) next
+        if (is.null(class_data[[cls_name]])) class_data[[cls_name]] <- list(roots = character(0), rules = list())
+        sub <- df[trimws(as.character(df[[c_class]])) == cls_name, , drop = FALSE]
+        for (i in seq_len(nrow(sub))) {
+          c_val <- .clean_code_val_r(sub[[c_code]][i])
+          if (is.null(c_val) || !nzchar(c_val)) next
+          class_data[[cls_name]]$roots <- c(class_data[[cls_name]]$roots, c_val)
+          row_vocab <- if (!is.null(c_vocab) && !is.na(sub[[c_vocab]][i])) trimws(as.character(sub[[c_vocab]][i])) else eff_vocab
+          class_data[[cls_name]]$rules[[length(class_data[[cls_name]]$rules) + 1]] <- concept_pattern(
+            vocabulary_id = row_vocab,
+            code_pattern = c_val,
+            domain_id = domain,
+            expand = expand,
+            target_vocabulary = eff_target,
+            include_retired = isTRUE(include_retired_maps_to)
+          )
+        }
+      }
+    } else {
+      cls_name <- tools::file_path_sans_ext(basename(norm_p))
+      if (is.null(class_data[[cls_name]])) class_data[[cls_name]] <- list(roots = character(0), rules = list())
+      for (i in seq_len(nrow(df))) {
+        c_val <- .clean_code_val_r(df[[c_code]][i])
+        if (is.null(c_val) || !nzchar(c_val)) next
+        class_data[[cls_name]]$roots <- c(class_data[[cls_name]]$roots, c_val)
+        row_vocab <- if (!is.null(c_vocab) && !is.na(df[[c_vocab]][i])) trimws(as.character(df[[c_vocab]][i])) else eff_vocab
+        class_data[[cls_name]]$rules[[length(class_data[[cls_name]]$rules) + 1]] <- concept_pattern(
+          vocabulary_id = row_vocab,
+          code_pattern = c_val,
+          domain_id = domain,
+          expand = expand,
+          target_vocabulary = eff_target,
+          include_retired = isTRUE(include_retired_maps_to)
+        )
+      }
+    }
+  }
+
+  rollups <- list()
+  combined_hashes_str <- paste(unlist(source_file_hashes), collapse = "")
+  all_fhash <- digest::digest(combined_hashes_str, algo = "sha256", serialize = FALSE)
+
+  for (cls_name in names(class_data)) {
+    r <- hierarchical_rollup(
+      name = cls_name,
+      domain = domain,
+      root_vocabulary = eff_vocab,
+      roots = class_data[[cls_name]]$roots,
+      target_vocabulary = eff_target,
+      expansion_direction = expand,
+      include_retired_maps_to = isTRUE(include_retired_maps_to),
+      exclude_dose_forms = exclude_dose_forms,
+      combination_policy = combination_policy,
+      rules = class_data[[cls_name]]$rules,
+      source_file = paste(source_files, collapse = ", "),
+      source_file_hash = all_fhash
+    )
+    rollups[[cls_name]] <- r
+  }
+
+  eng_name <- if (!is.null(name)) name else (if (length(paths) == 1) tools::file_path_sans_ext(basename(paths[1])) else "multi_csv_rollup_engine")
+  rollup_engine(
+    name = eng_name,
+    domain = domain,
+    rollups = rollups,
+    exclude_dose_forms = exclude_dose_forms,
+    combination_policy = combination_policy,
+    source_files = source_files,
+    source_file_hashes = source_file_hashes
+  )
+}
+
+#' Load Rollup Engine by Scanning a Directory of CSV Files
+#'
+#' @param folder Path to folder containing CSV files.
+#' @param glob File glob pattern (default '*.csv').
+#' @param class_col Column name or index identifying classes.
+#' @param code_col Column name or index identifying codes.
+#' @param vocabulary_col Optional column name for vocabulary.
+#' @param vocabulary_id Default vocabulary ID.
+#' @param domain Domain ID (default 'Drug').
+#' @param target_vocabulary Target vocabulary ID (default 'RxNorm').
+#' @param expand Hierarchy expansion direction.
+#' @param include_retired_maps_to Logical. Include backward maps to.
+#' @param exclude_dose_forms Character vector of dose forms to exclude.
+#' @param combination_policy Combination policy.
+#' @param name Name of engine.
+#' @param header Logical. Whether header is present.
+#' @param ... Additional arguments.
+#' @return A rollup_engine object.
+#' @export
+rollup_engine_from_folder <- function(folder,
+                                      glob = "*.csv",
+                                      class_col = "CLASS",
+                                      code_col = "CODE",
+                                      vocabulary_col = NULL,
+                                      vocabulary_id = NULL,
+                                      domain = "Drug",
+                                      target_vocabulary = NULL,
+                                      expand = "descendants",
+                                      include_retired_maps_to = TRUE,
+                                      exclude_dose_forms = NULL,
+                                      combination_policy = "attribute_all",
+                                      name = NULL,
+                                      header = TRUE,
+                                      ...) {
+  if (!dir.exists(folder)) stop(sprintf("Folder path does not exist or is not a directory: %s", folder), call. = FALSE)
+  pattern <- glob2rx(glob)
+  files <- list.files(folder, pattern = pattern, full.names = TRUE)
+  if (length(files) == 0) {
+    stop(sprintf("No files matching glob '%s' found in %s", glob, folder), call. = FALSE)
+  }
+  files <- sort(files)
+  eng_name <- if (!is.null(name)) name else basename(normalizePath(folder, winslash = "/"))
+  rollup_engine_from_csvs(
+    paths = files,
+    class_col = class_col,
+    code_col = code_col,
+    vocabulary_col = vocabulary_col,
+    vocabulary_id = vocabulary_id,
+    domain = domain,
+    target_vocabulary = target_vocabulary,
+    expand = expand,
+    include_retired_maps_to = include_retired_maps_to,
+    exclude_dose_forms = exclude_dose_forms,
+    combination_policy = combination_policy,
+    name = eng_name,
+    header = header,
+    ...
+  )
+}
+
+#' Load Rollup Engine from Bundled Reference Code Lists
+#'
+#' @param name Name of bundled code list (e.g. 'ederri_medications').
+#' @param class_col Column name for class filtering.
+#' @param code_col Column name for concept code.
+#' @param vocabulary_col Column name for vocabulary.
+#' @param vocabulary_id Default vocabulary ID.
+#' @param domain Domain ID (default 'Drug').
+#' @param expand Hierarchy expansion direction.
+#' @param include_retired_maps_to Logical. Include backward maps to.
+#' @param exclude_dose_forms Character vector of dose forms to exclude.
+#' @param ... Additional arguments.
+#' @return A rollup_engine object.
+#' @export
+rollup_engine_from_bundled <- function(name = "ederri_medications",
+                                       bundle_name = NULL,
+                                       resource_name = NULL,
+                                       class_col = "CLASS",
+                                       code_col = NULL,
+                                       vocabulary_col = "VOCABULARY",
+                                       vocabulary_id = NULL,
+                                       domain = "Drug",
+                                       expand = "descendants",
+                                       include_retired_maps_to = TRUE,
+                                       exclude_dose_forms = NULL,
+                                       ...) {
+  res_target <- if (!is.null(resource_name)) resource_name else (if (!is.null(bundle_name)) bundle_name else name)
+  res_path <- .code_list_path_r(res_target)
+  ext <- tolower(tools::file_ext(res_path))
+  if (ext %in% c("xlsx", "xls")) {
+    c_col <- if (!is.null(code_col)) code_col else "CODE"
+    rollup_engine_from_excel(
+      path = res_path,
+      class_col = class_col,
+      code_col = c_col,
+      vocabulary_col = vocabulary_col,
+      vocabulary_id = vocabulary_id,
+      domain = domain,
+      expand = expand,
+      include_retired_maps_to = include_retired_maps_to,
+      exclude_dose_forms = exclude_dose_forms,
+      ...
+    )
+  } else {
+    c_col <- if (!is.null(code_col)) code_col else "RXNORM_CUI"
+    rollup_engine_from_csvs(
+      paths = c(res_path),
+      class_col = class_col,
+      code_col = c_col,
+      vocabulary_col = vocabulary_col,
+      vocabulary_id = vocabulary_id,
+      domain = domain,
+      expand = expand,
+      include_retired_maps_to = include_retired_maps_to,
+      exclude_dose_forms = exclude_dose_forms,
+      name = name,
+      ...
+    )
+  }
 }
 
 #' Materialize Crosswalk from Rollup Specification
@@ -392,24 +1124,94 @@ rollup_engine <- function(name = "custom_rollup_engine",
 #' @return A data.frame containing resolved crosswalk concepts.
 #' @export
 materialize_crosswalk <- function(rollup, con, output_path = NULL, vocab_db = NULL) {
-  df <- resolve_concept_patterns(
-    con,
-    patterns = rollup$rules,
-    vocab_db = vocab_db,
-    expand = rollup$expansion_direction,
-    include_retired = isTRUE(rollup$include_retired_maps_to)
-  )
+  h <- spec_hash(rollup)
 
-  if (!is.null(rollup$exclude_dose_forms) && length(rollup$exclude_dose_forms) > 0) {
-    df <- .filter_dose_forms_r(con, df, rollup$exclude_dose_forms, vocab_db = vocab_db)
+  if (!is.null(output_path) && nzchar(output_path) && file.exists(output_path)) {
+    cached <- tryCatch({
+      c_df <- DBI::dbGetQuery(con, sprintf("SELECT * FROM read_parquet('%s')", gsub("\\\\", "/", output_path)))
+      if (nrow(c_df) > 0 && "spec_hash" %in% names(c_df) && identical(c_df$spec_hash[1], h)) {
+        valid <- TRUE
+        if (!is.null(rollup$source_file) && file.exists(rollup$source_file)) {
+          if (!identical(digest::digest(file = rollup$source_file, algo = "sha256"), rollup$source_file_hash)) {
+            valid <- FALSE
+          }
+        }
+        if (!is.null(rollup$source_file_hashes)) {
+          for (fpath in names(rollup$source_file_hashes)) {
+            if (file.exists(fpath)) {
+              if (!identical(digest::digest(file = fpath, algo = "sha256"), rollup$source_file_hashes[[fpath]])) {
+                valid <- FALSE
+                break
+              }
+            }
+          }
+        }
+        if (valid) return(c_df)
+      }
+      NULL
+    }, error = function(e) NULL)
+    if (!is.null(cached)) return(cached)
   }
 
-  df$rollup_name <- rollup$name
-  df$combination_policy <- rollup$combination_policy
-  h <- spec_hash(rollup)
-  df$spec_hash <- h
+  if (inherits(rollup, "rollup_engine") && !is.null(rollup$rollups) && length(rollup$rollups) > 0) {
+    if (length(rollup$rollups) == 1) {
+      single_r <- rollup$rollups[[1]]
+      df <- resolve_concept_patterns(
+        con,
+        patterns = single_r$rules,
+        vocab_db = vocab_db,
+        expand = single_r$expansion_direction,
+        include_retired = isTRUE(single_r$include_retired_maps_to)
+      )
+      if (!is.null(single_r$exclude_dose_forms) && length(single_r$exclude_dose_forms) > 0) {
+        df <- .filter_dose_forms_r(con, df, single_r$exclude_dose_forms, vocab_db = vocab_db)
+      }
+      df$rollup_name <- single_r$name
+      df$combination_policy <- single_r$combination_policy
+      df$engine_name <- rollup$name
+      df$spec_hash <- h
+    } else {
+      dfs <- list()
+      for (r in rollup$rollups) {
+        df_r <- resolve_concept_patterns(
+          con,
+          patterns = r$rules,
+          vocab_db = vocab_db,
+          expand = r$expansion_direction,
+          include_retired = isTRUE(r$include_retired_maps_to)
+        )
+        if (!is.null(r$exclude_dose_forms) && length(r$exclude_dose_forms) > 0) {
+          df_r <- .filter_dose_forms_r(con, df_r, r$exclude_dose_forms, vocab_db = vocab_db)
+        }
+        if (nrow(df_r) > 0) {
+          df_r$rollup_name <- r$name
+          df_r$combination_policy <- r$combination_policy
+          dfs[[length(dfs) + 1]] <- df_r
+        }
+      }
+      df <- if (length(dfs) > 0) do.call(rbind, dfs) else data.frame(concept_id = numeric(0), rollup_name = character(0), stringsAsFactors = FALSE)
+      df$engine_name <- rollup$name
+      df$spec_hash <- h
+    }
+  } else {
+    df <- resolve_concept_patterns(
+      con,
+      patterns = rollup$rules,
+      vocab_db = vocab_db,
+      expand = rollup$expansion_direction,
+      include_retired = isTRUE(rollup$include_retired_maps_to)
+    )
 
-  if (!is.null(output_path) && nzchar(output_path)) {
+    if (!is.null(rollup$exclude_dose_forms) && length(rollup$exclude_dose_forms) > 0) {
+      df <- .filter_dose_forms_r(con, df, rollup$exclude_dose_forms, vocab_db = vocab_db)
+    }
+
+    df$rollup_name <- rollup$name
+    df$combination_policy <- rollup$combination_policy
+    df$spec_hash <- h
+  }
+
+  if (!is.null(output_path) && nzchar(output_path) && nrow(df) > 0) {
     dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
     duckdb::duckdb_register(con, "_tmp_xwalk_mat", df)
     on.exit(tryCatch(duckdb::duckdb_unregister(con, "_tmp_xwalk_mat"), error = function(e) NULL), add = TRUE)
@@ -444,10 +1246,14 @@ extract_rollup_exposures <- function(rollup,
   types <- if (!is.null(prescribed_types)) as.numeric(prescribed_types) else c(32838, 38000177)
   type_str <- paste(types, collapse = ", ")
 
-  cids <- unique(stats::na.omit(as.numeric(mat$concept_id)))
-  DBI::dbExecute(con, "CREATE TEMPORARY TABLE IF NOT EXISTS _tmp_xwalk_ids_r (concept_id BIGINT)")
+  cids_and_names <- unique(mat[, c("concept_id", "rollup_name"), drop = FALSE])
+  cids_and_names <- cids_and_names[!is.na(cids_and_names$concept_id), , drop = FALSE]
+  cids_and_names$concept_id <- as.numeric(cids_and_names$concept_id)
+  cids_and_names$rollup_name <- as.character(cids_and_names$rollup_name)
+
+  DBI::dbExecute(con, "CREATE TEMPORARY TABLE IF NOT EXISTS _tmp_xwalk_ids_r (concept_id BIGINT, rollup_name VARCHAR)")
   DBI::dbExecute(con, "DELETE FROM _tmp_xwalk_ids_r")
-  DBI::dbAppendTable(con, "_tmp_xwalk_ids_r", data.frame(concept_id = cids))
+  DBI::dbAppendTable(con, "_tmp_xwalk_ids_r", cids_and_names)
 
   query <- sprintf("
     SELECT 
@@ -457,11 +1263,11 @@ extract_rollup_exposures <- function(rollup,
       de.drug_exposure_start_date,
       de.drug_exposure_end_date,
       de.drug_type_concept_id,
-      '%s' AS rollup_name
+      x.rollup_name
     FROM %s de
     JOIN _tmp_xwalk_ids_r x ON de.drug_concept_id = x.concept_id
     WHERE de.drug_type_concept_id IN (%s)
-  ", rollup$name, de_table, type_str)
+  ", de_table, type_str)
 
   DBI::dbGetQuery(con, query)
 }

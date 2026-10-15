@@ -14,7 +14,9 @@ hierarchical_rollup(
   include_retired_maps_to = TRUE,
   exclude_dose_forms = NULL,
   combination_policy = "attribute_all",
-  rules = NULL
+  rules = NULL,
+  source_file = NULL,
+  source_file_hash = NULL
 )
 }
 \arguments{
@@ -37,6 +39,10 @@ hierarchical_rollup(
 \item{combination_policy}{Combination product attribution policy ('attribute_all' | 'split' | 'disallow').}
 
 \item{rules}{Optional list of \code{concept_pattern} objects.}
+
+\item{source_file}{Optional path to the source file from which this rollup was loaded.}
+
+\item{source_file_hash}{Optional cryptographic SHA-256 hash of the source file.}
 }
 \value{
 A list representing the hierarchical rollup.

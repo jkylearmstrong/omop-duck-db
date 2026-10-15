@@ -1,3 +1,28 @@
+# omopduckdb 0.6.8
+
+Release 0.6.8 introduces native tabular file and workbook loaders (`.from_excel()`, `.from_csv()`, `.from_csvs()`, `.from_folder()`, `.from_bundled()`) for `HierarchicalRollup` and `RollupEngine`, bundled clinical reference code lists for multi-site studies (eDERRI / antidiabetic medications), cryptographic file-hash cache invalidation for Parquet crosswalks, and legacy headerless file support with complete 1:1 cross-language parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):
+
+### 1. Native Tabular File and Workbook Loaders for Rollups
+- **Single-Class Tabular Ingestion (`HierarchicalRollup.from_excel`, `HierarchicalRollup.from_csv`, `HierarchicalRollup.from_bundled`)**:
+  - Ingests single medication or condition classes directly from Excel workbook sheets or CSV files with automated column resolution (`code_col`, `class_col`, `vocabulary_col`).
+  - Native R equivalents: `hierarchical_rollup_from_excel()`, `hierarchical_rollup_from_csv()`, `hierarchical_rollup_from_bundled()`.
+- **Multi-Class Engine Loaders (`RollupEngine.from_excel`, `RollupEngine.from_csvs`, `RollupEngine.from_folder`, `RollupEngine.from_bundled`)**:
+  - Automatically splits multi-class sheets, sequences of CSV files, or entire directories of CSV files into structured batteries of `HierarchicalRollup` objects.
+  - Multi-class exposure extraction directly tags each drug exposure with its corresponding `rollup_name`.
+  - Native R equivalents: `rollup_engine_from_excel()`, `rollup_engine_from_csvs()`, `rollup_engine_from_folder()`, `rollup_engine_from_bundled()`.
+- **Legacy & Headerless Academic CSV Support**:
+  - Supports 0-indexed column integer references (e.g., `code_col=1, class_col=0`) to ingest legacy two-column code lists without required headers.
+
+### 2. Bundled Clinical Reference Workbooks & Code Lists
+- **Packaged Study Reference Code Lists (`inst/extdata/code_lists/`)**:
+  - Bundles standard clinical code lists for eDERRI antidiabetic medications (`ederri_medications.csv`, `diabetes_drug_categories.csv`, `rxnorm_categories_CUI_map_brief.csv`, `eDERRI_Clinical_Review_Package.xlsx`).
+  - Readily accessible via `.from_bundled("ederri_medications")` in Python and `rollup_engine_from_bundled("ederri_medications")` in R without needing external file paths.
+
+### 3. Cryptographic File-Hash Crosswalk Cache Invalidation
+- **Automated Cache Invalidation**:
+  - Stores SHA-256 digests of underlying source workbooks and CSV files within `source_file_hashes` and incorporates them into `spec_hash`.
+  - When an investigator updates or modifies an underlying Excel workbook or CSV code list, cached Parquet crosswalks are automatically recognized as stale and re-materialized directly in DuckDB.
+
 # omopduckdb 0.6.4
 
 Release 0.6.4 introduces production medication classification guards, explainable strategy auditing, publication-grade data quality assertions, causal inference nearest-neighbor matching, automated negative controls, semantic concept set optimization, longitudinal trajectory features, and federated survival meta-analysis with complete 1:1 cross-language parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):

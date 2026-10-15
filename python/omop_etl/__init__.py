@@ -330,6 +330,15 @@ from omop_etl.vocabulary import (
     load_vocabulary,
     omop_connect,
 )
+from omop_etl.rollups import (
+    ConceptPattern,
+    HierarchicalRollup,
+    RollupEngine,
+    audit_concept_drift,
+    compute_file_sha256,
+    materialize_crosswalk,
+    resolve_concept_set,
+)
 
 __all__ = [
     "DEFAULT_PHYSIOLOGIC_BOUNDS", "POPULATION_PHYSIOLOGIC_BOUNDS", "filter_bounds",
@@ -576,6 +585,7 @@ __all__ = [
     "RollupEngine",
     "materialize_crosswalk",
     "audit_concept_drift",
+    "compute_file_sha256",
     "suggest_source_mappings",
     "DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS",
     "DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS",
@@ -594,6 +604,6 @@ __all__ = [
     "filter_measurements",
 ]
 
-__version__ = "0.6.7"
+__version__ = "0.6.8"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 

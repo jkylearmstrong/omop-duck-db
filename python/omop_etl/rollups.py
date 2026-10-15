@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +23,7 @@ from omop_etl.integrity import (
     DEFAULT_DISPENSED_TYPE_CONCEPT_IDS,
     DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS,
 )
+from omop_etl.build_omop_cdm import _resource_path
 
 __all__ = [
     "ConceptPattern",
@@ -30,7 +32,76 @@ __all__ = [
     "resolve_concept_set",
     "materialize_crosswalk",
     "audit_concept_drift",
+    "compute_file_sha256",
 ]
+
+
+def compute_file_sha256(path: str | Path) -> str:
+    """Compute hex SHA-256 digest of a file on disk."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _find_column(df: pd.DataFrame, col_spec: str | int | None, required: bool = True) -> Any:
+    """Find column in dataframe matching exact name, index, or case-insensitive name."""
+    if col_spec is None:
+        return None
+    if isinstance(col_spec, int):
+        if col_spec in df.columns:
+            return col_spec
+        if 0 <= col_spec < len(df.columns):
+            return df.columns[col_spec]
+        if required:
+            raise KeyError(f"Column index {col_spec} out of bounds for table with {len(df.columns)} columns")
+        return None
+    if col_spec in df.columns:
+        return col_spec
+    col_norm = str(col_spec).strip().lower()
+    for c in df.columns:
+        if str(c).strip().lower() == col_norm:
+            return c
+    if str(col_spec).strip().isdigit():
+        idx = int(str(col_spec).strip())
+        if idx in df.columns:
+            return idx
+        if 0 <= idx < len(df.columns):
+            return df.columns[idx]
+    if required:
+        raise KeyError(f"Column {col_spec!r} not found in columns: {list(df.columns)}")
+    return None
+
+
+def _clean_code_val(val: Any) -> str | None:
+    """Normalize extracted concept code, stripping .0 artifact from numeric parsing."""
+    if val is None or pd.isna(val):
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "null"):
+        return None
+    if s.endswith(".0") and s[:-2].isdigit():
+        return s[:-2]
+    return s
+
+
+def _resolve_code_list_resource(name: str) -> Path:
+    """Locate bundled clinical reference files in extdata/code_lists."""
+    p_direct = Path(name)
+    if p_direct.exists():
+        return p_direct
+    candidates = []
+    base = name
+    for ext in ("", ".csv", ".xlsx"):
+        candidate_name = f"{base}{ext}" if not base.endswith(ext) or ext == "" else base
+        candidates.append(_resource_path("extdata", "code_lists", candidate_name))
+        candidates.append(Path(__file__).resolve().parent.parent.parent / "inst" / "extdata" / "code_lists" / candidate_name)
+    for c in candidates:
+        p = Path(c)
+        if p.exists():
+            return p
+    raise FileNotFoundError(f"Bundled code list {name!r} not found. Searched under inst/extdata/code_lists/")
 
 
 def _resolve_vocab_table(con: duckdb.DuckDBPyConnection | Any, name: str, vocab_db: str | None = None) -> str:
@@ -261,6 +332,8 @@ class HierarchicalRollup:
         exclude_dose_forms: Sequence[str] | None = None,
         combination_policy: str = "attribute_all",
         rules: Sequence[ConceptPattern | Mapping[str, Any] | str] | None = None,
+        source_file: str | None = None,
+        source_file_hash: str | None = None,
     ):
         self.name = name
         self.domain = domain
@@ -271,6 +344,8 @@ class HierarchicalRollup:
         self.include_retired_maps_to = include_retired_maps_to
         self.exclude_dose_forms = list(exclude_dose_forms or [])
         self.combination_policy = combination_policy
+        self.source_file = source_file
+        self.source_file_hash = source_file_hash
         self.rules: list[ConceptPattern] = []
 
         if rules:
@@ -298,7 +373,7 @@ class HierarchicalRollup:
                 ))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "name": self.name,
             "domain": self.domain,
             "root_vocabulary": self.root_vocabulary,
@@ -310,6 +385,11 @@ class HierarchicalRollup:
             "combination_policy": self.combination_policy,
             "rules": [r.to_dict() for r in self.rules],
         }
+        if self.source_file is not None:
+            d["source_file"] = self.source_file
+        if self.source_file_hash is not None:
+            d["source_file_hash"] = self.source_file_hash
+        return d
 
     def to_json(self, **kwargs) -> str:
         return json.dumps(self.to_dict(), **kwargs)
@@ -332,11 +412,225 @@ class HierarchicalRollup:
             exclude_dose_forms=d.get("exclude_dose_forms"),
             combination_policy=d.get("combination_policy", "attribute_all"),
             rules=rules,
+            source_file=d.get("source_file"),
+            source_file_hash=d.get("source_file_hash"),
         )
 
     @classmethod
     def from_json(cls, s: str) -> HierarchicalRollup:
         return cls.from_dict(json.loads(s))
+
+    @classmethod
+    def from_excel(
+        cls,
+        path: str | Path,
+        sheet_name: str | int | None = 0,
+        name: str | None = None,
+        code_col: str | int = "RXNORM_CUI",
+        class_col: str | int | None = None,
+        vocabulary_col: str | int | None = None,
+        vocabulary_id: str | None = None,
+        root_vocabulary: str | None = None,
+        domain: str = "Drug",
+        target_vocabulary: str | None = None,
+        expand: str | None = "descendants",
+        expansion_direction: str | None = None,
+        include_retired_maps_to: bool = True,
+        exclude_dose_forms: Sequence[str] | None = None,
+        combination_policy: str = "attribute_all",
+        header: bool | int | None = True,
+        **kwargs,
+    ) -> HierarchicalRollup:
+        """Instantiate a HierarchicalRollup directly from an Excel worksheet."""
+        p = Path(path).resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"Excel file not found at {path}")
+        fhash = compute_file_sha256(p)
+        hdr = 0 if header is True else (None if header is False else header)
+        df = pd.read_excel(p, sheet_name=sheet_name, header=hdr, **kwargs)
+
+        c_code = _find_column(df, code_col, required=True)
+        c_class = _find_column(df, class_col, required=False) if class_col is not None else None
+        c_vocab = _find_column(df, vocabulary_col, required=False) if vocabulary_col is not None else None
+
+        if c_class is not None and name is not None:
+            match_mask = df[c_class].astype(str).str.strip().str.lower() == str(name).strip().lower()
+            if not match_mask.any():
+                norm_target = re.sub(r"[- _]+", "", str(name).lower())
+                match_mask = df[c_class].astype(str).apply(lambda s: re.sub(r"[- _]+", "", str(s).lower())) == norm_target
+            df = df[match_mask]
+
+        eff_name = name or (str(sheet_name) if sheet_name is not None and sheet_name != 0 else p.stem)
+        eff_expand = expansion_direction if expansion_direction is not None else expand
+        eff_vocab = vocabulary_id or root_vocabulary or ("RxNorm" if domain == "Drug" else None)
+
+        rules = []
+        roots = []
+        for _, row in df.iterrows():
+            c_val = _clean_code_val(row[c_code])
+            if not c_val:
+                continue
+            roots.append(c_val)
+            row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+            rules.append(ConceptPattern(
+                vocabulary_id=row_vocab,
+                code_pattern=c_val,
+                domain_id=domain,
+                expand=eff_expand,
+                target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                include_retired=include_retired_maps_to,
+            ))
+
+        return cls(
+            name=eff_name,
+            domain=domain,
+            root_vocabulary=eff_vocab,
+            roots=roots,
+            target_vocabulary=target_vocabulary,
+            expansion_direction=eff_expand or "descendants",
+            include_retired_maps_to=include_retired_maps_to,
+            exclude_dose_forms=exclude_dose_forms,
+            combination_policy=combination_policy,
+            rules=rules,
+            source_file=str(p),
+            source_file_hash=fhash,
+        )
+
+    @classmethod
+    def from_csv(
+        cls,
+        path: str | Path,
+        name: str | None = None,
+        code_col: str | int = "RXNORM_CUI",
+        class_col: str | int | None = None,
+        vocabulary_col: str | int | None = None,
+        vocabulary_id: str | None = None,
+        root_vocabulary: str | None = None,
+        domain: str = "Drug",
+        target_vocabulary: str | None = None,
+        expand: str | None = "descendants",
+        expansion_direction: str | None = None,
+        include_retired_maps_to: bool = True,
+        exclude_dose_forms: Sequence[str] | None = None,
+        combination_policy: str = "attribute_all",
+        header: bool | int | None = True,
+        **kwargs,
+    ) -> HierarchicalRollup:
+        """Instantiate a HierarchicalRollup directly from a CSV file."""
+        p = Path(path).resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"CSV file not found at {path}")
+        fhash = compute_file_sha256(p)
+        hdr = 0 if header is True else (None if header is False else header)
+        df = pd.read_csv(p, header=hdr, **kwargs)
+
+        c_code = _find_column(df, code_col, required=False)
+        if c_code is None and "CODE" in df.columns:
+            c_code = "CODE"
+        if c_code is None and len(df.columns) > 1 and class_col is not None and isinstance(class_col, int) and class_col == 0:
+            c_code = df.columns[1]
+        if c_code is None:
+            c_code = _find_column(df, code_col, required=True)
+
+        c_class = _find_column(df, class_col, required=False) if class_col is not None else None
+        c_vocab = _find_column(df, vocabulary_col, required=False) if vocabulary_col is not None else None
+
+        if c_class is not None and name is not None:
+            match_mask = df[c_class].astype(str).str.strip().str.lower() == str(name).strip().lower()
+            if not match_mask.any():
+                norm_target = re.sub(r"[- _]+", "", str(name).lower())
+                match_mask = df[c_class].astype(str).apply(lambda s: re.sub(r"[- _]+", "", str(s).lower())) == norm_target
+            df = df[match_mask]
+
+        eff_name = name or p.stem
+        eff_expand = expansion_direction if expansion_direction is not None else expand
+        eff_vocab = vocabulary_id or root_vocabulary or ("RxNorm" if domain == "Drug" else None)
+
+        rules = []
+        roots = []
+        for _, row in df.iterrows():
+            c_val = _clean_code_val(row[c_code])
+            if not c_val:
+                continue
+            roots.append(c_val)
+            row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+            rules.append(ConceptPattern(
+                vocabulary_id=row_vocab,
+                code_pattern=c_val,
+                domain_id=domain,
+                expand=eff_expand,
+                target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                include_retired=include_retired_maps_to,
+            ))
+
+        return cls(
+            name=eff_name,
+            domain=domain,
+            root_vocabulary=eff_vocab,
+            roots=roots,
+            target_vocabulary=target_vocabulary,
+            expansion_direction=eff_expand or "descendants",
+            include_retired_maps_to=include_retired_maps_to,
+            exclude_dose_forms=exclude_dose_forms,
+            combination_policy=combination_policy,
+            rules=rules,
+            source_file=str(p),
+            source_file_hash=fhash,
+        )
+
+    @classmethod
+    def from_bundled(
+        cls,
+        name: str | None = None,
+        bundle_name: str | None = None,
+        resource_name: str | None = None,
+        class_col: str | int | None = "CLASS",
+        code_col: str | int | None = None,
+        vocabulary_col: str | int | None = "VOCABULARY",
+        vocabulary_id: str | None = None,
+        domain: str = "Drug",
+        expand: str | None = "descendants",
+        include_retired_maps_to: bool = True,
+        exclude_dose_forms: Sequence[str] | None = None,
+        **kwargs,
+    ) -> HierarchicalRollup:
+        """Instantiate a HierarchicalRollup from bundled clinical code lists."""
+        res_target = bundle_name or resource_name or "ederri_medications"
+        kwargs.pop("bundle_name", None)
+        kwargs.pop("resource_name", None)
+        eff_name = name or "Biguanides"
+        res_path = _resolve_code_list_resource(res_target)
+        if res_path.suffix.lower() in (".xlsx", ".xls"):
+            return cls.from_excel(
+                path=res_path,
+                name=eff_name,
+                class_col=class_col,
+                code_col=code_col or "CODE",
+                vocabulary_col=vocabulary_col,
+                vocabulary_id=vocabulary_id,
+                domain=domain,
+                expand=expand,
+                include_retired_maps_to=include_retired_maps_to,
+                exclude_dose_forms=exclude_dose_forms,
+                **kwargs,
+            )
+        else:
+            if code_col is None:
+                df_prev = pd.read_csv(res_path, nrows=2)
+                code_col = "RXNORM_CUI" if "RXNORM_CUI" in df_prev.columns else ("CODE" if "CODE" in df_prev.columns else 0)
+            return cls.from_csv(
+                path=res_path,
+                name=name,
+                class_col=class_col,
+                code_col=code_col,
+                vocabulary_col=vocabulary_col,
+                vocabulary_id=vocabulary_id,
+                domain=domain,
+                expand=expand,
+                include_retired_maps_to=include_retired_maps_to,
+                exclude_dose_forms=exclude_dose_forms,
+                **kwargs,
+            )
 
     def materialize(
         self,
@@ -345,6 +639,24 @@ class HierarchicalRollup:
         cache_path: str | Path | None = None,
     ) -> pd.DataFrame:
         """Materialize resolved crosswalk concepts in DuckDB and optionally cache to Parquet."""
+        if cache_path:
+            p = Path(cache_path)
+            if p.exists():
+                try:
+                    cached_df = pd.read_parquet(p)
+                    if (
+                        not cached_df.empty
+                        and "spec_hash" in cached_df.columns
+                        and cached_df["spec_hash"].iloc[0] == self.spec_hash()
+                    ):
+                        if self.source_file and os.path.exists(self.source_file):
+                            if compute_file_sha256(self.source_file) == self.source_file_hash:
+                                return cached_df
+                        else:
+                            return cached_df
+                except Exception:
+                    pass
+
         df = resolve_concept_set(
             con,
             patterns=self.rules,
@@ -368,6 +680,7 @@ class HierarchicalRollup:
         return df
 
     def extract_exposures(
+        self,
         con: duckdb.DuckDBPyConnection | Any,
         site_db: str | None = None,
         cohort_table: str = "cohort",
@@ -376,7 +689,36 @@ class HierarchicalRollup:
         vocab_db: str | None = None,
         **kwargs,
     ) -> pd.DataFrame:
-        pass
+        """Extract exposure records from site CDM table matched against materialized crosswalk."""
+        crosswalk_df = self.materialize(con, vocab_db=vocab_db)
+        if crosswalk_df.empty:
+            return pd.DataFrame()
+
+        de_prefix = f"{site_db}." if site_db else ""
+        de_table = f"{de_prefix}drug_exposure"
+
+        types = list(prescribed_types) if prescribed_types is not None else list(DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS)
+        type_str = ", ".join(str(int(t)) for t in types)
+
+        cids = sorted(crosswalk_df["concept_id"].dropna().astype(int).unique().tolist())
+        con.execute("CREATE TEMPORARY TABLE IF NOT EXISTS _tmp_xwalk_ids (concept_id BIGINT)")
+        con.execute("DELETE FROM _tmp_xwalk_ids")
+        con.executemany("INSERT INTO _tmp_xwalk_ids VALUES (?)", [(c,) for c in cids])
+
+        query = f"""
+            SELECT 
+                de.drug_exposure_id,
+                de.person_id,
+                de.drug_concept_id,
+                de.drug_exposure_start_date,
+                de.drug_exposure_end_date,
+                de.drug_type_concept_id,
+                '{self.name}' AS rollup_name
+            FROM {de_table} de
+            JOIN _tmp_xwalk_ids x ON de.drug_concept_id = x.concept_id
+            WHERE de.drug_type_concept_id IN ({type_str})
+        """
+        return con.execute(query).df()
 
 
 def _filter_dose_forms(
@@ -432,18 +774,520 @@ class RollupEngine:
         exclude_dose_forms: Sequence[str] | None = None,
         domain: str = "Drug",
         combination_policy: str = "attribute_all",
+        rollups: Sequence[HierarchicalRollup] | Mapping[str, HierarchicalRollup] | None = None,
+        source_files: Sequence[str] | None = None,
+        source_file_hashes: Mapping[str, str] | None = None,
     ):
         self.name = name
         self.domain = domain
         self.exclude_dose_forms = list(exclude_forms or exclude_dose_forms or [])
         self.combination_policy = combination_policy
-        self.rollup = HierarchicalRollup(
-            name=name,
-            domain=domain,
-            rules=rules,
-            exclude_dose_forms=self.exclude_dose_forms,
-            combination_policy=combination_policy,
+        self.source_files = list(source_files or [])
+        self.source_file_hashes = dict(source_file_hashes or {})
+
+        self.rollups: dict[str, HierarchicalRollup] = {}
+        if rollups:
+            if isinstance(rollups, Mapping):
+                self.rollups = dict(rollups)
+            else:
+                for r in rollups:
+                    self.rollups[r.name] = r
+            self.rollup = next(iter(self.rollups.values())) if self.rollups else None
+        else:
+            self.rollup = HierarchicalRollup(
+                name=name,
+                domain=domain,
+                rules=rules,
+                exclude_dose_forms=self.exclude_dose_forms,
+                combination_policy=combination_policy,
+            )
+            self.rollups[name] = self.rollup
+
+    def _find_rollup_key(self, key: str) -> str | None:
+        if key in self.rollups:
+            return key
+        norm_key = re.sub(r"[- _]+", "", str(key).lower())
+        for k in self.rollups:
+            if re.sub(r"[- _]+", "", str(k).lower()) == norm_key:
+                return k
+        return None
+
+    def __getitem__(self, key: str) -> HierarchicalRollup:
+        rk = self._find_rollup_key(key)
+        if rk is not None:
+            return self.rollups[rk]
+        return self.rollups[key]
+
+    def get(self, key: str, default: Any = None) -> HierarchicalRollup | Any:
+        rk = self._find_rollup_key(key)
+        if rk is not None:
+            return self.rollups[rk]
+        return default
+
+    def __len__(self) -> int:
+        return len(self.rollups)
+
+    def __iter__(self):
+        return iter(self.rollups.values())
+
+    def __contains__(self, key: str) -> bool:
+        return self._find_rollup_key(key) is not None
+
+    @property
+    def rollup_names(self) -> list[str]:
+        return list(self.rollups.keys())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "domain": self.domain,
+            "exclude_dose_forms": self.exclude_dose_forms,
+            "combination_policy": self.combination_policy,
+            "rollups": {k: v.to_dict() for k, v in self.rollups.items()},
+            "source_files": self.source_files,
+            "source_file_hashes": self.source_file_hashes,
+        }
+
+    def to_json(self, **kwargs) -> str:
+        return json.dumps(self.to_dict(), **kwargs)
+
+    def spec_hash(self) -> str:
+        serialized = json.dumps(self.to_dict(), sort_keys=True)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> RollupEngine:
+        rollups = {k: HierarchicalRollup.from_dict(v) for k, v in d.get("rollups", {}).items()}
+        return cls(
+            name=d.get("name", "custom_rollup_engine"),
+            domain=d.get("domain", "Drug"),
+            exclude_dose_forms=d.get("exclude_dose_forms"),
+            combination_policy=d.get("combination_policy", "attribute_all"),
+            rollups=rollups,
+            source_files=d.get("source_files"),
+            source_file_hashes=d.get("source_file_hashes"),
         )
+
+    @classmethod
+    def from_json(cls, s: str) -> RollupEngine:
+        return cls.from_dict(json.loads(s))
+
+    @classmethod
+    def from_excel(
+        cls,
+        path: str | Path,
+        sheet_name: str | int | Sequence[str | int] | None = 0,
+        class_col: str | int | None = "CLASS",
+        code_col: str | int = "CODE",
+        vocabulary_col: str | int | None = "VOCABULARY",
+        vocabulary_id: str | None = None,
+        root_vocabulary: str | None = None,
+        domain: str = "Drug",
+        target_vocabulary: str | None = None,
+        expand: str | None = "descendants",
+        expansion_direction: str | None = None,
+        include_retired_maps_to: bool = True,
+        exclude_dose_forms: Sequence[str] | None = None,
+        combination_policy: str = "attribute_all",
+        name: str | None = None,
+        header: bool | int | None = True,
+        **kwargs,
+    ) -> RollupEngine:
+        """Instantiate a RollupEngine from a multi-class or multi-sheet Excel workbook."""
+        p = Path(path).resolve()
+        if not p.exists():
+            raise FileNotFoundError(f"Excel file not found at {path}")
+        fhash = compute_file_sha256(p)
+        hdr = 0 if header is True else (None if header is False else header)
+        eff_expand = expansion_direction if expansion_direction is not None else expand
+        eff_vocab = vocabulary_id or root_vocabulary or ("RxNorm" if domain == "Drug" else None)
+
+        rollups: list[HierarchicalRollup] = []
+
+        if sheet_name is None:
+            sheets_dict = pd.read_excel(p, sheet_name=None, header=hdr, **kwargs)
+            for sname, sdf in sheets_dict.items():
+                c_class = _find_column(sdf, class_col, required=False) if class_col is not None else None
+                c_code = _find_column(sdf, code_col, required=False)
+                if c_code is None and "RXNORM_CUI" in sdf.columns:
+                    c_code = "RXNORM_CUI"
+                if c_code is None and len(sdf.columns) > 0:
+                    c_code = sdf.columns[0]
+                c_vocab = _find_column(sdf, vocabulary_col, required=False) if vocabulary_col is not None else None
+
+                if c_class is not None:
+                    for cls_val in sdf[c_class].dropna().unique():
+                        cls_name = str(cls_val).strip()
+                        if not cls_name:
+                            continue
+                        sub = sdf[sdf[c_class] == cls_val]
+                        roots, rules = [], []
+                        for _, row in sub.iterrows():
+                            c_val = _clean_code_val(row[c_code])
+                            if not c_val:
+                                continue
+                            roots.append(c_val)
+                            row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+                            rules.append(ConceptPattern(
+                                vocabulary_id=row_vocab,
+                                code_pattern=c_val,
+                                domain_id=domain,
+                                expand=eff_expand,
+                                target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                                include_retired=include_retired_maps_to,
+                            ))
+                        rollups.append(HierarchicalRollup(
+                            name=cls_name,
+                            domain=domain,
+                            root_vocabulary=eff_vocab,
+                            roots=roots,
+                            target_vocabulary=target_vocabulary,
+                            expansion_direction=eff_expand or "descendants",
+                            include_retired_maps_to=include_retired_maps_to,
+                            exclude_dose_forms=exclude_dose_forms,
+                            combination_policy=combination_policy,
+                            rules=rules,
+                            source_file=str(p),
+                            source_file_hash=fhash,
+                        ))
+                else:
+                    roots, rules = [], []
+                    for _, row in sdf.iterrows():
+                        c_val = _clean_code_val(row[c_code])
+                        if not c_val:
+                            continue
+                        roots.append(c_val)
+                        row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+                        rules.append(ConceptPattern(
+                            vocabulary_id=row_vocab,
+                            code_pattern=c_val,
+                            domain_id=domain,
+                            expand=eff_expand,
+                            target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                            include_retired=include_retired_maps_to,
+                        ))
+                    rollups.append(HierarchicalRollup(
+                        name=str(sname).strip(),
+                        domain=domain,
+                        root_vocabulary=eff_vocab,
+                        roots=roots,
+                        target_vocabulary=target_vocabulary,
+                        expansion_direction=eff_expand or "descendants",
+                        include_retired_maps_to=include_retired_maps_to,
+                        exclude_dose_forms=exclude_dose_forms,
+                        combination_policy=combination_policy,
+                        rules=rules,
+                        source_file=str(p),
+                        source_file_hash=fhash,
+                    ))
+        else:
+            df = pd.read_excel(p, sheet_name=sheet_name, header=hdr, **kwargs)
+            c_code = _find_column(df, code_col, required=False)
+            if c_code is None and "RXNORM_CUI" in df.columns:
+                c_code = "RXNORM_CUI"
+            if c_code is None and "CODE" in df.columns:
+                c_code = "CODE"
+            if c_code is None:
+                c_code = _find_column(df, code_col, required=True)
+            c_class = _find_column(df, class_col, required=False) if class_col is not None else None
+            c_vocab = _find_column(df, vocabulary_col, required=False) if vocabulary_col is not None else None
+
+            if c_class is not None:
+                for cls_val in df[c_class].dropna().unique():
+                    cls_name = str(cls_val).strip()
+                    if not cls_name:
+                        continue
+                    sub = df[df[c_class] == cls_val]
+                    roots, rules = [], []
+                    for _, row in sub.iterrows():
+                        c_val = _clean_code_val(row[c_code])
+                        if not c_val:
+                            continue
+                        roots.append(c_val)
+                        row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+                        rules.append(ConceptPattern(
+                            vocabulary_id=row_vocab,
+                            code_pattern=c_val,
+                            domain_id=domain,
+                            expand=eff_expand,
+                            target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                            include_retired=include_retired_maps_to,
+                        ))
+                    rollups.append(HierarchicalRollup(
+                        name=cls_name,
+                        domain=domain,
+                        root_vocabulary=eff_vocab,
+                        roots=roots,
+                        target_vocabulary=target_vocabulary,
+                        expansion_direction=eff_expand or "descendants",
+                        include_retired_maps_to=include_retired_maps_to,
+                        exclude_dose_forms=exclude_dose_forms,
+                        combination_policy=combination_policy,
+                        rules=rules,
+                        source_file=str(p),
+                        source_file_hash=fhash,
+                    ))
+            else:
+                roots, rules = [], []
+                for _, row in df.iterrows():
+                    c_val = _clean_code_val(row[c_code])
+                    if not c_val:
+                        continue
+                    roots.append(c_val)
+                    row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+                    rules.append(ConceptPattern(
+                        vocabulary_id=row_vocab,
+                        code_pattern=c_val,
+                        domain_id=domain,
+                        expand=eff_expand,
+                        target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                        include_retired=include_retired_maps_to,
+                    ))
+                rollups.append(HierarchicalRollup(
+                    name=name or str(sheet_name or p.stem),
+                    domain=domain,
+                    root_vocabulary=eff_vocab,
+                    roots=roots,
+                    target_vocabulary=target_vocabulary,
+                    expansion_direction=eff_expand or "descendants",
+                    include_retired_maps_to=include_retired_maps_to,
+                    exclude_dose_forms=exclude_dose_forms,
+                    combination_policy=combination_policy,
+                    rules=rules,
+                    source_file=str(p),
+                    source_file_hash=fhash,
+                ))
+
+        engine_name = name or (str(sheet_name) if sheet_name is not None and sheet_name != 0 else p.stem)
+        return cls(
+            name=engine_name,
+            domain=domain,
+            rollups=rollups,
+            exclude_dose_forms=exclude_dose_forms,
+            combination_policy=combination_policy,
+            source_files=[str(p)],
+            source_file_hashes={str(p): fhash},
+        )
+
+    @classmethod
+    def from_csvs(
+        cls,
+        paths: Sequence[str | Path],
+        class_col: str | int | None = "CLASS",
+        code_col: str | int = "CODE",
+        vocabulary_col: str | int | None = None,
+        vocabulary_id: str | None = None,
+        root_vocabulary: str | None = None,
+        domain: str = "Drug",
+        target_vocabulary: str | None = None,
+        expand: str | None = "descendants",
+        expansion_direction: str | None = None,
+        include_retired_maps_to: bool = True,
+        exclude_dose_forms: Sequence[str] | None = None,
+        combination_policy: str = "attribute_all",
+        name: str | None = None,
+        header: bool | int | None = True,
+        **kwargs,
+    ) -> RollupEngine:
+        """Instantiate a RollupEngine from a sequence of CSV files."""
+        source_files = []
+        source_file_hashes = {}
+        class_dict: dict[str, dict[str, Any]] = {}
+        eff_expand = expansion_direction if expansion_direction is not None else expand
+        eff_vocab = vocabulary_id or root_vocabulary or ("RxNorm" if domain == "Drug" else None)
+
+        for p_in in paths:
+            p = Path(p_in).resolve()
+            if not p.exists():
+                raise FileNotFoundError(f"CSV file not found at {p_in}")
+            p_str = str(p)
+            source_files.append(p_str)
+            source_file_hashes[p_str] = compute_file_sha256(p)
+
+            hdr = 0 if header is True else (None if header is False else header)
+            df = pd.read_csv(p, header=hdr, **kwargs)
+
+            c_code = _find_column(df, code_col, required=False)
+            if c_code is None and "RXNORM_CUI" in df.columns:
+                c_code = "RXNORM_CUI"
+            if c_code is None and "CODE" in df.columns:
+                c_code = "CODE"
+            if c_code is None:
+                if len(df.columns) > 1 and class_col is not None and isinstance(class_col, int) and class_col == 0:
+                    c_code = df.columns[1]
+                else:
+                    c_code = _find_column(df, code_col, required=True)
+
+            c_class = _find_column(df, class_col, required=False) if class_col is not None else None
+            c_vocab = _find_column(df, vocabulary_col, required=False) if vocabulary_col is not None else None
+
+            if c_class is not None:
+                for cls_val in df[c_class].dropna().unique():
+                    cls_name = str(cls_val).strip()
+                    if not cls_name:
+                        continue
+                    if cls_name not in class_dict:
+                        class_dict[cls_name] = {"roots": [], "rules": []}
+                    sub = df[df[c_class] == cls_val]
+                    for _, row in sub.iterrows():
+                        c_val = _clean_code_val(row[c_code])
+                        if not c_val:
+                            continue
+                        class_dict[cls_name]["roots"].append(c_val)
+                        row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+                        class_dict[cls_name]["rules"].append(ConceptPattern(
+                            vocabulary_id=row_vocab,
+                            code_pattern=c_val,
+                            domain_id=domain,
+                            expand=eff_expand,
+                            target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                            include_retired=include_retired_maps_to,
+                        ))
+            else:
+                cls_name = p.stem
+                if cls_name not in class_dict:
+                    class_dict[cls_name] = {"roots": [], "rules": []}
+                for _, row in df.iterrows():
+                    c_val = _clean_code_val(row[c_code])
+                    if not c_val:
+                        continue
+                    class_dict[cls_name]["roots"].append(c_val)
+                    row_vocab = str(row[c_vocab]).strip() if c_vocab is not None and not pd.isna(row[c_vocab]) else eff_vocab
+                    class_dict[cls_name]["rules"].append(ConceptPattern(
+                        vocabulary_id=row_vocab,
+                        code_pattern=c_val,
+                        domain_id=domain,
+                        expand=eff_expand,
+                        target_vocabulary=target_vocabulary or ("RxNorm" if domain == "Drug" else None),
+                        include_retired=include_retired_maps_to,
+                    ))
+
+        rollups = []
+        for cls_name, data in class_dict.items():
+            r = HierarchicalRollup(
+                name=cls_name,
+                domain=domain,
+                root_vocabulary=eff_vocab,
+                roots=data["roots"],
+                target_vocabulary=target_vocabulary,
+                expansion_direction=eff_expand or "descendants",
+                include_retired_maps_to=include_retired_maps_to,
+                exclude_dose_forms=exclude_dose_forms,
+                combination_policy=combination_policy,
+                rules=data["rules"],
+                source_file=", ".join(source_files),
+                source_file_hash=hashlib.sha256("".join(source_file_hashes.values()).encode("utf-8")).hexdigest(),
+            )
+            rollups.append(r)
+
+        return cls(
+            name=name or (Path(paths[0]).stem if len(paths) == 1 else "multi_csv_rollup_engine"),
+            domain=domain,
+            rollups=rollups,
+            exclude_dose_forms=exclude_dose_forms,
+            combination_policy=combination_policy,
+            source_files=source_files,
+            source_file_hashes=source_file_hashes,
+        )
+
+    @classmethod
+    def from_folder(
+        cls,
+        folder_path: str | Path,
+        glob: str = "*.csv",
+        class_col: str | int | None = "CLASS",
+        code_col: str | int = "CODE",
+        vocabulary_col: str | int | None = None,
+        vocabulary_id: str | None = None,
+        root_vocabulary: str | None = None,
+        domain: str = "Drug",
+        target_vocabulary: str | None = None,
+        expand: str | None = "descendants",
+        expansion_direction: str | None = None,
+        include_retired_maps_to: bool = True,
+        exclude_dose_forms: Sequence[str] | None = None,
+        combination_policy: str = "attribute_all",
+        name: str | None = None,
+        header: bool | int | None = True,
+        **kwargs,
+    ) -> RollupEngine:
+        """Instantiate a RollupEngine by discovering CSV code lists in a folder."""
+        p = Path(folder_path).resolve()
+        if not p.is_dir():
+            raise NotADirectoryError(f"Folder path does not exist or is not a directory: {folder_path}")
+        files = sorted(p.glob(glob))
+        if not files:
+            raise FileNotFoundError(f"No files matching glob {glob!r} found in {folder_path}")
+        return cls.from_csvs(
+            paths=files,
+            class_col=class_col,
+            code_col=code_col,
+            vocabulary_col=vocabulary_col,
+            vocabulary_id=vocabulary_id,
+            root_vocabulary=root_vocabulary,
+            domain=domain,
+            target_vocabulary=target_vocabulary,
+            expand=expand,
+            expansion_direction=expansion_direction,
+            include_retired_maps_to=include_retired_maps_to,
+            exclude_dose_forms=exclude_dose_forms,
+            combination_policy=combination_policy,
+            name=name or p.name,
+            header=header,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_bundled(
+        cls,
+        name: str = "ederri_medications",
+        bundle_name: str | None = None,
+        resource_name: str | None = None,
+        class_col: str | int | None = "CLASS",
+        code_col: str | int | None = None,
+        vocabulary_col: str | int | None = "VOCABULARY",
+        vocabulary_id: str | None = None,
+        domain: str = "Drug",
+        expand: str | None = "descendants",
+        include_retired_maps_to: bool = True,
+        exclude_dose_forms: Sequence[str] | None = None,
+        **kwargs,
+    ) -> RollupEngine:
+        """Instantiate a RollupEngine from bundled clinical code lists."""
+        res_target = bundle_name or resource_name or name
+        kwargs.pop("bundle_name", None)
+        kwargs.pop("resource_name", None)
+        res_path = _resolve_code_list_resource(res_target)
+        if res_path.suffix.lower() in (".xlsx", ".xls"):
+            return cls.from_excel(
+                path=res_path,
+                class_col=class_col,
+                code_col=code_col or "CODE",
+                vocabulary_col=vocabulary_col,
+                vocabulary_id=vocabulary_id,
+                domain=domain,
+                expand=expand,
+                include_retired_maps_to=include_retired_maps_to,
+                exclude_dose_forms=exclude_dose_forms,
+                **kwargs,
+            )
+        else:
+            if code_col is None:
+                df_prev = pd.read_csv(res_path, nrows=2)
+                code_col = "RXNORM_CUI" if "RXNORM_CUI" in df_prev.columns else ("CODE" if "CODE" in df_prev.columns else 0)
+            return cls.from_csvs(
+                paths=[res_path],
+                class_col=class_col,
+                code_col=code_col,
+                vocabulary_col=vocabulary_col,
+                vocabulary_id=vocabulary_id,
+                domain=domain,
+                expand=expand,
+                include_retired_maps_to=include_retired_maps_to,
+                exclude_dose_forms=exclude_dose_forms,
+                name=name,
+                **kwargs,
+            )
 
     def materialize(
         self,
@@ -451,7 +1295,63 @@ class RollupEngine:
         vocab_db: str | None = None,
         cache_path: str | Path | None = None,
     ) -> pd.DataFrame:
-        return self.rollup.materialize(con, vocab_db=vocab_db, cache_path=cache_path)
+        """Materialize resolved crosswalk concepts across all rollups and optionally cache to Parquet."""
+        if cache_path:
+            p = Path(cache_path)
+            if p.exists():
+                try:
+                    cached_df = pd.read_parquet(p)
+                    if (
+                        not cached_df.empty
+                        and "spec_hash" in cached_df.columns
+                        and cached_df["spec_hash"].iloc[0] == self.spec_hash()
+                    ):
+                        valid = True
+                        for fpath, fhash in self.source_file_hashes.items():
+                            if os.path.exists(fpath):
+                                if compute_file_sha256(fpath) != fhash:
+                                    valid = False
+                                    break
+                        if valid:
+                            return cached_df
+                except Exception:
+                    pass
+
+        if len(self.rollups) == 1:
+            df = self.rollup.materialize(con, vocab_db=vocab_db)
+            df["engine_name"] = self.name
+            df["spec_hash"] = self.spec_hash()
+            if cache_path:
+                p = Path(cache_path)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                df.to_parquet(p, index=False)
+            return df
+
+        dfs = []
+        for r in self.rollups.values():
+            df_r = r.materialize(con, vocab_db=vocab_db)
+            if not df_r.empty:
+                dfs.append(df_r)
+
+        if not dfs:
+            combined = pd.DataFrame(columns=[
+                "concept_id", "concept_name", "domain_id", "vocabulary_id",
+                "concept_class_id", "standard_concept", "concept_code",
+                "valid_start_date", "valid_end_date", "invalid_reason", "matched_pattern",
+                "rollup_name", "combination_policy", "spec_hash", "engine_name"
+            ])
+        else:
+            combined = pd.concat(dfs, ignore_index=True)
+
+        combined["engine_name"] = self.name
+        combined["spec_hash"] = self.spec_hash()
+
+        if cache_path:
+            p = Path(cache_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            combined.to_parquet(p, index=False)
+
+        return combined
 
     def extract_exposures(
         self,
@@ -474,10 +1374,18 @@ class RollupEngine:
         types = list(prescribed_types) if prescribed_types is not None else list(DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS)
         type_str = ", ".join(str(int(t)) for t in types)
 
-        cids = sorted(crosswalk_df["concept_id"].dropna().astype(int).unique().tolist())
-        con.execute("CREATE TEMPORARY TABLE IF NOT EXISTS _tmp_xwalk_ids (concept_id BIGINT)")
+        cids_and_names = (
+            crosswalk_df[["concept_id", "rollup_name"]]
+            .dropna(subset=["concept_id"])
+            .drop_duplicates()
+        )
+        cids_and_names["concept_id"] = cids_and_names["concept_id"].astype(int)
+
+        con.execute("CREATE TEMPORARY TABLE IF NOT EXISTS _tmp_xwalk_ids (concept_id BIGINT, rollup_name VARCHAR)")
         con.execute("DELETE FROM _tmp_xwalk_ids")
-        con.executemany("INSERT INTO _tmp_xwalk_ids VALUES (?)", [(c,) for c in cids])
+        con.register("_tmp_xwalk_reg", cids_and_names)
+        con.execute("INSERT INTO _tmp_xwalk_ids SELECT concept_id, rollup_name FROM _tmp_xwalk_reg")
+        con.unregister("_tmp_xwalk_reg")
 
         query = f"""
             SELECT 
@@ -487,7 +1395,7 @@ class RollupEngine:
                 de.drug_exposure_start_date,
                 de.drug_exposure_end_date,
                 de.drug_type_concept_id,
-                '{self.name}' AS rollup_name
+                x.rollup_name
             FROM {de_table} de
             JOIN _tmp_xwalk_ids x ON de.drug_concept_id = x.concept_id
             WHERE de.drug_type_concept_id IN ({type_str})
