@@ -10,7 +10,9 @@ export_medication_crosswalk(
   output_path = NULL,
   include_retired = TRUE,
   exclude_forms = NULL,
-  must_contain = NULL
+  must_contain = NULL,
+  vocab_schema = NULL,
+  vocab_db = NULL
 )
 }
 \arguments{
@@ -25,6 +27,10 @@ export_medication_crosswalk(
 \item{exclude_forms}{Optional vector of dosage form strings to exclude (e.g. 'Ophthalmic', 'Topical').}
 
 \item{must_contain}{Optional vector of required RxNorm codes or source strings; throws error if missing.}
+
+\item{vocab_schema}{Optional schema containing vocabulary tables.}
+
+\item{vocab_db}{Optional attached database containing vocabulary tables.}
 }
 \value{
 A data frame with columns \code{source_value}, \code{drug_class}, \code{concept_id}, \code{concept_name},

@@ -14,7 +14,9 @@ explain_medication_disagreement(
   person_col = NULL,
   top_n = 10,
   min_cell_count = 11,
-  mask_value = "<11"
+  mask_value = "<11",
+  vocab_schema = NULL,
+  vocab_db = NULL
 )
 }
 \arguments{
@@ -37,6 +39,10 @@ explain_medication_disagreement(
 \item{min_cell_count}{Cell count threshold for privacy suppression (default 11).}
 
 \item{mask_value}{Suppression mask string (default '<11').}
+
+\item{vocab_schema}{Optional schema containing vocabulary tables.}
+
+\item{vocab_db}{Optional attached database containing vocabulary tables.}
 }
 \value{
 A data frame with columns \code{site}, \code{medication_class}, \code{disagreement_type},

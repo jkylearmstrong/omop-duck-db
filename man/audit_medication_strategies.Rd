@@ -18,6 +18,8 @@ audit_medication_strategies(
   con = NULL,
   medication_specs = NULL,
   cohort_table = "cohort",
+  vocab_schema = NULL,
+  vocab_db = NULL,
   ...
 )
 }
@@ -48,6 +50,10 @@ by more than this.}
 \item{medication_specs}{Medication class specifications (needed if \code{explain = TRUE}).}
 
 \item{cohort_table}{Cohort table name (default 'cohort').}
+
+\item{vocab_schema}{Optional schema containing vocabulary tables.}
+
+\item{vocab_db}{Optional attached database containing vocabulary tables.}
 
 \item{...}{Forwarded to \code{\link[=explain_medication_disagreement]{explain_medication_disagreement()}} if \code{explain = TRUE}.}
 }

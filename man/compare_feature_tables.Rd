@@ -7,13 +7,15 @@
 compare_feature_tables(
   left,
   right,
-  keys,
+  keys = NULL,
   by = NULL,
   tolerances = NULL,
   smd_threshold = 0.1,
   missingness_gap_threshold = 0.05,
   scale_ratio_threshold = 5,
-  min_cell_count = 11L
+  min_cell_count = 11L,
+  left_manifest = NULL,
+  right_manifest = NULL
 )
 }
 \arguments{
@@ -34,6 +36,10 @@ compare_feature_tables(
 \item{scale_ratio_threshold}{Maximum allowable ratio of standard deviations (default 5.0).}
 
 \item{min_cell_count}{Cell count threshold for privacy suppression (default 11).}
+
+\item{left_manifest}{Optional companion manifest for left matrix.}
+
+\item{right_manifest}{Optional companion manifest for right matrix.}
 }
 \value{
 A data frame with columns:

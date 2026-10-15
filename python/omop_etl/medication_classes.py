@@ -379,7 +379,7 @@ def extract_medication_classes(
                         warnings.warn(msg, UserWarning)
                 if ids:
                     rows += [(cls, i) for i in sorted(set(ids))]
-                elif on_unresolved in ("raise", "warn"):
+                elif not spec["atc_codes"] and on_unresolved in ("raise", "warn"):
                     msg = f"Medication class '{cls}' has no ancestor concepts or ATC codes."
                     if on_unresolved == "raise":
                         raise ValueError(msg)
@@ -469,6 +469,8 @@ def extract_medication_classes(
             if on_unresolved in ("raise", "warn"):
                 desc_counts = dict(db_con.execute("SELECT drug_class, count(*) FROM _med_class_concepts GROUP BY drug_class").fetchall())
                 for cls in specs:
+                    if cls not in anc_df["drug_class"].values:
+                        continue
                     if desc_counts.get(cls, 0) == 0:
                         msg = f"Medication class '{cls}' resolved to no descendant concepts in concept_ancestor."
                         if on_unresolved == "raise":

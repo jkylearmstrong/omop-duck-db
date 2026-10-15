@@ -8,7 +8,9 @@ vocabulary_preflight(
   con,
   required = c("RxNorm", "ATC", "LOINC", "SNOMED"),
   max_unmapped_rate = 0.5,
-  fail_fast = TRUE
+  fail_fast = TRUE,
+  vocab_schema = NULL,
+  vocab_db = NULL
 )
 }
 \arguments{
@@ -19,9 +21,13 @@ vocabulary_preflight(
 \item{max_unmapped_rate}{Maximum allowable share of concept 0 rows before flagging (default 0.50 = 50 percent).}
 
 \item{fail_fast}{If TRUE, raises an error if any required vocabulary is missing.}
+
+\item{vocab_schema}{Optional schema or attached database name for vocabulary tables.}
+
+\item{vocab_db}{Alias for vocab_schema.}
 }
 \value{
-Named list with preflight metrics and passed status.
+Named list with preflight metrics, drug exposure type breakdown, and passed status.
 }
 \description{
 Checks required vocabulary presence, ATC hierarchy descendant coverage, and unmapped concept 0 rates.

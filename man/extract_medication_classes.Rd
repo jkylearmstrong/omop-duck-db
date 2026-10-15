@@ -20,6 +20,13 @@ extract_medication_classes(
   end_date_col = NULL,
   on_unresolved = c("raise", "warn", "ignore"),
   exclude_forms = NULL,
+  exclude_dose_form_concept_ids = NULL,
+  apply_exclude_to_source = FALSE,
+  exclude_forms_source = FALSE,
+  disaggregate_combinations = FALSE,
+  is_combination = FALSE,
+  vocab_schema = NULL,
+  vocab_db = NULL,
   route_concept_ids = NULL,
   by_type = FALSE,
   return_audit = FALSE,
@@ -59,6 +66,20 @@ columns like \code{source_value} / \code{drug_class}). Combined with inline \cod
 \item{on_unresolved}{Action when concepts or ATC codes fail to resolve (\code{"raise"}, \code{"warn"}, or \code{"ignore"}).}
 
 \item{exclude_forms}{Character vector of dosage/form patterns to exclude (e.g. \code{"topical"}, \code{"ophthalmic"}).}
+
+\item{exclude_dose_form_concept_ids}{Optional concept IDs of dose forms to exclude via 'RxNorm has dose form'.}
+
+\item{apply_exclude_to_source}{Also apply form/dose-form exclusions to strategy A source values.}
+
+\item{exclude_forms_source}{Alias for \code{apply_exclude_to_source}.}
+
+\item{disaggregate_combinations}{If \code{TRUE}, adds \verb{<class>_plain} and \verb{<class>_combination} columns.}
+
+\item{is_combination}{Alias for \code{disaggregate_combinations}.}
+
+\item{vocab_schema}{Optional schema name containing vocabulary tables.}
+
+\item{vocab_db}{Optional attached database containing vocabulary tables.}
 
 \item{route_concept_ids}{Vector of standard OMOP route concept IDs to filter exposures by.}
 

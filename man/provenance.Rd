@@ -4,12 +4,16 @@
 \alias{provenance}
 \title{Provenance Stamp}
 \usage{
-provenance(con = NULL, seed = NULL)
+provenance(con = NULL, seed = NULL, vocab_schema = NULL, vocab_db = NULL)
 }
 \arguments{
 \item{con}{Optional active DuckDB connection.}
 
 \item{seed}{Optional random seed.}
+
+\item{vocab_schema}{Optional schema or attached database name for vocabulary tables.}
+
+\item{vocab_db}{Alias for vocab_schema.}
 }
 \value{
 Named list of provenance metadata.

@@ -4,12 +4,16 @@
 \alias{check_vocabulary_provenance}
 \title{Check Vocabulary Provenance Between Databases}
 \usage{
-check_vocabulary_provenance(con1, con2)
+check_vocabulary_provenance(con1, con2, vocab_schema = NULL, vocab_db = NULL)
 }
 \arguments{
 \item{con1}{First DuckDB connection.}
 
 \item{con2}{Second DuckDB connection.}
+
+\item{vocab_schema}{Optional schema or attached database name for vocabulary tables.}
+
+\item{vocab_db}{Alias for vocab_schema.}
 }
 \value{
 A list with \code{matched} (logical) and \code{comparison} (data frame).

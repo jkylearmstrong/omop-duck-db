@@ -318,7 +318,15 @@ provenance <- function(con = NULL, seed = NULL, vocab_schema = NULL, vocab_db = 
 
   # Try git HEAD from repository root or current directory
   tryCatch({
-    candidate_dirs <- c(getwd(), tryCatch(rprojroot::find_root(rprojroot::is_git_root), error = function(e) ""))
+    find_git_root <- function(p) {
+      cur <- normalizePath(p, winslash = "/", mustWork = FALSE)
+      while (nzchar(cur) && cur != dirname(cur)) {
+        if (dir.exists(file.path(cur, ".git"))) return(cur)
+        cur <- dirname(cur)
+      }
+      ""
+    }
+    candidate_dirs <- unique(c(getwd(), find_git_root(getwd())))
     found_git <- FALSE
     for (d in candidate_dirs) {
       if (nzchar(d) && dir.exists(file.path(d, ".git"))) {

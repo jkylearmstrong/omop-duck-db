@@ -326,7 +326,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
       if (length(ids)) {
         rows[[length(rows) + 1L]] <- data.frame(drug_class = cls, ancestor_concept_id = sort(unique(as.integer(ids))),
                                                 stringsAsFactors = FALSE)
-      } else if (on_unresolved %in% c("raise", "warn")) {
+      } else if (length(spec$atc_codes) == 0 && on_unresolved %in% c("raise", "warn")) {
         msg <- sprintf("Medication class '%s' has no ancestor concepts or ATC codes.", cls)
         if (on_unresolved == "raise") stop(msg) else warning(msg)
       }
@@ -409,6 +409,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     if (on_unresolved %in% c("raise", "warn")) {
       desc_counts <- DBI::dbGetQuery(db_con, "SELECT drug_class, count(*) AS n FROM _med_class_concepts GROUP BY drug_class")
       for (cls in names(specs)) {
+        if (!cls %in% anc_df$drug_class) next
         cnt <- if (cls %in% desc_counts$drug_class) desc_counts$n[desc_counts$drug_class == cls] else 0
         if (cnt == 0) {
           msg <- sprintf("Medication class '%s' resolved to no descendant concepts in concept_ancestor.", cls)

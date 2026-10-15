@@ -14,7 +14,8 @@ cohort_from_index_stays(
   end_date_col = "end_date",
   cohort_definition_id = 1L,
   site_col = "site",
-  target_table = NULL
+  target_table = NULL,
+  group_by = NULL
 )
 }
 \arguments{
@@ -37,6 +38,8 @@ cohort_from_index_stays(
 \item{site_col}{Site column name if present (default 'site').}
 
 \item{target_table}{Optional table name to persist the cohort in DuckDB.}
+
+\item{group_by}{Optional column name (e.g. 'SITE') to stratify match diagnostics by.}
 }
 \value{
 A list with \code{cohort} (data frame) and \code{audit} (list of match metrics).
