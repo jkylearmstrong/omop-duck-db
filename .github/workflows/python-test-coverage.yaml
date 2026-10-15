@@ -28,7 +28,7 @@ jobs:
           use-public-rspm: true
 
       - name: Install R package (required by parity tests)
-        run: Rscript -e "install.packages(c('DBI','duckdb','stringr','yaml')); install.packages('.', repos = NULL, type = 'source')"
+        run: Rscript -e "install.packages(c('DBI','duckdb','stringr','yaml','digest')); install.packages('.', repos = NULL, type = 'source')"
 
       - name: Install Python package (+ dev extras)
         run: |
