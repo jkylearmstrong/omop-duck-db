@@ -22,6 +22,10 @@ rollup_engine_from_bundled(
 \arguments{
 \item{name}{Name of bundled code list (e.g. 'ederri_medications').}
 
+\item{bundle_name}{Optional name of bundled code list.}
+
+\item{resource_name}{Optional alias for bundle/resource name.}
+
 \item{class_col}{Column name for class filtering.}
 
 \item{code_col}{Column name for concept code.}

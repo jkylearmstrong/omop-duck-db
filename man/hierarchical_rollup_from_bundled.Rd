@@ -24,6 +24,8 @@ hierarchical_rollup_from_bundled(
 
 \item{bundle_name}{Name of bundled code list (e.g. 'ederri_medications').}
 
+\item{resource_name}{Optional alias for bundle_name.}
+
 \item{class_col}{Column name for class filtering.}
 
 \item{code_col}{Column name for concept code.}

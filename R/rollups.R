@@ -563,8 +563,9 @@ hierarchical_rollup_from_csv <- function(path,
 
 #' Load Hierarchical Rollup from Bundled Reference Code Lists
 #'
-#' @param bundle_name Name of bundled code list (e.g. 'ederri_medications').
 #' @param name Name of clinical class (e.g. 'Biguanides').
+#' @param bundle_name Name of bundled code list (e.g. 'ederri_medications').
+#' @param resource_name Optional alias for bundle_name.
 #' @param class_col Column name for class filtering.
 #' @param code_col Column name for concept code.
 #' @param vocabulary_col Column name for vocabulary.
@@ -1029,7 +1030,7 @@ rollup_engine_from_folder <- function(folder,
                                       header = TRUE,
                                       ...) {
   if (!dir.exists(folder)) stop(sprintf("Folder path does not exist or is not a directory: %s", folder), call. = FALSE)
-  pattern <- glob2rx(glob)
+  pattern <- utils::glob2rx(glob)
   files <- list.files(folder, pattern = pattern, full.names = TRUE)
   if (length(files) == 0) {
     stop(sprintf("No files matching glob '%s' found in %s", glob, folder), call. = FALSE)
@@ -1057,6 +1058,8 @@ rollup_engine_from_folder <- function(folder,
 #' Load Rollup Engine from Bundled Reference Code Lists
 #'
 #' @param name Name of bundled code list (e.g. 'ederri_medications').
+#' @param bundle_name Optional name of bundled code list.
+#' @param resource_name Optional alias for bundle/resource name.
 #' @param class_col Column name for class filtering.
 #' @param code_col Column name for concept code.
 #' @param vocabulary_col Column name for vocabulary.
