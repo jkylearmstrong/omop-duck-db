@@ -9,11 +9,13 @@ sanitize_measurements(
   cohort_table = NULL,
   method = "dqd_biologic_limits",
   action = "nullify",
+  outlier_action = NULL,
   measurement_concept_ids = NULL,
   limits = NULL,
   iqr_multiplier = 3,
   z_threshold = 4,
-  person_col = "subject_id"
+  person_col = "subject_id",
+  measurement_table = "measurement"
 )
 }
 \arguments{

@@ -23,6 +23,11 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from omop_etl.integrity import (
+    DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS,
+    DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS,
+    DEFAULT_DISPENSED_TYPE_CONCEPT_IDS,
+)
 from omop_etl.paths import read_csv_sql
 
 __all__ = [
@@ -35,6 +40,11 @@ __all__ = [
     "MedicationExtractor",
     "extract_medication_transitions",
     "MedicationTransitions",
+    "compute_drug_eras",
+    "compute_adherence_pdc",
+    "DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS",
+    "DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS",
+    "DEFAULT_DISPENSED_TYPE_CONCEPT_IDS",
 ]
 
 _STRATEGIES = ("source", "standard", "both")
@@ -250,6 +260,9 @@ def extract_medication_classes(
     route_concept_ids: Sequence[int] | None = None,
     by_type: bool = False,
     return_audit: bool = False,
+    offset_anchor: str = "visit_start_date",
+    anchor: str | None = None,
+    drug_type_concept_ids: Sequence[int] | None = None,
     **audit_kwargs,
 ):
     """Flag medication-class exposure for each cohort row by source crosswalk, OMOP hierarchy, or both.
@@ -274,6 +287,9 @@ def extract_medication_classes(
             ``'pre_admission'`` = [index - ``lookback_days`` (default 365), index - 1]; ``'inpatient'`` =
             [index, stay end]; ``'discharge'`` = [stay end, stay end] (orders written at discharge).
             The stay end is ``end_date_col`` (default ``cohort_end_date``/``visit_end_date``).
+        offset_anchor: Milestone date to anchor windows to ('visit_start_date' | 'visit_end_date' | 'index_date').
+        anchor: Alias for offset_anchor.
+        drug_type_concept_ids: Optional sequence of drug_type_concept_id values to filter exposures by.
         on_unresolved: How to handle unresolvable ATC codes / concepts with no descendants (``'ignore'``,
             ``'warn'``, or ``'raise'``).
         exclude_forms: Dosage form strings or concept IDs to exclude (e.g. ``['Ophthalmic', 'Topical']``).
@@ -321,8 +337,10 @@ def extract_medication_classes(
 
     if window is not None and window not in _WINDOWS:
         raise ValueError(f"window must be one of {_WINDOWS}, got {window!r}.")
+    oa = (anchor or offset_anchor or "visit_start_date").lower().strip()
+    use_end_anchor = oa in ("visit_end_date", "end", "discharge", "cohort_end_date")
     ecol = None
-    if window in ("inpatient", "discharge"):
+    if window in ("inpatient", "discharge") or use_end_anchor:
         ecol = _first_present(cols, _END_COLS, "stay end date", end_date_col)
     end_sel = f', CAST("{ecol}" AS DATE) AS end_date' if ecol else ""
     site_sel = f', "{scol}" AS site' if scol else ""
@@ -341,13 +359,19 @@ def extract_medication_classes(
     elif window == "discharge":
         lo, hi = f"AND {d} >= v.end_date", f"AND {d} <= v.end_date"
     else:
-        lo = "" if lookback_days is None else f"AND {d} >= v.index_date - {int(lookback_days)}"
-        hi = f"AND {d} <= v.index_date + {int(lookahead_days)}"
+        anchor_d = "v.end_date" if use_end_anchor else "v.index_date"
+        lo = "" if lookback_days is None else f"AND {d} >= {anchor_d} - {int(lookback_days)}"
+        hi = f"AND {d} <= {anchor_d} + {int(lookahead_days)}"
 
     route_clause = ""
     if route_concept_ids:
         r_ids = ", ".join(str(int(x)) for x in route_concept_ids)
         route_clause = f"AND de.route_concept_id IN ({r_ids})"
+
+    drug_type_clause = ""
+    if drug_type_concept_ids:
+        dt_ids = ", ".join(str(int(x)) for x in drug_type_concept_ids)
+        drug_type_clause = f"AND de.drug_type_concept_id IN ({dt_ids})"
 
     db_con.register("_med_cohort_df", base[["_row", "person_id", "index_date"] + (["end_date"] if ecol else [])])
     flags: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
@@ -485,7 +509,7 @@ def extract_medication_classes(
                 f"SELECT DISTINCT v._row, m.drug_class{combo_hit_sel}{type_sel} FROM _med_cohort v "
                 "JOIN drug_exposure de ON de.person_id = v.person_id "
                 "JOIN _med_class_concepts m ON m.concept_id = de.drug_concept_id "
-                f"WHERE TRUE {lo} {hi} {route_clause}").fetchall()
+                f"WHERE TRUE {lo} {hi} {route_clause} {drug_type_clause}").fetchall()
             for hit in hits:
                 row, cls = hit[0], hit[1]
                 flags["standard"].setdefault(cls, set()).add(row)
@@ -575,7 +599,7 @@ def extract_medication_classes(
                 f"{code_join} "
                 "JOIN _med_xw_df x ON x.source_value = UPPER(TRIM(de.drug_source_value)) "
                 f"OR x.source_value = {code_expr} "
-                f"WHERE TRUE {lo} {hi} {route_clause} {src_exclude_clause}").fetchall()
+                f"WHERE TRUE {lo} {hi} {route_clause} {src_exclude_clause} {drug_type_clause}").fetchall()
             for hit in hits:
                 row, cls = hit[0], hit[1]
                 flags["source"].setdefault(cls, set()).add(row)
@@ -1088,12 +1112,43 @@ class MedicationExtractor:
     >>> me.extract("cohort", window="pre_admission")
     """
 
-    def __init__(self, con, medication_specs: Mapping[str, Any], *, strategy: str = "standard", crosswalk=None):
+    def __init__(
+        self,
+        con,
+        medication_specs: Mapping[str, Any],
+        *,
+        strategy: str = "standard",
+        crosswalk=None,
+        offset_anchor: str = "visit_start_date",
+        anchor: str | None = None,
+        drug_type_concept_ids: Sequence[int] | None = None,
+    ):
         self.con, self.specs, self.strategy, self.crosswalk = con, dict(medication_specs), strategy, crosswalk
+        self.offset_anchor = anchor or offset_anchor
+        self.drug_type_concept_ids = drug_type_concept_ids
 
-    def extract(self, cohort_table: str, window: str | None = None, **kwargs):
+    def extract(
+        self,
+        cohort_table: str,
+        window: str | None = None,
+        offset_anchor: str | None = None,
+        anchor: str | None = None,
+        drug_type_concept_ids: Sequence[int] | None = None,
+        **kwargs,
+    ):
+        oa = anchor or offset_anchor or self.offset_anchor
+        dt = drug_type_concept_ids if drug_type_concept_ids is not None else self.drug_type_concept_ids
         return extract_medication_classes(
-            self.con, cohort_table, self.specs, self.strategy, crosswalk=self.crosswalk, window=window, **kwargs)
+            self.con,
+            cohort_table,
+            self.specs,
+            self.strategy,
+            crosswalk=self.crosswalk,
+            window=window,
+            offset_anchor=oa,
+            drug_type_concept_ids=dt,
+            **kwargs,
+        )
 
     def extract_all_windows(self, cohort_table: str, **kwargs) -> pd.DataFrame:
         """One frame with ``<class>__<window>`` flag columns for every temporal frame."""
@@ -1229,4 +1284,283 @@ def extract_medication_transitions(
     out["med_continued_across_stay"] = any_cont.astype(int)
 
     return MedicationTransitions(out, list(specs.keys()))
+
+
+def compute_drug_eras(
+    con: duckdb.DuckDBPyConnection,
+    concept_set: Sequence[int] | None = None,
+    persistence_window_days: int = 30,
+    *,
+    drug_exposure_table: str = "drug_exposure",
+    output_table: str | None = None,
+) -> pd.DataFrame:
+    """Compute drug eras on-the-fly using DuckDB vectorized window functions (islands & gaps).
+
+    Groups continuous or near-continuous periods of drug exposure within a specified persistence gap.
+
+    Args:
+        con: Active DuckDB connection.
+        concept_set: Optional sequence of drug_concept_ids (or ingredient IDs) to restrict to.
+        persistence_window_days: Maximum allowable gap in days between exposures to stay in the same era (default 30).
+        drug_exposure_table: Name of the drug exposure table/view in DuckDB (default 'drug_exposure').
+        output_table: Optional table name to materialize the computed eras into.
+
+    Returns:
+        pd.DataFrame: Table with columns:
+            drug_era_id, person_id, drug_concept_id, drug_era_start_date,
+            drug_era_end_date, drug_exposure_count, era_days, gap_days.
+    """
+    filter_clause = ""
+    if concept_set:
+        c_str = ", ".join(str(int(c)) for c in concept_set)
+        filter_clause = f"AND drug_concept_id IN ({c_str})"
+
+    sql = f"""
+    WITH raw_exposures AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            CAST(drug_exposure_start_date AS DATE) AS start_date,
+            CAST(COALESCE(
+                drug_exposure_end_date,
+                drug_exposure_start_date + CAST(COALESCE(days_supply, 1) - 1 AS INTEGER),
+                drug_exposure_start_date
+            ) AS DATE) AS end_date
+        FROM {drug_exposure_table}
+        WHERE drug_concept_id IS NOT NULL {filter_clause}
+    ),
+    ordered AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            start_date,
+            end_date,
+            MAX(end_date) OVER (
+                PARTITION BY person_id, drug_concept_id
+                ORDER BY start_date, end_date
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prev_max_end
+        FROM raw_exposures
+    ),
+    flagged AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            start_date,
+            end_date,
+            CASE
+                WHEN prev_max_end IS NULL OR start_date > prev_max_end + {int(persistence_window_days)} THEN 1
+                ELSE 0
+            END AS is_new_era
+        FROM ordered
+    ),
+    grouped AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            start_date,
+            end_date,
+            SUM(is_new_era) OVER (
+                PARTITION BY person_id, drug_concept_id
+                ORDER BY start_date, end_date
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS era_group
+        FROM flagged
+    )
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY person_id, drug_concept_id, MIN(start_date)) AS drug_era_id,
+        person_id,
+        drug_concept_id,
+        MIN(start_date) AS drug_era_start_date,
+        MAX(end_date) AS drug_era_end_date,
+        COUNT(*) AS drug_exposure_count,
+        CAST(date_diff('day', MIN(start_date), MAX(end_date)) + 1 AS INTEGER) AS era_days,
+        CAST(GREATEST(0, date_diff('day', MIN(start_date), MAX(end_date)) + 1 - SUM(date_diff('day', start_date, end_date) + 1)) AS INTEGER) AS gap_days
+    FROM grouped
+    GROUP BY person_id, drug_concept_id, era_group
+    ORDER BY person_id, drug_concept_id, drug_era_start_date
+    """
+
+    if output_table:
+        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        return con.execute(f"SELECT * FROM {output_table}").fetchdf()
+
+    return con.execute(sql).fetchdf()
+
+
+def compute_adherence_pdc(
+    con: duckdb.DuckDBPyConnection,
+    cohort_table: str = "cohort",
+    concept_set: Sequence[int] | None = None,
+    *,
+    lookback_days: int = 180,
+    lookahead_days: int = 0,
+    offset_anchor: str = "visit_start_date",
+    anchor: str | None = None,
+    drug_exposure_table: str = "drug_exposure",
+    person_id_col: str | None = None,
+    index_date_col: str | None = None,
+    end_date_col: str | None = None,
+) -> pd.DataFrame:
+    """Computes Proportion of Days Covered (PDC) and Medication Possession Ratio (MPR) over a study window.
+
+    Vectorized in DuckDB using non-overlapping exposure interval unions to compute exact active days.
+
+    Args:
+        con: Active DuckDB connection.
+        cohort_table: Cohort table name or DataFrame.
+        concept_set: Sequence of target drug_concept_ids to evaluate adherence for.
+        lookback_days: Lookback window in days (default 180).
+        lookahead_days: Lookahead window in days (default 0).
+        offset_anchor: Milestone date to anchor to ('visit_start_date' | 'visit_end_date' | 'index_date').
+        anchor: Alias for offset_anchor.
+        drug_exposure_table: OMOP drug_exposure table name.
+        person_id_col, index_date_col, end_date_col: Custom column names.
+
+    Returns:
+        pd.DataFrame: Patient-level adherence matrix with columns:
+            `person_id`, `index_date`, `window_start`, `window_end`, `covered_days`,
+            `total_days`, `pdc`, `mpr`, `is_adherent_80`.
+    """
+    oa = (anchor or offset_anchor or "visit_start_date").lower()
+    cols = [r[0].lower() for r in con.execute(f"DESCRIBE SELECT * FROM {cohort_table}").fetchall()]
+    pcol = person_id_col or ("person_id" if "person_id" in cols else "subject_id")
+    icol = index_date_col or ("cohort_start_date" if "cohort_start_date" in cols else "index_date")
+    ecol = end_date_col or ("cohort_end_date" if "cohort_end_date" in cols else ("visit_end_date" if "visit_end_date" in cols else icol))
+
+    use_end = oa in ("visit_end_date", "end", "discharge", "cohort_end_date")
+    anchor_col = ecol if use_end else icol
+
+    c_filter = ""
+    if concept_set:
+        c_str = ", ".join(str(int(c)) for c in concept_set)
+        c_filter = f"AND de.drug_concept_id IN ({c_str})"
+
+    sql = f"""
+    WITH cohort_windows AS (
+        SELECT DISTINCT
+            CAST({pcol} AS BIGINT) AS person_id,
+            CAST({icol} AS DATE) AS index_date,
+            CAST({anchor_col} AS DATE) - {int(lookback_days)} AS w_start,
+            CAST({anchor_col} AS DATE) + {int(lookahead_days)} AS w_end,
+            CAST(date_diff('day', CAST({anchor_col} AS DATE) - {int(lookback_days)}, CAST({anchor_col} AS DATE) + {int(lookahead_days)}) + 1 AS INTEGER) AS total_days
+        FROM {cohort_table}
+    ),
+    raw_exp AS (
+        SELECT
+            cw.person_id,
+            cw.index_date,
+            cw.w_start,
+            cw.w_end,
+            cw.total_days,
+            GREATEST(cw.w_start, CAST(de.drug_exposure_start_date AS DATE)) AS exp_start,
+            LEAST(cw.w_end, CAST(COALESCE(
+                de.drug_exposure_end_date,
+                de.drug_exposure_start_date + CAST(COALESCE(de.days_supply, 1) - 1 AS INTEGER),
+                de.drug_exposure_start_date
+            ) AS DATE)) AS exp_end,
+            CAST(COALESCE(de.days_supply, 1) AS INTEGER) AS days_supply
+        FROM cohort_windows cw
+        JOIN {drug_exposure_table} de ON de.person_id = cw.person_id
+        WHERE de.drug_concept_id IS NOT NULL {c_filter}
+          AND CAST(de.drug_exposure_start_date AS DATE) <= cw.w_end
+          AND CAST(COALESCE(
+                de.drug_exposure_end_date,
+                de.drug_exposure_start_date + CAST(COALESCE(de.days_supply, 1) - 1 AS INTEGER),
+                de.drug_exposure_start_date
+            ) AS DATE) >= cw.w_start
+    ),
+    valid_exp AS (
+        SELECT * FROM raw_exp WHERE exp_start <= exp_end
+    ),
+    ordered_exp AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            exp_start,
+            exp_end,
+            days_supply,
+            MAX(exp_end) OVER (
+                PARTITION BY person_id, index_date
+                ORDER BY exp_start, exp_end
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prev_max_end
+        FROM valid_exp
+    ),
+    flagged_exp AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            exp_start,
+            exp_end,
+            days_supply,
+            CASE
+                WHEN prev_max_end IS NULL OR exp_start > prev_max_end + 1 THEN 1
+                ELSE 0
+            END AS is_new_block
+        FROM ordered_exp
+    ),
+    grouped_exp AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            exp_start,
+            exp_end,
+            days_supply,
+            SUM(is_new_block) OVER (
+                PARTITION BY person_id, index_date
+                ORDER BY exp_start, exp_end
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS block_id
+        FROM flagged_exp
+    ),
+    merged_blocks AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            block_id,
+            date_diff('day', MIN(exp_start), MAX(exp_end)) + 1 AS block_covered_days,
+            SUM(days_supply) AS block_days_supply
+        FROM grouped_exp
+        GROUP BY person_id, index_date, w_start, w_end, total_days, block_id
+    ),
+    patient_adherence AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            SUM(block_covered_days) AS covered_days,
+            SUM(block_days_supply) AS total_supply_days
+        FROM merged_blocks
+        GROUP BY person_id, index_date, w_start, w_end, total_days
+    )
+    SELECT
+        cw.person_id,
+        cw.index_date,
+        cw.w_start AS window_start,
+        cw.w_end AS window_end,
+        COALESCE(pa.covered_days, 0) AS covered_days,
+        cw.total_days,
+        ROUND(CAST(COALESCE(pa.covered_days, 0) AS DOUBLE) / GREATEST(1, cw.total_days), 4) AS pdc,
+        ROUND(CAST(COALESCE(pa.total_supply_days, 0) AS DOUBLE) / GREATEST(1, cw.total_days), 4) AS mpr,
+        CASE WHEN ROUND(CAST(COALESCE(pa.covered_days, 0) AS DOUBLE) / GREATEST(1, cw.total_days), 4) >= 0.80 THEN 1 ELSE 0 END AS is_adherent_80
+    FROM cohort_windows cw
+    LEFT JOIN patient_adherence pa ON pa.person_id = cw.person_id AND pa.index_date = cw.index_date
+    ORDER BY cw.person_id, cw.index_date
+    """
+    return con.execute(sql).fetchdf()
 

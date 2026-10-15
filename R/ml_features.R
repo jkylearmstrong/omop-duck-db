@@ -474,3 +474,138 @@ extract_clinical_sequence_tokens <- function(con,
     max_seq_len = max_seq_len
   )
 }
+
+.locf_vec <- function(x) {
+  if (length(x) <= 1L || !any(is.na(x))) return(x)
+  for (i in 2:length(x)) {
+    if (is.na(x[i])) x[i] <- x[i - 1L]
+  }
+  x
+}
+
+#' Deterministic In-Encounter LOCF & Leakage-Safe Imputation
+#'
+#' Provides within-encounter last observation carried forward (LOCF) for vital signs and
+#' repeated laboratory measurements, encounter-level missingness indicators (`miss_<feature>`),
+#' and training-set-derived median imputation to prevent cross-validation leakage.
+#'
+#' @param data A `data.frame` or active DuckDB/DBI connection holding encounter observations.
+#' @param features Optional character vector of feature column names to impute. Defaults to all numeric features.
+#' @param encounter_col Name of the encounter identifier column (default `"visit_occurrence_id"`).
+#' @param time_col Name of the timestamp or sequential ordering column within encounters (default `"measurement_datetime"`).
+#' @param order_col Alias for `time_col`.
+#' @param id_col Patient identifier column name (default `"person_id"`).
+#' @param imputation_strategy Imputation strategy: `"locf_median"` (default), `"locf"`, or `"median"`.
+#' @param training_medians Optional named list or vector of medians pre-computed on training data.
+#' @param median_values Alias for `training_medians`.
+#' @param add_missing_indicators Whether to append binary `miss_<feature>` indicator columns (default `TRUE`).
+#' @param add_indicators Alias for `add_missing_indicators`.
+#' @param table_name Name of the table if `data` is a database connection.
+#' @param feature_table Alias for `table_name`.
+#' @param return_medians Logical; if `TRUE`, returns `list(data = df, applied_medians = applied_medians)`.
+#' @return A `data.frame` with imputed values and missingness flags, having an attribute `"applied_medians"`.
+#' @export
+impute_encounter_observations <- function(data,
+                                         features = NULL,
+                                         encounter_col = "visit_occurrence_id",
+                                         time_col = "measurement_datetime",
+                                         order_col = NULL,
+                                         id_col = "person_id",
+                                         imputation_strategy = c("locf_median", "locf", "median"),
+                                         training_medians = NULL,
+                                         median_values = NULL,
+                                         add_missing_indicators = TRUE,
+                                         add_indicators = NULL,
+                                         table_name = NULL,
+                                         feature_table = NULL,
+                                         return_medians = FALSE) {
+  strat <- if (is.character(imputation_strategy)) imputation_strategy[1] else "locf_median"
+  tbl <- if (!is.null(feature_table)) feature_table else if (!is.null(table_name)) table_name else "measurement"
+  medians <- if (!is.null(median_values)) as.list(median_values) else if (!is.null(training_medians)) as.list(training_medians) else list()
+  add_ind <- if (!is.null(add_indicators)) isTRUE(add_indicators) else isTRUE(add_missing_indicators)
+
+  if (inherits(data, "DBIConnection")) {
+    df <- DBI::dbGetQuery(data, sprintf("SELECT * FROM %s", tbl))
+  } else if (is.data.frame(data)) {
+    df <- as.data.frame(data)
+  } else {
+    stop("data must be a data.frame or DBI/DuckDB connection.", call. = FALSE)
+  }
+
+  t_col <- if (!is.null(order_col)) order_col else time_col
+
+  cols_lower <- stats::setNames(names(df), tolower(names(df)))
+  enc_c <- if (tolower(encounter_col) %in% names(cols_lower)) cols_lower[[tolower(encounter_col)]] else encounter_col
+  t_c <- if (tolower(t_col) %in% names(cols_lower)) cols_lower[[tolower(t_col)]] else t_col
+  pid_c <- if (tolower(id_col) %in% names(cols_lower)) cols_lower[[tolower(id_col)]] else id_col
+
+  # Sort chronologically within encounter
+  sort_keys <- intersect(c(enc_c, t_c), names(df))
+  if (length(sort_keys) > 0 && nrow(df) > 0) {
+    ord_args <- lapply(sort_keys, function(k) df[[k]])
+    df <- df[do.call(order, ord_args), , drop = FALSE]
+    rownames(df) <- NULL
+  }
+
+  # Identify features
+  if (!is.null(features)) {
+    target_features <- character(0)
+    for (f in features) {
+      if (tolower(f) %in% names(cols_lower)) {
+        target_features <- c(target_features, cols_lower[[tolower(f)]])
+      } else if (f %in% names(df)) {
+        target_features <- c(target_features, f)
+      }
+    }
+  } else {
+    skip_cols <- tolower(c(enc_c, t_c, pid_c, "subject_id", "measurement_id", "measurement_concept_id"))
+    num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
+    target_features <- num_cols[!tolower(num_cols) %in% skip_cols & !grepl("^miss_", num_cols, ignore.case = TRUE)]
+  }
+
+  # 1. Missingness indicators
+  if (add_ind) {
+    for (f in target_features) {
+      df[[paste0("miss_", f)]] <- as.integer(is.na(df[[f]]))
+    }
+  }
+
+  # 2. In-encounter LOCF
+  if (strat %in% c("locf", "locf_median") && enc_c %in% names(df) && nrow(df) > 0) {
+    split_indices <- split(seq_len(nrow(df)), df[[enc_c]])
+    for (f in target_features) {
+      vals <- df[[f]]
+      for (idx in split_indices) {
+        if (length(idx) > 1L && any(is.na(vals[idx]))) {
+          vals[idx] <- .locf_vec(vals[idx])
+        }
+      }
+      df[[f]] <- vals
+    }
+  }
+
+  # 3. Leakage-safe median imputation
+  applied_medians <- medians
+  if (strat %in% c("median", "locf_median")) {
+    for (f in target_features) {
+      f_key <- as.character(f)
+      if (!f_key %in% names(applied_medians)) {
+        non_na <- df[[f]][!is.na(df[[f]])]
+        m_val <- if (length(non_na) > 0) as.numeric(stats::median(non_na)) else 0.0
+        applied_medians[[f_key]] <- m_val
+      }
+      m_impute <- as.numeric(applied_medians[[f_key]])
+      na_mask <- is.na(df[[f]])
+      if (any(na_mask)) {
+        df[[f]][na_mask] <- m_impute
+      }
+    }
+  }
+
+  attr(df, "applied_medians") <- applied_medians
+  if (isTRUE(return_medians)) {
+    return(list(data = df, applied_medians = applied_medians))
+  }
+  df
+}
+

@@ -8,7 +8,7 @@ filter_bounds(
   data,
   bounds = NULL,
   population = c("adult", "pediatric", "neonatal"),
-  action = c("nullify", "clip", "drop"),
+  action = c("nullify", "clip", "drop", "winsorize", "flag_indicator"),
   feature_col = NULL,
   value_col = "value_as_number"
 )

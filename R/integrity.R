@@ -308,7 +308,7 @@ provenance <- function(con = NULL, seed = NULL, vocab_schema = NULL, vocab_db = 
   v_schema <- if (!is.null(vocab_schema)) vocab_schema else vocab_db
   prov <- list(
     package_name = "omopduckdb",
-    package_version = "0.6.5",
+    package_version = "0.6.6",
     duckdb_version = as.character(utils::packageVersion("duckdb")),
     timestamp_utc = format(as.POSIXlt(Sys.time(), tz = "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
     seed = seed,
@@ -577,15 +577,37 @@ scan_document_numbers <- function(doc_text_or_path, manifest, previous_manifest 
 #' @param con DuckDB connection.
 #' @param required Vector of required vocabulary IDs (default RxNorm, ATC, LOINC, SNOMED).
 #' @param max_unmapped_rate Maximum allowable share of concept 0 rows before flagging (default 0.50 = 50 percent).
+#' Default OMOP CDM concept sets for drug exposure types
+#' @export
+DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS <- c(32838L, 38000177L, 32817L)
+#' @export
+DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS <- c(38000180L, 32828L)
+#' @export
+DEFAULT_DISPENSED_TYPE_CONCEPT_IDS <- c(38000175L, 32823L)
+
+#' Runs a comprehensive preflight verification of OMOP CDM vocabulary coverage, ATC hierarchies,
+#' unmapped concept 0 rates across clinical tables, and drug exposure types.
+#'
+#' @param con DuckDB OMOP database connection.
+#' @param required Required vocabulary IDs (default: RxNorm, ATC, LOINC, SNOMED).
+#' @param max_unmapped_rate Maximum allowable share of concept 0 unmapped rows before flagging (default 0.50 = 50%).
 #' @param fail_fast If TRUE, raises an error if any required vocabulary is missing.
 #' @param vocab_schema Optional schema or attached database name for vocabulary tables.
 #' @param vocab_db Alias for vocab_schema.
+#' @param prescribed_type_concept_ids Optional integer vector of prescribed concept IDs (default: 32838, 38000177, 32817).
+#' @param administered_type_concept_ids Optional integer vector of administered concept IDs (default: 38000180, 32828).
+#' @param dispensed_type_concept_ids Optional integer vector of dispensed concept IDs (default: 38000175, 32823).
 #' @return Named list with preflight metrics, drug exposure type breakdown, and passed status.
 #' @export
-vocabulary_preflight <- function(con, required = c("RxNorm", "ATC", "LOINC", "SNOMED"), max_unmapped_rate = 0.50, fail_fast = TRUE, vocab_schema = NULL, vocab_db = NULL) {
+vocabulary_preflight <- function(con, required = c("RxNorm", "ATC", "LOINC", "SNOMED"), max_unmapped_rate = 0.50, fail_fast = TRUE, vocab_schema = NULL, vocab_db = NULL, prescribed_type_concept_ids = NULL, administered_type_concept_ids = NULL, dispensed_type_concept_ids = NULL) {
   v_schema <- if (!is.null(vocab_schema)) vocab_schema else vocab_db
   concept_tbl <- if (!is.null(v_schema)) sprintf("%s.concept", v_schema) else "concept"
   ca_tbl <- if (!is.null(v_schema)) sprintf("%s.concept_ancestor", v_schema) else "concept_ancestor"
+
+  p_ids <- if (!is.null(prescribed_type_concept_ids)) as.integer(prescribed_type_concept_ids) else DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS
+  a_ids <- if (!is.null(administered_type_concept_ids)) as.integer(administered_type_concept_ids) else DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS
+  d_ids <- if (!is.null(dispensed_type_concept_ids)) as.integer(dispensed_type_concept_ids) else DEFAULT_DISPENSED_TYPE_CONCEPT_IDS
+  all_known_ids <- unique(c(p_ids, a_ids, d_ids))
 
   if (is.null(v_schema)) {
     has_c <- tryCatch(DBI::dbGetQuery(con, "SELECT 1 FROM concept LIMIT 1"), error = function(e) NULL)
@@ -605,12 +627,13 @@ vocabulary_preflight <- function(con, required = c("RxNorm", "ATC", "LOINC", "SN
     atc_counts = list(),
     drug_types = list(
       prescribed = 0L, administered = 0L, dispensed = 0L, other = 0L, total = 0L,
-      prescribed_38000177 = 0L, administered_38000180 = 0L, dispensed_38000175 = 0L
+      prescribed_38000177 = 0L, prescribed_32838 = 0L, administered_38000180 = 0L, dispensed_38000175 = 0L
     ),
     drug_type_breakdown = list(),
     issues = character()
   )
   report$drug_type_breakdown <- report$drug_types
+  report$prescriptions_by_type <- report$drug_types
 
   for (v in required) {
     cnt <- tryCatch({
@@ -643,24 +666,37 @@ vocabulary_preflight <- function(con, required = c("RxNorm", "ATC", "LOINC", "SN
       SELECT count(*) AS n FROM information_schema.tables WHERE lower(table_name) = 'drug_exposure'
     ")$n[1] > 0
     if (has_de) {
-      dt_stats <- DBI::dbGetQuery(con, "
+      p_sql <- if (length(p_ids) > 0) paste(p_ids, collapse = ", ") else "NULL"
+      a_sql <- if (length(a_ids) > 0) paste(a_ids, collapse = ", ") else "NULL"
+      d_sql <- if (length(d_ids) > 0) paste(d_ids, collapse = ", ") else "NULL"
+      all_sql <- if (length(all_known_ids) > 0) paste(all_known_ids, collapse = ", ") else "NULL"
+
+      dt_stats <- DBI::dbGetQuery(con, sprintf("
         SELECT
-          count(CASE WHEN drug_type_concept_id = 38000177 THEN 1 END) AS prescribed,
-          count(CASE WHEN drug_type_concept_id = 38000180 THEN 1 END) AS administered,
-          count(CASE WHEN drug_type_concept_id = 38000175 THEN 1 END) AS dispensed,
-          count(CASE WHEN drug_type_concept_id NOT IN (38000177, 38000180, 38000175) OR drug_type_concept_id IS NULL THEN 1 END) AS other,
+          count(CASE WHEN drug_type_concept_id IN (%s) THEN 1 END) AS prescribed,
+          count(CASE WHEN drug_type_concept_id IN (%s) THEN 1 END) AS administered,
+          count(CASE WHEN drug_type_concept_id IN (%s) THEN 1 END) AS dispensed,
+          count(CASE WHEN drug_type_concept_id NOT IN (%s) OR drug_type_concept_id IS NULL THEN 1 END) AS other,
+          count(CASE WHEN drug_type_concept_id = 38000177 THEN 1 END) AS prescribed_38000177,
+          count(CASE WHEN drug_type_concept_id = 32838 THEN 1 END) AS prescribed_32838,
+          count(CASE WHEN drug_type_concept_id = 38000180 THEN 1 END) AS administered_38000180,
+          count(CASE WHEN drug_type_concept_id = 38000175 THEN 1 END) AS dispensed_38000175,
           count(*) AS total
         FROM drug_exposure
-      ")
+      ", p_sql, a_sql, d_sql, all_sql))
       if (nrow(dt_stats) > 0) {
         p <- as.integer(dt_stats$prescribed[1] %||% 0)
         a <- as.integer(dt_stats$administered[1] %||% 0)
         d <- as.integer(dt_stats$dispensed[1] %||% 0)
         o <- as.integer(dt_stats$other[1] %||% 0)
+        p38 <- as.integer(dt_stats$prescribed_38000177[1] %||% 0)
+        p32 <- as.integer(dt_stats$prescribed_32838[1] %||% 0)
+        a38 <- as.integer(dt_stats$administered_38000180[1] %||% 0)
+        d38 <- as.integer(dt_stats$dispensed_38000175[1] %||% 0)
         tot <- as.integer(dt_stats$total[1] %||% 0)
         dt_list <- list(
           prescribed = p, administered = a, dispensed = d, other = o, total = tot,
-          prescribed_38000177 = p, administered_38000180 = a, dispensed_38000175 = d,
+          prescribed_38000177 = p38, prescribed_32838 = p32, administered_38000180 = a38, dispensed_38000175 = d38,
           prescribed_pct = if (tot > 0) round(p * 100.0 / tot, 2) else 0.0,
           administered_pct = if (tot > 0) round(a * 100.0 / tot, 2) else 0.0,
           dispensed_pct = if (tot > 0) round(d * 100.0 / tot, 2) else 0.0

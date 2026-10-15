@@ -10,7 +10,9 @@ consortium_survival_meta_analysis(
   event_col = "event",
   strata_col = "site_id",
   group_col = NULL,
-  min_cell_size = 11L
+  min_cell_size = 11L,
+  competing_event = 2L,
+  competing_risk_col = NULL
 )
 }
 \arguments{
@@ -25,6 +27,10 @@ consortium_survival_meta_analysis(
 \item{group_col}{Optional name of binary treatment/group column.}
 
 \item{min_cell_size}{Minimum cell count for privacy suppression (default 11L).}
+
+\item{competing_event}{Integer indicator value representing competing event (default 2L).}
+
+\item{competing_risk_col}{Optional separate binary column indicating competing event.}
 }
 \value{
 An object of class \code{c("omop_federated_survival", "list")}.
@@ -33,4 +39,8 @@ An object of class \code{c("omop_federated_survival", "list")}.
 Pools Cox Proportional Hazard Ratios across participating consortium sites using
 DerSimonian-Laird random-effects meta-analysis and builds pooled Kaplan-Meier survival curves
 with automatic small-cell suppression (< 11).
+
+Pools Cox Proportional Hazard Ratios across participating consortium sites using
+DerSimonian-Laird random-effects meta-analysis and builds pooled Kaplan-Meier survival curves
+and Aalen-Johansen Cumulative Incidence Functions (CIF) for competing risks with automatic small-cell suppression (< 11).
 }

@@ -24,6 +24,8 @@ __all__ = [
     "plausibility_report",
     "detect_redundant_features",
     "dqd_summary",
+    "detect_unit_discordance",
+    "normalize_units",
 ]
 
 _DEFAULT_PANELS = {
@@ -298,6 +300,7 @@ def plausibility_report(
     sd_to_mean_max: float = 3.0,
     min_pct: float = 0.0,
     max_pct: float = 100.0,
+    audit_unit_discordance: bool = True,
     ci_gate: bool = False,
 ) -> pd.DataFrame:
     """Table-level and feature-level physiological plausibility report and CI gate.
@@ -313,6 +316,7 @@ def plausibility_report(
         sd_to_mean_max: Maximum plausible SD-to-mean ratio for strictly positive variables (default 3.0).
         min_pct: Minimum valid percentage (default 0.0).
         max_pct: Maximum valid percentage (default 100.0).
+        audit_unit_discordance: Whether to audit laboratory unit discordance / bimodal scaling (default True).
         ci_gate: If True, raises a ValueError if any plausibility check fails.
 
     Returns:
@@ -443,6 +447,22 @@ def plausibility_report(
                         "flagged": True,
                         "reason": "impossible_percentage",
                     })
+
+    if audit_unit_discordance:
+        try:
+            disc_df = detect_unit_discordance(df)
+            if not disc_df.empty:
+                for _, r in disc_df[disc_df["flagged"]].iterrows():
+                    records.append({
+                        "feature": str(r["feature"]),
+                        "metric": "unit_discordance",
+                        "observed_value": round(float(r["detected_ratio"]), 2),
+                        "expected_range": f"~{r['expected_conversion']}",
+                        "flagged": True,
+                        "reason": f"suspected_unit_mismatch_{r['suspected_unit']}_vs_{r['target_unit']}",
+                    })
+        except Exception:
+            pass
 
     out = pd.DataFrame(records)
     if out.empty:
@@ -659,3 +679,204 @@ def dqd_summary(
         })
 
     return pd.DataFrame(summary_rows)
+
+
+KNOWN_UNIT_CONVERSIONS = {
+    "creatinine": {"ratio": 88.42, "target": "mg/dL", "alt": "umol/L", "concept_ids": (3016723, 3015632, 3020564), "thresh": 15.0},
+    "glucose": {"ratio": 18.016, "target": "mg/dL", "alt": "mmol/L", "concept_ids": (3004501, 3000483), "thresh": 25.0},
+    "bilirubin_total": {"ratio": 17.1, "target": "mg/dL", "alt": "umol/L", "concept_ids": (3024128, 3024561), "thresh": 10.0},
+    "calcium": {"ratio": 4.008, "target": "mg/dL", "alt": "mmol/L", "concept_ids": (3019550, 3014576), "thresh": 5.0},
+    "bun": {"ratio": 2.801, "target": "mg/dL", "alt": "mmol/L", "concept_ids": (3013682, 3004295), "thresh": 15.0},
+    "albumin": {"ratio": 10.0, "target": "g/dL", "alt": "g/L", "concept_ids": (3024561, 3013721), "thresh": 12.0},
+    "wbc": {"ratio": 1000.0, "target": "10*3/uL", "alt": "cells/uL", "concept_ids": (3000905, 3010813), "thresh": 300.0},
+    "platelets": {"ratio": 1000.0, "target": "10*3/uL", "alt": "cells/uL", "concept_ids": (3024929, 3007461), "thresh": 1500.0},
+}
+
+
+def detect_unit_discordance(
+    con_or_df: duckdb.DuckDBPyConnection | pd.DataFrame,
+    *,
+    measurement_concept_id: int | None = None,
+    concept_id: int | None = None,
+    target_unit: str | None = None,
+    site_col: str | None = "site",
+    measurement_table: str = "measurement",
+    value_col: str = "value_as_number",
+    concept_col: str = "measurement_concept_id",
+    tolerance: float = 0.35,
+) -> pd.DataFrame:
+    """Audits distributions per measurement/analyte across sites or within a dataset to detect unit discordance.
+
+    Detects when multi-site medians or within-dataset bimodal distributions deviate by standard conversion factors
+    (e.g., Creatinine in mg/dL vs. umol/L x88.42, Glucose in mg/dL vs. mmol/L x18.016, Albumin g/dL vs. g/L x10).
+    """
+    target_cid = measurement_concept_id if concept_id is None else concept_id
+    if isinstance(con_or_df, duckdb.DuckDBPyConnection):
+        df = con_or_df.execute(f"SELECT * FROM {measurement_table}").df()
+    else:
+        df = con_or_df.copy()
+
+    records = []
+    cols_lower = {c.lower(): c for c in df.columns}
+    actual_site = cols_lower.get(site_col.lower()) if site_col else None
+    actual_val = cols_lower.get(value_col.lower(), value_col)
+    actual_concept = cols_lower.get(concept_col.lower(), concept_col)
+
+    for analyte, info in KNOWN_UNIT_CONVERSIONS.items():
+        vals_by_site: dict[str, pd.Series] = {}
+        target_series: pd.Series | None = None
+        cid_found = None
+
+        if actual_concept in df.columns and actual_val in df.columns:
+            for cid in info["concept_ids"]:
+                sub = df[df[actual_concept] == cid]
+                if not sub.empty:
+                    cid_found = cid
+                    if actual_site and actual_site in sub.columns and sub[actual_site].nunique() > 1:
+                        for s, grp in sub.groupby(actual_site):
+                            s_vals = pd.to_numeric(grp[actual_val], errors="coerce").dropna()
+                            if len(s_vals) > 0:
+                                vals_by_site[str(s)] = s_vals
+                    target_series = pd.to_numeric(sub[actual_val], errors="coerce").dropna()
+                    break
+
+        if target_series is None or target_series.empty:
+            for col_name, orig_col in cols_lower.items():
+                if col_name == analyte or col_name.startswith(f"{analyte}_") or col_name.endswith(f"_{analyte}"):
+                    s_vals = pd.to_numeric(df[orig_col], errors="coerce").dropna()
+                    if not s_vals.empty:
+                        target_series = s_vals
+                        if actual_site and actual_site in df.columns and df[actual_site].nunique() > 1:
+                            for s, grp in df.groupby(actual_site):
+                                site_s = pd.to_numeric(grp[orig_col], errors="coerce").dropna()
+                                if len(site_s) > 0:
+                                    vals_by_site[str(s)] = site_s
+                        break
+
+        if target_series is None or len(target_series) < 2:
+            continue
+
+        exp_ratio = float(info["ratio"])
+        thresh = float(info["thresh"])
+
+        # 1. Multi-site median audit
+        if len(vals_by_site) >= 2:
+            site_medians = {s: float(v.median()) for s, v in vals_by_site.items() if len(v) >= 2}
+            sites = list(site_medians.keys())
+            for i in range(len(sites)):
+                for j in range(i + 1, len(sites)):
+                    s1, s2 = sites[i], sites[j]
+                    m1, m2 = site_medians[s1], site_medians[s2]
+                    if m1 <= 0 or m2 <= 0:
+                        continue
+                    obs_ratio = max(m1, m2) / max(min(m1, m2), 1e-6)
+                    if abs(obs_ratio - exp_ratio) / exp_ratio <= tolerance:
+                        high_site = s1 if m1 > m2 else s2
+                        low_site = s2 if m1 > m2 else s1
+                        records.append({
+                            "feature": analyte,
+                            "measurement_concept_id": cid_found,
+                            "site": f"{high_site}_vs_{low_site}",
+                            "median_val": round(max(m1, m2), 2),
+                            "detected_ratio": round(obs_ratio, 2),
+                            "expected_conversion": exp_ratio,
+                            "suspected_unit": info["alt"],
+                            "target_unit": info["target"],
+                            "flagged": True,
+                            "is_discordant": True,
+                            "discordance_type": "cross_site_ratio",
+                            "recommendation": f"Convert site {high_site} from {info['alt']} to {info['target']} (divide by {exp_ratio})",
+                        })
+
+        # 2. Within-dataset bimodal distribution audit
+        sub_low = target_series[target_series <= thresh]
+        sub_high = target_series[target_series > thresh]
+        if len(sub_low) >= 2 and len(sub_high) >= 2:
+            m_low = float(sub_low.median())
+            m_high = float(sub_high.median())
+            if m_low > 0:
+                obs_ratio = m_high / m_low
+                if abs(obs_ratio - exp_ratio) / exp_ratio <= tolerance:
+                    records.append({
+                        "feature": analyte,
+                        "measurement_concept_id": cid_found,
+                        "site": "internal_bimodal",
+                        "median_val": round(m_high, 2),
+                        "detected_ratio": round(obs_ratio, 2),
+                        "expected_conversion": exp_ratio,
+                        "suspected_unit": info["alt"],
+                        "target_unit": info["target"],
+                        "flagged": True,
+                        "is_discordant": True,
+                        "discordance_type": "bimodal_distribution",
+                        "recommendation": f"Normalize values > {thresh} from {info['alt']} to {info['target']} (divide by {exp_ratio})",
+                    })
+
+    if not records:
+        return pd.DataFrame(columns=[
+            "feature", "measurement_concept_id", "site", "median_val", "detected_ratio",
+            "expected_conversion", "suspected_unit", "target_unit", "flagged", "is_discordant",
+            "discordance_type", "recommendation",
+        ])
+    return pd.DataFrame(records)
+
+
+def normalize_units(
+    con_or_df: duckdb.DuckDBPyConnection | pd.DataFrame,
+    concept_id: int | None = None,
+    feature: str | None = None,
+    target_unit: str = "mg/dL",
+    auto_convert_ratio: float = 88.42,
+    threshold: float | None = None,
+    value_col: str = "value_as_number",
+    concept_col: str = "measurement_concept_id",
+    measurement_concept_id: int | None = None,
+    measurement_table: str = "measurement",
+    output_table: str | None = None,
+) -> pd.DataFrame:
+    """Normalizes bimodal or discordant measurement values to a canonical target unit.
+
+    Converts values detected in alternative units (e.g. umol/L -> mg/dL by dividing by 88.42)
+    while preserving already-standardized values.
+    """
+    cid = measurement_concept_id if concept_id is None else concept_id
+    if isinstance(con_or_df, duckdb.DuckDBPyConnection):
+        df = con_or_df.execute(f"SELECT * FROM {measurement_table}").df()
+    else:
+        df = con_or_df.copy()
+
+    thresh = threshold
+    if thresh is None:
+        if auto_convert_ratio > 50:
+            thresh = 15.0  # e.g. Creatinine
+        elif auto_convert_ratio > 10:
+            thresh = 25.0  # e.g. Glucose
+        else:
+            thresh = 10.0
+
+    cols_lower = {c.lower(): c for c in df.columns}
+    actual_val = cols_lower.get(value_col.lower(), value_col)
+    actual_concept = cols_lower.get(concept_col.lower(), concept_col)
+
+    if feature:
+        f_col = cols_lower.get(feature.lower(), feature)
+        if f_col in df.columns:
+            s = pd.to_numeric(df[f_col], errors="coerce")
+            mask = s > thresh
+            df.loc[mask, f_col] = s.loc[mask] / auto_convert_ratio
+            return df
+
+    if actual_concept in df.columns and actual_val in df.columns:
+        s = pd.to_numeric(df[actual_val], errors="coerce")
+        if cid is not None:
+            mask = (df[actual_concept] == int(cid)) & (s > thresh)
+        else:
+            mask = s > thresh
+        df.loc[mask, actual_val] = s.loc[mask] / auto_convert_ratio
+
+    if output_table and isinstance(con_or_df, duckdb.DuckDBPyConnection):
+        con_or_df.register("_temp_norm_df", df)
+        con_or_df.execute(f"CREATE OR REPLACE TABLE {output_table} AS SELECT * FROM _temp_norm_df")
+        con_or_df.unregister("_temp_norm_df")
+
+    return df

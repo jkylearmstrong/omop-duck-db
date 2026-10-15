@@ -10,7 +10,9 @@ extract_temporal_trajectories(
   measurement_concept_ids,
   window_days = 365L,
   index_date_col = "cohort_start_date",
-  id_col = "person_id"
+  id_col = "person_id",
+  offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
+  anchor = NULL
 )
 }
 \arguments{
@@ -25,6 +27,10 @@ extract_temporal_trajectories(
 \item{index_date_col}{Column name for index date (default "cohort_start_date").}
 
 \item{id_col}{Column identifying patient (default "person_id").}
+
+\item{offset_anchor}{Milestone date to anchor lookback windows ('visit_start_date' | 'visit_end_date' | 'index_date').}
+
+\item{anchor}{Alias for offset_anchor.}
 }
 \value{
 A data.frame with wide trajectory features per patient.

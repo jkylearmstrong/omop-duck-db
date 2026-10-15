@@ -326,7 +326,9 @@ export_companion_manifest <- function(source, output_path = NULL, con = NULL,
 compare_feature_tables <- function(left, right, keys = NULL, by = NULL, tolerances = NULL,
                                    smd_threshold = 0.10, missingness_gap_threshold = 0.05,
                                    scale_ratio_threshold = 5.0, min_cell_count = 11L,
-                                   left_manifest = NULL, right_manifest = NULL) {
+                                   left_manifest = NULL, right_manifest = NULL,
+                                   stream_to_parquet = NULL, partition_by = NULL,
+                                   to_arrow_dataset = FALSE) {
   left_df <- left
   if (!is.null(left_manifest)) {
     lm <- if (is.data.frame(left_manifest)) left_manifest else utils::read.csv(left_manifest, stringsAsFactors = FALSE)
@@ -459,6 +461,23 @@ compare_feature_tables <- function(left, right, keys = NULL, by = NULL, toleranc
     ))
   }
   rownames(out) <- NULL
+
+  if (!is.null(stream_to_parquet) && nzchar(stream_to_parquet)) {
+    out_dir <- dirname(stream_to_parquet)
+    if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    if (requireNamespace("arrow", quietly = TRUE)) {
+      if (!is.null(partition_by) && length(partition_by) > 0 && all(partition_by %in% names(out))) {
+        arrow::write_dataset(out, path = stream_to_parquet, partitioning = partition_by)
+      } else {
+        arrow::write_parquet(out, stream_to_parquet)
+      }
+    }
+  }
+
+  if (isTRUE(to_arrow_dataset) && requireNamespace("arrow", quietly = TRUE)) {
+    return(arrow::as_arrow_table(out))
+  }
+
   out
 }
 

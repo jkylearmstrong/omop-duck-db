@@ -13,7 +13,9 @@ extract_elixhauser_comorbidities(
   lookback_days = 365,
   source_and_standard = TRUE,
   hierarchy_adjusted = TRUE,
-  exclude_index_diagnoses = TRUE
+  exclude_index_diagnoses = TRUE,
+  fallback_on_unmapped = FALSE,
+  return_mapping_fidelity = FALSE
 )
 }
 \arguments{

@@ -128,7 +128,7 @@ resolve_bounds <- function(bounds = NULL, population = c("adult", "pediatric", "
 #' @return The data frame with attribute `bounds_report` (`feature, low, high, n_checked, n_out_of_range`).
 #' @export
 filter_bounds <- function(data, bounds = NULL, population = c("adult", "pediatric", "neonatal"),
-                          action = c("nullify", "clip", "drop"), feature_col = NULL,
+                          action = c("nullify", "clip", "drop", "winsorize", "flag_indicator"), feature_col = NULL,
                           value_col = "value_as_number") {
   action <- match.arg(action)
   cfg <- resolve_bounds(bounds, population = population)
@@ -158,15 +158,34 @@ filter_bounds <- function(data, bounds = NULL, population = c("adult", "pediatri
       hi <- cfg[[feat]][2]
       bad <- oor(x, lo, hi)
       add(feat, lo, hi, sum(!is.na(x)), sum(bad))
-      if (action == "nullify") df[[feat]] <- ifelse(bad, NA_real_, x)
-      else if (action == "clip") df[[feat]] <- clip(x, lo, hi)
-      else drop_mask <- drop_mask | bad
+      if (action == "nullify") {
+        df[[feat]] <- ifelse(bad, NA_real_, x)
+      } else if (action %in% c("clip", "winsorize")) {
+        df[[feat]] <- clip(x, lo, hi)
+      } else if (action == "flag_indicator") {
+        df[[feat]] <- clip(x, lo, hi)
+        df[[paste0("is_outlier_", feat)]] <- as.integer(bad)
+      } else {
+        drop_mask <- drop_mask | bad
+      }
+    }
+    if (action == "flag_indicator") {
+      out_cols <- paste0("is_outlier_", names(cfg)[names(cfg) %in% names(df)])
+      if (length(out_cols) > 0) {
+        flags <- vapply(out_cols, function(col) df[[col]] == 1L, logical(nrow(df)))
+        if (is.matrix(flags)) {
+          df[["is_outlier"]] <- as.integer(rowSums(flags) > 0)
+        } else {
+          df[["is_outlier"]] <- as.integer(flags)
+        }
+      }
     }
   } else {
     if (!all(c(feature_col, value_col) %in% names(df))) {
       stop(sprintf("Long frame needs columns '%s' and '%s'.", feature_col, value_col))
     }
     vals <- suppressWarnings(as.numeric(df[[value_col]]))
+    outlier_flags <- rep(0L, nrow(df))
     for (feat in names(cfg)) {
       sel <- df[[feature_col]] == feat & !is.na(df[[feature_col]])
       if (!any(sel)) next
@@ -174,11 +193,21 @@ filter_bounds <- function(data, bounds = NULL, population = c("adult", "pediatri
       hi <- cfg[[feat]][2]
       bad <- sel & oor(vals, lo, hi)
       add(feat, lo, hi, sum(sel & !is.na(vals)), sum(bad))
-      if (action == "nullify") vals[bad] <- NA_real_
-      else if (action == "clip") vals[sel] <- clip(vals[sel], lo, hi)
-      else drop_mask <- drop_mask | bad
+      if (action == "nullify") {
+        vals[bad] <- NA_real_
+      } else if (action %in% c("clip", "winsorize")) {
+        vals[sel] <- clip(vals[sel], lo, hi)
+      } else if (action == "flag_indicator") {
+        vals[sel] <- clip(vals[sel], lo, hi)
+        outlier_flags[bad] <- 1L
+      } else {
+        drop_mask <- drop_mask | bad
+      }
     }
     df[[value_col]] <- vals
+    if (action == "flag_indicator") {
+      df$is_outlier <- outlier_flags
+    }
   }
   if (action == "drop") df <- df[!drop_mask, , drop = FALSE]
   rep_df <- if (length(report)) do.call(rbind, report) else

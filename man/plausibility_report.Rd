@@ -10,7 +10,8 @@ plausibility_report(
   sd_to_mean_max = 3,
   min_pct = 0,
   max_pct = 100,
-  ci_gate = FALSE
+  ci_gate = FALSE,
+  audit_unit_discordance = FALSE
 )
 }
 \arguments{

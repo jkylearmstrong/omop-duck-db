@@ -342,7 +342,7 @@ run_dqd <- function(con,
 # sanitize_measurements: physiologic-range and outlier sanitization (RFC 6.1)
 # ------------------------------------------------------------------------------------------
 .SANITIZE_METHODS <- c("dqd_biologic_limits", "winsorize_iqr", "z_score_cutoff")
-.SANITIZE_ACTIONS <- c("nullify", "clamp", "drop_row")
+.SANITIZE_ACTIONS <- c("nullify", "clamp", "drop_row", "winsorize", "drop", "flag_indicator")
 # Statistical methods need at least this many finite values in a (concept, unit) group.
 .SANITIZE_MIN_GROUP_ROWS <- 3L
 # z_score_cutoff computes its statistics on values divided by the group's largest magnitude when that
@@ -561,7 +561,7 @@ run_dqd <- function(con,
 #' @keywords internal
 #' @noRd
 .sanitize_build_sql <- function(method, action, extras, cohort_ref, person_ref, concept_ids, limit_rows,
-                                iqr_multiplier, z_threshold) {
+                                iqr_multiplier, z_threshold, measurement_table = "measurement") {
   where <- "m.value_as_number IS NOT NULL"
   if (!is.null(cohort_ref)) {
     where <- c(where, sprintf("m.person_id IN (SELECT TRY_CAST(c.%s AS BIGINT) FROM %s AS c)", person_ref, cohort_ref))
@@ -574,7 +574,7 @@ run_dqd <- function(con,
     "base AS (\n",
     "  SELECT m.measurement_id, m.person_id, m.measurement_concept_id, m.measurement_date,\n",
     "         m.unit_concept_id, CAST(m.value_as_number AS DOUBLE) AS value_raw", extra_select, "\n",
-    "  FROM measurement AS m\n",
+    "  FROM ", measurement_table, " AS m\n",
     "  WHERE ", paste(where, collapse = " AND "), "\n",
     ")"
   ))
@@ -708,7 +708,7 @@ run_dqd <- function(con,
     )
   }
 
-  if (action == "clamp") {
+  if (action %in% c("clamp", "flag_indicator")) {
     out_of_range <- "CASE WHEN sanitize_status = 'below_min' THEN lo ELSE hi END"
     # +/-Inf go to the nearest finite bound when there is one; NaN (and any value with no finite bound,
     # e.g. an IQR fence that overflowed) is nullified
@@ -729,9 +729,11 @@ run_dqd <- function(con,
   ))
   with_clause <- paste0("WITH ", paste(ctes, collapse = ",\n"))
 
+  flag_indicator_col <- if (action == "flag_indicator") ", CAST(flagged AS INTEGER) AS is_outlier" else ""
   out_cols <- paste0(
     "measurement_id, person_id, measurement_concept_id, measurement_date, unit_concept_id, ",
     "value_clean AS value_as_number, value_raw AS value_as_number_raw, sanitize_status",
+    flag_indicator_col,
     paste0(sprintf(", %s", vapply(extras, .sanitize_ident, character(1))), collapse = "")
   )
   rows_sql <- paste0(
@@ -900,11 +902,16 @@ sanitize_measurements <- function(con,
                                   cohort_table = NULL,
                                   method = "dqd_biologic_limits",
                                   action = "nullify",
+                                  outlier_action = NULL,
                                   measurement_concept_ids = NULL,
                                   limits = NULL,
                                   iqr_multiplier = 3.0,
                                   z_threshold = 4.0,
-                                  person_col = "subject_id") {
+                                  person_col = "subject_id",
+                                  measurement_table = "measurement") {
+  if (!is.null(outlier_action)) {
+    action <- outlier_action
+  }
   choice <- function(value, allowed, arg) {
     v <- if (is.character(value) && length(value) == 1L && !is.na(value)) tolower(trimws(value)) else NA_character_
     if (is.na(v) || !v %in% allowed) {
@@ -915,6 +922,9 @@ sanitize_measurements <- function(con,
   }
   method_k <- choice(method, .SANITIZE_METHODS, "method")
   action_k <- choice(action, .SANITIZE_ACTIONS, "action")
+  if (action_k == "winsorize") action_k <- "clamp"
+  else if (action_k == "drop") action_k <- "drop_row"
+
   k_iqr <- .sanitize_positive(iqr_multiplier, "iqr_multiplier")
   k_z <- .sanitize_positive(z_threshold, "z_threshold")
   concept_ids <- if (is.null(measurement_concept_ids)) NULL else .sanitize_concept_ids(measurement_concept_ids)
@@ -931,10 +941,11 @@ sanitize_measurements <- function(con,
   describe_cols <- function(table_sql) {
     DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s LIMIT 0", table_sql))$column_name
   }
+  meas_ref <- if (!is.null(measurement_table) && nzchar(measurement_table)) .sanitize_table_ref(measurement_table, "measurement_table") else "measurement"
   meas_cols <- tryCatch(
-    describe_cols("measurement"),
+    describe_cols(meas_ref),
     error = function(e) {
-      stop("sanitize_measurements() needs a CDM 'measurement' table on this connection: ", conditionMessage(e),
+      stop(sprintf("sanitize_measurements() needs a CDM '%s' table on this connection: %s", meas_ref, conditionMessage(e)),
            call. = FALSE)
     }
   )
@@ -970,7 +981,8 @@ sanitize_measurements <- function(con,
 
   sql <- .sanitize_build_sql(
     method = method_k, action = action_k, extras = extras, cohort_ref = cohort_ref, person_ref = person_ref,
-    concept_ids = concept_ids, limit_rows = limit_rows, iqr_multiplier = k_iqr, z_threshold = k_z
+    concept_ids = concept_ids, limit_rows = limit_rows, iqr_multiplier = k_iqr, z_threshold = k_z,
+    measurement_table = meas_ref
   )
   out <- DBI::dbGetQuery(con, sql$rows_sql)
   report <- DBI::dbGetQuery(con, sql$report_sql)

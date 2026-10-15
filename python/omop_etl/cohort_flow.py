@@ -84,8 +84,8 @@ class CohortFlow:
             counts.append(("One index visit per person",
                            con.execute(f"SELECT COUNT(*), COUNT(DISTINCT subject_id) FROM ({sel})").fetchone()[0],
                            con.execute(f"SELECT COUNT(DISTINCT subject_id) FROM ({sel})").fetchone()[0]))
-        self.cohort = con.execute(sel + " ORDER BY subject_id, visit_occurrence_id" if not self.one_visit_per_person
-                                  else sel).df()
+        self._cohort_sql = sel + " ORDER BY subject_id, visit_occurrence_id" if not self.one_visit_per_person else sel
+        self.cohort = con.execute(self._cohort_sql).df()
         n0 = max(int(counts[0][1]), 1)
         recs, prev = [], None
         for i, (name, n, persons) in enumerate(counts, start=1):
@@ -201,6 +201,41 @@ class CohortFlow:
         if as_dict:
             return res
         return json.dumps(res, indent=2)
+
+    def stream_to_parquet(
+        self,
+        output_path: str | Path,
+        partition_by: Sequence[str] | None = None,
+    ) -> Path:
+        """Stream the generated cohort directly out-of-core to a (optionally partitioned) Parquet file."""
+        from pathlib import Path
+        if self.cohort is None:
+            self.run()
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        sql_path = str(out_p).replace("\\", "/")
+        part_clause = ""
+        if partition_by:
+            cols = ", ".join(partition_by)
+            part_clause = f", PARTITION_BY ({cols})"
+        if hasattr(self, "_cohort_sql") and self._cohort_sql:
+            self.con.execute(f"COPY ({self._cohort_sql}) TO '{sql_path}' (FORMAT PARQUET{part_clause})")
+        else:
+            self.con.register("_cohort_flow_stream_tmp", self.cohort)
+            self.con.execute(f"COPY _cohort_flow_stream_tmp TO '{sql_path}' (FORMAT PARQUET{part_clause})")
+            self.con.unregister("_cohort_flow_stream_tmp")
+        return out_p
+
+    def to_arrow_dataset(self) -> Any:
+        """Export the cohort as an Arrow Dataset/Table via DuckDB zero-copy export."""
+        if self.cohort is None:
+            self.run()
+        if hasattr(self, "_cohort_sql") and self._cohort_sql:
+            return self.con.execute(self._cohort_sql).arrow()
+        self.con.register("_cohort_flow_arrow_tmp", self.cohort)
+        res = self.con.execute("SELECT * FROM _cohort_flow_arrow_tmp").arrow()
+        self.con.unregister("_cohort_flow_arrow_tmp")
+        return res
 
 
 class Table2Generator:

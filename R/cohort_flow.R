@@ -111,6 +111,7 @@ cohort_flow <- function(con, visit_concept_ids = c(9201L, 262L), anchor = c("adm
       k <- cnt(paste0("SELECT COUNT(*), COUNT(DISTINCT subject_id) FROM (", sel, ")"))
       counts[[length(counts) + 1L]] <- c("One index visit per person", k)
     }
+    st$cohort_sql <- sel
     st$cohort <- DBI::dbGetQuery(con, paste(sel, if (!isTRUE(one_visit_per_person)) "ORDER BY subject_id, visit_occurrence_id" else ""))
     n <- as.numeric(vapply(counts, function(x) x[2], ""))
     p <- as.numeric(vapply(counts, function(x) x[3], ""))
@@ -127,8 +128,37 @@ cohort_flow <- function(con, visit_concept_ids = c(9201L, 262L), anchor = c("adm
     if (is.null(st$attrition)) stop("call run() first.", call. = FALSE)
     st$attrition
   }
+  stream_to_parquet <- function(output_path, partition_by = NULL) {
+    if (is.null(st$cohort)) run()
+    out_dir <- dirname(output_path)
+    if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    part_clause <- ""
+    if (!is.null(partition_by) && length(partition_by) > 0) {
+      part_clause <- sprintf(", PARTITION_BY (%s)", paste(partition_by, collapse = ", "))
+    }
+    sql_path <- gsub("\\\\", "/", output_path)
+    if (!is.null(st$cohort_sql) && nzchar(st$cohort_sql)) {
+      clean_sql <- trimws(st$cohort_sql)
+      clean_sql <- sub(";*$", "", clean_sql)
+      DBI::dbExecute(con, sprintf("COPY (%s) TO '%s' (FORMAT PARQUET%s)", clean_sql, sql_path, part_clause))
+    } else {
+      duckdb::duckdb_register(con, "_flow_stream_tmp", st$cohort)
+      DBI::dbExecute(con, sprintf("COPY _flow_stream_tmp TO '%s' (FORMAT PARQUET%s)", sql_path, part_clause))
+      duckdb::duckdb_unregister(con, "_flow_stream_tmp")
+    }
+    output_path
+  }
+  to_arrow_dataset <- function() {
+    if (is.null(st$cohort)) run()
+    if (requireNamespace("arrow", quietly = TRUE)) {
+      return(arrow::as_arrow_table(st$cohort))
+    }
+    st$cohort
+  }
   self$add_step <- add_step
   self$run <- run
+  self$stream_to_parquet <- stream_to_parquet
+  self$to_arrow_dataset <- to_arrow_dataset
   self$to_markdown <- function() to_markdown(need())
   self$to_mermaid <- function() to_mermaid(need())
   self$to_latex <- function() to_tikz(need())
@@ -151,6 +181,23 @@ cohort_flow <- function(con, visit_concept_ids = c(9201L, 262L), anchor = c("adm
   class(self) <- "cohort_flow"
   self
 }
+
+#' @export
+stream_to_parquet <- function(x, output_path, partition_by = NULL, ...) UseMethod("stream_to_parquet")
+
+#' @export
+stream_to_parquet.cohort_flow <- function(x, output_path, partition_by = NULL, ...) {
+  x$stream_to_parquet(output_path, partition_by = partition_by)
+}
+
+#' @export
+to_arrow_dataset <- function(x, ...) UseMethod("to_arrow_dataset")
+
+#' @export
+to_arrow_dataset.cohort_flow <- function(x, ...) {
+  x$to_arrow_dataset()
+}
+
 
 #' Convert an attrition table to Graphviz DOT source
 #'

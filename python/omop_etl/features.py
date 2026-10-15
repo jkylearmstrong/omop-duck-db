@@ -14,35 +14,63 @@ import pandas as pd
 
 def extract_patient_features(
     con: duckdb.DuckDBPyConnection,
-    cohort_id: int,
+    cohort_id: int | None = None,
     outcome_cohort_id: int | None = None,
-    lookback_days: Sequence[int] = (30, 180, 365),
+    lookback_days: Sequence[int] | int = (30, 180, 365),
     include_demographics: bool = True,
     include_conditions: bool = True,
     include_drugs: bool = True,
     include_procedures: bool = True,
     include_measurements: bool = True,
     format: str = "df",
+    offset_anchor: str = "visit_start_date",
+    anchor: str | None = None,
+    stream_to_parquet: str | None = None,
+    partition_by: Sequence[str] | str | None = None,
+    cohort_table: str = "cohort",
+    measurement_concept_ids: Sequence[int] | None = None,
+    lookahead_days: int = 0,
+    **kwargs: Any,
 ) -> Any:
-    """Extracts ML-ready patient features anchored to cohort_start_date (T0).
+    """Extracts ML-ready patient features anchored to cohort milestone dates (T0).
     
     Args:
         con: Active DuckDB connection.
-        cohort_id: Cohort definition ID in the cohort table defining the target population.
+        cohort_id: Optional cohort definition ID in the cohort table defining target population.
         outcome_cohort_id: Optional cohort definition ID defining binary outcome Y.
-        lookback_days: Sequence of days for prior observation windows.
+        lookback_days: Sequence of days or single integer for prior observation windows.
         include_demographics: Include age, gender, race, ethnicity, index year.
         include_conditions: Include condition occurrence counts across lookback windows.
         include_drugs: Include drug exposure counts across lookback windows.
         include_procedures: Include procedure occurrence counts across lookback windows.
         include_measurements: Include measurement counts across lookback windows.
-        format: Output data format: 'df' (Pandas), 'arrow' (PyArrow), 'polars', or 'sparse'.
+        format: Output data format: 'df' (Pandas), 'arrow' (PyArrow), 'polars', 'sparse', or 'arrow_dataset'.
+        offset_anchor: Milestone date to anchor lookback windows ('visit_start_date' | 'visit_end_date' | 'index_date').
+        anchor: Alias for offset_anchor ('start' | 'end' | 'index').
+        stream_to_parquet: Optional file path to stream feature matrix directly to Parquet out-of-core.
+        partition_by: Optional column(s) to partition streamed Parquet files by (e.g. ['site']).
+        cohort_table: Table name containing cohort entries (default 'cohort').
+        measurement_concept_ids: Specific measurement concept IDs to extract aggregated features for.
+        lookahead_days: Days after anchor date to include in measurement extraction (default 0).
         
     Returns:
         pd.DataFrame, pyarrow.Table, polars.DataFrame, or sparse DataFrame.
     """
     fmt = format.lower().strip()
-    windows = sorted([int(w) for w in lookback_days])
+    windows = [int(lookback_days)] if isinstance(lookback_days, (int, float)) else sorted([int(w) for w in lookback_days])
+
+    cols = [r[0].lower() for r in con.execute(f"DESCRIBE SELECT * FROM {cohort_table}").fetchall()]
+    pcol = "person_id" if "person_id" in cols else "subject_id"
+    scol = "cohort_start_date" if "cohort_start_date" in cols else ("visit_start_date" if "visit_start_date" in cols else "index_date")
+    ecol = "cohort_end_date" if "cohort_end_date" in cols else ("visit_end_date" if "visit_end_date" in cols else scol)
+
+    oa = (anchor or offset_anchor or "visit_start_date").lower().strip()
+    use_end = oa in ("visit_end_date", "end", "discharge", "cohort_end_date")
+    anchor_col = ecol if use_end else scol
+
+    existing_tables = {r[0].lower() for r in con.execute("SHOW TABLES").fetchall()}
+    has_person = "person" in existing_tables
+    do_demo = include_demographics and has_person
 
     outcome_join = ""
     outcome_select = ""
@@ -50,98 +78,132 @@ def extract_patient_features(
         outcome_select = "COALESCE(oc.outcome_flag, 0) AS y,"
         outcome_join = f"""
             LEFT JOIN (
-                SELECT DISTINCT subject_id, 1 AS outcome_flag
-                FROM cohort
+                SELECT DISTINCT {pcol} AS subject_id, 1 AS outcome_flag
+                FROM {cohort_table}
                 WHERE cohort_definition_id = {int(outcome_cohort_id)}
-            ) oc ON c.subject_id = oc.subject_id
+            ) oc ON c.{pcol} = oc.subject_id
         """
 
     demo_select = ""
     demo_join = ""
-    if include_demographics:
-        demo_select = """
-            date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age_at_index,
+    if do_demo:
+        demo_select = f"""
+            date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.{anchor_col}) AS age_at_index,
             p.gender_concept_id,
             p.race_concept_id,
             p.ethnicity_concept_id,
-            YEAR(c.cohort_start_date) AS index_year,
+            YEAR(c.{anchor_col}) AS index_year,
         """
-        demo_join = "LEFT JOIN person p ON c.subject_id = p.person_id"
+        demo_join = f"LEFT JOIN person p ON c.{pcol} = p.person_id"
 
     # Aggregated lookback windows
     lookback_selects = []
     lookback_joins = []
 
-    if include_conditions:
+    if include_conditions and "condition_occurrence" in existing_tables:
         cond_cols = ", ".join(
-            f"COUNT(DISTINCT CASE WHEN co.condition_start_date BETWEEN c.cohort_start_date - {w} AND c.cohort_start_date - 1 THEN co.condition_occurrence_id END) AS condition_count_{w}d"
+            f"COUNT(DISTINCT CASE WHEN co.condition_start_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN co.condition_occurrence_id END) AS condition_count_{w}d"
             for w in windows
         )
         lookback_selects.append(cond_cols)
-        lookback_joins.append("LEFT JOIN condition_occurrence co ON c.subject_id = co.person_id")
+        lookback_joins.append(f"LEFT JOIN condition_occurrence co ON c.{pcol} = co.person_id")
 
-    if include_drugs:
+    if include_drugs and "drug_exposure" in existing_tables:
         drug_cols = ", ".join(
-            f"COUNT(DISTINCT CASE WHEN de.drug_exposure_start_date BETWEEN c.cohort_start_date - {w} AND c.cohort_start_date - 1 THEN de.drug_exposure_id END) AS drug_count_{w}d"
+            f"COUNT(DISTINCT CASE WHEN de.drug_exposure_start_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN de.drug_exposure_id END) AS drug_count_{w}d"
             for w in windows
         )
         lookback_selects.append(drug_cols)
-        lookback_joins.append("LEFT JOIN drug_exposure de ON c.subject_id = de.person_id")
+        lookback_joins.append(f"LEFT JOIN drug_exposure de ON c.{pcol} = de.person_id")
 
-    if include_procedures:
+    if include_procedures and "procedure_occurrence" in existing_tables:
         proc_cols = ", ".join(
-            f"COUNT(DISTINCT CASE WHEN po.procedure_date BETWEEN c.cohort_start_date - {w} AND c.cohort_start_date - 1 THEN po.procedure_occurrence_id END) AS procedure_count_{w}d"
+            f"COUNT(DISTINCT CASE WHEN po.procedure_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN po.procedure_occurrence_id END) AS procedure_count_{w}d"
             for w in windows
         )
         lookback_selects.append(proc_cols)
-        lookback_joins.append("LEFT JOIN procedure_occurrence po ON c.subject_id = po.person_id")
+        lookback_joins.append(f"LEFT JOIN procedure_occurrence po ON c.{pcol} = po.person_id")
 
-    if include_measurements:
-        meas_cols = ", ".join(
-            f"COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.cohort_start_date - {w} AND c.cohort_start_date - 1 THEN m.measurement_id END) AS measurement_count_{w}d"
-            for w in windows
-        )
-        lookback_selects.append(meas_cols)
-        lookback_joins.append("LEFT JOIN measurement m ON c.subject_id = m.person_id")
+    if "measurement" in existing_tables:
+        if measurement_concept_ids:
+            for cid in measurement_concept_ids:
+                for w in windows:
+                    lookback_selects.append(
+                        f"AVG(CASE WHEN m.measurement_concept_id = {int(cid)} AND m.measurement_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} + {int(lookahead_days)} THEN m.value_as_number END) AS mean_measurement_{int(cid)}"
+                    )
+            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id")
+        elif include_measurements:
+            meas_cols = ", ".join(
+                f"COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN m.measurement_id END) AS measurement_count_{w}d"
+                for w in windows
+            )
+            lookback_selects.append(meas_cols)
+            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id")
 
     select_items = [
-        "c.subject_id",
-        "c.cohort_start_date",
-        "c.cohort_end_date",
+        f"c.{pcol} AS subject_id",
+        f"c.{pcol} AS person_id",
+        f"c.{scol} AS cohort_start_date",
+        f"c.{ecol} AS cohort_end_date",
     ]
+    if "site" in cols:
+        select_items.append("c.site")
     if outcome_cohort_id is not None:
         select_items.append("COALESCE(oc.outcome_flag, 0) AS y")
-    if include_demographics:
+    if do_demo:
         select_items.extend([
-            "date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age_at_index",
+            f"date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.{anchor_col}) AS age_at_index",
             "p.gender_concept_id",
             "p.race_concept_id",
             "p.ethnicity_concept_id",
-            "YEAR(c.cohort_start_date) AS index_year",
+            f"YEAR(c.{anchor_col}) AS index_year",
         ])
     select_items.extend(lookback_selects)
 
     select_clause = ",\n            ".join(select_items)
     all_joins = "\n        ".join([j for j in [demo_join, outcome_join] + lookback_joins if j])
 
+    where_items = []
+    if cohort_id is not None and "cohort_definition_id" in cols:
+        where_items.append(f"c.cohort_definition_id = {int(cohort_id)}")
+    where_sql = f"WHERE {' AND '.join(where_items)}" if where_items else ""
+
+    group_by_items = [f"c.{pcol}", f"c.{scol}", f"c.{ecol}"]
+    if "site" in cols:
+        group_by_items.append("c.site")
+    if outcome_cohort_id is not None:
+        group_by_items.append("oc.outcome_flag")
+    if do_demo:
+        group_by_items.extend(["p.year_of_birth", "p.month_of_birth", "p.day_of_birth", "p.gender_concept_id", "p.race_concept_id", "p.ethnicity_concept_id"])
+
     dense_sql = f"""
         SELECT 
             {select_clause}
-        FROM cohort c
+        FROM {cohort_table} c
         {all_joins}
-        WHERE c.cohort_definition_id = {int(cohort_id)}
+        {where_sql}
         GROUP BY 
-            c.subject_id, c.cohort_start_date, c.cohort_end_date
-            {', oc.outcome_flag' if outcome_cohort_id is not None else ''}
-            {', p.year_of_birth, p.month_of_birth, p.day_of_birth, p.gender_concept_id, p.race_concept_id, p.ethnicity_concept_id' if include_demographics else ''}
-        ORDER BY c.subject_id, c.cohort_start_date;
+            {', '.join(group_by_items)}
+        ORDER BY c.{pcol}, c.{scol}
     """
+
+    if stream_to_parquet:
+        p_clause = ""
+        if partition_by:
+            p_cols = [partition_by] if isinstance(partition_by, str) else list(partition_by)
+            p_clause = f", PARTITION_BY ({', '.join(p_cols)})"
+        clean_sql = dense_sql.strip().rstrip(";").strip()
+        con.execute(f"COPY ({clean_sql}) TO '{stream_to_parquet}' (FORMAT PARQUET{p_clause})")
+        if fmt in ("arrow_dataset", "dataset"):
+            import pyarrow.dataset as ds
+            return ds.dataset(stream_to_parquet)
+        return stream_to_parquet
 
     if fmt == "sparse":
         # Returns standard OHDSI (row_id, covariate_id, covariate_value)
         df_dense = con.execute(dense_sql).df()
         sparse_rows = []
-        feature_cols = [col for col in df_dense.columns if col not in ("subject_id", "cohort_start_date", "cohort_end_date", "y")]
+        feature_cols = [col for col in df_dense.columns if col not in ("subject_id", "person_id", "cohort_start_date", "cohort_end_date", "y", "site")]
 
         for row_id, (_, row) in enumerate(df_dense.iterrows(), start=1):
             for col_idx, col_name in enumerate(feature_cols, start=101):
@@ -171,6 +233,9 @@ def extract_patient_features(
             return reader.read_all() if hasattr(reader, "read_all") else reader
 
     return con.execute(dense_sql).df()
+
+
+extract_features = extract_patient_features
 
 
 def extract_temporal_features(
@@ -484,6 +549,8 @@ def extract_measurements(
     outlier_bounds: dict[str, tuple[float | None, float | None]] | None = None,
     worst_direction: dict[str, str] | None = None,
     measurement_table: str = "measurement",
+    offset_anchor: str = "visit_start_date",
+    anchor: str | None = None,
 ) -> Any:
     r"""Extracts consolidated laboratory and vital sign measurements with selectable windowing strategies.
     
@@ -566,11 +633,15 @@ def extract_measurements(
         WHERE s.is_concept_id = FALSE;
     """)
 
+    oa = (anchor or offset_anchor or "visit_start_date").lower().strip()
+    use_end = oa in ("visit_end_date", "end", "discharge", "cohort_end_date")
+    anchor_meas = "c.cohort_end_date" if use_end else "c.cohort_start_date"
+
     if window == "stay":
         date_cond = "m.measurement_date >= c.cohort_start_date AND m.measurement_date <= c.cohort_end_date"
     elif window == "lookback":
         lb = int(lookback_days or 365)
-        date_cond = f"m.measurement_date >= (c.cohort_start_date - {lb}) AND m.measurement_date < c.cohort_start_date"
+        date_cond = f"m.measurement_date >= ({anchor_meas} - {lb}) AND m.measurement_date < {anchor_meas}"
     elif window == "all":
         date_cond = "m.measurement_date <= c.cohort_end_date"
     else:

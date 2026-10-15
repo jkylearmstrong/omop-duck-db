@@ -1,3 +1,11 @@
+#' Default OMOP CDM concept sets for drug exposure types
+#' @export
+DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS <- c(32838L, 38000177L, 32817L)
+#' @export
+DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS <- c(38000180L, 32828L)
+#' @export
+DEFAULT_DISPENSED_TYPE_CONCEPT_IDS <- c(38000175L, 32823L)
+
 #' @keywords internal
 #' @noRd
 .med_q <- function(x) paste0("'", gsub("'", "''", as.character(x), fixed = TRUE), "'")
@@ -237,6 +245,9 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
                                        vocab_schema = NULL,
                                        vocab_db = NULL,
                                        route_concept_ids = NULL, by_type = FALSE,
+                                       offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
+                                       anchor = NULL,
+                                       drug_type_concept_ids = NULL,
                                        return_audit = FALSE, ...) {
   strategy <- match.arg(strategy)
   on_unresolved <- match.arg(on_unresolved)
@@ -263,8 +274,11 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     where <- sprintf("WHERE cohort_definition_id = %d", as.integer(cohort_definition_id))
   }
 
+  oa <- tolower(if (!is.null(anchor)) anchor else if (!is.null(offset_anchor) && length(offset_anchor) == 1) offset_anchor else "visit_start_date")
+  use_end_anchor <- oa %in% c("visit_end_date", "end", "discharge", "cohort_end_date")
+
   ecol <- NULL
-  if (!is.null(window) && window %in% c("inpatient", "discharge")) {
+  if (use_end_anchor || (!is.null(window) && window %in% c("inpatient", "discharge"))) {
     ecol <- .med_first_present(cols, c("cohort_end_date", "visit_end_date", "discharge_date", "end_date"),
                                "stay end date", end_date_col)
   }
@@ -274,6 +288,8 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     'SELECT ROW_NUMBER() OVER () AS row_id, "%s" AS person_id, CAST("%s" AS DATE) AS index_date%s%s FROM %s %s',
     pcol, icol, end_sel, site_sel, cohort_table, where))
   result <- base[, setdiff(names(base), c("row_id", "end_date")), drop = FALSE]
+
+  ref_date <- if (use_end_anchor) "v.end_date" else "v.index_date"
 
   d <- "de.drug_exposure_start_date"
   if (identical(window, "pre_admission")) {
@@ -287,13 +303,18 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     lo <- sprintf("AND %s >= v.end_date", d)
     hi <- sprintf("AND %s <= v.end_date", d)
   } else {
-    lo <- if (is.null(lookback_days)) "" else sprintf("AND %s >= v.index_date - %d", d, as.integer(lookback_days))
-    hi <- sprintf("AND %s <= v.index_date + %d", d, as.integer(lookahead_days))
+    lo <- if (is.null(lookback_days)) "" else sprintf("AND %s >= %s - %d", d, ref_date, as.integer(lookback_days))
+    hi <- sprintf("AND %s <= %s + %d", d, ref_date, as.integer(lookahead_days))
   }
 
   route_clause <- ""
   if (!is.null(route_concept_ids) && length(route_concept_ids) > 0) {
     route_clause <- sprintf("AND de.route_concept_id IN (%s)", paste(as.integer(route_concept_ids), collapse = ", "))
+  }
+
+  dt_clause <- ""
+  if (!is.null(drug_type_concept_ids) && length(drug_type_concept_ids) > 0) {
+    dt_clause <- sprintf("AND de.drug_type_concept_id IN (%s)", paste(as.integer(drug_type_concept_ids), collapse = ", "))
   }
 
   flags <- list(source = list(), standard = list())
@@ -1192,4 +1213,270 @@ extract_medication_transitions <- function(con, cohort_table = "cohort",
 
   medication_transitions(out, classes)
 }
+
+#' Compute Drug Eras On-The-Fly
+#'
+#' Groups continuous or near-continuous periods of drug exposure within a specified persistence gap
+#' using vectorized DuckDB island-and-gap window functions.
+#'
+#' @param con Active DuckDB connection.
+#' @param concept_set Optional vector of drug_concept_ids (or ingredient IDs) to restrict to.
+#' @param persistence_window_days Maximum allowable gap in days between exposures to stay in the same era (default 30).
+#' @param drug_exposure_table Name of drug exposure table in DuckDB (default 'drug_exposure').
+#' @param output_table Optional table name to materialize the computed eras into.
+#' @return A data frame with columns: `drug_era_id`, `person_id`, `drug_concept_id`, `drug_era_start_date`,
+#'   `drug_era_end_date`, `drug_exposure_count`, `era_days`, `gap_days`.
+#' @export
+compute_drug_eras <- function(con, concept_set = NULL, persistence_window_days = 30,
+                              drug_exposure_table = "drug_exposure", output_table = NULL) {
+  filter_clause <- ""
+  if (!is.null(concept_set) && length(concept_set) > 0) {
+    c_str <- paste(as.integer(concept_set), collapse = ", ")
+    filter_clause <- sprintf("AND drug_concept_id IN (%s)", c_str)
+  }
+
+  sql <- sprintf("
+    WITH raw_exposures AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            CAST(drug_exposure_start_date AS DATE) AS start_date,
+            CAST(COALESCE(
+                drug_exposure_end_date,
+                drug_exposure_start_date + CAST(COALESCE(days_supply, 1) - 1 AS INTEGER),
+                drug_exposure_start_date
+            ) AS DATE) AS end_date
+        FROM %s
+        WHERE drug_concept_id IS NOT NULL %s
+    ),
+    ordered AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            start_date,
+            end_date,
+            MAX(end_date) OVER (
+                PARTITION BY person_id, drug_concept_id
+                ORDER BY start_date, end_date
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prev_max_end
+        FROM raw_exposures
+    ),
+    flagged AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            start_date,
+            end_date,
+            CASE
+                WHEN prev_max_end IS NULL OR start_date > prev_max_end + %d THEN 1
+                ELSE 0
+            END AS is_new_era
+        FROM ordered
+    ),
+    grouped AS (
+        SELECT
+            person_id,
+            drug_concept_id,
+            start_date,
+            end_date,
+            SUM(is_new_era) OVER (
+                PARTITION BY person_id, drug_concept_id
+                ORDER BY start_date, end_date
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS era_group
+        FROM flagged
+    )
+    SELECT
+        ROW_NUMBER() OVER (ORDER BY person_id, drug_concept_id, MIN(start_date)) AS drug_era_id,
+        person_id,
+        drug_concept_id,
+        MIN(start_date) AS drug_era_start_date,
+        MAX(end_date) AS drug_era_end_date,
+        COUNT(*) AS drug_exposure_count,
+        CAST(date_diff('day', MIN(start_date), MAX(end_date)) + 1 AS INTEGER) AS era_days,
+        CAST(GREATEST(0, date_diff('day', MIN(start_date), MAX(end_date)) + 1 - SUM(date_diff('day', start_date, end_date) + 1)) AS INTEGER) AS gap_days
+    FROM grouped
+    GROUP BY person_id, drug_concept_id, era_group
+    ORDER BY person_id, drug_concept_id, drug_era_start_date
+  ", drug_exposure_table, filter_clause, as.integer(persistence_window_days))
+
+  if (!is.null(output_table) && nzchar(output_table)) {
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
+  }
+
+  DBI::dbGetQuery(con, sql)
+}
+
+#' Compute Adherence (PDC & MPR)
+#'
+#' Computes Proportion of Days Covered (PDC) and Medication Possession Ratio (MPR) over a study window
+#' using DuckDB interval unions.
+#'
+#' @param con Active DuckDB connection.
+#' @param cohort_table Cohort table name.
+#' @param concept_set Sequence of target drug_concept_ids.
+#' @param lookback_days Lookback window in days (default 180).
+#' @param lookahead_days Lookahead window in days (default 0).
+#' @param offset_anchor Milestone date to anchor to ('visit_start_date' | 'visit_end_date' | 'index_date').
+#' @param anchor Alias for offset_anchor.
+#' @param drug_exposure_table OMOP drug_exposure table name.
+#' @param person_id_col,index_date_col,end_date_col Custom column names.
+#' @return A data frame with `person_id`, `index_date`, `window_start`, `window_end`, `covered_days`,
+#'   `total_days`, `pdc`, `mpr`, `is_adherent_80`.
+#' @export
+compute_adherence_pdc <- function(con, cohort_table = "cohort", concept_set = NULL,
+                                  lookback_days = 180, lookahead_days = 0,
+                                  offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
+                                  anchor = NULL, drug_exposure_table = "drug_exposure",
+                                  person_id_col = NULL, index_date_col = NULL, end_date_col = NULL) {
+  oa <- tolower(if (!is.null(anchor)) anchor else if (!is.null(offset_anchor) && length(offset_anchor) == 1) offset_anchor else "visit_start_date")
+  cols <- tolower(DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s", cohort_table))$column_name)
+
+  pcol <- if (!is.null(person_id_col)) person_id_col else if ("person_id" %in% cols) "person_id" else "subject_id"
+  icol <- if (!is.null(index_date_col)) index_date_col else if ("cohort_start_date" %in% cols) "cohort_start_date" else "index_date"
+  ecol <- if (!is.null(end_date_col)) end_date_col else if ("cohort_end_date" %in% cols) "cohort_end_date" else if ("visit_end_date" %in% cols) "visit_end_date" else icol
+
+  use_end <- oa %in% c("visit_end_date", "end", "discharge", "cohort_end_date")
+  anchor_col <- if (use_end) ecol else icol
+
+  c_filter <- ""
+  if (!is.null(concept_set) && length(concept_set) > 0) {
+    c_str <- paste(as.integer(concept_set), collapse = ", ")
+    c_filter <- sprintf("AND de.drug_concept_id IN (%s)", c_str)
+  }
+
+  sql <- sprintf("
+    WITH cohort_windows AS (
+        SELECT DISTINCT
+            CAST(\"%s\" AS BIGINT) AS person_id,
+            CAST(\"%s\" AS DATE) AS index_date,
+            CAST(\"%s\" AS DATE) - %d AS w_start,
+            CAST(\"%s\" AS DATE) + %d AS w_end,
+            CAST(date_diff('day', CAST(\"%s\" AS DATE) - %d, CAST(\"%s\" AS DATE) + %d) + 1 AS INTEGER) AS total_days
+        FROM %s
+    ),
+    raw_exp AS (
+        SELECT
+            cw.person_id,
+            cw.index_date,
+            cw.w_start,
+            cw.w_end,
+            cw.total_days,
+            GREATEST(cw.w_start, CAST(de.drug_exposure_start_date AS DATE)) AS exp_start,
+            LEAST(cw.w_end, CAST(COALESCE(
+                de.drug_exposure_end_date,
+                de.drug_exposure_start_date + CAST(COALESCE(de.days_supply, 1) - 1 AS INTEGER),
+                de.drug_exposure_start_date
+            ) AS DATE)) AS exp_end,
+            CAST(COALESCE(de.days_supply, 1) AS INTEGER) AS days_supply
+        FROM cohort_windows cw
+        JOIN %s de ON de.person_id = cw.person_id
+        WHERE de.drug_concept_id IS NOT NULL %s
+          AND CAST(de.drug_exposure_start_date AS DATE) <= cw.w_end
+          AND CAST(COALESCE(
+                de.drug_exposure_end_date,
+                de.drug_exposure_start_date + CAST(COALESCE(de.days_supply, 1) - 1 AS INTEGER),
+                de.drug_exposure_start_date
+            ) AS DATE) >= cw.w_start
+    ),
+    valid_exp AS (
+        SELECT * FROM raw_exp WHERE exp_start <= exp_end
+    ),
+    ordered_exp AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            exp_start,
+            exp_end,
+            days_supply,
+            MAX(exp_end) OVER (
+                PARTITION BY person_id, index_date
+                ORDER BY exp_start, exp_end
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS prev_max_end
+        FROM valid_exp
+    ),
+    flagged_exp AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            exp_start,
+            exp_end,
+            days_supply,
+            CASE
+                WHEN prev_max_end IS NULL OR exp_start > prev_max_end + 1 THEN 1
+                ELSE 0
+            END AS is_new_block
+        FROM ordered_exp
+    ),
+    grouped_exp AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            exp_start,
+            exp_end,
+            days_supply,
+            SUM(is_new_block) OVER (
+                PARTITION BY person_id, index_date
+                ORDER BY exp_start, exp_end
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS block_id
+        FROM flagged_exp
+    ),
+    merged_blocks AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            block_id,
+            date_diff('day', MIN(exp_start), MAX(exp_end)) + 1 AS block_covered_days,
+            SUM(days_supply) AS block_days_supply
+        FROM grouped_exp
+        GROUP BY person_id, index_date, w_start, w_end, total_days, block_id
+    ),
+    patient_adherence AS (
+        SELECT
+            person_id,
+            index_date,
+            w_start,
+            w_end,
+            total_days,
+            SUM(block_covered_days) AS covered_days,
+            SUM(block_days_supply) AS total_supply_days
+        FROM merged_blocks
+        GROUP BY person_id, index_date, w_start, w_end, total_days
+    )
+    SELECT
+        cw.person_id,
+        cw.index_date,
+        cw.w_start AS window_start,
+        cw.w_end AS window_end,
+        COALESCE(pa.covered_days, 0) AS covered_days,
+        cw.total_days,
+        ROUND(CAST(COALESCE(pa.covered_days, 0) AS DOUBLE) / GREATEST(1, cw.total_days), 4) AS pdc,
+        ROUND(CAST(COALESCE(pa.total_supply_days, 0) AS DOUBLE) / GREATEST(1, cw.total_days), 4) AS mpr,
+        CASE WHEN ROUND(CAST(COALESCE(pa.covered_days, 0) AS DOUBLE) / GREATEST(1, cw.total_days), 4) >= 0.80 THEN 1 ELSE 0 END AS is_adherent_80
+    FROM cohort_windows cw
+    LEFT JOIN patient_adherence pa ON pa.person_id = cw.person_id AND pa.index_date = cw.index_date
+    ORDER BY cw.person_id, cw.index_date
+  ", pcol, icol, anchor_col, as.integer(lookback_days), anchor_col, as.integer(lookahead_days),
+     anchor_col, as.integer(lookback_days), anchor_col, as.integer(lookahead_days),
+     cohort_table, drug_exposure_table, c_filter)
+
+  DBI::dbGetQuery(con, sql)
+}
+
 

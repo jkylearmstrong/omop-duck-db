@@ -326,7 +326,8 @@ panel_missingness_audit <- function(features, panels = NULL, by = "site", thresh
 #'   \code{feature}, \code{metric}, \code{observed_value}, \code{expected_range}, \code{flagged}, \code{reason}.
 #' @export
 plausibility_report <- function(table1_or_features, ranges = NULL, sd_to_mean_max = 3.0,
-                                min_pct = 0.0, max_pct = 100.0, ci_gate = FALSE) {
+                                min_pct = 0.0, max_pct = 100.0, ci_gate = FALSE,
+                                audit_unit_discordance = FALSE) {
   df <- table1_or_features
   bounds <- if (!is.null(ranges)) ranges else .default_physiologic_bounds
   cols_lower <- as.list(stats::setNames(names(df), tolower(names(df))))
@@ -431,6 +432,23 @@ plausibility_report <- function(table1_or_features, ranges = NULL, sd_to_mean_ma
             flagged = TRUE, reason = "impossible_percentage", stringsAsFactors = FALSE
           )
         }
+      }
+    }
+  }
+
+  if (isTRUE(audit_unit_discordance)) {
+    disc_df <- detect_unit_discordance(df)
+    if (nrow(disc_df) > 0) {
+      for (r in seq_len(nrow(disc_df))) {
+        records[[length(records) + 1L]] <- data.frame(
+          feature = as.character(disc_df$feature[r]),
+          metric = "unit_discordance",
+          observed_value = as.numeric(disc_df$detected_ratio[r]),
+          expected_range = sprintf("ratio ~ %s", disc_df$expected_conversion[r]),
+          flagged = TRUE,
+          reason = sprintf("suspected_%s_vs_%s", disc_df$suspected_unit[r], disc_df$target_unit[r]),
+          stringsAsFactors = FALSE
+        )
       }
     }
   }
@@ -652,3 +670,269 @@ dqd_summary <- function(results, by_site = TRUE, site_col = "site") {
   rownames(out) <- NULL
   out
 }
+
+#' Known laboratory unit conversions and standard ratios
+#' @export
+KNOWN_UNIT_CONVERSIONS <- list(
+  creatinine = list(ratio = 88.42, target = "mg/dL", alt = "umol/L", concept_ids = c(3016723L, 3020564L), thresh = 15.0),
+  glucose = list(ratio = 18.016, target = "mg/dL", alt = "mmol/L", concept_ids = c(3004501L, 3000483L), thresh = 25.0),
+  bun = list(ratio = 2.801, target = "mg/dL", alt = "mmol/L", concept_ids = c(3013682L, 3004295L), thresh = 20.0),
+  calcium = list(ratio = 4.008, target = "mg/dL", alt = "mmol/L", concept_ids = c(3015232L, 3025175L), thresh = 10.0),
+  total_bilirubin = list(ratio = 17.1, target = "mg/dL", alt = "umol/L", concept_ids = c(3024128L, 3027597L), thresh = 10.0),
+  albumin = list(ratio = 10.0, target = "g/dL", alt = "g/L", concept_ids = c(3024561L, 3013721L), thresh = 12.0),
+  wbc = list(ratio = 1000.0, target = "10*3/uL", alt = "cells/uL", concept_ids = c(3000905L, 3010813L), thresh = 300.0),
+  platelets = list(ratio = 1000.0, target = "10*3/uL", alt = "cells/uL", concept_ids = c(3024929L, 3007461L), thresh = 1500.0)
+)
+
+#' Detect Unit Discordance & Bimodal Normalization
+#'
+#' Audits distributions per measurement/analyte across sites or within a dataset to detect unit discordance
+#' (e.g. Creatinine mg/dL vs umol/L x88.42, Glucose mg/dL vs mmol/L x18.016).
+#'
+#' @param con_or_df Active DuckDB connection or data frame.
+#' @param measurement_concept_id Optional concept ID filter.
+#' @param concept_id Alias for measurement_concept_id.
+#' @param target_unit Target canonical unit (e.g. 'mg/dL').
+#' @param site_col Hospital site column name (default 'site').
+#' @param measurement_table Measurement table name (default 'measurement').
+#' @param value_col Value column name (default 'value_as_number').
+#' @param concept_col Concept column name (default 'measurement_concept_id').
+#' @param measurement_concept_id Single measurement concept ID.
+#' @param measurement_concept_ids Vector of measurement concept IDs.
+#' @param concept_id Alias for measurement_concept_id.
+#' @param target_unit Canonical unit to compare against.
+#' @param site_col Hospital site column name (default 'site').
+#' @param measurement_table Measurement table name (default 'measurement').
+#' @param value_col Value column name (default 'value_as_number').
+#' @param concept_col Measurement concept column name (default 'measurement_concept_id').
+#' @param tolerance Ratio deviation tolerance (default 0.35).
+#' @return A data frame of detected discordances.
+#' @export
+detect_unit_discordance <- function(con_or_df, measurement_concept_id = NULL, measurement_concept_ids = NULL,
+                                    concept_id = NULL, target_unit = NULL, site_col = "site",
+                                    measurement_table = "measurement", value_col = "value_as_number",
+                                    concept_col = "measurement_concept_id", tolerance = 0.35) {
+  target_cids <- unique(as.integer(c(concept_id, measurement_concept_id, measurement_concept_ids)))
+  target_cids <- target_cids[!is.na(target_cids)]
+
+  df <- if (inherits(con_or_df, "DBIConnection") || inherits(con_or_df, "duckdb_connection")) {
+    DBI::dbGetQuery(con_or_df, sprintf("SELECT * FROM %s", measurement_table))
+  } else {
+    as.data.frame(con_or_df)
+  }
+
+  records <- list()
+  cols_lower <- as.list(stats::setNames(names(df), tolower(names(df))))
+  actual_site <- if (!is.null(site_col)) cols_lower[[tolower(site_col)]] else NULL
+  actual_val <- cols_lower[[tolower(value_col)]] %||% value_col
+  actual_concept <- cols_lower[[tolower(concept_col)]] %||% concept_col
+
+  for (analyte in names(KNOWN_UNIT_CONVERSIONS)) {
+    info <- KNOWN_UNIT_CONVERSIONS[[analyte]]
+    if (length(target_cids) > 0 && !any(info$concept_ids %in% target_cids)) next
+    vals_by_site <- list()
+    target_series <- NULL
+    cid_found <- NA_integer_
+
+    if (actual_concept %in% names(df) && actual_val %in% names(df)) {
+      for (cid in info$concept_ids) {
+        sub <- df[df[[actual_concept]] == cid, , drop = FALSE]
+        if (nrow(sub) > 0) {
+          cid_found <- as.integer(cid)
+          if (!is.null(actual_site) && actual_site %in% names(sub) && length(unique(sub[[actual_site]])) > 1) {
+            for (s in unique(sub[[actual_site]])) {
+              s_vals <- suppressWarnings(as.numeric(sub[[actual_val]][sub[[actual_site]] == s]))
+              s_vals <- s_vals[!is.na(s_vals)]
+              if (length(s_vals) > 0) vals_by_site[[as.character(s)]] <- s_vals
+            }
+          }
+          t_vals <- suppressWarnings(as.numeric(sub[[actual_val]]))
+          target_series <- t_vals[!is.na(t_vals)]
+          break
+        }
+      }
+    }
+
+    if (is.null(target_series) || length(target_series) == 0) {
+      for (c_name in names(cols_lower)) {
+        if (c_name == analyte || grepl(paste0("^", analyte, "_"), c_name) || grepl(paste0("_", analyte, "$"), c_name)) {
+          orig_c <- cols_lower[[c_name]]
+          s_vals <- suppressWarnings(as.numeric(df[[orig_c]]))
+          s_vals <- s_vals[!is.na(s_vals)]
+          if (length(s_vals) > 0) {
+            target_series <- s_vals
+            if (!is.null(actual_site) && actual_site %in% names(df) && length(unique(df[[actual_site]])) > 1) {
+              for (s in unique(df[[actual_site]])) {
+                site_s <- suppressWarnings(as.numeric(df[[orig_c]][df[[actual_site]] == s]))
+                site_s <- site_s[!is.na(site_s)]
+                if (length(site_s) > 0) vals_by_site[[as.character(s)]] <- site_s
+              }
+            }
+            break
+          }
+        }
+      }
+    }
+
+    if (is.null(target_series) || length(target_series) < 2) next
+
+    exp_ratio <- as.numeric(info$ratio)
+    thresh <- as.numeric(info$thresh)
+
+    # 1. Multi-site median audit
+    if (length(vals_by_site) >= 2) {
+      site_medians <- vapply(vals_by_site, stats::median, numeric(1))
+      site_names <- names(site_medians)
+      if (length(site_names) >= 2) {
+        for (i in seq_len(length(site_names) - 1)) {
+          for (j in (i + 1):length(site_names)) {
+            s1 <- site_names[i]
+            s2 <- site_names[j]
+            m1 <- site_medians[s1]
+            m2 <- site_medians[s2]
+            if (m1 <= 0 || m2 <= 0) next
+            obs_ratio <- max(m1, m2) / max(min(m1, m2), 1e-6)
+            if (abs(obs_ratio - exp_ratio) / exp_ratio <= tolerance) {
+              high_site <- if (m1 > m2) s1 else s2
+              low_site <- if (m1 > m2) s2 else s1
+              records[[length(records) + 1L]] <- data.frame(
+                feature = analyte,
+                measurement_concept_id = cid_found,
+                site = sprintf("%s_vs_%s", high_site, low_site),
+                median_val = round(max(m1, m2), 2),
+                detected_ratio = round(obs_ratio, 2),
+                expected_conversion = exp_ratio,
+                suspected_unit = info$alt,
+                target_unit = info$target,
+                flagged = TRUE,
+                is_discordant = TRUE,
+                discordance_type = "cross_site_ratio",
+                recommendation = sprintf("Convert site %s from %s to %s (divide by %s)", high_site, info$alt, info$target, exp_ratio),
+                stringsAsFactors = FALSE
+              )
+            }
+          }
+        }
+      }
+    }
+
+    # 2. Within-dataset bimodal distribution audit
+    sub_low <- target_series[target_series <= thresh]
+    sub_high <- target_series[target_series > thresh]
+    if (length(sub_low) >= 2 && length(sub_high) >= 2) {
+      m_low <- stats::median(sub_low)
+      m_high <- stats::median(sub_high)
+      if (m_low > 0) {
+        obs_ratio <- m_high / m_low
+        if (abs(obs_ratio - exp_ratio) / exp_ratio <= tolerance) {
+          records[[length(records) + 1L]] <- data.frame(
+            feature = analyte,
+            measurement_concept_id = cid_found,
+            site = "internal_bimodal",
+            median_val = round(m_high, 2),
+            detected_ratio = round(obs_ratio, 2),
+            expected_conversion = exp_ratio,
+            suspected_unit = info$alt,
+            target_unit = info$target,
+            flagged = TRUE,
+            is_discordant = TRUE,
+            discordance_type = "bimodal_distribution",
+            recommendation = sprintf("Normalize values > %s from %s to %s (divide by %s)", thresh, info$alt, info$target, exp_ratio),
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+    }
+  }
+
+  if (length(records) == 0) {
+    return(data.frame(
+      feature = character(0), measurement_concept_id = integer(0), site = character(0),
+      median_val = numeric(0), detected_ratio = numeric(0), expected_conversion = numeric(0),
+      suspected_unit = character(0), target_unit = character(0), flagged = logical(0),
+      is_discordant = logical(0), discordance_type = character(0), recommendation = character(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  out <- do.call(rbind, records)
+  rownames(out) <- NULL
+  out$discordance_detected <- out$is_discordant
+  out$detected_conversion_ratio <- out$detected_ratio
+  out
+}
+
+#' Normalize Units
+#'
+#' Normalizes bimodal or discordant measurement values to a canonical target unit.
+#'
+#' @param con_or_df Active DuckDB connection or data frame.
+#' @param concept_id Optional concept ID.
+#' @param feature Optional feature column name.
+#' @param target_unit Target unit (default 'mg/dL').
+#' @param auto_convert_ratio Numeric ratio (default 88.42).
+#' @param threshold Optional threshold above which values are converted.
+#' @param bimodal_threshold Alias for threshold.
+#' @param value_col Value column name (default 'value_as_number').
+#' @param concept_col Concept column name (default 'measurement_concept_id').
+#' @param measurement_concept_id Alias for concept_id.
+#' @param measurement_table Measurement table name (default 'measurement').
+#' @param output_table Optional output table name to materialize into DuckDB.
+#' @return Normalized data frame.
+#' @export
+normalize_units <- function(con_or_df, concept_id = NULL, feature = NULL,
+                            target_unit = "mg/dL", auto_convert_ratio = 88.42,
+                            threshold = NULL, bimodal_threshold = NULL,
+                            value_col = "value_as_number",
+                            concept_col = "measurement_concept_id",
+                            measurement_concept_id = NULL,
+                            measurement_table = "measurement",
+                            output_table = NULL) {
+  cid <- if (is.null(concept_id)) measurement_concept_id else concept_id
+  is_con <- inherits(con_or_df, "DBIConnection") || inherits(con_or_df, "duckdb_connection")
+  df <- if (is_con) {
+    DBI::dbGetQuery(con_or_df, sprintf("SELECT * FROM %s", measurement_table))
+  } else {
+    as.data.frame(con_or_df)
+  }
+
+  thresh <- if (!is.null(bimodal_threshold)) bimodal_threshold else threshold
+  if (is.null(thresh)) {
+    if (auto_convert_ratio > 50) thresh <- 15.0
+    else if (auto_convert_ratio > 10) thresh <- 25.0
+    else thresh <- 10.0
+  }
+
+  cols_lower <- as.list(stats::setNames(names(df), tolower(names(df))))
+  actual_val <- cols_lower[[tolower(value_col)]] %||% value_col
+  actual_concept <- cols_lower[[tolower(concept_col)]] %||% concept_col
+
+  if (!is.null(feature)) {
+    f_col <- cols_lower[[tolower(feature)]] %||% feature
+    if (f_col %in% names(df)) {
+      s <- suppressWarnings(as.numeric(df[[f_col]]))
+      mask <- !is.na(s) & s > thresh
+      df[[f_col]][mask] <- s[mask] / auto_convert_ratio
+      return(df)
+    }
+  }
+
+  if (actual_concept %in% names(df) && actual_val %in% names(df)) {
+    s <- suppressWarnings(as.numeric(df[[actual_val]]))
+    mask <- if (!is.null(cid)) {
+      !is.na(s) & (df[[actual_concept]] == as.integer(cid)) & (s > thresh)
+    } else {
+      !is.na(s) & (s > thresh)
+    }
+    df[[actual_val]][mask] <- s[mask] / auto_convert_ratio
+  }
+
+  if (!is.null(output_table) && nzchar(output_table) && is_con) {
+    duckdb::duckdb_register(con_or_df, "_temp_norm_df", df)
+    DBI::dbExecute(con_or_df, sprintf("CREATE OR REPLACE TABLE %s AS SELECT * FROM _temp_norm_df", output_table))
+    duckdb::duckdb_unregister(con_or_df, "_temp_norm_df")
+  }
+
+  df
+}
+

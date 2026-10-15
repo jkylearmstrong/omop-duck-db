@@ -360,7 +360,7 @@ def run_dqd(
 # sanitize_measurements: physiologic-range and outlier sanitization (RFC 6.1)
 # ----------------------------------------------------------------------------------------
 _SANITIZE_METHODS = ("dqd_biologic_limits", "winsorize_iqr", "z_score_cutoff")
-_SANITIZE_ACTIONS = ("nullify", "clamp", "drop_row")
+_SANITIZE_ACTIONS = ("nullify", "clamp", "drop_row", "winsorize", "drop", "flag_indicator")
 _SANITIZE_FORMATS = ("df", "arrow", "pyarrow", "polars")
 # Statistical methods need at least this many finite values in a (concept, unit) group.
 _SANITIZE_MIN_GROUP_ROWS = 3
@@ -552,7 +552,7 @@ def _sanitize_limits_cte(rows: list[tuple]) -> str:
 
 
 def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, concept_ids, limit_rows,
-                        iqr_multiplier, z_threshold):
+                        iqr_multiplier, z_threshold, measurement_table="measurement"):
     """Compose ``(rows_sql, report_sql)``; both share one classification CTE chain.
 
     Every row of the in-scope measurements gets a ``sanitize_status`` and a cleaned value in SQL, so the
@@ -564,11 +564,12 @@ def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, conce
     if concept_ids is not None:
         where.append("m.measurement_concept_id IN (" + ", ".join(str(int(c)) for c in concept_ids) + ")")
     extra_select = "".join(f", m.{_sanitize_ident(c)}" for c in extras)
+    meas_ref = measurement_table if (measurement_table and (measurement_table.startswith('"') or "." in measurement_table)) else (_sanitize_table_ref(measurement_table, "measurement_table") if measurement_table else "measurement")
     ctes = [
         "base AS (\n"
         "  SELECT m.measurement_id, m.person_id, m.measurement_concept_id, m.measurement_date,\n"
         f"         m.unit_concept_id, CAST(m.value_as_number AS DOUBLE) AS value_raw{extra_select}\n"
-        "  FROM measurement AS m\n"
+        f"  FROM {meas_ref} AS m\n"
         f"  WHERE {' AND '.join(where)}\n"
         ")"
     ]
@@ -680,7 +681,7 @@ def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, conce
             ")",
         ]
 
-    if action == "clamp":
+    if action in ("clamp", "flag_indicator"):
         out_of_range = "CASE WHEN sanitize_status = 'below_min' THEN lo ELSE hi END"
         # +/-Inf go to the nearest finite bound when there is one; NaN (and any value with no finite bound,
         # e.g. an IQR fence that overflowed) is nullified
@@ -700,8 +701,10 @@ def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, conce
     )
     with_clause = "WITH " + ",\n".join(ctes)
 
+    flag_indicator_col = ", CAST(flagged AS INTEGER) AS is_outlier" if action == "flag_indicator" else ""
     out_cols = ("measurement_id, person_id, measurement_concept_id, measurement_date, unit_concept_id, "
                 "value_clean AS value_as_number, value_raw AS value_as_number_raw, sanitize_status"
+                + flag_indicator_col
                 + "".join(f", {_sanitize_ident(c)}" for c in extras))
     rows_sql = (
         f"{with_clause}\nSELECT {out_cols}\nFROM fin\n"
@@ -762,12 +765,14 @@ def sanitize_measurements(
     cohort_table: str | None = None,
     method: str = "dqd_biologic_limits",
     action: str = "nullify",
+    outlier_action: str | None = None,
     measurement_concept_ids: Sequence[int] | None = None,
     limits: pd.DataFrame | None = None,
     iqr_multiplier: float = 3.0,
     z_threshold: float = 4.0,
     person_col: str = "subject_id",
     format: str = "df",
+    measurement_table: str = "measurement",
 ) -> Any:
     r"""Sanitize implausible numeric measurements (RFC 6.1): physiologic limits or statistical outliers.
 
@@ -909,6 +914,8 @@ def sanitize_measurements(
     ...                               method="dqd_biologic_limits", action="nullify")
     >>> clean.attrs["sanitization_report"]
     """
+    if outlier_action is not None:
+        action = outlier_action
     method_k = str(method).lower().strip()
     action_k = str(action).lower().strip()
     fmt = str(format).lower().strip()
@@ -916,6 +923,10 @@ def sanitize_measurements(
         raise ValueError(f"method must be one of {list(_SANITIZE_METHODS)}; got {method!r}")
     if action_k not in _SANITIZE_ACTIONS:
         raise ValueError(f"action must be one of {list(_SANITIZE_ACTIONS)}; got {action!r}")
+    if action_k == "winsorize":
+        action_k = "clamp"
+    elif action_k == "drop":
+        action_k = "drop_row"
     if fmt not in _SANITIZE_FORMATS:
         raise ValueError(f"format must be one of 'df', 'arrow' or 'polars'; got {format!r}")
     k_iqr = _sanitize_positive(iqr_multiplier, "iqr_multiplier")
@@ -930,10 +941,12 @@ def sanitize_measurements(
         warnings.warn(f"limits is only used by method='dqd_biologic_limits' and is ignored for method={method_k!r}.",
                       stacklevel=2)
 
+    meas_ref = _sanitize_table_ref(measurement_table, "measurement_table") if measurement_table else "measurement"
+    table_display = measurement_table if measurement_table else "measurement"
     try:
-        meas_cols = {r[0].lower(): r[0] for r in con.execute("DESCRIBE SELECT * FROM measurement LIMIT 0").fetchall()}
+        meas_cols = {r[0].lower(): r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {meas_ref} LIMIT 0").fetchall()}
     except duckdb.Error as e:
-        raise ValueError(f"sanitize_measurements() needs a CDM 'measurement' table on this connection: {e}") from e
+        raise ValueError(f"sanitize_measurements() needs a CDM '{table_display}' table on this connection: {e}") from e
     absent = [c for c in _SANITIZE_REQUIRED_MEASUREMENT_COLS if c not in meas_cols]
     if absent:
         raise ValueError(f"The measurement table is missing required column(s) {absent}")
@@ -956,7 +969,8 @@ def sanitize_measurements(
 
     rows_sql, report_sql = _sanitize_build_sql(
         method=method_k, action=action_k, extras=extras, cohort_ref=cohort_ref, person_ref=person_ref,
-        concept_ids=concept_ids, limit_rows=limit_rows, iqr_multiplier=k_iqr, z_threshold=k_z)
+        concept_ids=concept_ids, limit_rows=limit_rows, iqr_multiplier=k_iqr, z_threshold=k_z,
+        measurement_table=meas_ref)
 
     out = None
     if fmt == "df":

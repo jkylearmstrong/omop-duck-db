@@ -2,7 +2,8 @@
 % Please edit documentation in R/integrity.R
 \name{vocabulary_preflight}
 \alias{vocabulary_preflight}
-\title{Vocabulary and Input Preflight Check}
+\title{Runs a comprehensive preflight verification of OMOP CDM vocabulary coverage, ATC hierarchies,
+unmapped concept 0 rates across clinical tables, and drug exposure types.}
 \usage{
 vocabulary_preflight(
   con,
@@ -10,25 +11,35 @@ vocabulary_preflight(
   max_unmapped_rate = 0.5,
   fail_fast = TRUE,
   vocab_schema = NULL,
-  vocab_db = NULL
+  vocab_db = NULL,
+  prescribed_type_concept_ids = NULL,
+  administered_type_concept_ids = NULL,
+  dispensed_type_concept_ids = NULL
 )
 }
 \arguments{
-\item{con}{DuckDB connection.}
+\item{con}{DuckDB OMOP database connection.}
 
-\item{required}{Vector of required vocabulary IDs (default RxNorm, ATC, LOINC, SNOMED).}
+\item{required}{Required vocabulary IDs (default: RxNorm, ATC, LOINC, SNOMED).}
 
-\item{max_unmapped_rate}{Maximum allowable share of concept 0 rows before flagging (default 0.50 = 50 percent).}
+\item{max_unmapped_rate}{Maximum allowable share of concept 0 unmapped rows before flagging (default 0.50 = 50\%).}
 
 \item{fail_fast}{If TRUE, raises an error if any required vocabulary is missing.}
 
 \item{vocab_schema}{Optional schema or attached database name for vocabulary tables.}
 
 \item{vocab_db}{Alias for vocab_schema.}
+
+\item{prescribed_type_concept_ids}{Optional integer vector of prescribed concept IDs (default: 32838, 38000177, 32817).}
+
+\item{administered_type_concept_ids}{Optional integer vector of administered concept IDs (default: 38000180, 32828).}
+
+\item{dispensed_type_concept_ids}{Optional integer vector of dispensed concept IDs (default: 38000175, 32823).}
 }
 \value{
 Named list with preflight metrics, drug exposure type breakdown, and passed status.
 }
 \description{
-Checks required vocabulary presence, ATC hierarchy descendant coverage, and unmapped concept 0 rates.
+Runs a comprehensive preflight verification of OMOP CDM vocabulary coverage, ATC hierarchies,
+unmapped concept 0 rates across clinical tables, and drug exposure types.
 }

@@ -154,8 +154,9 @@ def filter_bounds(
 
     The result's ``.attrs['bounds_report']`` is a DataFrame of ``feature, low, high, n_checked, n_out_of_range``.
     """
-    if action not in ("nullify", "clip", "drop"):
-        raise ValueError("action must be 'nullify', 'clip' or 'drop'.")
+    act = str(action).lower().strip()
+    if act not in ("nullify", "clip", "winsorize", "drop", "flag_indicator"):
+        raise ValueError("action must be 'nullify', 'clip', 'winsorize', 'drop', or 'flag_indicator'.")
     cfg = resolve_bounds(bounds, population=population)
     df = data.copy()
     report = []
@@ -176,30 +177,39 @@ def filter_bounds(
             s = pd.to_numeric(df[feat], errors="coerce")
             bad = _oor(s, lo, hi)
             report.append((feat, lo, hi, int(s.notna().sum()), int(bad.sum())))
-            if action == "nullify":
+            if act == "nullify":
                 df[feat] = s.mask(bad)
-            elif action == "clip":
+            elif act in ("clip", "winsorize"):
                 df[feat] = s.clip(lower=lo, upper=hi)
+            elif act == "flag_indicator":
+                df[feat] = s.clip(lower=lo, upper=hi)
+                df[f"is_outlier_{feat}"] = bad.astype(int)
             else:
                 drop_mask |= bad
     else:
         if feature_col not in df.columns or value_col not in df.columns:
             raise ValueError(f"Long frame needs columns {feature_col!r} and {value_col!r}.")
         vals = pd.to_numeric(df[value_col], errors="coerce")
+        outlier_flags = pd.Series(0, index=df.index)
         for feat, (lo, hi) in cfg.items():
             sel = df[feature_col] == feat
             if not sel.any():
                 continue
             bad = sel & _oor(vals, lo, hi)
             report.append((feat, lo, hi, int((sel & vals.notna()).sum()), int(bad.sum())))
-            if action == "nullify":
+            if act == "nullify":
                 vals = vals.mask(bad)
-            elif action == "clip":
+            elif act in ("clip", "winsorize"):
                 vals = vals.mask(sel, vals.clip(lower=lo, upper=hi))
+            elif act == "flag_indicator":
+                vals = vals.mask(sel, vals.clip(lower=lo, upper=hi))
+                outlier_flags |= bad.astype(int)
             else:
                 drop_mask |= bad
         df[value_col] = vals
-    if action == "drop":
+        if act == "flag_indicator":
+            df["is_outlier"] = outlier_flags
+    if act == "drop":
         df = df[~drop_mask]
     df.attrs["bounds_report"] = pd.DataFrame(
         report, columns=["feature", "low", "high", "n_checked", "n_out_of_range"])

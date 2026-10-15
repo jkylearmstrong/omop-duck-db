@@ -116,9 +116,14 @@ from omop_etl.wide_measurement import (
     load_wide_measurement,
 )
 from omop_etl.medication_classes import (
+    DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS,
+    DEFAULT_DISPENSED_TYPE_CONCEPT_IDS,
+    DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS,
     assert_exposure_coverage,
     audit_combination_products,
     audit_medication_strategies,
+    compute_adherence_pdc,
+    compute_drug_eras,
     explain_medication_disagreement,
     export_medication_crosswalk,
     extract_medication_classes,
@@ -126,7 +131,9 @@ from omop_etl.medication_classes import (
 from omop_etl.quality import (
     audit_code_list_coverage,
     detect_redundant_features,
+    detect_unit_discordance,
     dqd_summary,
+    normalize_units,
     panel_missingness_audit,
     plausibility_report,
 )
@@ -175,6 +182,7 @@ from omop_etl.features import (
     ACUTE_LAB_PANEL,
     CORE_14_LAB_PANEL,
     aggregate_concept_sets,
+    extract_features,
     extract_inpatient_labs,
     extract_measurements,
     extract_patient_features,
@@ -225,6 +233,7 @@ from omop_etl.ml_features import (
     export_clinical_sequence_tokens,
     extract_sard_visit_tensors,
     extract_sparse_concept_matrix,
+    impute_encounter_observations,
     to_clinical_sequence_tokens,
 )
 from omop_etl.omop_learn_backend import (
@@ -267,6 +276,7 @@ from omop_etl.concept_optimizer import (
     optimize_concept_set,
 )
 from omop_etl.trajectories import (
+    extract_acute_trajectories,
     extract_temporal_trajectories,
 )
 from omop_etl.federated_survival import (
@@ -526,8 +536,19 @@ __all__ = [
     "consortium_survival_meta_analysis",
     "FederatedSurvivalResult",
     "generate_synthetic_omop_twin",
+    # 0.6.6 EHR Prescriptions, Multi-Anchor, Unit Discordance, Outliers, Eras & Acute Trajectories Additions
+    "DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS",
+    "DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS",
+    "DEFAULT_DISPENSED_TYPE_CONCEPT_IDS",
+    "compute_drug_eras",
+    "compute_adherence_pdc",
+    "detect_unit_discordance",
+    "normalize_units",
+    "extract_acute_trajectories",
+    "impute_encounter_observations",
+    "extract_features",
 ]
 
-__version__ = "0.6.5"
+__version__ = "0.6.6"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 

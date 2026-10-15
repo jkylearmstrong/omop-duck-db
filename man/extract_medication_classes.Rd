@@ -29,6 +29,9 @@ extract_medication_classes(
   vocab_db = NULL,
   route_concept_ids = NULL,
   by_type = FALSE,
+  offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
+  anchor = NULL,
+  drug_type_concept_ids = NULL,
   return_audit = FALSE,
   ...
 )

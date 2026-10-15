@@ -1,8 +1,8 @@
-test_that("Version is 0.6.5 and commit detection works in R", {
-  expect_equal(as.character(utils::packageVersion("omopduckdb")), "0.6.5")
+test_that("Version is 0.6.5 or later and commit detection works in R", {
+  expect_true(utils::packageVersion("omopduckdb") >= "0.6.5")
   prov <- provenance()
   expect_true(nchar(prov$git_commit) >= 7)
-  expect_equal(prov$package_version, "0.6.5")
+  expect_true(prov$package_version >= "0.6.5")
 })
 
 test_that("Vocabulary preflight and provenance support vocab_schema and drug types", {

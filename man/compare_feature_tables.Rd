@@ -15,7 +15,10 @@ compare_feature_tables(
   scale_ratio_threshold = 5,
   min_cell_count = 11L,
   left_manifest = NULL,
-  right_manifest = NULL
+  right_manifest = NULL,
+  stream_to_parquet = NULL,
+  partition_by = NULL,
+  to_arrow_dataset = FALSE
 )
 }
 \arguments{

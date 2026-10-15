@@ -12,12 +12,19 @@
 #' @param include_conditions Logical. Include condition occurrence counts across lookback windows.
 #' @param include_drugs Logical. Include drug exposure counts across lookback windows.
 #' @param include_procedures Logical. Include procedure occurrence counts across lookback windows.
+#' @param offset_anchor Milestone date to anchor lookback windows ('visit_start_date' | 'visit_end_date' | 'index_date').
+#' @param anchor Alias for offset_anchor ('start' | 'end' | 'index').
+#' @param stream_to_parquet Optional file path to stream feature matrix directly to Parquet out-of-core.
+#' @param partition_by Optional column(s) to partition streamed Parquet files by (e.g. 'site').
+#' @param cohort_table Table name containing cohort entries (default 'cohort').
+#' @param measurement_concept_ids Specific measurement concept IDs to extract aggregated features for.
+#' @param lookahead_days Days after anchor date to include in measurement extraction (default 0).
 #' @param include_measurements Logical. Include measurement counts across lookback windows.
 #' @param format Output format: `"df"` (data.frame), `"arrow"`, or `"sparse"`.
 #' @return A `data.frame`, Arrow Table, or sparse covariate data.frame.
 #' @export
 extract_patient_features <- function(con,
-                                     cohort_id,
+                                     cohort_id = NULL,
                                      outcome_cohort_id = NULL,
                                      lookback_days = c(30, 180, 365),
                                      include_demographics = TRUE,
@@ -25,102 +32,162 @@ extract_patient_features <- function(con,
                                      include_drugs = TRUE,
                                      include_procedures = TRUE,
                                      include_measurements = TRUE,
-                                     format = "df") {
+                                     format = "df",
+                                     offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
+                                     anchor = NULL,
+                                     stream_to_parquet = NULL,
+                                     partition_by = NULL,
+                                     cohort_table = "cohort",
+                                     measurement_concept_ids = NULL,
+                                     lookahead_days = 0,
+                                     ...) {
   fmt <- tolower(trimws(format))
   windows <- sort(as.integer(lookback_days))
 
-  select_items <- c("c.subject_id", "c.cohort_start_date", "c.cohort_end_date")
+  cols <- tolower(DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s", cohort_table))$column_name)
+  pcol <- if ("person_id" %in% cols) "person_id" else "subject_id"
+  scol <- if ("cohort_start_date" %in% cols) "cohort_start_date" else if ("visit_start_date" %in% cols) "visit_start_date" else "index_date"
+  ecol <- if ("cohort_end_date" %in% cols) "cohort_end_date" else if ("visit_end_date" %in% cols) "visit_end_date" else scol
+
+  oa <- tolower(if (!is.null(anchor)) anchor else if (!is.null(offset_anchor) && length(offset_anchor) == 1) offset_anchor else "visit_start_date")
+  use_end <- oa %in% c("visit_end_date", "end", "discharge", "cohort_end_date")
+  anchor_col <- if (use_end) ecol else scol
+
+  existing_tables <- tolower(DBI::dbGetQuery(con, "SHOW TABLES")$name)
+  has_person <- "person" %in% existing_tables
+  do_demo <- isTRUE(include_demographics) && has_person
+
+  select_items <- c(sprintf("c.%s AS subject_id", pcol), sprintf("c.%s AS person_id", pcol), sprintf("c.%s AS cohort_start_date", scol), sprintf("c.%s AS cohort_end_date", ecol))
+  if ("site" %in% cols) {
+    select_items <- c(select_items, "c.site")
+  }
 
   if (!is.null(outcome_cohort_id)) {
     select_items <- c(select_items, "COALESCE(oc.outcome_flag, 0) AS y")
     outcome_join <- sprintf("
       LEFT JOIN (
-          SELECT DISTINCT subject_id, 1 AS outcome_flag
-          FROM cohort
+          SELECT DISTINCT %s AS subject_id, 1 AS outcome_flag
+          FROM %s
           WHERE cohort_definition_id = %d
-      ) oc ON c.subject_id = oc.subject_id
-    ", as.integer(outcome_cohort_id))
+      ) oc ON c.%s = oc.subject_id
+    ", pcol, cohort_table, as.integer(outcome_cohort_id), pcol)
   } else {
     outcome_join <- ""
   }
 
-  if (isTRUE(include_demographics)) {
+  if (do_demo) {
     select_items <- c(select_items,
-      "date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age_at_index",
+      sprintf("date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.%s) AS age_at_index", anchor_col),
       "p.gender_concept_id",
       "p.race_concept_id",
       "p.ethnicity_concept_id",
-      "YEAR(c.cohort_start_date) AS index_year"
+      sprintf("YEAR(c.%s) AS index_year", anchor_col)
     )
-    demo_join <- "LEFT JOIN person p ON c.subject_id = p.person_id"
+    demo_join <- sprintf("LEFT JOIN person p ON c.%s = p.person_id", pcol)
   } else {
     demo_join <- ""
   }
 
   lookback_joins <- character(0)
 
-  if (isTRUE(include_conditions)) {
+  if (isTRUE(include_conditions) && "condition_occurrence" %in% existing_tables) {
     cond_cols <- sprintf(
-      "COUNT(DISTINCT CASE WHEN co.condition_start_date BETWEEN c.cohort_start_date - %d AND c.cohort_start_date - 1 THEN co.condition_occurrence_id END) AS condition_count_%dd",
-      windows, windows
+      "COUNT(DISTINCT CASE WHEN co.condition_start_date BETWEEN c.%s - %d AND c.%s - 1 THEN co.condition_occurrence_id END) AS condition_count_%dd",
+      anchor_col, windows, anchor_col, windows
     )
     select_items <- c(select_items, cond_cols)
-    lookback_joins <- c(lookback_joins, "LEFT JOIN condition_occurrence co ON c.subject_id = co.person_id")
+    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN condition_occurrence co ON c.%s = co.person_id", pcol))
   }
 
-  if (isTRUE(include_drugs)) {
+  if (isTRUE(include_drugs) && "drug_exposure" %in% existing_tables) {
     drug_cols <- sprintf(
-      "COUNT(DISTINCT CASE WHEN de.drug_exposure_start_date BETWEEN c.cohort_start_date - %d AND c.cohort_start_date - 1 THEN de.drug_exposure_id END) AS drug_count_%dd",
-      windows, windows
+      "COUNT(DISTINCT CASE WHEN de.drug_exposure_start_date BETWEEN c.%s - %d AND c.%s - 1 THEN de.drug_exposure_id END) AS drug_count_%dd",
+      anchor_col, windows, anchor_col, windows
     )
     select_items <- c(select_items, drug_cols)
-    lookback_joins <- c(lookback_joins, "LEFT JOIN drug_exposure de ON c.subject_id = de.person_id")
+    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN drug_exposure de ON c.%s = de.person_id", pcol))
   }
 
-  if (isTRUE(include_procedures)) {
+  if (isTRUE(include_procedures) && "procedure_occurrence" %in% existing_tables) {
     proc_cols <- sprintf(
-      "COUNT(DISTINCT CASE WHEN po.procedure_date BETWEEN c.cohort_start_date - %d AND c.cohort_start_date - 1 THEN po.procedure_occurrence_id END) AS procedure_count_%dd",
-      windows, windows
+      "COUNT(DISTINCT CASE WHEN po.procedure_date BETWEEN c.%s - %d AND c.%s - 1 THEN po.procedure_occurrence_id END) AS procedure_count_%dd",
+      anchor_col, windows, anchor_col, windows
     )
     select_items <- c(select_items, proc_cols)
-    lookback_joins <- c(lookback_joins, "LEFT JOIN procedure_occurrence po ON c.subject_id = po.person_id")
+    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN procedure_occurrence po ON c.%s = po.person_id", pcol))
   }
 
-  if (isTRUE(include_measurements)) {
-    meas_cols <- sprintf(
-      "COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.cohort_start_date - %d AND c.cohort_start_date - 1 THEN m.measurement_id END) AS measurement_count_%dd",
-      windows, windows
-    )
-    select_items <- c(select_items, meas_cols)
-    lookback_joins <- c(lookback_joins, "LEFT JOIN measurement m ON c.subject_id = m.person_id")
+  if ("measurement" %in% existing_tables) {
+    if (!is.null(measurement_concept_ids) && length(measurement_concept_ids) > 0) {
+      meas_items <- character(0)
+      for (cid in measurement_concept_ids) {
+        for (w in windows) {
+          meas_items <- c(meas_items, sprintf(
+            "AVG(CASE WHEN m.measurement_concept_id = %d AND m.measurement_date BETWEEN c.%s - %d AND c.%s + %d THEN m.value_as_number END) AS mean_measurement_%d",
+            as.integer(cid), anchor_col, w, anchor_col, as.integer(lookahead_days), as.integer(cid)
+          ))
+        }
+      }
+      select_items <- c(select_items, meas_items)
+      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id", pcol))
+    } else if (isTRUE(include_measurements)) {
+      meas_cols <- sprintf(
+        "COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.%s - %d AND c.%s - 1 THEN m.measurement_id END) AS measurement_count_%dd",
+        anchor_col, windows, anchor_col, windows
+      )
+      select_items <- c(select_items, meas_cols)
+      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id", pcol))
+    }
   }
 
   select_clause <- paste(select_items, collapse = ",\n        ")
   all_joins <- paste(c(demo_join, outcome_join, lookback_joins)[nchar(c(demo_join, outcome_join, lookback_joins)) > 0], collapse = "\n    ")
 
-  group_demo <- if (isTRUE(include_demographics)) ", p.year_of_birth, p.month_of_birth, p.day_of_birth, p.gender_concept_id, p.race_concept_id, p.ethnicity_concept_id" else ""
-  group_outcome <- if (!is.null(outcome_cohort_id)) ", oc.outcome_flag" else ""
+  where_clause <- ""
+  if (!is.null(cohort_id) && "cohort_definition_id" %in% cols) {
+    where_clause <- sprintf("WHERE c.cohort_definition_id = %d", as.integer(cohort_id))
+  }
+
+  group_cols <- c(sprintf("c.%s", pcol), sprintf("c.%s", scol), sprintf("c.%s", ecol))
+  if ("site" %in% cols) group_cols <- c(group_cols, "c.site")
+  if (!is.null(outcome_cohort_id)) group_cols <- c(group_cols, "oc.outcome_flag")
+  if (do_demo) {
+    group_cols <- c(group_cols, "p.year_of_birth", "p.month_of_birth", "p.day_of_birth", "p.gender_concept_id", "p.race_concept_id", "p.ethnicity_concept_id")
+  }
+  group_by_clause <- paste(group_cols, collapse = ", ")
 
   dense_sql <- sprintf("
     SELECT 
         %s
-    FROM cohort c
+    FROM %s c
     %s
-    WHERE c.cohort_definition_id = %d
+    %s
     GROUP BY 
-        c.subject_id, c.cohort_start_date, c.cohort_end_date
         %s
-        %s
-    ORDER BY c.subject_id, c.cohort_start_date;
-  ", select_clause, all_joins, as.integer(cohort_id), group_outcome, group_demo)
+    ORDER BY c.%s, c.%s;
+  ", select_clause, cohort_table, all_joins, where_clause, group_by_clause, pcol, scol)
+
+  if (!is.null(stream_to_parquet) && nzchar(stream_to_parquet)) {
+    p_clause <- ""
+    if (!is.null(partition_by) && length(partition_by) > 0) {
+      p_clause <- sprintf(", PARTITION_BY (%s)", paste(partition_by, collapse = ", "))
+    }
+    clean_sql <- trimws(dense_sql)
+    clean_sql <- sub(";*$", "", clean_sql)
+    DBI::dbExecute(con, sprintf("COPY (%s) TO '%s' (FORMAT PARQUET%s)", clean_sql, stream_to_parquet, p_clause))
+    if (fmt %in% c("arrow_dataset", "dataset") && requireNamespace("arrow", quietly = TRUE)) {
+      return(arrow::open_dataset(stream_to_parquet))
+    }
+    return(stream_to_parquet)
+  }
 
   df_dense <- DBI::dbGetQuery(con, dense_sql)
 
   if (fmt == "sparse") {
-    feature_cols <- setdiff(names(df_dense), c("subject_id", "cohort_start_date", "cohort_end_date", "y"))
+    feature_cols <- setdiff(names(df_dense), c("person_id", "subject_id", "cohort_start_date", "cohort_end_date", "y", "site"))
     sparse_rows <- list()
     for (row_idx in seq_len(nrow(df_dense))) {
-      sub_id <- df_dense$subject_id[row_idx]
+      sub_id <- df_dense[[names(df_dense)[1]]][row_idx]
       for (col_idx in seq_along(feature_cols)) {
         col_name <- feature_cols[col_idx]
         val <- df_dense[[col_name]][row_idx]
@@ -147,6 +214,11 @@ extract_patient_features <- function(con,
 
   df_dense
 }
+
+#' @rdname extract_patient_features
+#' @export
+extract_features <- extract_patient_features
+
 
 #' Extract Temporal Baseline and Prior Utilization Features
 #'

@@ -2,11 +2,12 @@
 % Please edit documentation in R/features.R
 \name{extract_patient_features}
 \alias{extract_patient_features}
+\alias{extract_features}
 \title{Extract Machine Learning Feature Matrix from OMOP CDM}
 \usage{
 extract_patient_features(
   con,
-  cohort_id,
+  cohort_id = NULL,
   outcome_cohort_id = NULL,
   lookback_days = c(30, 180, 365),
   include_demographics = TRUE,
@@ -14,7 +15,36 @@ extract_patient_features(
   include_drugs = TRUE,
   include_procedures = TRUE,
   include_measurements = TRUE,
-  format = "df"
+  format = "df",
+  offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
+  anchor = NULL,
+  stream_to_parquet = NULL,
+  partition_by = NULL,
+  cohort_table = "cohort",
+  measurement_concept_ids = NULL,
+  lookahead_days = 0,
+  ...
+)
+
+extract_features(
+  con,
+  cohort_id = NULL,
+  outcome_cohort_id = NULL,
+  lookback_days = c(30, 180, 365),
+  include_demographics = TRUE,
+  include_conditions = TRUE,
+  include_drugs = TRUE,
+  include_procedures = TRUE,
+  include_measurements = TRUE,
+  format = "df",
+  offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
+  anchor = NULL,
+  stream_to_parquet = NULL,
+  partition_by = NULL,
+  cohort_table = "cohort",
+  measurement_concept_ids = NULL,
+  lookahead_days = 0,
+  ...
 )
 }
 \arguments{
@@ -37,6 +67,20 @@ extract_patient_features(
 \item{include_measurements}{Logical. Include measurement counts across lookback windows.}
 
 \item{format}{Output format: \code{"df"} (data.frame), \code{"arrow"}, or \code{"sparse"}.}
+
+\item{offset_anchor}{Milestone date to anchor lookback windows ('visit_start_date' | 'visit_end_date' | 'index_date').}
+
+\item{anchor}{Alias for offset_anchor ('start' | 'end' | 'index').}
+
+\item{stream_to_parquet}{Optional file path to stream feature matrix directly to Parquet out-of-core.}
+
+\item{partition_by}{Optional column(s) to partition streamed Parquet files by (e.g. 'site').}
+
+\item{cohort_table}{Table name containing cohort entries (default 'cohort').}
+
+\item{measurement_concept_ids}{Specific measurement concept IDs to extract aggregated features for.}
+
+\item{lookahead_days}{Days after anchor date to include in measurement extraction (default 0).}
 }
 \value{
 A \code{data.frame}, Arrow Table, or sparse covariate data.frame.

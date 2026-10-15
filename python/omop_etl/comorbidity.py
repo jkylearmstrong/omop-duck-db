@@ -218,7 +218,8 @@ def _resolve_concept_ancestor(con) -> tuple[str | None, str]:
 # SQL
 # --------------------------------------------------------------------------------------
 def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_out, cohort_where, lookback_days,
-               concept_ancestor, hierarchy_adjusted, index_visit_col=None):
+               concept_ancestor, hierarchy_adjusted, index_visit_col=None, fallback_on_unmapped=False,
+               return_mapping_fidelity=False):
     """The profiler as one statement of CTEs.
 
     ``cohort_base`` is the distinct (person, index date) rows and ``cond`` the condition records of those persons with a
@@ -249,7 +250,6 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
         "  JOIN icd AS i ON i.len = l.len AND i.code = left(s.src, l.len)\n)",
     ]
     vid_sel = ", c.vid" if index_visit_col else ""
-    cond_hit = f"SELECT c.pid, c.cdate{vid_sel}, h.domain FROM cond AS c JOIN src_hit AS h ON h.src = c.src"
     if concept_ancestor is not None:
         anc_values = ",\n      ".join(f"({_quote_str(d)}, {int(a)})" for d, a in codes.ancestors)
         ctes.append(
@@ -263,9 +263,17 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
             "    UNION ALL\n"
             "    SELECT domain, concept_id FROM anc\n"
             "  )\n)")
-        cond_hit += (
-            f"\n    UNION ALL\n    SELECT c.pid, c.cdate{vid_sel}, h.domain FROM cond AS c "
-            "JOIN std_hit AS h ON h.concept_id = c.cid")
+        src_filter = " WHERE c.cid = 0 OR c.cid IS NULL" if fallback_on_unmapped else ""
+        cond_hit = (
+            f"SELECT c.pid, c.cdate{vid_sel}, h.domain, 1 AS is_std FROM cond AS c "
+            f"JOIN std_hit AS h ON h.concept_id = c.cid\n"
+            f"    UNION ALL\n"
+            f"    SELECT c.pid, c.cdate{vid_sel}, h.domain, 0 AS is_std FROM cond AS c "
+            f"JOIN src_hit AS h ON h.src = c.src{src_filter}"
+        )
+    else:
+        cond_hit = f"SELECT c.pid, c.cdate{vid_sel}, h.domain, 0 AS is_std FROM cond AS c JOIN src_hit AS h ON h.src = c.src"
+
     window = "ch.cdate < cb.idx_d"
     if index_visit_col:
         # train/serve skew guard: diagnoses attached to the index visit itself are coded after discharge
@@ -282,18 +290,24 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
     ctes.append(f"cond_hit AS (\n    {cond_hit}\n)")
     ctes.append(
         "hits AS (\n"
-        "  SELECT DISTINCT cb.person_key, cb.index_key, ch.domain\n"
+        "  SELECT cb.person_key, cb.index_key, ch.domain, MAX(ch.is_std) AS is_std\n"
         "  FROM cohort_base AS cb\n"
-        f"  JOIN cond_hit AS ch ON ch.pid = cb.person_key AND {window}\n)")
+        f"  JOIN cond_hit AS ch ON ch.pid = cb.person_key AND {window}\n"
+        "  GROUP BY cb.person_key, cb.index_key, ch.domain\n)")
 
     flag_aggs = ",\n         ".join(
         f"MAX(CASE WHEN domain = {_quote_str(d)} THEN 1 ELSE 0 END) AS {_quote_ident(c)}" for d, c, _ in codes.domains)
     ctes.append(
-        f"flags AS (\n  SELECT person_key, index_key,\n         {flag_aggs}\n  FROM hits GROUP BY person_key, index_key\n)")
+        f"flags AS (\n  SELECT person_key, index_key,\n         {flag_aggs},\n"
+        "         SUM(is_std) AS std_pts,\n"
+        "         COUNT(*) AS tot_pts\n"
+        "  FROM hits GROUP BY person_key, index_key\n)")
     flag_cols = ",\n         ".join(
         f"CAST(COALESCE(f.{_quote_ident(c)}, 0) AS INTEGER) AS {_quote_ident(c)}" for _, c, _ in codes.domains)
     ctes.append(
-        f"flat AS (\n  SELECT cb.person_key, cb.index_key,\n         {flag_cols}\n  FROM cohort_base AS cb\n"
+        f"flat AS (\n  SELECT cb.person_key, cb.index_key,\n         {flag_cols},\n"
+        "         CASE WHEN COALESCE(f.tot_pts, 0) > 0 THEN ROUND(CAST(f.std_pts AS DOUBLE) / f.tot_pts, 4) ELSE 1.0 END AS mapping_fidelity_score\n"
+        "  FROM cohort_base AS cb\n"
         "  LEFT JOIN flags AS f ON f.person_key = cb.person_key AND f.index_key = cb.index_key\n)")
 
     col_of = {d: c for d, c, _ in codes.domains}
@@ -307,11 +321,13 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
     total_sql = " + ".join(flag for flag, _ in terms)
     score_sql = " + ".join(f"({flag} * ({w}))" for flag, w in terms)
     flag_names = ", ".join(_quote_ident(c) for _, c, _ in codes.domains)
+    fidelity_col = ", mapping_fidelity_score" if return_mapping_fidelity else ""
     return (
         "WITH\n" + ",\n".join(ctes) + "\n"
         f"SELECT person_key AS {_quote_ident(person_out)}, index_key AS {_quote_ident(index_out)}, {flag_names},\n"
         f"       CAST(({score_sql}) AS INTEGER) AS {_quote_ident(spec.score_col)},\n"
-        f"       CAST(({total_sql}) AS INTEGER) AS {_quote_ident(spec.total_col)}\n"
+        f"       CAST(({total_sql}) AS INTEGER) AS {_quote_ident(spec.total_col)}"
+        f"{fidelity_col}\n"
         "FROM flat\n"
         "ORDER BY person_key, index_key"
     )
@@ -321,7 +337,8 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
 # Driver
 # --------------------------------------------------------------------------------------
 def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, index_date_col, lookback_days,
-             source_and_standard, hierarchy_adjusted, format, exclude_index_diagnoses=True):
+             source_and_standard, hierarchy_adjusted, format, exclude_index_diagnoses=True,
+             fallback_on_unmapped=False, return_mapping_fidelity=False):
     if not isinstance(format, str) or format.lower().strip() not in _FORMATS:
         raise ValueError(f"format must be one of {_FORMATS}; got {format!r}")
     fmt = format.lower().strip()
@@ -401,10 +418,14 @@ def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, ind
     sql = _build_sql(
         spec, codes, qualified=qualified, person=person, index_col=index_col, person_out=person_col,
         index_out=index_date_col, cohort_where=cohort_where, lookback_days=lookback,
-        concept_ancestor=concept_ancestor, hierarchy_adjusted=hierarchy_adjusted, index_visit_col=index_visit_col)
+        concept_ancestor=concept_ancestor, hierarchy_adjusted=hierarchy_adjusted, index_visit_col=index_visit_col,
+        fallback_on_unmapped=fallback_on_unmapped, return_mapping_fidelity=return_mapping_fidelity)
     res = con.execute(sql)
     if fmt == "df":
-        return res.df()
+        out_df = res.df()
+        avg_score = float(out_df["mapping_fidelity_score"].mean()) if "mapping_fidelity_score" in out_df.columns else 1.0
+        out_df.attrs["mapping_fidelity_score"] = round(avg_score, 4)
+        return out_df
     if hasattr(res, "to_arrow_table"):
         arrow = res.to_arrow_table()
     elif hasattr(res, "fetch_arrow_table"):  # duckdb < 1.4
@@ -428,6 +449,8 @@ def extract_elixhauser_comorbidities(
     hierarchy_adjusted: bool = True,
     format: str = "df",
     exclude_index_diagnoses: bool = True,
+    fallback_on_unmapped: bool = False,
+    return_mapping_fidelity: bool = False,
 ) -> Any:
     """Elixhauser comorbidity profile (31 domains, Quan et al. 2005) with the van Walraven 2009 score.
 
@@ -518,7 +541,8 @@ def extract_elixhauser_comorbidities(
     """
     return _profile(con, _ELIXHAUSER, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
                     index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format,
-                    exclude_index_diagnoses)
+                    exclude_index_diagnoses, fallback_on_unmapped=fallback_on_unmapped,
+                    return_mapping_fidelity=return_mapping_fidelity)
 
 
 def extract_charlson_index(
@@ -532,6 +556,8 @@ def extract_charlson_index(
     hierarchy_adjusted: bool = True,
     format: str = "df",
     exclude_index_diagnoses: bool = True,
+    fallback_on_unmapped: bool = False,
+    return_mapping_fidelity: bool = False,
 ) -> Any:
     """Charlson comorbidity profile (17 categories, Quan et al. 2005 coding) with the Charlson index.
 
@@ -620,4 +646,5 @@ def extract_charlson_index(
     """
     return _profile(con, _CHARLSON, "extract_charlson_index", cohort_table, cohort_id, person_col,
                     index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format,
-                    exclude_index_diagnoses)
+                    exclude_index_diagnoses, fallback_on_unmapped=fallback_on_unmapped,
+                    return_mapping_fidelity=return_mapping_fidelity)

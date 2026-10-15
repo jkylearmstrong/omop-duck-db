@@ -347,7 +347,10 @@ def compare_feature_tables(
     missingness_gap_threshold: float = 0.05,
     scale_ratio_threshold: float = 5.0,
     min_cell_count: int = 11,
-) -> pd.DataFrame:
+    stream_to_parquet: str | Path | None = None,
+    partition_by: Sequence[str] | None = None,
+    to_arrow_dataset: bool = False,
+) -> Any:
     """Computes a feature-by-feature parity ledger comparing two derivations.
 
     Quantifies standardized mean differences (SMD), Pearson correlation (or Cohen's kappa),
@@ -365,9 +368,12 @@ def compare_feature_tables(
         missingness_gap_threshold: Maximum allowable missingness gap (default 0.05 = 5%).
         scale_ratio_threshold: Maximum allowable ratio of standard deviations (default 5.0).
         min_cell_count: Cell count threshold for suppression (default 11).
+        stream_to_parquet: Optional file or directory path to stream the parity ledger directly to Parquet.
+        partition_by: Optional columns to partition parquet by (e.g. ['site']).
+        to_arrow_dataset: Whether to return an Arrow Table/Dataset.
 
     Returns:
-        pd.DataFrame: Parity ledger with columns [site, feature, matched_n, left_mean,
+        pd.DataFrame or pyarrow.Table: Parity ledger with columns [site, feature, matched_n, left_mean,
             right_mean, left_sd, right_sd, smd, correlation, left_missing_rate,
             right_missing_rate, missingness_gap, flagged, reason].
     """
@@ -524,11 +530,27 @@ def compare_feature_tables(
 
     out = pd.DataFrame(records)
     if out.empty:
-        return pd.DataFrame(columns=[
+        out = pd.DataFrame(columns=[
             "site", "feature", "matched_n", "left_mean", "right_mean", "left_sd", "right_sd",
             "smd", "correlation", "left_missing_rate", "right_missing_rate", "missingness_gap",
             "flagged", "reason"
         ])
+
+    if stream_to_parquet is not None:
+        out_p = Path(stream_to_parquet)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        if partition_by and len(out) > 0 and all(c in out.columns for c in partition_by):
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            tbl = pa.Table.from_pandas(out)
+            pq.write_to_dataset(tbl, root_path=str(out_p), partition_cols=list(partition_by))
+        else:
+            out.to_parquet(out_p, index=False)
+
+    if to_arrow_dataset:
+        import pyarrow as pa
+        return pa.Table.from_pandas(out)
+
     return out
 
 

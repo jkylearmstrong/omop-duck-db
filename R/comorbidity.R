@@ -77,9 +77,12 @@ extract_elixhauser_comorbidities <- function(con,
                                              lookback_days = 365,
                                              source_and_standard = TRUE,
                                              hierarchy_adjusted = TRUE,
-                                             exclude_index_diagnoses = TRUE) {
+                                             exclude_index_diagnoses = TRUE,
+                                             fallback_on_unmapped = FALSE,
+                                             return_mapping_fidelity = FALSE) {
   .comorb_profile(con, .comorb_elixhauser, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
-                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses)
+                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses,
+                  fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity)
 }
 
 #' Charlson comorbidity profile (17 categories, Charlson index)
@@ -138,9 +141,12 @@ extract_charlson_index <- function(con,
                                    lookback_days = 365,
                                    source_and_standard = TRUE,
                                    hierarchy_adjusted = TRUE,
-                                   exclude_index_diagnoses = TRUE) {
+                                   exclude_index_diagnoses = TRUE,
+                                   fallback_on_unmapped = FALSE,
+                                   return_mapping_fidelity = FALSE) {
   .comorb_profile(con, .comorb_charlson, "extract_charlson_index", cohort_table, cohort_id, person_col,
-                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses)
+                  index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses,
+                  fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity)
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -309,7 +315,8 @@ extract_charlson_index <- function(con,
 
 # The profiler as one statement of CTEs (see the Python twin for the walk-through).
 .comorb_build_sql <- function(spec, codes, qualified, person, index_col, person_out, index_out, cohort_where,
-                              lookback_days, concept_ancestor, hierarchy_adjusted, index_visit_col = NULL) {
+                              lookback_days, concept_ancestor, hierarchy_adjusted, index_visit_col = NULL,
+                              fallback_on_unmapped = FALSE, return_mapping_fidelity = FALSE) {
   icd_values <- paste(sprintf("(%s, %s)", .comorb_qs(codes$icd$domain), .comorb_qs(codes$icd$code)),
                       collapse = ",\n      ")
   ctes <- c(
@@ -334,7 +341,7 @@ extract_charlson_index <- function(con,
            "  JOIN icd AS i ON i.len = l.len AND i.code = left(s.src, l.len)\n)")
   )
   vid_sel <- if (!is.null(index_visit_col)) ", c.vid" else ""
-  cond_hit <- paste0("SELECT c.pid, c.cdate", vid_sel, ", h.domain FROM cond AS c JOIN src_hit AS h ON h.src = c.src")
+  src_filter <- if (isTRUE(fallback_on_unmapped)) " WHERE c.cid = 0 OR c.cid IS NULL" else ""
   if (!is.null(concept_ancestor)) {
     anc_values <- paste(sprintf("(%s, %s)", .comorb_qs(codes$ancestors$domain), .comorb_num(codes$ancestors$concept_id)),
                         collapse = ",\n      ")
@@ -350,8 +357,13 @@ extract_charlson_index <- function(con,
              "    SELECT domain, concept_id FROM anc\n",
              "  )\n)")
     )
-    cond_hit <- paste0(cond_hit, "\n    UNION ALL\n",
-                       "    SELECT c.pid, c.cdate", vid_sel, ", h.domain FROM cond AS c JOIN std_hit AS h ON h.concept_id = c.cid")
+    cond_hit <- paste0(
+      "    SELECT c.pid, c.cdate", vid_sel, ", h.domain, 1 AS is_std FROM cond AS c JOIN std_hit AS h ON h.concept_id = c.cid\n",
+      "    UNION ALL\n",
+      "    SELECT c.pid, c.cdate", vid_sel, ", h.domain, 0 AS is_std FROM cond AS c JOIN src_hit AS h ON h.src = c.src", src_filter
+    )
+  } else {
+    cond_hit <- paste0("SELECT c.pid, c.cdate", vid_sel, ", h.domain, 0 AS is_std FROM cond AS c JOIN src_hit AS h ON h.src = c.src")
   }
   window <- "ch.cdate < cb.idx_d"
   if (!is.null(index_visit_col)) {
@@ -368,8 +380,8 @@ extract_charlson_index <- function(con,
   ctes <- c(
     ctes,
     sprintf("cond_hit AS (\n    %s\n)", cond_hit),
-    sprintf(paste0("hits AS (\n  SELECT DISTINCT cb.person_key, cb.index_key, ch.domain\n  FROM cohort_base AS cb\n",
-                   "  JOIN cond_hit AS ch ON ch.pid = cb.person_key AND %s\n)"), window)
+    sprintf(paste0("hits AS (\n  SELECT cb.person_key, cb.index_key, ch.domain, MAX(ch.is_std) AS is_std\n  FROM cohort_base AS cb\n",
+                   "  JOIN cond_hit AS ch ON ch.pid = cb.person_key AND %s\n  GROUP BY cb.person_key, cb.index_key, ch.domain\n)"), window)
   )
 
   dom <- codes$domains
@@ -379,10 +391,11 @@ extract_charlson_index <- function(con,
                      collapse = ",\n         ")
   ctes <- c(
     ctes,
-    sprintf("flags AS (\n  SELECT person_key, index_key,\n         %s\n  FROM hits GROUP BY person_key, index_key\n)",
+    sprintf("flags AS (\n  SELECT person_key, index_key,\n         %s,\n         SUM(is_std) AS std_pts,\n         COUNT(*) AS tot_pts\n  FROM hits GROUP BY person_key, index_key\n)",
             flag_aggs),
-    paste0("flat AS (\n  SELECT cb.person_key, cb.index_key,\n         ", flag_cols, "\n  FROM cohort_base AS cb\n",
-           "  LEFT JOIN flags AS f ON f.person_key = cb.person_key AND f.index_key = cb.index_key\n)")
+    paste0("flat AS (\n  SELECT cb.person_key, cb.index_key,\n         ", flag_cols, ",\n",
+           "         CASE WHEN COALESCE(f.tot_pts, 0) > 0 THEN ROUND(CAST(f.std_pts AS DOUBLE) / f.tot_pts, 4) ELSE 1.0 END AS mapping_fidelity_score\n",
+           "  FROM cohort_base AS cb\n  LEFT JOIN flags AS f ON f.person_key = cb.person_key AND f.index_key = cb.index_key\n)")
   )
 
   counted <- .comorb_qi(dom$column)
@@ -395,19 +408,21 @@ extract_charlson_index <- function(con,
   }
   total_sql <- paste(counted, collapse = " + ")
   score_sql <- paste(sprintf("(%s * (%d))", counted, dom$weight), collapse = " + ")
+  fidelity_col <- if (isTRUE(return_mapping_fidelity)) ", mapping_fidelity_score" else ""
   paste0(
     "WITH\n", paste(ctes, collapse = ",\n"), "\n",
     sprintf("SELECT person_key AS %s, index_key AS %s, %s,\n", .comorb_qi(person_out), .comorb_qi(index_out),
             paste(.comorb_qi(dom$column), collapse = ", ")),
     sprintf("       CAST((%s) AS INTEGER) AS %s,\n", score_sql, .comorb_qi(spec$score_col)),
-    sprintf("       CAST((%s) AS INTEGER) AS %s\n", total_sql, .comorb_qi(spec$total_col)),
+    sprintf("       CAST((%s) AS INTEGER) AS %s%s\n", total_sql, .comorb_qi(spec$total_col), fidelity_col),
     "FROM flat\n",
     "ORDER BY person_key, index_key"
   )
 }
 
 .comorb_profile <- function(con, spec, fn, cohort_table, cohort_id, person_col, index_date_col, lookback_days,
-                            source_and_standard, hierarchy_adjusted, exclude_index_diagnoses = TRUE) {
+                            source_and_standard, hierarchy_adjusted, exclude_index_diagnoses = TRUE,
+                            fallback_on_unmapped = FALSE, return_mapping_fidelity = FALSE) {
   lookback <- .comorb_check_int(lookback_days, "lookback_days", allow_null = TRUE, minimum = 0)
   cohort <- .comorb_check_int(cohort_id, "cohort_id", allow_null = TRUE)
   .comorb_check_flag(source_and_standard, "source_and_standard")
@@ -483,6 +498,11 @@ extract_charlson_index <- function(con,
   }
 
   sql <- .comorb_build_sql(spec, codes, qualified, person, index_col, person_col, index_date_col, cohort_where,
-                           lookback, concept_ancestor, hierarchy_adjusted, index_visit_col)
-  DBI::dbGetQuery(con, sql)
+                           lookback, concept_ancestor, hierarchy_adjusted, index_visit_col,
+                           fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity)
+  res <- DBI::dbGetQuery(con, sql)
+  avg_score <- if ("mapping_fidelity_score" %in% names(res)) mean(res$mapping_fidelity_score, na.rm = TRUE) else 1.0
+  attr(res, "mapping_fidelity_score") <- round(avg_score, 4)
+  res
 }
+

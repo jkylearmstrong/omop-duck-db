@@ -906,3 +906,94 @@ def arrow_to_cuda_tensors(
     return X_tensor
 
 
+def impute_encounter_observations(
+    data: pd.DataFrame | duckdb.DuckDBPyConnection,
+    features: Sequence[str] | None = None,
+    *,
+    encounter_col: str = "visit_occurrence_id",
+    time_col: str = "measurement_datetime",
+    id_col: str = "person_id",
+    imputation_strategy: str = "locf_median",
+    training_medians: Mapping[str, float] | None = None,
+    median_values: Mapping[str, float] | None = None,
+    add_missing_indicators: bool = True,
+    add_indicators: bool | None = None,
+    table_name: str | None = None,
+    feature_table: str | None = None,
+    return_medians: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, float]]:
+    """Deterministic in-database / in-encounter imputation helper with leakage prevention.
+
+    Provides:
+    1. In-encounter forward-fill (LOCF) for vital signs and repeating laboratory measurements.
+    2. Encounter-level missingness indicators (`miss_<feature> = 1`).
+    3. Training-set-derived median imputation to prevent cross-validation leakage.
+
+    Args:
+        data: DataFrame or DuckDB connection containing encounter observations.
+        features: Optional list of numeric feature columns to impute. Defaults to all numeric features.
+        encounter_col: Encounter identifier column (default 'visit_occurrence_id').
+        time_col: Measurement timestamp/date column for chronological ordering (default 'measurement_datetime').
+        id_col: Patient identifier column (default 'person_id').
+        imputation_strategy: Strategy to apply ('locf', 'median', 'locf_median').
+        training_medians: Optional dictionary of medians pre-computed on a training split.
+        median_values: Alias for training_medians.
+        add_missing_indicators: Whether to generate binary `miss_<feature>` indicator columns (default True).
+        add_indicators: Alias for add_missing_indicators.
+        table_name: Table name if `data` is a DuckDB connection.
+        feature_table: Alias for table_name.
+        return_medians: If True, returns tuple (df, applied_medians). Otherwise returns df with applied_medians in df.attrs.
+
+    Returns:
+        pd.DataFrame or tuple[pd.DataFrame, dict[str, float]]: Imputed DataFrame and dictionary of applied medians.
+    """
+    tbl = feature_table or table_name or "measurement"
+    medians = dict(median_values or training_medians or {})
+    add_ind = add_missing_indicators if add_indicators is None else add_indicators
+    if isinstance(data, duckdb.DuckDBPyConnection):
+        df = data.execute(f"SELECT * FROM {tbl}").df()
+    else:
+        df = data.copy()
+
+    cols_lower = {c.lower(): c for c in df.columns}
+    enc_c = cols_lower.get(encounter_col.lower(), encounter_col)
+    t_c = cols_lower.get(time_col.lower(), time_col)
+    pid_c = cols_lower.get(id_col.lower(), id_col)
+
+    # Sort within encounter chronologically if timestamp column present
+    sort_keys = [c for c in [enc_c, t_c] if c in df.columns]
+    if sort_keys:
+        df = df.sort_values(sort_keys)
+
+    # Determine features to impute
+    if features is not None:
+        target_features = [cols_lower.get(f.lower(), f) for f in features if cols_lower.get(f.lower(), f) in df.columns]
+    else:
+        skip_cols = {enc_c.lower(), t_c.lower(), pid_c.lower(), "subject_id", "measurement_id", "measurement_concept_id"}
+        target_features = [c for c in df.select_dtypes(include=[np.number]).columns if c.lower() not in skip_cols and not c.startswith("miss_")]
+
+    # 1. Missingness indicators
+    if add_ind:
+        for f in target_features:
+            df[f"miss_{f}"] = df[f].isna().astype(int)
+
+    # 2. In-encounter forward-fill (LOCF)
+    if imputation_strategy in ("locf", "locf_median") and enc_c in df.columns:
+        for f in target_features:
+            df[f] = df.groupby(enc_c)[f].ffill()
+
+    # 3. Leakage-safe median imputation
+    applied_medians = dict(medians)
+    if imputation_strategy in ("median", "locf_median"):
+        for f in target_features:
+            if f not in applied_medians:
+                m_val = float(df[f].median()) if df[f].notna().any() else 0.0
+                applied_medians[f] = m_val
+            df[f] = df[f].fillna(applied_medians[f])
+
+    df.attrs["applied_medians"] = applied_medians
+    if return_medians:
+        return df, applied_medians
+    return df
+
+

@@ -8,7 +8,7 @@ import math
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 import duckdb
 import numpy as np
@@ -612,6 +612,11 @@ def scan_document_numbers(
 # 5. Vocabulary and Input Preflight Check
 # -----------------------------------------------------------------------------
 
+DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS = (32838, 38000177, 32817)
+DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS = (38000180, 32828)
+DEFAULT_DISPENSED_TYPE_CONCEPT_IDS = (38000175, 32823)
+
+
 def vocabulary_preflight(
     con: duckdb.DuckDBPyConnection,
     required: Iterable[str] = ("RxNorm", "ATC", "LOINC", "SNOMED"),
@@ -619,6 +624,10 @@ def vocabulary_preflight(
     fail_fast: bool = True,
     vocab_schema: Optional[str] = None,
     vocab_db: Optional[str] = None,
+    prescribed_type_concept_ids: Optional[Sequence[int]] = None,
+    administered_type_concept_ids: Optional[Sequence[int]] = None,
+    dispensed_type_concept_ids: Optional[Sequence[int]] = None,
+    required_vocabularies: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Runs a comprehensive preflight verification of OMOP CDM vocabulary coverage, ATC hierarchies,
     unmapped concept 0 rates across clinical tables, and drug exposure types.
@@ -637,6 +646,12 @@ def vocabulary_preflight(
         Schema or attached database containing Athena vocabulary tables (e.g. 'central_vocab').
     vocab_db : Optional[str]
         Alias for vocab_schema.
+    prescribed_type_concept_ids : Optional[Sequence[int]]
+        Concept IDs representing prescriptions (default: 32838 [EHR prescription], 38000177, 32817).
+    administered_type_concept_ids : Optional[Sequence[int]]
+        Concept IDs representing inpatient administrations (default: 38000180, 32828).
+    dispensed_type_concept_ids : Optional[Sequence[int]]
+        Concept IDs representing dispensings (default: 38000175, 32823).
 
     Returns
     -------
@@ -646,6 +661,11 @@ def vocabulary_preflight(
     v_schema = vocab_schema or vocab_db
     concept_tbl = f"{v_schema}.concept" if v_schema else "concept"
     ca_tbl = f"{v_schema}.concept_ancestor" if v_schema else "concept_ancestor"
+
+    p_ids = tuple(DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS if prescribed_type_concept_ids is None else prescribed_type_concept_ids)
+    a_ids = tuple(DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS if administered_type_concept_ids is None else administered_type_concept_ids)
+    d_ids = tuple(DEFAULT_DISPENSED_TYPE_CONCEPT_IDS if dispensed_type_concept_ids is None else dispensed_type_concept_ids)
+    all_known_ids = set(p_ids) | set(a_ids) | set(d_ids)
 
     # Fall back to central_vocab if v_schema is None and concept is not in default schema
     if v_schema is None:
@@ -671,16 +691,19 @@ def vocabulary_preflight(
             "other": 0,
             "total": 0,
             "prescribed_38000177": 0,
+            "prescribed_32838": 0,
             "administered_38000180": 0,
             "dispensed_38000175": 0,
         },
         "drug_type_breakdown": {},
         "issues": [],
     }
+    req = required if required_vocabularies is None else required_vocabularies
     report["drug_type_breakdown"] = report["drug_types"]
+    report["prescriptions_by_type"] = report["drug_types"]
 
     # Check required vocabularies
-    for vocab in required:
+    for vocab in req:
         try:
             cnt = con.execute(
                 f"SELECT count(*) FROM {concept_tbl} WHERE vocabulary_id = '{vocab}'"
@@ -715,17 +738,25 @@ def vocabulary_preflight(
             "SELECT count(*) FROM information_schema.tables WHERE lower(table_name) = 'drug_exposure'"
         ).fetchone()[0] > 0
         if has_de:
-            dt_stats = con.execute("""
+            p_sql = ", ".join(str(int(x)) for x in p_ids) if p_ids else "NULL"
+            a_sql = ", ".join(str(int(x)) for x in a_ids) if a_ids else "NULL"
+            d_sql = ", ".join(str(int(x)) for x in d_ids) if d_ids else "NULL"
+            all_sql = ", ".join(str(int(x)) for x in all_known_ids) if all_known_ids else "NULL"
+            dt_stats = con.execute(f"""
                 SELECT
-                    count(CASE WHEN drug_type_concept_id = 38000177 THEN 1 END) AS prescribed,
-                    count(CASE WHEN drug_type_concept_id = 38000180 THEN 1 END) AS administered,
-                    count(CASE WHEN drug_type_concept_id = 38000175 THEN 1 END) AS dispensed,
-                    count(CASE WHEN drug_type_concept_id NOT IN (38000177, 38000180, 38000175) OR drug_type_concept_id IS NULL THEN 1 END) AS other,
+                    count(CASE WHEN drug_type_concept_id IN ({p_sql}) THEN 1 END) AS prescribed,
+                    count(CASE WHEN drug_type_concept_id IN ({a_sql}) THEN 1 END) AS administered,
+                    count(CASE WHEN drug_type_concept_id IN ({d_sql}) THEN 1 END) AS dispensed,
+                    count(CASE WHEN drug_type_concept_id NOT IN ({all_sql}) OR drug_type_concept_id IS NULL THEN 1 END) AS other,
+                    count(CASE WHEN drug_type_concept_id = 38000177 THEN 1 END) AS prescribed_38000177,
+                    count(CASE WHEN drug_type_concept_id = 32838 THEN 1 END) AS prescribed_32838,
+                    count(CASE WHEN drug_type_concept_id = 38000180 THEN 1 END) AS administered_38000180,
+                    count(CASE WHEN drug_type_concept_id = 38000175 THEN 1 END) AS dispensed_38000175,
                     count(*) AS total
                 FROM drug_exposure
             """).fetchone()
             if dt_stats:
-                total_cnt = int(dt_stats[4] or 0)
+                total_cnt = int(dt_stats[8] or 0)
                 p_cnt = int(dt_stats[0] or 0)
                 a_cnt = int(dt_stats[1] or 0)
                 d_cnt = int(dt_stats[2] or 0)
@@ -735,9 +766,10 @@ def vocabulary_preflight(
                     "dispensed": d_cnt,
                     "other": int(dt_stats[3] or 0),
                     "total": total_cnt,
-                    "prescribed_38000177": p_cnt,
-                    "administered_38000180": a_cnt,
-                    "dispensed_38000175": d_cnt,
+                    "prescribed_38000177": int(dt_stats[4] or 0),
+                    "prescribed_32838": int(dt_stats[5] or 0),
+                    "administered_38000180": int(dt_stats[6] or 0),
+                    "dispensed_38000175": int(dt_stats[7] or 0),
                     "prescribed_pct": round(float(p_cnt) / float(total_cnt) * 100.0, 2) if total_cnt > 0 else 0.0,
                     "administered_pct": round(float(a_cnt) / float(total_cnt) * 100.0, 2) if total_cnt > 0 else 0.0,
                     "dispensed_pct": round(float(d_cnt) / float(total_cnt) * 100.0, 2) if total_cnt > 0 else 0.0,
