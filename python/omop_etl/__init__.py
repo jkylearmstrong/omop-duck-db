@@ -337,7 +337,6 @@ from omop_etl.rollups import (
     audit_concept_drift,
     compute_file_sha256,
     materialize_crosswalk,
-    resolve_concept_set,
 )
 
 __all__ = [

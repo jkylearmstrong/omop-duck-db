@@ -308,8 +308,8 @@ reference:
   - normalize_units
   - stream_to_parquet
   - to_arrow_dataset
-- title: Hierarchical rollups, concept patterns, fuzzy mappings, domain provenance, and Parquet crosswalk cache (v0.6.7)
-  desc: Declarative multi-domain hierarchical rollups, concept set pattern matching, DuckDB in-database fuzzy string matching, clinical provenance filters, Parquet crosswalk materialization, and vocabulary drift auditing.
+- title: Hierarchical rollups, tabular loaders, concept patterns, fuzzy mappings, domain provenance, and Parquet crosswalk cache (v0.6.7 - v0.6.8)
+  desc: Declarative multi-domain hierarchical rollups, native tabular and workbook loaders, bundled clinical code lists, concept set pattern matching, DuckDB in-database fuzzy string matching, clinical provenance filters, Parquet crosswalk materialization, and vocabulary drift auditing.
   contents:
   - audit_concept_drift
   - concept_pattern
@@ -318,10 +318,17 @@ reference:
   - filter_measurements
   - filter_visits
   - hierarchical_rollup
+  - hierarchical_rollup_from_bundled
+  - hierarchical_rollup_from_csv
+  - hierarchical_rollup_from_excel
   - materialize_crosswalk
   - provenance_concept_ids
   - resolve_concept_patterns
   - rollup_engine
+  - rollup_engine_from_bundled
+  - rollup_engine_from_csvs
+  - rollup_engine_from_excel
+  - rollup_engine_from_folder
   - rollups
   - spec_hash
   - suggest_source_mappings

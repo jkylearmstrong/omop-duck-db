@@ -152,12 +152,17 @@ class ConceptPattern:
 
 def resolve_concept_set(
     con: duckdb.DuckDBPyConnection | Any,
-    patterns: Sequence[ConceptPattern | Mapping[str, Any] | str],
+    patterns: Sequence[ConceptPattern | Mapping[str, Any] | str] | None = None,
     vocab_db: str | None = None,
     standard_only: bool = False,
     expand: str | None = None,
     include_retired: bool = False,
-) -> pd.DataFrame:
+    include_concepts: int | Sequence[int] | None = None,
+    exclude_concepts: int | Sequence[int] | None = None,
+    include_descendants: bool = True,
+    exclude_descendants: bool = True,
+    **kwargs: Any,
+) -> Any:
     """Resolve OMOP concept sets using code/name wildcard patterns, regexes, and hierarchy expansions.
 
     Args:
@@ -167,10 +172,25 @@ def resolve_concept_set(
         standard_only: If True, filters output to standard OMOP concepts ('S').
         expand: Global hierarchy expansion ('descendants' | 'ancestors' | None).
         include_retired: If True, performs backward 'Maps to' lookup for deprecated concepts.
+        include_concepts: Optional concept ID(s) for OHDSI ATLAS algebra delegation.
+        exclude_concepts: Optional concept ID(s) to exclude for OHDSI ATLAS algebra delegation.
+        include_descendants: If True, includes descendants for include_concepts.
+        exclude_descendants: If True, includes descendants for exclude_concepts.
 
     Returns:
-        pd.DataFrame: Resolved concepts table.
+        pd.DataFrame or list[int]: Resolved concepts table or concept IDs.
     """
+    if patterns is None and (include_concepts is not None or exclude_concepts is not None):
+        from omop_etl.cohort import resolve_concept_set as _resolve_cohort
+        return _resolve_cohort(
+            con,
+            include_concepts=include_concepts,
+            exclude_concepts=exclude_concepts,
+            include_descendants=include_descendants,
+            exclude_descendants=exclude_descendants,
+            **kwargs,
+        )
+
     if not patterns:
         return pd.DataFrame(columns=[
             "concept_id", "concept_name", "domain_id", "vocabulary_id",

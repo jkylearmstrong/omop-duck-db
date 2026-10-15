@@ -86,6 +86,7 @@ def test_hierarchical_rollup_from_headerless_csv():
 
 
 def test_hierarchical_rollup_from_excel():
+    pytest.importorskip("openpyxl")
     excel_path = os.path.join(
         os.path.dirname(__file__), "..", "inst", "extdata", "code_lists", "eDERRI_Clinical_Review_Package.xlsx"
     )
@@ -128,6 +129,7 @@ def test_hierarchical_rollup_from_bundled():
 # 3. RollupEngine Multi-Class Ingestion
 # ---------------------------------------------------------------------------
 def test_rollup_engine_from_excel():
+    pytest.importorskip("openpyxl")
     excel_path = os.path.join(
         os.path.dirname(__file__), "..", "inst", "extdata", "code_lists", "eDERRI_Clinical_Review_Package.xlsx"
     )
@@ -262,7 +264,7 @@ def test_parquet_crosswalk_caching_and_invalidation():
         _create_mock_vocab_db(con)
 
         # Build engine from this CSV
-        engine = RollupEngine.from_excel_or_csv = RollupEngine.from_csvs(
+        engine = RollupEngine.from_csvs(
             paths=[csv_file],
             class_col="CLASS",
             code_col="CODE",
