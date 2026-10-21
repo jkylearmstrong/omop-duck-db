@@ -124,6 +124,32 @@ reference:
   - ACUTE_LAB_PANEL
   - WORST_LAB_DIRECTION
   - DEFAULT_VISIT_CONCEPT_GROUPS
+  - extract_velocity_features
+  - NO_PRIOR_VISIT_DAYS
+  - VELOCITY_FEATURES
+  - VELOCITY_CONCEPTS
+- title: Source databases, model bundles and site telemetry
+  desc: Stream any DBI source to Parquet, import an existing OMOP CDM, validate feature contracts, score with hash-verified model bundles, and produce/pool aggregate-only consortium telemetry.
+  contents:
+  - from_sql
+  - import_omop
+  - CDM_STUDY_TABLES
+  - load_feature_spec
+  - validate_feature_frame
+  - feature_validation_telemetry
+  - load_model_bundle
+  - write_model_bundle
+  - score_cohort
+  - bundle_predict_proba
+  - sha256_file
+  - DEFAULT_RISK_TIERS
+  - site_telemetry
+  - aggregate_telemetry
+  - validate_packet
+  - load_packet_schema
+  - auroc_delong
+  - average_precision
+  - TELEMETRY_SCHEMA_VERSION
 - title: Production scoring and train/serve skew guard
   desc: A fitted imputer, scaler and model bundled with the ordered feature schema; scoring refuses frames that do not match it.
   contents:

@@ -19,8 +19,11 @@ Imports:
     DBI,
     digest,
     duckdb,
+    jsonlite,
     parallel,
+    stats,
     stringr,
+    utils,
     yaml
 Suggests:
     googledrive,
@@ -48,7 +51,8 @@ Suggests:
     reticulate,
     FeatureExtraction,
     arrow,
-    jsonlite,
+    RSQLite,
+    xgboost,
     dplyr,
     withr,
     survival,
