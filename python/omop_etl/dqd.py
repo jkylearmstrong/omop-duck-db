@@ -21,6 +21,7 @@ import duckdb
 import pandas as pd
 
 from omop_etl.build_omop_cdm import _resource_path
+from omop_etl.jsonio import strict_dumps
 
 
 _PLAUSIBLE_DATE_TABLES = [
@@ -403,7 +404,7 @@ def run_dqd(
         p = Path(output_json)
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
-            json.dump(dqd_dict, f, indent=2)
+            f.write(strict_dumps(dqd_dict, indent=2))
 
     return dqd_dict
 

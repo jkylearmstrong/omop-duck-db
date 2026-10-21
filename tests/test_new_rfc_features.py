@@ -447,7 +447,9 @@ def test_sard_dense_features_and_cluster_command(mock_cdm, tmp_path):
 
 
 def test_arrow_to_cuda_tensors():
-    torch = pytest.importorskip("torch")
+    from conftest import import_or_skip
+
+    torch = import_or_skip("torch")
     import pyarrow as pa
 
     data = {

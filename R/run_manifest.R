@@ -74,7 +74,7 @@ write_run_manifest <- function(m, path = "run_manifest.json") {
             feature_spec = if (is.null(m$feature_spec)) NULL else list(path = m$feature_spec, sha256 = .file_sha256(m$feature_spec)),
             attrition = m$attrition, extra = m$extra)
   dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
-  jsonlite::write_json(d, path, auto_unbox = TRUE, null = "null", pretty = TRUE, digits = NA)
+  jsonlite::write_json(d, path, auto_unbox = TRUE, null = "null", na = "null", pretty = TRUE, digits = NA)
   invisible(path)
 }
 

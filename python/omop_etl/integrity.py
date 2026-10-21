@@ -4,6 +4,8 @@ Provenance Manifests, and Consortium Overlap Tools."""
 import hashlib
 import hmac
 import json
+
+from omop_etl.jsonio import strict_dumps
 import math
 import os
 import re
@@ -528,7 +530,7 @@ def numbers_of_record(
 
     if path:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
+            f.write(strict_dumps(manifest, indent=2))
 
     return manifest
 

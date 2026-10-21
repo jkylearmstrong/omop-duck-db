@@ -30,6 +30,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from omop_etl.jsonio import strict_dumps
 from omop_etl.feature_contract import FeatureValidationReport, load_feature_spec, validate_feature_frame
 
 __all__ = ["BundleIntegrityError", "ModelBundle", "load_model_bundle", "score_cohort", "write_model_bundle",
@@ -267,19 +268,19 @@ def write_model_bundle(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     spec = load_feature_spec(dict(feature_spec))
-    (out / "feature_spec.json").write_text(json.dumps(spec, indent=2, sort_keys=True), encoding="utf-8")
+    (out / "feature_spec.json").write_text(strict_dumps(spec, indent=2, sort_keys=True), encoding="utf-8")
     blend_comps = []
     for c in components:
         fname = c["filename"]
         if "content" in c:
-            (out / fname).write_text(json.dumps(c["content"], indent=2, sort_keys=True), encoding="utf-8")
+            (out / fname).write_text(strict_dumps(c["content"], indent=2, sort_keys=True), encoding="utf-8")
         else:
             shutil.copyfile(c["file"], out / fname)
         blend_comps.append({"name": c.get("name", fname), "kind": c["kind"], "file": fname,
                             "weight": c.get("weight", 1.0), **({"output": c["output"]} if "output" in c else {})})
     blend = {"components": blend_comps, "calibration": dict(calibration) if calibration else None,
              "risk_tiers": [dict(t) for t in (risk_tiers or DEFAULT_RISK_TIERS)]}
-    (out / "blend.json").write_text(json.dumps(blend, indent=2, sort_keys=True), encoding="utf-8")
+    (out / "blend.json").write_text(strict_dumps(blend, indent=2, sort_keys=True), encoding="utf-8")
     hashes = {c["file"]: sha256_file(out / c["file"]) for c in blend_comps}
     hashes["blend.json"] = sha256_file(out / "blend.json")
     manifest = {
@@ -288,5 +289,5 @@ def write_model_bundle(
         "feature_spec_sha256": sha256_file(out / "feature_spec.json"), "model_sha256": hashes,
         "license": license, "intended_use": intended_use,
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    (out / "manifest.json").write_text(strict_dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return out

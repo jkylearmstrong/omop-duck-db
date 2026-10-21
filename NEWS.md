@@ -1,3 +1,11 @@
+# omopduckdb (development version)
+
+- **`omop-duckdb evaluate`** (Python): one command chains `check_source`, cohort, `extract_velocity_features`, `validate_feature_frame`, `score_cohort`, `site_telemetry` and a run manifest; only the aggregate packet and manifest are written (`omop_etl.evaluate.evaluate_site()`).
+- **Strict JSON**: every exchanged JSON file (feature specs, bundles, manifests, telemetry, DQD and integrity reports) now writes `null` instead of `NaN` / `Infinity`, in Python (`omop_etl.jsonio`) and R (`na = "null"`); specs that already contain `NaN` tokens are read as `null`.
+- **Live-database CI** (`.github/workflows/live-db.yml`, `tests/test_live_databases.py`): PostgreSQL 16, SQL Server 2022 and Oracle Free service containers exercise chunked `from_sql`, `import_omop` and execution of the generated SQL Server / Oracle DDL. The `[oracle]` extra now requires SQLAlchemy 2.x.
+- Fixed (found by the first live Oracle run): `from_sql()` truncated Oracle `NUMBER(p,s)` columns with decimals to integers (Oracle's `NUMBER` type is both Numeric and Integer); they now map to Arrow decimals.
+- Tests: optional PyTorch tests skip cleanly when the import raises `OSError` (Windows DLL initialisation failure) as well as `ImportError`.
+
 # omopduckdb 0.7.0
 
 Release 0.7.0 adds source-database neutrality, hash-verified model deployment, consortium telemetry, run manifests, velocity features and more export targets, in Python and (mostly) R. It also changes a few defaults; read **Upgrade notes** first.

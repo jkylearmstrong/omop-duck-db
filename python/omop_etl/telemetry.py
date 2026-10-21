@@ -20,6 +20,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from omop_etl.jsonio import strict_dumps
+
 __all__ = ["SCHEMA_VERSION", "site_telemetry", "aggregate_telemetry", "validate_packet", "load_packet_schema",
            "TelemetryPrivacyError"]
 
@@ -213,7 +215,7 @@ def site_telemetry(
     if output is not None:
         out = Path(output)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(packet, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+        out.write_text(strict_dumps(packet, indent=2, sort_keys=True), encoding="utf-8")
     return packet
 
 

@@ -9,10 +9,12 @@ Commands:
     omop-duckdb extract --url <sqlalchemy-url|env:VAR> --tables a,b --out <dir>
     omop-duckdb import-omop --url <url> --schema <cdm_schema> --out site.duckdb
     omop-duckdb check-source <dir> [--format csv|parquet]
+    omop-duckdb evaluate --bundle bundle/ --db site.duckdb --site-id S01 --out telemetry_packet.json
 """
 
 from __future__ import annotations
 
+from omop_etl.jsonio import strict_dumps
 from omop_etl.paths import sql_path_literal
 import argparse
 import json
@@ -140,6 +142,21 @@ def create_parser() -> argparse.ArgumentParser:
     sc.add_argument("--on-violation", choices=["raise", "clip", "nullify"], default="raise")
     _add_manifest_args(sc)
 
+    ev = subparsers.add_parser("evaluate", help="One-shot consortium evaluation: check-source, features, validate, score, telemetry.")
+    ev.add_argument("--bundle", required=True, help="Model bundle directory.")
+    ev.add_argument("--db", required=True, help="Site OMOP CDM DuckDB file (opened read-only).")
+    ev.add_argument("--out", "-o", required=True, help="Telemetry packet JSON to write.")
+    ev.add_argument("--site-id", required=True, help="Opaque consortium site code, [A-Za-z0-9_-]{1,32}.")
+    ev.add_argument("--source-dir", default=None, help="Raw source directory to preflight with check-source first.")
+    ev.add_argument("--source-format", choices=["csv", "parquet"], default=None)
+    ev.add_argument("--cohort-table", default=None, help="Existing cohort table with an outcome_flag column (default: define the 30-day readmission cohort).")
+    ev.add_argument("--extra-features", default=None, help="Parquet/CSV of extra feature columns keyed by subject_id + cohort_start_date (labs, elix_*, med_*).")
+    ev.add_argument("--on-violation", choices=["raise", "clip", "nullify"], default="raise")
+    ev.add_argument("--min-cell", type=int, default=11)
+    ev.add_argument("--seed", type=int, default=42)
+    ev.add_argument("--persist-keys", default=None, help="CSV of index stays to reuse/write for identical cohorts across runs.")
+    ev.add_argument("--manifest", default=None, help="run_manifest.json path (default: next to --out).")
+
     vm = subparsers.add_parser("verify-manifest", help="Verify input hashes recorded in a run_manifest.json.")
     vm.add_argument("manifest", help="Path to run_manifest.json.")
 
@@ -172,6 +189,20 @@ def handle_score(args: argparse.Namespace) -> int:
     if args.manifest:
         m.write(args.manifest)
     print(f"Scored {len(scores)} rows -> {args.out}")
+    return 0
+
+
+def handle_evaluate(args: argparse.Namespace) -> int:
+    from omop_etl.evaluate import EvaluationError, evaluate_site
+
+    try:
+        evaluate_site(args.bundle, args.db, args.out, site_id=args.site_id, source_dir=args.source_dir,
+                      source_format=args.source_format, cohort_table=args.cohort_table, extra_features=args.extra_features,
+                      on_violation=args.on_violation, min_cell=args.min_cell, seed=args.seed, persist_keys=args.persist_keys,
+                      manifest=args.manifest)
+    except EvaluationError as exc:
+        print(f"evaluate failed: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -249,7 +280,7 @@ def handle_dqd(args: argparse.Namespace) -> int:
             out_p = Path(args.output)
             out_p.parent.mkdir(parents=True, exist_ok=True)
             if out_p.suffix.lower() == ".json":
-                out_p.write_text(json.dumps(results, indent=2, default=str), encoding="utf-8")
+                out_p.write_text(strict_dumps(results, indent=2, default=str), encoding="utf-8")
             else:
                 md_lines = ["# Duck-DQD Data Quality Report\n"]
                 for k, v in results.items():
@@ -257,7 +288,7 @@ def handle_dqd(args: argparse.Namespace) -> int:
                 out_p.write_text("\n".join(md_lines), encoding="utf-8")
             print(f"DQD report written to {args.output}")
         else:
-            print(json.dumps(results, indent=2, default=str))
+            print(strict_dumps(results, indent=2, default=str))
         return 0
     finally:
         con.close()
@@ -357,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:
         return handle_export(args)
     if args.command == "score":
         return handle_score(args)
+    if args.command == "evaluate":
+        return handle_evaluate(args)
     if args.command == "verify-manifest":
         return handle_verify_manifest(args)
     if args.command == "extract":

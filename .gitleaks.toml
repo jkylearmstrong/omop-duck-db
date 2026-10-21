@@ -8,6 +8,8 @@ useDefault = true
 description = "Synthetic fixtures and documentation placeholders"
 paths = [
   '''tests/fixtures/''',
+  '''\.github/workflows/live-db\.yml''',
+  '''tests/test_live_databases\.py''',
   '''renv\.lock''',
 ]
 regexes = [

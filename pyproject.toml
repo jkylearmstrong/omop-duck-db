@@ -29,7 +29,7 @@ ml = ["scipy>=1.10"]
 sql = ["sqlalchemy>=1.4"]
 postgres = ["sqlalchemy>=1.4", "psycopg2-binary"]
 mssql = ["sqlalchemy>=1.4", "pyodbc"]
-oracle = ["sqlalchemy>=1.4", "oracledb"]
+oracle = ["sqlalchemy>=2.0", "oracledb"]  # the oracle+oracledb dialect needs SQLAlchemy 2.x
 snowflake = ["sqlalchemy>=1.4", "snowflake-sqlalchemy"]
 # Model bundles (FR-A1): native XGBoost JSON and ONNX runtimes.
 bundle = ["xgboost>=2.0", "onnxruntime>=1.16"]

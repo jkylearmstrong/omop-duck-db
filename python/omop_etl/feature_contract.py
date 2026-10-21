@@ -20,6 +20,7 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
+from omop_etl.jsonio import strict_loads
 from omop_etl.measurement_filter import DEFAULT_PHYSIOLOGIC_BOUNDS
 
 __all__ = ["FeatureContractError", "FeatureValidationReport", "validate_feature_frame", "load_feature_spec"]
@@ -44,7 +45,7 @@ class FeatureContractError(ValueError):
 
 def load_feature_spec(spec: Mapping[str, Any] | str | Path) -> dict[str, Any]:
     if isinstance(spec, (str, Path)):
-        spec = json.loads(Path(spec).read_text(encoding="utf-8"))
+        spec = strict_loads(Path(spec).read_text(encoding="utf-8"))
     feats = spec.get("features") if isinstance(spec, Mapping) else None
     if not feats:
         raise ValueError("feature_spec needs a non-empty 'features' list.")

@@ -23,6 +23,18 @@ if os.environ.get("OMOP_LEARN_SRC"):
 from omop_etl import build_schema  # noqa: E402
 
 
+def import_or_skip(name: str):
+    """``pytest.importorskip`` that also skips when the library is installed but cannot load.
+
+    On Windows a PyTorch wheel without its VC++ / CUDA redistributables raises ``OSError: [WinError 1114] DLL
+    initialization failed`` (not ``ImportError``), which ``importorskip`` would turn into a test error.
+    """
+    try:
+        return __import__(name)
+    except (ImportError, OSError) as exc:
+        pytest.skip(f"{name} is unavailable: {type(exc).__name__}: {exc}", allow_module_level=False)
+
+
 def _insert_person(con, ids):
     for pid in ids:
         con.execute(
