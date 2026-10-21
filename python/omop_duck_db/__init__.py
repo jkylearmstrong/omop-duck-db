@@ -3,4 +3,4 @@
 from omop_etl import *  # noqa: F401, F403
 import omop_etl as _omop_etl
 
-__version__ = getattr(_omop_etl, "__version__", "0.6.8")
+__version__ = getattr(_omop_etl, "__version__", "0.7.0")

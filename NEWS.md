@@ -1,5 +1,15 @@
-# omopduckdb (development version)
+# omopduckdb 0.7.0
 
+Release 0.7.0 adds source-database neutrality, hash-verified model deployment, consortium telemetry, run manifests, velocity features and more export targets, in Python and (mostly) R. It also changes a few defaults; read **Upgrade notes** first.
+
+## Upgrade notes
+- **R installs need `jsonlite`** (now in Imports, with `stats` and `utils`).
+- **`run_dqd()` gains a `plausibleDateRange` check** on every clinical `*_date` column (default 1950-01-01 to the extraction date), so pass rates differ from earlier reports. Use `plausible_date_range=` for sites with a far-future sentinel such as 2099-12-31.
+- **Oracle export changed**: typed `.ctl` files with `SKIP=1` and explicit date masks, `NUMBER(10)` / `VARCHAR2(n CHAR)` DDL, 30-character identifier check (`oracle_max_identifier=128` for 12.2+), reserved words quoted, `load_oracle.sh` expects `$ORA_CONN`. Regenerate old Oracle exports.
+- **`omop-duckdb build` and `omop-duckdb cohort define --type inpatient` now work** (they previously called library functions with wrong arguments). `build` runs `build_schema`, so use a new target file.
+- Not exercised against real PostgreSQL, Oracle, SQL Server, Snowflake or BigQuery databases, and the XGBoost/ONNX bundle paths are untested; please report problems.
+
+## What is new
 Python-side additions from the 2026-10 consortium audit (`FEATURE_REQUESTS_POST_0.6.8.md`). R ports are included for A1 (logistic and XGBoost-JSON bundles; ONNX/TorchScript components are Python-only), A2, A3, A4 and B1/B2 (`from_sql()` / `import_omop()` take an open DBI connection instead of a SQLAlchemy URL). Bundles and telemetry packets are interchangeable between the two languages. Also ported to R: B3 (`check_source()`, Parquet source files, `etl_pcornet(strict_source = TRUE)`), A5 (`run_manifest()`, `write_run_manifest()`, `verify_manifest()`), C1 (`run_dqd()` `plausibleDateRange`), C2 (`split_by_date()`) and C3 (`define_study_cohort(persist_keys=)`). Not ported to R: C4 secret scanning (repository-level, language independent) and the `omop-duckdb` CLI commands.
 
 - **Source-database neutrality (FR-B1/B2/B3)**: `omop-duckdb extract` / `omop_etl.extract.from_sql()` streams any SQLAlchemy source to Parquet in chunks (typed from the reflected schema, lower-cased columns, case-insensitive table lookup, `--table-map`, `env:VAR` URLs, secrets never logged; extras `[postgres]`, `[mssql]`, `[oracle]`, `[snowflake]`). `omop-duckdb import-omop` / `import_omop()` copies an existing OMOP CDM from a server into DuckDB. The PCORnet ETL now reads `<table>.parquet` as well as `.csv`; `omop-duckdb check-source` / `check_source()` reports present tables/columns and `etl_pcornet(strict_source=True)` fails fast naming the missing column and table.
