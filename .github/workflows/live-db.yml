@@ -54,9 +54,9 @@ jobs:
         options: >-
           --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 30
     env:
-      OMOP_TEST_POSTGRES_URL: postgresql+psycopg2://omop:omop_ci_pw@localhost:5432/omop
-      OMOP_TEST_MSSQL_URL: mssql+pymssql://sa:Omop_ci_pw1%21@localhost:1433/master
-      OMOP_TEST_ORACLE_URL: oracle+oracledb://omop:omop_ci_pw@localhost:1521/?service_name=FREEPDB1
+      OMOP_TEST_POSTGRES_URL: postgresql+psycopg2://omop:omop_ci_pw@localhost:5432/omop  # secret-scan:allow (throwaway CI container credentials)
+      OMOP_TEST_MSSQL_URL: mssql+pymssql://sa:Omop_ci_pw1%21@localhost:1433/master  # secret-scan:allow (throwaway CI container credentials)
+      OMOP_TEST_ORACLE_URL: oracle+oracledb://omop:omop_ci_pw@localhost:1521/?service_name=FREEPDB1  # secret-scan:allow (throwaway CI container credentials)
     steps:
       - uses: actions/checkout@v4
 

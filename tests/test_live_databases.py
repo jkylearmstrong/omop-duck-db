@@ -4,7 +4,7 @@ Each backend is enabled by an environment variable holding a SQLAlchemy URL; bac
 default ``pytest tests`` run is unaffected. ``.github/workflows/live-db.yml`` starts PostgreSQL 16, SQL Server 2022 and
 Oracle Free and sets:
 
-* ``OMOP_TEST_POSTGRES_URL``  e.g. ``postgresql+psycopg2://omop:omop@localhost:5432/omop``
+* ``OMOP_TEST_POSTGRES_URL``  e.g. ``postgresql+psycopg2://omop:omop@localhost:5432/omop``  # secret-scan:allow
 * ``OMOP_TEST_MSSQL_URL``     e.g. ``mssql+pymssql://sa:<pw>@localhost:1433/master``
 * ``OMOP_TEST_ORACLE_URL``    e.g. ``oracle+oracledb://omop:<pw>@localhost:1521/?service_name=FREEPDB1``
 * ``OMOP_TEST_SQLITE_URL``    optional, lets the generic tests run without any server
