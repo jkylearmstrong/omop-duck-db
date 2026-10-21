@@ -72,7 +72,7 @@ def test_url_from_env_and_no_secret_leak(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="NOT_SET"):
         resolve_url("env:NOT_SET")
     with pytest.raises(Exception) as ei:
-        from_sql("postgresql://user:hunter2@127.0.0.1:1/db", ["person"], tmp_path / "o")
+        from_sql("postgresql://user:hunter2@127.0.0.1:1/db", ["person"], tmp_path / "o")  # secret-scan:allow (dummy value: asserts masking)
     assert "hunter2" not in str(ei.value)
 
 
