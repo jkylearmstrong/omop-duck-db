@@ -70,12 +70,13 @@ def engine(request):
 
 def _drop(eng, *tables: str) -> None:
     md = sa.MetaData()
-    insp = sa.inspect(eng)
-    existing = {t.lower(): t for t in insp.get_table_names()}
+    existing = {t.lower(): t for t in sa.inspect(eng).get_table_names()}
+    # reflect everything BEFORE opening the DROP transaction: on SQL Server a second connection reflecting while the
+    # first holds uncommitted DDL locks blocks forever
+    todo = [sa.Table(existing[t.lower()], md, autoload_with=eng) for t in tables if t.lower() in existing]
     with eng.begin() as c:
-        for t in tables:
-            if t.lower() in existing:
-                sa.Table(existing[t.lower()], md, autoload_with=eng).drop(c)
+        for tbl in todo:
+            tbl.drop(c)
 
 
 N = 2503  # not a multiple of the chunk size
@@ -106,12 +107,15 @@ def test_chunked_streaming_roundtrip(engine, tmp_path):
         f = (tmp_path / "out" / f"{name}.parquet").as_posix()
         cols = {r[0]: r[1] for r in con.execute(f"DESCRIBE SELECT * FROM '{f}'").fetchall()}
         assert set(cols) == {"event_id", "patid", "amount", "event_date", "event_ts", "note"}  # lower-cased even on Oracle
-        assert cols["event_id"] in ("BIGINT", "INTEGER") and cols["event_date"] == "DATE"
+        oracle = engine.dialect_name == "oracle"
+        assert cols["event_id"] in ("BIGINT", "INTEGER") or (oracle and cols["event_id"].startswith("DECIMAL"))
+        assert cols["event_date"] == "DATE" or (oracle and cols["event_date"].startswith("TIMESTAMP"))  # Oracle DATE has a time
         assert cols["event_ts"].startswith("TIMESTAMP") and cols["amount"].startswith("DECIMAL")
         n, n_amt, n_note, total, d0, ts_max = con.execute(
-            f"SELECT count(*), count(amount), count(note), sum(amount), min(event_date), max(event_ts) FROM '{f}'").fetchone()
+            f"SELECT count(*), count(amount), count(note), sum(amount), min(CAST(event_date AS DATE)), max(event_ts) FROM '{f}'").fetchone()
         assert (n, n_amt, n_note) == (N, sum(1 for r in rows if r["amount"] is not None), sum(1 for r in rows if r["note"]))
         assert total == sum(r["amount"] for r in rows if r["amount"] is not None)
+        assert n == N
         assert d0 == dt.date(2020, 1, 1) and ts_max == max(r["event_ts"] for r in rows)
         assert con.execute(f"SELECT note FROM '{f}' WHERE event_id = 1").fetchone()[0] == 'a,b "q" 1'
     finally:
