@@ -515,13 +515,14 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                             age_method = "year_difference", min_los_days = 1, washin_days = 365,
                             exclude_death = TRUE, death_ids = 4216643, death_sources = "death_table",
                             window_days = 30, gap_days = 0, verified = TRUE,
-                            evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42) {
+                            evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42,
+                            pinned_keys = FALSE) {
   list(cohort_id = cohort_id, outcome = outcome, label = label, schema = schema, visit_ids = visit_ids,
        outcome_visit_ids = outcome_visit_ids, study_start = study_start, study_end = study_end,
        min_age = min_age, age_method = age_method, min_los_days = min_los_days, washin_days = washin_days,
        exclude_death = exclude_death, death_ids = death_ids, death_sources = death_sources,
        window_days = window_days, gap_days = gap_days, verified = verified, evidence = evidence,
-       rule = rule, seed = seed)
+       rule = rule, seed = seed, pinned_keys = pinned_keys)
 }
 
 # ---- identifier / literal helpers --------------------------------------------------------------------
@@ -563,7 +564,18 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 
 #' @keywords internal
 #' @noRd
-.study_order_by <- function(rule, seed) {
+.study_order_by <- function(rule, seed, pinned = FALSE) {
+  pin <- if (isTRUE(pinned)) paste0("(f.visit_occurrence_id IN (SELECT visit_occurrence_id FROM ", .STUDY_PINNED_TABLE, ")) DESC, ") else ""
+  paste0(pin, .study_order_by_rule(rule, seed))
+}
+
+#' @keywords internal
+#' @noRd
+.STUDY_PINNED_TABLE <- "_study_pinned_keys"
+
+#' @keywords internal
+#' @noRd
+.study_order_by_rule <- function(rule, seed) {
   if (rule == "random") {
     sprintf("hash(f.visit_occurrence_id, %s), f.visit_occurrence_id", .sql_int(seed))
   } else if (rule == "first") {
@@ -833,7 +845,7 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                 ORDER BY %s
             ) AS stay_rank
         FROM filtered_stays f
-    )", .study_order_by(spec$rule, spec$seed))
+    )", .study_order_by(spec$rule, spec$seed, spec$pinned_keys))
     )
   }
   paste0("WITH ", paste(ctes, collapse = ",\n    "))
@@ -997,6 +1009,20 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
     stop(e)
   })
   DBI::dbGetQuery(con, sprintf("SELECT %s FROM %s ORDER BY subject_id;", projection, tmp))
+}
+
+#' @keywords internal
+#' @noRd
+.write_index_keys <- function(df, path) {
+  keys <- df[order(df$subject_id), c("subject_id", "visit_occurrence_id")]
+  tmp <- tempfile(fileext = ".csv")
+  utils::write.csv(keys, tmp, row.names = FALSE, quote = FALSE, eol = "\n")
+  new <- readBin(tmp, "raw", file.info(tmp)$size)
+  unlink(tmp)
+  if (file.exists(path) && identical(readBin(path, "raw", file.info(path)$size), new)) return(invisible(path))
+  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+  writeBin(new, path)
+  invisible(path)
 }
 
 # ---- argument validation (define_study_cohort) -------------------------------------------------------
@@ -1286,6 +1312,11 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #' @param table_name Optional table name (up to three dot-separated plain identifiers) to persist the full result.
 #' @param schema Optional schema (or `catalog.schema`) holding the CDM tables; default resolved via the search
 #'   path.
+#' @param one_per_patient The engine always selects exactly one index stay per patient; `FALSE` is rejected.
+#' @param persist_keys Path of a CSV (`subject_id,visit_occurrence_id`, sorted by subject) of the selected index
+#'   stays. When the file exists the listed stays are preferred over resampling, so selection is identical across
+#'   re-runs and sites sharing the file; patients missing from it are sampled by `sampling_rule` and the file is
+#'   rewritten. It is only written when its content changes (byte-identical for identical selections).
 #' @param attrition Compute the stepwise patient attrition via [compute_attrition()] (default `TRUE`).
 #'
 #' @return A `data.frame`, one row per patient ordered by `subject_id`, with columns `cohort_definition_id`,
@@ -1354,7 +1385,12 @@ define_study_cohort <- function(con,
                                 materialise = "auto",
                                 table_name = NULL,
                                 schema = NULL,
-                                attrition = TRUE) {
+                                attrition = TRUE,
+                                one_per_patient = TRUE,
+                                persist_keys = NULL) {
+  if (!isTRUE(one_per_patient)) {
+    stop("define_study_cohort selects exactly one index stay per patient; one_per_patient = FALSE is unsupported.", call. = FALSE)
+  }
   visit_ids <- .resolve_visit_types(visit_type, "visit_type", allow_null = TRUE)
   win <- .resolve_study_window(study_window)
   min_age_n <- .whole_number(min_age, "min_age", minimum = 0, allow_null = TRUE)
@@ -1447,6 +1483,19 @@ define_study_cohort <- function(con,
     evidence = evidence, rule = rule, seed = seed_n
   )
 
+  if (!is.null(persist_keys) && file.exists(persist_keys)) {
+    pinned <- utils::read.csv(persist_keys, stringsAsFactors = FALSE)
+    if (!"visit_occurrence_id" %in% names(pinned)) {
+      stop("persist_keys file '", persist_keys, "' needs a visit_occurrence_id column.", call. = FALSE)
+    }
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TEMP TABLE %s (visit_occurrence_id BIGINT)", .STUDY_PINNED_TABLE))
+    ids <- stats::na.omit(as.numeric(pinned$visit_occurrence_id))
+    if (length(ids)) DBI::dbExecute(con, sprintf("INSERT INTO %s VALUES %s", .STUDY_PINNED_TABLE,
+                                                 paste0("(", sprintf("%.0f", ids), ")", collapse = ", ")))
+    spec$pinned_keys <- TRUE
+    on.exit(DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", .STUDY_PINNED_TABLE)), add = TRUE)
+  }
+
   if (identical(materialise, "auto")) {
     if (.study_db_read_only(con, schema)) {
       warning("The connection is read-only, so the cohort was returned but not written to the cohort / ",
@@ -1470,6 +1519,8 @@ define_study_cohort <- function(con,
       overwrite = TRUE
     )
   )
+
+  if (!is.null(persist_keys)) .write_index_keys(df, persist_keys)
 
   if (attrition) {
     attr(df, "attrition") <- compute_attrition(con, cohort_id, .study_attrition_steps(spec))

@@ -10,13 +10,14 @@ export_cdm(
   output_path,
   tables = NULL,
   partition_by = NULL,
-  compression = "zstd"
+  compression = "zstd",
+  oracle_max_identifier = 30L
 )
 }
 \arguments{
 \item{con}{Active DuckDB DBI connection.}
 
-\item{target_type}{Character: \code{"parquet"}, \code{"postgres"}, \code{"oracle"}, \code{"csv"}, or \code{"tsv"}.}
+\item{target_type}{Character: \code{"parquet"}, \code{"postgres"}, \code{"oracle"}, \code{"sqlserver"}, \code{"snowflake"}, \code{"bigquery"}, \code{"csv"}, or \code{"tsv"}.}
 
 \item{output_path}{Character destination directory path or connection string.}
 
@@ -25,6 +26,8 @@ export_cdm(
 \item{partition_by}{Optional named list of table -> SQL partition expression (for Parquet).}
 
 \item{compression}{Character compression codec for Parquet (default \code{"zstd"}).}
+
+\item{oracle_max_identifier}{30 (Oracle < 12.2, the safe default) or 128; longer identifiers raise an error.}
 }
 \value{
 A list with export status and file paths.

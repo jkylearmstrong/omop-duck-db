@@ -3,11 +3,12 @@
 #' Exports OMOP CDM tables to partitioned Parquet, PostgreSQL, Oracle, or CSV/TSV.
 #'
 #' @param con Active DuckDB DBI connection.
-#' @param target_type Character: `"parquet"`, `"postgres"`, `"oracle"`, `"csv"`, or `"tsv"`.
+#' @param target_type Character: `"parquet"`, `"postgres"`, `"oracle"`, `"sqlserver"`, `"snowflake"`, `"bigquery"`, `"csv"`, or `"tsv"`.
 #' @param output_path Character destination directory path or connection string.
 #' @param tables Optional character vector of table names (default: all populated CDM tables).
 #' @param partition_by Optional named list of table -> SQL partition expression (for Parquet).
 #' @param compression Character compression codec for Parquet (default `"zstd"`).
+#' @param oracle_max_identifier 30 (Oracle < 12.2, the safe default) or 128; longer identifiers raise an error.
 #' @return A list with export status and file paths.
 #' @export
 export_cdm <- function(con,
@@ -15,7 +16,8 @@ export_cdm <- function(con,
                        output_path,
                        tables = NULL,
                        partition_by = NULL,
-                       compression = "zstd") {
+                       compression = "zstd",
+                       oracle_max_identifier = 30L) {
   tgt <- tolower(trimws(target_type))
 
   all_cdm_tables <- c(
@@ -72,44 +74,40 @@ export_cdm <- function(con,
     }
     DBI::dbExecute(con, "DETACH target_pg;")
 
-  } else if (tgt == "oracle") {
-    ddl_statements <- character(0)
-
+  } else if (tgt %in% EXTRA_EXPORT_TARGETS) {
+    model <- load_cdm_schema()
+    unknown <- setdiff(tolower(tables), names(model))
+    if (length(unknown)) stop("Tables not in the CDM v5.4 DDL: ", paste(unknown, collapse = ", "), call. = FALSE)
+    writeLines(generate_ddl(tgt, tables, schema = model, oracle_max_identifier = oracle_max_identifier),
+               file.path(output_path, sprintf("omop_%s_ddl.sql", tgt)), sep = "")
     for (tbl in tables) {
-      csv_file <- file.path(output_path, paste0(tbl, ".csv"))
-      DBI::dbExecute(con, sprintf("COPY %s TO %s (FORMAT CSV, HEADER TRUE);", tbl, sql_path_literal(csv_file)))
-
-      cols_info <- DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s LIMIT 0", tbl))
-      oracle_cols <- character(nrow(cols_info))
-      ctl_col_defs <- character(nrow(cols_info))
-
-      for (j in seq_len(nrow(cols_info))) {
-        col_name <- toupper(cols_info$column_name[j])
-        col_type <- toupper(cols_info$column_type[j])
-        ora_type <- if (grepl("BIGINT", col_type)) "NUMBER(19)"
-                    else if (grepl("INT", col_type)) "NUMBER(10)"
-                    else if (grepl("DATE", col_type)) "DATE"
-                    else if (grepl("TIMESTAMP", col_type)) "TIMESTAMP"
-                    else "VARCHAR2(255)"
-        oracle_cols[j] <- sprintf("    %s %s", col_name, ora_type)
-        ctl_col_defs[j] <- sprintf("    %s CHAR(4000)", col_name)
+      cols <- model[[tolower(tbl)]]
+      if (tgt %in% c("oracle", "sqlserver")) {
+        data <- file.path(output_path, paste0(tbl, ".csv"))
+        DBI::dbExecute(con, sprintf("COPY (%s) TO %s (FORMAT CSV, HEADER TRUE);", .csv_select(tbl, cols), sql_path_literal(data)))
+        results[[tbl]] <- list(status = "EXPORTED", format = paste0(tgt, "_csv"))
+        if (tgt == "oracle") {
+          ctl_file <- file.path(output_path, paste0(tbl, ".ctl"))
+          writeLines(.oracle_ctl(tbl, cols, oracle_max_identifier), ctl_file, sep = "")
+          results[[tbl]] <- list(status = "EXPORTED", format = "oracle_sqlldr", ctl_file = ctl_file)
+        }
+      } else {
+        data <- file.path(output_path, paste0(tbl, ".parquet"))
+        DBI::dbExecute(con, sprintf("COPY %s TO %s (FORMAT PARQUET, COMPRESSION %s);", tbl, sql_path_literal(data), compression))
+        results[[tbl]] <- list(status = "EXPORTED", format = paste0(tgt, "_parquet"))
       }
-
-      ddl_statements <- c(ddl_statements, sprintf("CREATE TABLE %s (\n%s\n);", toupper(tbl), paste(oracle_cols, collapse = ",\n")))
-
-      ctl_content <- sprintf("LOAD DATA\nINFILE '%s.csv'\nINTO TABLE %s\nFIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"'\nTRAILING NULLCOLS\n(\n%s\n)\n",
-                             tbl, toupper(tbl), paste(ctl_col_defs, collapse = ",\n"))
-      ctl_file <- file.path(output_path, paste0(tbl, ".ctl"))
-      writeLines(ctl_content, ctl_file)
-
-      results[[tbl]] <- list(status = "EXPORTED", format = "oracle_sqlldr", ctl_file = ctl_file)
     }
-
-    ddl_file <- file.path(output_path, "omop_oracle_ddl.sql")
-    writeLines(paste(ddl_statements, collapse = "\n\n"), ddl_file)
-
-    sh_file <- file.path(output_path, "load_oracle.sh")
-    writeLines(c("#!/usr/bin/env bash", sprintf("sqlldr control=%s.ctl log=%s.log bad=%s.bad direct=true", tables, tables, tables)), sh_file)
+    if (tgt == "oracle") {
+      writeLines(c("#!/usr/bin/env bash", "set -euo pipefail",
+                   sprintf("sqlldr userid=$ORA_CONN control=%s.ctl log=%s.log bad=%s.bad", tables, tables, tables)),
+                 file.path(output_path, "load_oracle.sh"))
+    } else if (tgt == "sqlserver") {
+      writeLines(.sqlserver_load(tables), file.path(output_path, "load_sqlserver.sql"), sep = "")
+    } else if (tgt == "snowflake") {
+      writeLines(.snowflake_load(tables), file.path(output_path, "load_snowflake.sql"), sep = "")
+    } else {
+      writeLines(.bigquery_load(tables), file.path(output_path, "load_bigquery.sh"), sep = "")
+    }
 
   } else if (tgt %in% c("csv", "tsv")) {
     delim <- if (tgt == "tsv") "\\t" else ","
@@ -122,7 +120,7 @@ export_cdm <- function(con,
     }
 
   } else {
-    stop("Unsupported export target_type '", target_type, "'. Use parquet, postgres, oracle, csv, or tsv.")
+    stop("Unsupported export target_type '", target_type, "'. Use parquet, postgres, oracle, sqlserver, snowflake, bigquery, csv, or tsv.")
   }
 
   list(

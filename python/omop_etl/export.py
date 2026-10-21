@@ -3,7 +3,8 @@
 Supports:
 1. Partitioned Parquet (Hive partitioned for S3/GCS/Azure enclaves).
 2. Native DuckDB -> PostgreSQL streaming (zero intermediate CSVs via postgres extension).
-3. Oracle enterprise bulk loading (generates data files + SQL*Loader .ctl control files + Oracle DDL).
+3. Oracle / SQL Server / Snowflake / BigQuery: data files, DDL and loader scripts generated from the one CDM DDL source
+   (omop_etl.export_targets): SQL*Loader .ctl, BULK INSERT, PUT + COPY INTO, bq load.
 4. Standard delimited CSV / TSV exports.
 """
 
@@ -14,6 +15,17 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import duckdb
+
+from omop_etl.export_targets import (
+    EXTRA_TARGETS,
+    bigquery_load_script,
+    csv_select,
+    generate_ddl,
+    load_cdm_schema,
+    oracle_ctl,
+    snowflake_load_script,
+    sqlserver_load_script,
+)
 
 
 ALL_CDM_TABLES = [
@@ -47,17 +59,19 @@ def export_cdm(
     tables: Sequence[str] | None = None,
     partition_by: Mapping[str, str] | None = None,
     compression: str = "zstd",
+    oracle_max_identifier: int = 30,
 ) -> dict[str, Any]:
-    """Exports OMOP CDM tables to cloud Parquet, PostgreSQL, Oracle, or CSV.
+    """Exports OMOP CDM tables to cloud Parquet, PostgreSQL, Oracle, SQL Server, Snowflake, BigQuery, or CSV.
     
     Args:
         con: Active DuckDB connection.
-        target_type: One of 'parquet', 'postgres', 'oracle', 'csv', 'tsv'.
+        target_type: One of 'parquet', 'postgres', 'oracle', 'sqlserver', 'snowflake', 'bigquery', 'csv', 'tsv'.
         output_path: Destination directory path, or connection string (for postgres).
         tables: Sequence of CDM tables to export (None = all populated CDM tables).
         partition_by: Mapping of table_name -> SQL partition expression (for Parquet).
         compression: Parquet compression codec ('zstd', 'snappy', 'gzip', etc.).
-        
+        oracle_max_identifier: 30 (Oracle < 12.2, the safe default) or 128; longer identifiers raise.
+
     Returns:
         dict: Summary of exported tables, row counts, and output files.
     """
@@ -111,53 +125,40 @@ def export_cdm(
             results[tbl] = {"status": "STREAMED_TO_POSTGRES"}
         con.execute("DETACH target_pg;")
 
-    elif tgt == "oracle":
-        # Generates CSV data dumps + Oracle .ctl SQL*Loader control files + Oracle DDL
-        ddl_statements = []
-        ctl_files = []
-
+    elif tgt in EXTRA_TARGETS:
+        # DDL, data files and loader scripts all derive from the single CDM DDL source (see export_targets)
+        model = load_cdm_schema()
+        unknown = [t for t in tables if t.lower() not in model]
+        if unknown:
+            raise LookupError(f"Tables not in the CDM v5.4 DDL: {unknown}")
+        (out_dir / f"omop_{tgt}_ddl.sql").write_text(
+            generate_ddl(tgt, tables, schema=model, oracle_max_identifier=oracle_max_identifier), encoding="utf-8")
         for tbl in tables:
-            csv_path = out_dir / f"{tbl}.csv"
-            p_str = _posix_path(csv_path)
-            con.execute(f"COPY {tbl} TO '{p_str}' (FORMAT CSV, HEADER TRUE);")
-
-            # Introspect schema for Oracle DDL and control file
-            cols_info = con.execute(f"DESCRIBE SELECT * FROM {tbl} LIMIT 0").fetchall()
-            oracle_cols = []
-            ctl_col_defs = []
-
-            for col_name, col_type, *rest in cols_info:
-                clean_type = col_type.split("(")[0].upper()
-                ora_type = ORACLE_TYPE_MAP.get(clean_type, "VARCHAR2(255)")
-                if "VARCHAR" in clean_type and "(" in col_type:
-                    ora_type = col_type.upper().replace("VARCHAR", "VARCHAR2")
-                oracle_cols.append(f"    {col_name.upper()} {ora_type}")
-                ctl_col_defs.append(f"    {col_name.upper()} CHAR(4000)")
-
-            ddl_statements.append(f"CREATE TABLE {tbl.upper()} (\n" + ",\n".join(oracle_cols) + "\n);")
-
-            ctl_cols_str = ",\n".join(ctl_col_defs)
-            ctl_content = f"""LOAD DATA
-INFILE '{tbl}.csv'
-INTO TABLE {tbl.upper()}
-FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '"'
-TRAILING NULLCOLS
-(
-{ctl_cols_str}
-)
-"""
-            ctl_path = out_dir / f"{tbl}.ctl"
-            ctl_path.write_text(ctl_content, encoding="utf-8")
-            ctl_files.append(str(ctl_path))
-
-            results[tbl] = {"status": "EXPORTED", "format": "oracle_sqlldr", "ctl_file": str(ctl_path)}
-
-        ddl_path = out_dir / "omop_oracle_ddl.sql"
-        ddl_path.write_text("\n\n".join(ddl_statements), encoding="utf-8")
-
-        sh_script = out_dir / "load_oracle.sh"
-        sh_lines = [f"sqlldr control={tbl}.ctl log={tbl}.log bad={tbl}.bad direct=true" for tbl in tables]
-        sh_script.write_text("#!/usr/bin/env bash\n" + "\n".join(sh_lines) + "\n", encoding="utf-8")
+            cols = model[tbl.lower()]
+            if tgt in ("oracle", "sqlserver"):
+                data = out_dir / f"{tbl}.csv"
+                con.execute(f"COPY ({csv_select(tbl, cols)}) TO '{_posix_path(data)}' (FORMAT CSV, HEADER TRUE);")
+                results[tbl] = {"status": "EXPORTED", "format": f"{tgt}_csv"}
+                if tgt == "oracle":
+                    ctl = out_dir / f"{tbl}.ctl"
+                    ctl.write_text(oracle_ctl(tbl, cols, oracle_max_identifier), encoding="utf-8")
+                    results[tbl].update(format="oracle_sqlldr", ctl_file=str(ctl))
+            else:
+                data = out_dir / f"{tbl}.parquet"
+                con.execute(f"COPY {tbl} TO '{_posix_path(data)}' (FORMAT PARQUET, COMPRESSION {compression});")
+                results[tbl] = {"status": "EXPORTED", "format": f"{tgt}_parquet"}
+        if tgt == "oracle":
+            (out_dir / "omop_oracle_ddl.sql").write_text(
+                generate_ddl("oracle", tables, schema=model, oracle_max_identifier=oracle_max_identifier), encoding="utf-8")
+            lines = [f"sqlldr userid=$ORA_CONN control={t}.ctl log={t}.log bad={t}.bad" for t in tables]
+            nl = chr(10)
+            (out_dir / "load_oracle.sh").write_text("#!/usr/bin/env bash" + nl + "set -euo pipefail" + nl + nl.join(lines) + nl, encoding="utf-8")
+        elif tgt == "sqlserver":
+            (out_dir / "load_sqlserver.sql").write_text(sqlserver_load_script(tables), encoding="utf-8")
+        elif tgt == "snowflake":
+            (out_dir / "load_snowflake.sql").write_text(snowflake_load_script(tables), encoding="utf-8")
+        else:
+            (out_dir / "load_bigquery.sh").write_text(bigquery_load_script(tables), encoding="utf-8")
 
     elif tgt in ("csv", "tsv"):
         delim = "\\t" if tgt == "tsv" else ","
@@ -169,7 +170,7 @@ TRAILING NULLCOLS
             results[tbl] = {"status": "EXPORTED", "format": tgt}
 
     else:
-        raise ValueError(f"Unsupported export target_type: '{target_type}'. Use 'parquet', 'postgres', 'oracle', 'csv', or 'tsv'.")
+        raise ValueError(f"Unsupported export target_type: '{target_type}'. Use 'parquet', 'postgres', 'oracle', 'sqlserver', 'snowflake', 'bigquery', 'csv', or 'tsv'.")
 
     return {
         "target_type": tgt,

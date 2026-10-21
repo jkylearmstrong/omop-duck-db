@@ -1,0 +1,13 @@
+# Install with: pip install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+  - repo: local
+    hooks:
+      - id: secret-scan
+        name: offline secret scan (scripts/secret_scan.py)
+        entry: python scripts/secret_scan.py --staged
+        language: system
+        pass_filenames: false

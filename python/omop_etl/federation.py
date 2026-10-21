@@ -1379,4 +1379,11 @@ def audit_cell_suppression(
 consortium_privacy_audit = audit_cell_suppression
 
 
+# Aggregate-only site telemetry and the consortium aggregator (FR-A2).
+from omop_etl.telemetry import (  # noqa: E402,F401
+    aggregate_telemetry,
+    site_telemetry,
+    validate_packet,
+)
 
+__all__ += ["site_telemetry", "aggregate_telemetry", "validate_packet"]

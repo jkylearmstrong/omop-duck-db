@@ -166,3 +166,15 @@ class OMOPScoringPipeline:
         return (f"OMOPScoringPipeline(model={type(self.model).__name__}, n_features={len(self.feature_names)}, "
                 f"imputer={type(self.imputer).__name__ if self.imputer is not None else None}, "
                 f"scaler={type(self.scaler).__name__ if self.scaler is not None else None}, strict={self.strict})")
+
+
+# Model bundles (FR-A1): pickle-free, hash-verified deployment of trained models.
+from omop_etl.model_bundle import (  # noqa: E402,F401
+    BundleIntegrityError,
+    ModelBundle,
+    load_model_bundle,
+    score_cohort,
+    write_model_bundle,
+)
+
+__all__ += ["BundleIntegrityError", "ModelBundle", "load_model_bundle", "score_cohort", "write_model_bundle"]

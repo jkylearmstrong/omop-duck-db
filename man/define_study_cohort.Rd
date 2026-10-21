@@ -31,7 +31,9 @@ define_study_cohort(
   materialise = "auto",
   table_name = NULL,
   schema = NULL,
-  attrition = TRUE
+  attrition = TRUE,
+  one_per_patient = TRUE,
+  persist_keys = NULL
 )
 }
 \arguments{
@@ -127,6 +129,13 @@ the same call works on read-only connections).}
 path.}
 
 \item{attrition}{Compute the stepwise patient attrition via \code{\link[=compute_attrition]{compute_attrition()}} (default \code{TRUE}).}
+
+\item{one_per_patient}{The engine always selects exactly one index stay per patient; \code{FALSE} is rejected.}
+
+\item{persist_keys}{Path of a CSV (\verb{subject_id,visit_occurrence_id}, sorted by subject) of the selected index
+stays. When the file exists the listed stays are preferred over resampling, so selection is identical across
+re-runs and sites sharing the file; patients missing from it are sampled by \code{sampling_rule} and the file is
+rewritten. It is only written when its content changes (byte-identical for identical selections).}
 }
 \value{
 A \code{data.frame}, one row per patient ordered by \code{subject_id}, with columns \code{cohort_definition_id},
