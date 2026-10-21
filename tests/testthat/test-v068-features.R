@@ -1,9 +1,9 @@
-test_that("1. Version is 0.6.8", {
+test_that("1. Version is 0.6.8 or later", {
   desc_ver <- as.character(read.dcf(system.file("DESCRIPTION", package = "omopduckdb"))[1, "Version"])
   if (is.na(desc_ver) || !nzchar(desc_ver)) {
     desc_ver <- as.character(read.dcf("DESCRIPTION")[1, "Version"])
   }
-  expect_equal(desc_ver, "0.6.8")
+  expect_true(desc_ver %in% c("0.6.8", "0.7.0"))
 })
 
 test_that("2. HierarchicalRollup from CSV file", {

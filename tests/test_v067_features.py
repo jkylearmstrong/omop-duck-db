@@ -43,8 +43,8 @@ from omop_etl import (
 # 1. Version Bump
 # ---------------------------------------------------------------------------
 def test_v067_version():
-    assert omop_etl.__version__ in ("0.6.7", "0.6.8")
-    assert omop_duck_db.__version__ in ("0.6.7", "0.6.8")
+    assert omop_etl.__version__ in ("0.6.7", "0.6.8", "0.7.0")
+    assert omop_duck_db.__version__ in ("0.6.7", "0.6.8", "0.7.0")
 
 
 # ---------------------------------------------------------------------------
