@@ -145,7 +145,7 @@ site_telemetry <- function(scores, y_true, site_id, min_cell = 11L, tier_fractio
   validate_packet(packet)
   if (!is.null(output)) {
     dir.create(dirname(output), showWarnings = FALSE, recursive = TRUE)
-    jsonlite::write_json(packet, output, auto_unbox = TRUE, null = "null", digits = NA, pretty = TRUE)
+    jsonlite::write_json(packet, output, auto_unbox = TRUE, null = "null", na = "null", digits = NA, pretty = TRUE)
   }
   packet
 }

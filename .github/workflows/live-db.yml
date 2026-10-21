@@ -1,0 +1,75 @@
+name: Live databases
+
+# FR-B1/B4 validation against real servers (not mocks): chunked extraction, OMOP import, and execution of the generated
+# SQL Server / Oracle DDL. Service containers are started by Actions; tests/test_live_databases.py skips any backend whose
+# OMOP_TEST_*_URL variable is unset, so it is a no-op in the normal test jobs.
+#
+# Not required for merge: the Oracle image is large and slow to start. Re-run with workflow_dispatch if a container flakes.
+
+on:
+  pull_request:
+    paths:
+      - "python/omop_etl/extract.py"
+      - "python/omop_etl/export*.py"
+      - "inst/extdata/5.4/duckdb/**"
+      - "tests/test_live_databases.py"
+      - ".github/workflows/live-db.yml"
+  push:
+    branches: [main]
+    paths:
+      - "python/omop_etl/extract.py"
+      - "python/omop_etl/export*.py"
+      - "tests/test_live_databases.py"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  live-databases:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: omop
+          POSTGRES_PASSWORD: omop_ci_pw
+          POSTGRES_DB: omop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U omop" --health-interval 5s --health-timeout 5s --health-retries 20
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Omop_ci_pw1!"
+        ports: ["1433:1433"]
+      oracle:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          ORACLE_PASSWORD: omop_ci_pw
+          APP_USER: omop
+          APP_USER_PASSWORD: omop_ci_pw
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 30
+    env:
+      OMOP_TEST_POSTGRES_URL: postgresql+psycopg2://omop:omop_ci_pw@localhost:5432/omop
+      OMOP_TEST_MSSQL_URL: mssql+pymssql://sa:Omop_ci_pw1%21@localhost:1433/master
+      OMOP_TEST_ORACLE_URL: oracle+oracledb://omop:omop_ci_pw@localhost:1521/?service_name=FREEPDB1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package, test deps and database drivers
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" "sqlalchemy>=2.0" psycopg2-binary pymssql oracledb
+
+      - name: Live database tests
+        # the mssql container has no health check; the tests retry the connection for up to two minutes
+        run: pytest tests/test_live_databases.py -v -rs

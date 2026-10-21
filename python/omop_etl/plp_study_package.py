@@ -8,6 +8,8 @@ cross-validation folds, and Shiny diagnostics dashboards.
 from __future__ import annotations
 
 import json
+
+from omop_etl.jsonio import strict_dumps
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import duckdb
@@ -335,7 +337,7 @@ shinyApp(ui, server)
             "useProcedureOccurrenceLongTerm": True,
         },
     }
-    (settings_dir / "study_specs.json").write_text(json.dumps(study_specs, indent=2), encoding="utf-8")
+    (settings_dir / "study_specs.json").write_text(strict_dumps(study_specs, indent=2), encoding="utf-8")
 
     # 8. inst/sql/cohorts.sql
     cohorts_sql = f"""-- Target Cohort Extraction SQL (Cohort Definition ID: {target_id})

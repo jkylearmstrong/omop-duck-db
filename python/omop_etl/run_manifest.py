@@ -19,6 +19,8 @@ import datetime as _dt
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from omop_etl.jsonio import strict_dumps  # noqa: E402
+
 __all__ = ["RunManifest", "ManifestVerificationError", "verify_manifest", "file_sha256"]
 
 MANIFEST_VERSION = 1
@@ -145,7 +147,7 @@ class RunManifest:
     def write(self, path: str | Path = "run_manifest.json") -> Path:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True, default=str), encoding="utf-8")
+        p.write_text(strict_dumps(self.to_dict(), indent=2, sort_keys=True, default=str), encoding="utf-8")
         return p
 
 

@@ -182,7 +182,7 @@ write_model_bundle <- function(out_dir, name, version, feature_spec, components,
                                risk_tiers = NULL, license = "UNLICENSED", intended_use = "") {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   spec <- load_feature_spec(feature_spec)
-  wj <- function(x, f) jsonlite::write_json(x, file.path(out_dir, f), auto_unbox = TRUE, null = "null", digits = NA, pretty = TRUE)
+  wj <- function(x, f) jsonlite::write_json(x, file.path(out_dir, f), auto_unbox = TRUE, null = "null", na = "null", digits = NA, pretty = TRUE)
   wj(spec, "feature_spec.json")
   comps <- lapply(components, function(c) {
     if (!is.null(c$content)) wj(c$content, c$filename) else file.copy(c$file, file.path(out_dir, c$filename), overwrite = TRUE)

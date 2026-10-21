@@ -258,7 +258,9 @@ def test_default_features_and_cohort_use_real_classes(cdm_and_cohort):
 def omop_dataset_module(monkeypatch):
     """``omop_learn.omop`` imports `datasets` and `sparse` at module level (HF / numba stack). Neither is
     needed to build a dataset or call ``to_torch``, so stub them only if they are not installed."""
-    pytest.importorskip("torch")
+    from conftest import import_or_skip
+
+    import_or_skip("torch")
     for name in ("datasets", "sparse"):
         if not _have(name):
             monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(load_dataset=None, COO=None))

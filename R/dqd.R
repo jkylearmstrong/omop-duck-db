@@ -369,7 +369,7 @@ run_dqd <- function(con,
   if (!is.null(output_json)) {
     if (requireNamespace("jsonlite", quietly = TRUE)) {
       dir.create(dirname(normalizePath(output_json, mustWork = FALSE)), showWarnings = FALSE, recursive = TRUE)
-      jsonlite::write_json(dqd_res, output_json, pretty = TRUE, auto_unbox = TRUE)
+      jsonlite::write_json(dqd_res, output_json, pretty = TRUE, auto_unbox = TRUE, na = "null", null = "null")
     }
   }
 
