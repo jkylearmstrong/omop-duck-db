@@ -86,8 +86,7 @@ def _arrow_type(col_type: Any):
     t = col_type
     if isinstance(t, sa.Boolean):
         return pa.bool_()
-    if isinstance(t, sa.Integer):
-        return pa.int64()
+    # Numeric BEFORE Integer: Oracle's NUMBER subclasses both, and NUMBER(10,2) must not become an integer
     if isinstance(t, sa.Numeric) and not isinstance(t, sa.Float):
         prec, scale = getattr(t, "precision", None), getattr(t, "scale", None)
         if scale == 0 and prec is not None and prec <= 18:
@@ -95,6 +94,8 @@ def _arrow_type(col_type: Any):
         if prec is not None and scale is not None and prec <= 38:
             return pa.decimal128(prec, scale)
         return pa.float64()  # Oracle NUMBER without precision
+    if isinstance(t, sa.Integer):
+        return pa.int64()
     if isinstance(t, sa.Float):
         return pa.float64()
     if isinstance(t, sa.DateTime):  # includes Oracle DATE (carries time), SQL Server datetime2

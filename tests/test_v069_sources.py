@@ -146,3 +146,18 @@ def test_parquet_source_matches_csv(tmp_path):
     for t in ("person", "visit_occurrence", "condition_occurrence", "measurement", "drug_exposure"):
         q = f"SELECT * FROM {t} ORDER BY ALL"
         assert a.execute(q).fetchall() == b.execute(q).fetchall(), t
+
+
+def test_arrow_type_mapping_for_oracle_number_and_date():
+    """Found by the live Oracle run: NUMBER subclasses both Numeric and Integer, so NUMBER(10,2) lost its decimals."""
+    import pyarrow as pa
+    from sqlalchemy.dialects import oracle
+
+    from omop_etl.extract import _arrow_type
+
+    assert _arrow_type(oracle.NUMBER(10, 2)) == pa.decimal128(10, 2)
+    assert _arrow_type(oracle.NUMBER(10, 0)) == pa.int64()
+    assert _arrow_type(oracle.NUMBER(38, 0)) == pa.decimal128(38, 0)
+    assert _arrow_type(oracle.NUMBER()) == pa.float64()
+    assert _arrow_type(oracle.DATE()) == pa.timestamp("us")  # Oracle DATE carries a time of day
+    assert _arrow_type(sa.Integer()) == pa.int64() and _arrow_type(sa.Numeric(12, 3)) == pa.decimal128(12, 3)
