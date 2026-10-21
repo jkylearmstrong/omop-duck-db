@@ -2,18 +2,20 @@
 % Please edit documentation in R/velocity.R
 \name{extract_velocity_features}
 \alias{extract_velocity_features}
-\title{Clinical-velocity feature set (utilization trajectory and bedside ratios)}
+\title{Raw utilization inputs plus the engineered velocity set for a cohort}
 \usage{
 extract_velocity_features(
   con,
   cohort_table = "cohort",
   lookback_days = 365,
-  recent_days = 90,
   readmit_gap_days = 30,
   ip_concepts = c(9201L, 262L),
   ed_concepts = c(9203L, 262L),
+  os_concepts = 9202L,
   concepts = NULL,
-  cohort_id = NULL
+  extra_features = NULL,
+  cohort_id = NULL,
+  engineer = TRUE
 )
 }
 \arguments{
@@ -22,30 +24,25 @@ extract_velocity_features(
 \item{cohort_table}{Table or view with \code{subject_id} and \code{cohort_start_date} (optionally \code{cohort_end_date},
 \code{cohort_definition_id}).}
 
-\item{lookback_days, recent_days, readmit_gap_days}{Window lengths in days (\verb{lookback_days >= recent_days >= 1}).}
+\item{lookback_days, readmit_gap_days}{Window lengths in days (>= 1).}
 
-\item{ip_concepts, ed_concepts}{Visit concept ids counted as inpatient / emergency.}
+\item{ip_concepts, ed_concepts, os_concepts}{Visit concept ids counted as inpatient / emergency / outpatient.}
 
-\item{concepts}{Overrides for \link{VELOCITY_CONCEPTS} (names \code{heart_rate}, \code{systolic_bp}, \code{bun}, \code{creatinine}).}
+\item{concepts}{Overrides for \link{VELOCITY_CONCEPTS}.}
+
+\item{extra_features}{Optional data.frame joined on \code{subject_id} + \code{cohort_start_date}.}
 
 \item{cohort_id}{Optional \code{cohort_definition_id} filter.}
+
+\item{engineer}{If \code{FALSE}, return only the raw inputs.}
 }
 \value{
-A \code{data.frame} with \code{subject_id}, \code{cohort_start_date} and the \link{VELOCITY_FEATURES}.
+A data.frame.
 }
 \description{
-One row per distinct cohort (\code{subject_id}, \code{cohort_start_date}), using only visits strictly before the admission
-date (nothing from the index stay leaks). Mirror of \code{omop_etl.velocity.extract_velocity_features} (identical SQL).
-}
-\details{
-\itemize{
-\item \code{ip_velocity}, \code{ed_velocity}: prior inpatient / emergency visits per 30 days over the look-back window
-\item \code{recent_ip_ratio}: inpatient visits in the last \code{recent_days} / inpatient visits in the window (0 if none)
-\item \code{readmission_intensity}: prior \code{readmit_gap_days} readmissions / prior inpatient visits (0 if none)
-\item \code{days_since_last_ip}, \code{days_since_last_ed}: days from the last prior discharge to admission;
-\link{NO_PRIOR_VISIT_DAYS} (365) when there is none
-\item \code{shock_index}: heart rate / systolic BP (first admission-day values; \code{NA} if either is missing or SBP <= 0)
-\item \code{bun_to_creatinine}: BUN / creatinine (first admission-day values; \code{NA} if either missing or creatinine <= 0)
-\item \code{lace_proxy}: L + A + E of the LACE index (length of stay, acuity, ED visits in 6 months), no Charlson term
-}
+Builds, for every distinct (\code{subject_id}, \code{cohort_start_date}), the reference script's raw utilization inputs from
+\code{visit_occurrence} (only visits strictly before the admission date inside \code{lookback_days}; \verb{days_since_*} are \code{NA} when
+there is no prior visit), the first admission-day heart rate / SBP / DBP / BUN / creatinine, optionally joins
+\code{extra_features} (labs, \verb{elix_*}, \verb{med_*}), and applies \code{\link[=engineer_clinical_features]{engineer_clinical_features()}}. Mirror of
+\code{omop_etl.velocity.extract_velocity_features}.
 }

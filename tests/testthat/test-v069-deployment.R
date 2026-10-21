@@ -1,33 +1,3 @@
-test_that("velocity features: values, sentinel and zero-division guards", {
-  con <- DBI::dbConnect(duckdb::duckdb())
-  on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
-  DBI::dbExecute(con, "CREATE TABLE visit_occurrence (visit_occurrence_id INT, person_id INT, visit_concept_id INT, visit_start_date DATE, visit_end_date DATE)")
-  DBI::dbExecute(con, "CREATE TABLE measurement (measurement_id INT, person_id INT, measurement_concept_id INT, measurement_date DATE, value_as_number DOUBLE)")
-  v <- function(id, p, c, s, e) DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence VALUES (%d,%d,%d,DATE '%s',DATE '%s')", id, p, c, s, e))
-  v(1, 1, 9201, "2019-09-01", "2019-09-05"); v(2, 1, 9201, "2019-09-20", "2019-09-22")
-  v(3, 1, 9201, "2020-02-01", "2020-02-03"); v(4, 1, 9201, "2020-03-20", "2020-03-25")
-  v(5, 1, 9203, "2020-02-10", "2020-02-10"); v(6, 1, 9203, "2020-04-10", "2020-04-12")
-  v(7, 2, 9201, "2020-04-10", "2020-04-12")
-  v(8, 3, 9201, "2020-04-10", "2020-04-20"); v(9, 3, 9201, "2020-05-01", "2020-05-02")
-  DBI::dbExecute(con, "CREATE TABLE coh AS SELECT person_id AS subject_id, visit_start_date AS cohort_start_date, visit_end_date AS cohort_end_date FROM visit_occurrence WHERE visit_occurrence_id IN (6,7,8)")
-  m <- function(id, p, c, val) DBI::dbExecute(con, sprintf("INSERT INTO measurement VALUES (%d,%d,%d,DATE '2020-04-10',%s)", id, p, c, val))
-  m(1, 1, 3027018, 100); m(2, 1, 3004249, 80); m(3, 1, 3013682, 40); m(4, 1, 3016723, 2)
-  m(5, 2, 3027018, 90); m(6, 2, 3004249, 0); m(7, 2, 3013682, 10); m(8, 2, 3016723, 0)
-  f <- extract_velocity_features(con, "coh")
-  p1 <- f[f$subject_id == 1, ]; p2 <- f[f$subject_id == 2, ]; p3 <- f[f$subject_id == 3, ]
-  expect_equal(p1$ip_velocity, 4 * 30 / 365)
-  expect_equal(p1$ed_velocity, 30 / 365)
-  expect_equal(p1$recent_ip_ratio, 2 / 4)
-  expect_equal(p1$readmission_intensity, 1 / 4)
-  expect_equal(p1$days_since_last_ip, as.numeric(as.Date("2020-04-10") - as.Date("2020-03-25")))
-  expect_equal(p1$shock_index, 1.25); expect_equal(p1$bun_to_creatinine, 20)
-  expect_equal(p1$lace_proxy, 6)
-  expect_equal(p2$days_since_last_ip, NO_PRIOR_VISIT_DAYS)
-  expect_equal(c(p2$ip_velocity, p2$recent_ip_ratio, p2$readmission_intensity), c(0, 0, 0))
-  expect_true(is.na(p2$shock_index) && is.na(p2$bun_to_creatinine))
-  expect_equal(p3$days_since_last_ip, 365); expect_equal(p3$lace_proxy, 5)
-})
-
 spec <- list(features = list(
   list(name = "creatinine", dtype = "float", unit = "mg/dL", bounds = list(0.1, 30), impute = 1),
   list(name = "heart_rate", dtype = "float", unit = "bpm", bounds = list(20, 250), impute = 80),

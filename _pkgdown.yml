@@ -125,6 +125,9 @@ reference:
   - WORST_LAB_DIRECTION
   - DEFAULT_VISIT_CONCEPT_GROUPS
   - extract_velocity_features
+  - engineer_clinical_features
+  - site_baseline_risk
+  - REQUIRED_VELOCITY_INPUTS
   - NO_PRIOR_VISIT_DAYS
   - VELOCITY_FEATURES
   - VELOCITY_CONCEPTS

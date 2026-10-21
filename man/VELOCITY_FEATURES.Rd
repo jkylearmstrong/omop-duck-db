@@ -2,7 +2,7 @@
 % Please edit documentation in R/velocity.R
 \name{VELOCITY_FEATURES}
 \alias{VELOCITY_FEATURES}
-\title{Names of the columns returned by \code{\link[=extract_velocity_features]{extract_velocity_features()}}}
+\title{Names of the features added by \code{\link[=engineer_clinical_features]{engineer_clinical_features()}}}
 \format{
 A character vector.
 }
@@ -10,5 +10,5 @@ A character vector.
 VELOCITY_FEATURES
 }
 \description{
-Names of the columns returned by \code{\link[=extract_velocity_features]{extract_velocity_features()}}
+Names of the features added by \code{\link[=engineer_clinical_features]{engineer_clinical_features()}}
 }

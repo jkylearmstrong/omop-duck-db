@@ -10,5 +10,5 @@ A named list of integer vectors.
 VELOCITY_CONCEPTS
 }
 \description{
-Standard OMOP concepts (LOINC): heart rate, systolic BP, BUN, serum creatinine.
+Standard OMOP concepts (LOINC): heart rate, systolic BP, diastolic BP, BUN, serum creatinine.
 }

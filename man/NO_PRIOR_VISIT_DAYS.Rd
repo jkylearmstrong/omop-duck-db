@@ -10,5 +10,6 @@ An integer constant.
 NO_PRIOR_VISIT_DAYS
 }
 \description{
-\code{COALESCE(date_diff('day', last_visit_end, admission), 365)}. Mirror of \code{omop_etl.velocity.NO_PRIOR_VISIT_DAYS}.
+Missing \verb{days_since_prior_*} values are replaced by this constant, then clipped to >= 1, exactly as in
+\code{scripts/engineer_clinical_features.py}. Mirror of \code{omop_etl.velocity.NO_PRIOR_VISIT_DAYS}.
 }

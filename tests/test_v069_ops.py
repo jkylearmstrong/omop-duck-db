@@ -18,7 +18,6 @@ from omop_etl import build_schema, define_study_cohort, run_dqd  # noqa: E402
 from omop_etl.cli import main as cli_main  # noqa: E402
 from omop_etl.run_manifest import ManifestVerificationError, RunManifest, verify_manifest  # noqa: E402
 from omop_etl.temporal_split import split_by_date  # noqa: E402
-from omop_etl.velocity import NO_PRIOR_VISIT_DAYS, extract_velocity_features  # noqa: E402
 
 
 def _visit(con, vid, pid, concept, start, end):
@@ -145,47 +144,6 @@ def test_split_by_date_union_equals_original(cdm, tmp_path):
     split_by_date(cdm, "2022-01-01", tmp_path / "p2.duckdb", remove_from_source=True)
     assert cdm.execute("SELECT count(*), max(visit_start_date) FROM visit_occurrence").fetchone() == (2, dt.date(2021, 12, 31))
     assert cdm.execute("SELECT count(*) FROM measurement").fetchone()[0] == 2
-
-
-# ---- A4: velocity features -------------------------------------------------------------------------------------
-
-def test_velocity_features_values_sentinel_and_zero_division(cdm):
-    for pid in (1, 2, 3):
-        _person(cdm, pid)
-    # patient 1: 4 prior IP in a year (one within 90d, gap-readmission pair), 1 prior ED, then emergency index
-    _visit(cdm, 1, 1, 9201, "2019-09-01", "2019-09-05")
-    _visit(cdm, 2, 1, 9201, "2019-09-20", "2019-09-22")   # within 30d of discharge of visit 1 -> readmission
-    _visit(cdm, 3, 1, 9201, "2020-02-01", "2020-02-03")
-    _visit(cdm, 4, 1, 9201, "2020-03-20", "2020-03-25")   # within 90d of index
-    _visit(cdm, 5, 1, 9203, "2020-02-10", "2020-02-10")
-    _visit(cdm, 6, 1, 9203, "2020-04-10", "2020-04-12")   # index: emergency, LOS 2
-    # patient 2: no prior visits at all
-    _visit(cdm, 7, 2, 9201, "2020-04-10", "2020-04-12")
-    # patient 3: index only; plus a visit AFTER the index that must not leak
-    _visit(cdm, 8, 3, 9201, "2020-04-10", "2020-04-20")
-    _visit(cdm, 9, 3, 9201, "2020-05-01", "2020-05-02")
-    cdm.execute("CREATE TABLE coh AS SELECT person_id AS subject_id, visit_start_date AS cohort_start_date, "
-                "visit_end_date AS cohort_end_date FROM visit_occurrence WHERE visit_occurrence_id IN (6, 7, 8)")
-    for mid, pid, c, v in [(1, 1, 3027018, 100), (2, 1, 3004249, 80), (3, 1, 3013682, 40), (4, 1, 3016723, 2.0),
-                           (5, 2, 3027018, 90), (6, 2, 3004249, 0), (7, 2, 3013682, 10), (8, 2, 3016723, 0)]:
-        _meas(cdm, mid, pid, c, "2020-04-10", v)
-    f = extract_velocity_features(cdm, "coh").set_index("subject_id")
-    p1 = f.loc[1]
-    assert p1.ip_velocity == pytest.approx(4 * 30 / 365)
-    assert p1.ed_velocity == pytest.approx(1 * 30 / 365)
-    assert p1.recent_ip_ratio == pytest.approx(2 / 4)  # visits 3 and 4 start within 90 days
-    assert p1.readmission_intensity == pytest.approx(1 / 4)
-    assert p1.days_since_last_ip == (dt.date(2020, 4, 10) - dt.date(2020, 3, 25)).days
-    assert p1.days_since_last_ed == (dt.date(2020, 4, 10) - dt.date(2020, 2, 10)).days
-    assert p1.shock_index == pytest.approx(1.25) and p1.bun_to_creatinine == pytest.approx(20.0)
-    assert p1.lace_proxy == 2 + 3 + 1  # LOS 2d + emergency + 1 prior ED
-    p2 = f.loc[2]  # no prior visits: sentinel + zero-division guards
-    assert p2.days_since_last_ip == NO_PRIOR_VISIT_DAYS == p2.days_since_last_ed == 365
-    assert p2.ip_velocity == 0 and p2.recent_ip_ratio == 0 and p2.readmission_intensity == 0
-    assert pd.isna(p2.shock_index) and pd.isna(p2.bun_to_creatinine)  # SBP = 0 and creatinine = 0
-    p3 = f.loc[3]
-    assert p3.days_since_last_ip == 365 and p3.ip_velocity == 0  # the later 2020-05 visit does not leak
-    assert p3.lace_proxy == 5  # 10-day LOS = 5 points, not emergency, no prior ED
 
 
 # ---- A5: run manifest -------------------------------------------------------------------------------------------

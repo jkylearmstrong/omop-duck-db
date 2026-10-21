@@ -52,7 +52,7 @@ def test_oracle_identifier_limit_and_reserved_words():
     odd = {"t": [Column("date", "date", None, True), Column("comment", "varchar", 10, True), Column("level", "integer", None, True)]}
     ddl = generate_ddl("oracle", schema=odd)
     assert '"DATE" DATE' in ddl and '"COMMENT" VARCHAR2(10 CHAR)' in ddl and '"LEVEL" NUMBER(10)' in ddl
-    assert "[date]" in generate_ddl("sqlserver", schema={"t": [Column("end", "date", None, True)]})
+    assert "[end]" in generate_ddl("sqlserver", schema={"t": [Column("end", "date", None, True)]})
     assert "`end`" in generate_ddl("bigquery", schema={"t": [Column("end", "date", None, True)]})
 
 
