@@ -1,11 +1,22 @@
 #' @keywords internal
 #' @noRd
-find_source_file <- function(source_dir, table_name) {
-  matches <- list.files(source_dir, pattern = paste0("(?i)^", table_name, "\\.csv$"), full.names = TRUE)
-  if (length(matches) == 0) {
-    return(NULL)
+find_source_file <- function(source_dir, table_name, source_format = NULL) {
+  formats <- if (is.null(source_format)) c("csv", "parquet") else tolower(source_format)
+  for (fmt in formats) {
+    matches <- sort(list.files(source_dir, pattern = paste0("^", table_name, "\\.", fmt, "$"), full.names = TRUE, ignore.case = TRUE))
+    if (length(matches)) return(matches[[1]])
   }
-  matches[[1]]
+  NULL
+}
+
+#' @keywords internal
+#' @noRd
+.source_relation <- function(path) {
+  if (grepl("\\.parquet$", path, ignore.case = TRUE)) {
+    sprintf("(SELECT COLUMNS(*)::VARCHAR FROM read_parquet(%s))", sql_path_literal(path))
+  } else {
+    sprintf("read_csv_auto(%s, union_by_name = true, all_varchar = true)", sql_path_literal(path))
+  }
 }
 
 #' @keywords internal
@@ -167,8 +178,8 @@ load_macros <- function(con, temporary = NULL, skip_unresolved = FALSE) {
 #' @noRd
 prepare_source_view <- function(con, view_name, csv_path, expected_columns, aliases = .DEFAULT_ALIASES) {
   cols_df <- DBI::dbGetQuery(con, sprintf(
-    "DESCRIBE SELECT * FROM read_csv_auto(%s, union_by_name = true, all_varchar = true) LIMIT 0",
-    sql_path_literal(csv_path)
+    "DESCRIBE SELECT * FROM %s LIMIT 0",
+    .source_relation(csv_path)
   ))
   actual_cols <- stats::setNames(cols_df$column_name, toupper(cols_df$column_name))
 
@@ -207,8 +218,8 @@ prepare_source_view <- function(con, view_name, csv_path, expected_columns, alia
 ", label, paste(padded, collapse = ", ")))
 
   sql <- sprintf(
-    "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT %s FROM read_csv_auto(%s, union_by_name = true, all_varchar = true);",
-    view_name, paste(exprs, collapse = ", "), sql_path_literal(csv_path)
+    "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT %s FROM %s;",
+    view_name, paste(exprs, collapse = ", "), .source_relation(csv_path)
   )
   DBI::dbExecute(con, sql)
 }

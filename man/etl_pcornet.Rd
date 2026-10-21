@@ -15,7 +15,9 @@ etl_pcornet(
   auto_resources = FALSE,
   memory_limit = NULL,
   threads = NULL,
-  temp_dir = NULL
+  temp_dir = NULL,
+  source_format = NULL,
+  strict_source = FALSE
 )
 }
 \arguments{

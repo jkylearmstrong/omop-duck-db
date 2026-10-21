@@ -150,6 +150,14 @@ reference:
   - auroc_delong
   - average_precision
   - TELEMETRY_SCHEMA_VERSION
+  - check_source
+  - SOURCE_CONTRACT
+  - run_manifest
+  - run_manifest_add_step
+  - write_run_manifest
+  - verify_manifest
+  - split_by_date
+  - DEFAULT_SPLIT_DATE_COLUMNS
 - title: Production scoring and train/serve skew guard
   desc: A fitted imputer, scaler and model bundled with the ordered feature schema; scoring refuses frames that do not match it.
   contents:

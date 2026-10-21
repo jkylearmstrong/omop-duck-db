@@ -1,3 +1,9 @@
+#' @keywords internal
+#' @noRd
+.PLAUSIBLE_DATE_TABLES <- c("visit_occurrence", "visit_detail", "condition_occurrence", "procedure_occurrence",
+                            "drug_exposure", "measurement", "observation", "device_exposure", "death",
+                            "observation_period", "condition_era", "drug_era")
+
 #' Run Native DuckDB DataQualityDashboard (DQD) Engine
 #'
 #' Executes vectorized pure-SQL OHDSI DQD checks (conformance, completeness, plausibility,
@@ -7,12 +13,18 @@
 #' @param output_json Optional file path to write standard OHDSI DQD JSON.
 #' @param check_levels Character vector of check categories: `"TABLE"`, `"FIELD"`, `"CONCEPT"`, `"TEMPORAL"`.
 #' @param cdm_version Character CDM version (default `"5.4"`).
+#' @param plausible_date_range `c(lower, upper)` for the FIELD-level `plausibleDateRange` check on every `*_date` column of the
+#'   clinical tables; `upper = NA` means the extraction date. Default `c("1950-01-01", NA)`, so a 1913 visit is flagged.
+#'   Sites with a far-future sentinel (e.g. 2099-12-31) should pass an explicit upper bound.
+#' @param date_fail_threshold_pct The check fails when the violating share exceeds this percentage (default 0).
 #' @return A list with `Metadata`, `Overview`, and `CheckResults`.
 #' @export
 run_dqd <- function(con,
                     output_json = NULL,
                     check_levels = c("TABLE", "FIELD", "CONCEPT", "TEMPORAL"),
-                    cdm_version = "5.4") {
+                    cdm_version = "5.4",
+                    plausible_date_range = c("1950-01-01", NA),
+                    date_fail_threshold_pct = 0) {
   check_levels <- toupper(check_levels)
   results <- list()
 
@@ -304,6 +316,32 @@ run_dqd <- function(con,
           execution_status = if (pre_birth_cnt == 0L) "PASSED" else "FAILED",
           failed = pre_birth_cnt > 0L
         )
+      }
+    }
+  }
+
+  if ("FIELD" %in% check_levels) {
+    lo_s <- if (is.na(plausible_date_range[1])) "1900-01-01" else as.character(plausible_date_range[1])
+    hi_s <- if (is.na(plausible_date_range[2])) format(Sys.Date()) else as.character(plausible_date_range[2])
+    for (tbl in .PLAUSIBLE_DATE_TABLES) {
+      if (!has_table(tbl)) next
+      cols <- DBI::dbGetQuery(con, sprintf(
+        "SELECT column_name FROM information_schema.columns WHERE lower(table_name) = '%s' AND lower(column_name) LIKE '%%!_date' ESCAPE '!' AND upper(data_type) = 'DATE' ORDER BY ordinal_position",
+        tbl))$column_name
+      for (col in cols) {
+        r <- DBI::dbGetQuery(con, sprintf(
+          "SELECT count(\"%1$s\") AS n, count(*) FILTER (WHERE \"%1$s\" < DATE '%2$s' OR \"%1$s\" > DATE '%3$s') AS bad, count(*) FILTER (WHERE \"%1$s\" < DATE '%2$s') AS early, count(*) FILTER (WHERE \"%1$s\" > DATE '%3$s') AS late FROM %4$s",
+          col, lo_s, hi_s, tbl))
+        pct <- if (r$n > 0) 100 * r$bad / r$n else 0
+        failed <- pct > date_fail_threshold_pct
+        results[[length(results) + 1L]] <- list(
+          check_id = sprintf("FIELD_PLAUSIBLE_DATE_RANGE_%s_%s", toupper(tbl), toupper(col)),
+          check_name = "plausibleDateRange", check_level = "FIELD", cdm_table_name = tbl, cdm_field_name = col,
+          check_description = sprintf("%s.%s lies within [%s, %s].", tbl, col, lo_s, hi_s),
+          num_violated_rows = as.integer(r$bad), num_before_lower_bound = as.integer(r$early),
+          num_after_upper_bound = as.integer(r$late), pct_violated_rows = round(pct, 4),
+          num_denominator_rows = as.integer(r$n),
+          execution_status = if (failed) "FAILED" else "PASSED", failed = failed)
       }
     }
   }

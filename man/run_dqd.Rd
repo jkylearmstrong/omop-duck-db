@@ -8,7 +8,9 @@ run_dqd(
   con,
   output_json = NULL,
   check_levels = c("TABLE", "FIELD", "CONCEPT", "TEMPORAL"),
-  cdm_version = "5.4"
+  cdm_version = "5.4",
+  plausible_date_range = c("1950-01-01", NA),
+  date_fail_threshold_pct = 0
 )
 }
 \arguments{
@@ -19,6 +21,12 @@ run_dqd(
 \item{check_levels}{Character vector of check categories: \code{"TABLE"}, \code{"FIELD"}, \code{"CONCEPT"}, \code{"TEMPORAL"}.}
 
 \item{cdm_version}{Character CDM version (default \code{"5.4"}).}
+
+\item{plausible_date_range}{\code{c(lower, upper)} for the FIELD-level \code{plausibleDateRange} check on every \verb{*_date} column of the
+clinical tables; \code{upper = NA} means the extraction date. Default \code{c("1950-01-01", NA)}, so a 1913 visit is flagged.
+Sites with a far-future sentinel (e.g. 2099-12-31) should pass an explicit upper bound.}
+
+\item{date_fail_threshold_pct}{The check fails when the violating share exceeds this percentage (default 0).}
 }
 \value{
 A list with \code{Metadata}, \code{Overview}, and \code{CheckResults}.

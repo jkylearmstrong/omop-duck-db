@@ -37,11 +37,14 @@ etl_pcornet <- function(
     auto_resources = FALSE,
     memory_limit = NULL,
     threads = NULL,
-    temp_dir = NULL
+    temp_dir = NULL,
+    source_format = NULL,
+    strict_source = FALSE
 ) {
   if (!dir.exists(source_dir)) {
     stop("Source directory not found: ", source_dir)
   }
+  if (isTRUE(strict_source)) check_source(source_dir, source_format, raise_on_error = TRUE)
   if (isTRUE(disambiguate_patids) && is.null(site_id)) {
     stop("disambiguate_patids requires site_id to be specified.")
   }
