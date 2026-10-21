@@ -74,6 +74,19 @@ Technical lessons recorded during package build and deployment:
 - **Non-Editable Python Wheel Bundling**: Relocatable wheels cannot resolve SQL templates via git repository-relative paths. Resolved using `pyproject.toml` `[tool.setuptools.package-data]` / `force-include` combined with a package-relative first, repo-relative fallback resource locator.
 - **Athena CPT4 Vocabulary**: Athena downloads do not include CPT4 descriptions directly due to AMA copyright; the Java utility `cpt4.jar` (requiring a UMLS license) or public CMS OMOP BigQuery mirrors (`bigquery-public-data.cms_synthetic_patient_data_omop`) are used to populate CPT4 concepts.
 
+## Secret scanning and token revocation
+
+CI (`secret-scan` job) runs `scripts/secret_scan.py` over tracked files, a planted-token self-test, and `gitleaks` over the full
+history; `.pre-commit-config.yaml` runs both before each commit (`pip install pre-commit && pre-commit install`).
+If a credential was ever committed (for example the TestPyPI token noted in QUESTIONS B11):
+
+1. **Revoke it first** (TestPyPI/PyPI: Account settings -> API tokens -> Remove). Rewriting history does not un-leak a token that
+   was pushed; revocation does.
+2. Find it: `gitleaks detect --source . --redact` (full history).
+3. Remove it from history: `git filter-repo --replace-text replacements.txt` (a file with `<the-token>==>REMOVED`), then
+   force-push all branches/tags and ask collaborators to re-clone. Re-run step 2 to confirm.
+4. Publish with a trusted publisher / a new scoped token stored only in GitHub Actions secrets.
+
 ## Where it's heading
 
 - **Production Consortium Deployments**: Automated validation against multi-hospital health network nodes (eDERRI study).

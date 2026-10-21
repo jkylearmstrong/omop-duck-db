@@ -1,0 +1,15 @@
+# Secret-scan rules (FR-C4). `gitleaks detect` also scans the whole git history.
+title = "omop-duck-db gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic fixtures and documentation placeholders"
+paths = [
+  '''tests/fixtures/''',
+  '''renv\.lock''',
+]
+regexes = [
+  '''secret-scan:allow''',
+]

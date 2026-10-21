@@ -25,7 +25,15 @@ classifiers = [
 # ML bridge: scipy for sparse concept matrices. omop-learn itself is not on PyPI; install it from GitHub
 # (pip install git+https://github.com/clinicalml/omop-learn) to use DuckDBBackend with its models.
 ml = ["scipy>=1.10"]
-dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl"]
+# Source-database extras (FR-B1): SQLAlchemy plus the engine driver.
+sql = ["sqlalchemy>=1.4"]
+postgres = ["sqlalchemy>=1.4", "psycopg2-binary"]
+mssql = ["sqlalchemy>=1.4", "pyodbc"]
+oracle = ["sqlalchemy>=1.4", "oracledb"]
+snowflake = ["sqlalchemy>=1.4", "snowflake-sqlalchemy"]
+# Model bundles (FR-A1): native XGBoost JSON and ONNX runtimes.
+bundle = ["xgboost>=2.0", "onnxruntime>=1.16"]
+dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4"]
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
@@ -51,6 +59,7 @@ packages = ["python/omop_etl", "python/omop_duck_db"]
 "inst/extdata/comorbidity" = "omop_etl/resources/extdata/comorbidity"
 "inst/extdata/code_lists" = "omop_etl/resources/extdata/code_lists"
 "inst/extdata/physiologic_limits.csv" = "omop_etl/resources/extdata/physiologic_limits.csv"
+"inst/extdata/telemetry_packet.schema.json" = "omop_etl/resources/extdata/telemetry_packet.schema.json"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

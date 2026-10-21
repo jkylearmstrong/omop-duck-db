@@ -80,12 +80,24 @@ DEFAULT_ALIASES = {
 }
 
 
-def find_source_file(source_dir, table_name):
-    pattern = re.compile(rf"^{re.escape(table_name)}\.csv$", re.IGNORECASE)
-    for name in os.listdir(source_dir):
-        if pattern.match(name):
-            return os.path.join(source_dir, name)
+def find_source_file(source_dir, table_name, source_format=None):
+    """Locates ``<table_name>.csv`` or ``<table_name>.parquet`` (case-insensitive) in ``source_dir``.
+
+    ``source_format`` ('csv' | 'parquet' | None) restricts the search; None prefers CSV, then Parquet."""
+    formats = ("csv", "parquet") if source_format is None else (str(source_format).lower(),)
+    for fmt in formats:
+        pattern = re.compile(rf"^{re.escape(table_name)}\.{fmt}$", re.IGNORECASE)
+        for name in sorted(os.listdir(source_dir)):
+            if pattern.match(name):
+                return os.path.join(source_dir, name)
     return None
+
+
+def _source_relation(path):
+    """SQL relation reading a source file with every column as VARCHAR (the ETL casts explicitly)."""
+    if str(path).lower().endswith(".parquet"):
+        return f"(SELECT COLUMNS(*)::VARCHAR FROM read_parquet({sql_path_literal(path)}))"
+    return f"read_csv_auto({sql_path_literal(path)}, union_by_name = true, all_varchar = true)"
 
 
 def prepare_source_view(con, view_name, csv_path, expected_columns, aliases=None):
@@ -95,7 +107,7 @@ def prepare_source_view(con, view_name, csv_path, expected_columns, aliases=None
         aliases = DEFAULT_ALIASES
 
     cols_info = con.execute(
-        f"DESCRIBE SELECT * FROM read_csv_auto({sql_path_literal(csv_path)}, union_by_name = true, all_varchar = true) LIMIT 0"
+        f"DESCRIBE SELECT * FROM {_source_relation(csv_path)} LIMIT 0"
     ).fetchall()
     actual_cols = {col[0].upper(): col[0] for col in cols_info}
 
@@ -127,7 +139,7 @@ def prepare_source_view(con, view_name, csv_path, expected_columns, aliases=None
     if padded:
         print(f"  [{label}] null-padded missing columns: {', '.join(padded)}")
 
-    sql = f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS SELECT {', '.join(exprs)} FROM read_csv_auto({sql_path_literal(csv_path)}, union_by_name = true, all_varchar = true);"
+    sql = f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS SELECT {', '.join(exprs)} FROM {_source_relation(csv_path)};"
     con.execute(sql)
 
 
@@ -1563,14 +1575,24 @@ def etl_pcornet(
     site_name=None,
     disambiguate_patids=False,
     auto_resources=False,
+    source_format=None,
+    strict_source=False,
 ):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline.
 
     ``auto_resources=True`` sizes DuckDB to the host (see ``omop_etl.resources.configure_resources``);
     explicit ``memory_limit`` / ``threads`` / ``temp_dir`` still win over the detected values.
+
+    ``source_dir`` holds ``<table>.csv`` or ``<table>.parquet`` files (see ``omop_etl.source_check``).
+    ``strict_source=True`` runs ``check_source`` first and raises ``SourceContractError`` naming any missing
+    required table / column instead of null-padding it; ``source_format`` ('csv' | 'parquet') restricts that check.
     """
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
+    if strict_source:
+        from omop_etl.source_check import check_source
+
+        check_source(source_dir, source_format, raise_on_error=True)
 
     if disambiguate_patids and site_id is None:
         raise ValueError("disambiguate_patids requires site_id to be specified.")

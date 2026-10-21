@@ -339,7 +339,19 @@ from omop_etl.rollups import (
     materialize_crosswalk,
 )
 
+from omop_etl.extract import from_sql, import_omop  # noqa: E402
+from omop_etl.feature_contract import validate_feature_frame  # noqa: E402
+from omop_etl.model_bundle import load_model_bundle, score_cohort  # noqa: E402
+from omop_etl.run_manifest import RunManifest, verify_manifest  # noqa: E402
+from omop_etl.source_check import check_source  # noqa: E402
+from omop_etl.telemetry import aggregate_telemetry, site_telemetry  # noqa: E402
+from omop_etl.temporal_split import split_by_date  # noqa: E402
+from omop_etl.velocity import extract_velocity_features  # noqa: E402
+
 __all__ = [
+    "from_sql", "import_omop", "validate_feature_frame", "load_model_bundle", "score_cohort", "RunManifest",
+    "verify_manifest", "check_source", "aggregate_telemetry", "site_telemetry", "split_by_date",
+    "extract_velocity_features",
     "DEFAULT_PHYSIOLOGIC_BOUNDS", "POPULATION_PHYSIOLOGIC_BOUNDS", "filter_bounds",
     "harmonize_measurement_units", "harmonize_anthropometrics", "MedicationExtractor",
     "MedicationTransitions", "extract_medication_transitions",

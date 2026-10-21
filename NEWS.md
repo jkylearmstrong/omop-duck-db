@@ -1,3 +1,12 @@
+# omopduckdb (development version)
+
+Python-side additions from the 2026-10 consortium audit (`FEATURE_REQUESTS_POST_0.6.8.md`). R ports of the model-bundle, telemetry, velocity-feature and source-extraction items are **not** included yet.
+
+- **Source-database neutrality (FR-B1/B2/B3)**: `omop-duckdb extract` / `omop_etl.extract.from_sql()` streams any SQLAlchemy source to Parquet in chunks (typed from the reflected schema, lower-cased columns, case-insensitive table lookup, `--table-map`, `env:VAR` URLs, secrets never logged; extras `[postgres]`, `[mssql]`, `[oracle]`, `[snowflake]`). `omop-duckdb import-omop` / `import_omop()` copies an existing OMOP CDM from a server into DuckDB. The PCORnet ETL now reads `<table>.parquet` as well as `.csv`; `omop-duckdb check-source` / `check_source()` reports present tables/columns and `etl_pcornet(strict_source=True)` fails fast naming the missing column and table.
+- **Model deployment (FR-A1/A2/A3/A5)**: pickle-free, SHA-256-verified model bundles (`load_model_bundle`, `score_cohort`, `write_model_bundle`; logistic JSON built in, XGBoost JSON / ONNX / TorchScript with the `[bundle]` extra); aggregate-only `site_telemetry()` packets (JSON-Schema validated, small-cell + secondary suppression) and a random-effects `aggregate_telemetry()` (Cochran Q, I2, tau2); `validate_feature_frame()` with raise/clip/nullify; `RunManifest` / `run_manifest.json`, `--manifest` / `--verify-manifest` and `omop-duckdb verify-manifest`; `omop-duckdb score`.
+- **Features and operations (FR-A4/C1/C2/C3/C4)**: `extract_velocity_features()` (365-day sentinel `NO_PRIOR_VISIT_DAYS`); DQD `plausibleDateRange` on every clinical `*_date` column; `split_by_date()` held-out split with per-table counts and checksums; `define_study_cohort(persist_keys=..., one_per_patient=True)`; CI `secret-scan` job, `.gitleaks.toml`, pre-commit hook, `scripts/secret_scan.py`.
+- Fixed: `omop-duckdb build` and `omop-duckdb cohort define --type inpatient` called their library functions with wrong arguments.
+
 # omopduckdb 0.6.8
 
 Release 0.6.8 introduces native tabular file and workbook loaders (`.from_excel()`, `.from_csv()`, `.from_csvs()`, `.from_folder()`, `.from_bundled()`) for `HierarchicalRollup` and `RollupEngine`, bundled clinical reference code lists for multi-site studies (eDERRI / antidiabetic medications), cryptographic file-hash cache invalidation for Parquet crosswalks, and legacy headerless file support with complete 1:1 cross-language parity between Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`):

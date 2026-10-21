@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/jkylearmstrong/omop-duck-db/schemas/telemetry_packet-1.0.json",
+  "title": "omop-duck-db site telemetry packet",
+  "description": "Aggregate-only evaluation summary of a model at one site. Contains no patient-level or row-level values and no free text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "site_id", "min_cell", "n", "n_events", "prevalence", "suppressed", "metrics", "deciles", "tiers"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "site_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$"},
+    "min_cell": {"type": "integer", "minimum": 2},
+    "model": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9_. -]{0,64}$"},
+        "version": {"type": "string", "pattern": "^[A-Za-z0-9_.+-]{0,32}$"}
+      }
+    },
+    "n": {"type": ["integer", "null"], "minimum": 0},
+    "n_events": {"type": ["integer", "null"], "minimum": 0},
+    "prevalence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "suppressed": {"type": "boolean"},
+    "metrics": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["auroc", "auroc_se", "auprc", "brier", "cal_slope", "cal_slope_se", "cal_intercept", "cal_intercept_se", "cal_in_the_large", "mean_prediction"],
+      "properties": {
+        "auroc": {"type": "number", "minimum": 0, "maximum": 1},
+        "auroc_se": {"type": "number", "minimum": 0},
+        "auprc": {"type": "number", "minimum": 0, "maximum": 1},
+        "brier": {"type": "number", "minimum": 0, "maximum": 1},
+        "cal_slope": {"type": ["number", "null"]},
+        "cal_slope_se": {"type": ["number", "null"]},
+        "cal_intercept": {"type": ["number", "null"]},
+        "cal_intercept_se": {"type": ["number", "null"]},
+        "cal_in_the_large": {"type": ["number", "null"]},
+        "mean_prediction": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "deciles": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decile", "n", "events", "mean_pred", "observed_rate"],
+        "properties": {
+          "decile": {"type": "integer", "minimum": 1, "maximum": 10},
+          "n": {"type": ["integer", "null"], "minimum": 0},
+          "events": {"type": ["integer", "null"], "minimum": 0},
+          "mean_pred": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "observed_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "tiers": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["top_fraction", "flagged", "true_positives", "sensitivity", "ppv", "nns"],
+        "properties": {
+          "top_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+          "flagged": {"type": ["integer", "null"], "minimum": 0},
+          "true_positives": {"type": ["integer", "null"], "minimum": 0},
+          "sensitivity": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "ppv": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "nns": {"type": ["number", "null"], "minimum": 1}
+        }
+      }
+    },
+    "feature_validation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "n_rows": {"type": "integer", "minimum": 0},
+        "n_missing_features": {"type": "integer", "minimum": 0},
+        "n_extra_features": {"type": "integer", "minimum": 0},
+        "n_dtype_mismatch": {"type": "integer", "minimum": 0},
+        "n_unit_suspicion": {"type": "integer", "minimum": 0},
+        "n_values_clipped": {"type": "integer", "minimum": 0},
+        "n_values_nullified": {"type": "integer", "minimum": 0},
+        "on_violation": {"type": "string", "enum": ["raise", "clip", "nullify"]}
+      }
+    }
+  }
+}

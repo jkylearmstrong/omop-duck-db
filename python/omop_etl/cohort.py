@@ -7,8 +7,10 @@ and tracking patient attrition across CONSORT flowchart phenotyping criteria.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import numbers
+import os
 import re
 import warnings
 from dataclasses import dataclass
@@ -556,6 +558,7 @@ class _StudySpec:
     evidence: tuple[str, ...] = _FOLLOWUP_EVIDENCE
     rule: str = "random"
     seed: int = 42
+    pinned_keys: bool = False  # prefer stays listed in the _study_pinned_keys temp table (see persist_keys)
 
 
 # ---- identifier / literal helpers -------------------------------------------------------------------
@@ -586,7 +589,16 @@ def _tbl(spec: _StudySpec, name: str) -> str:
 
 # ---- SQL generators ---------------------------------------------------------------------------------
 
-def _study_order_by(rule: str, seed: int) -> str:
+_STUDY_PINNED_TABLE = "_study_pinned_keys"
+
+
+def _study_order_by(rule: str, seed: int, pinned: bool = False) -> str:
+    pin = (f"(f.visit_occurrence_id IN (SELECT visit_occurrence_id FROM {_STUDY_PINNED_TABLE})) DESC, "
+           if pinned else "")
+    return pin + _study_order_by_rule(rule, seed)
+
+
+def _study_order_by_rule(rule: str, seed: int) -> str:
     if rule == "random":
         return f"hash(f.visit_occurrence_id, {int(seed)}), f.visit_occurrence_id"
     if rule == "first":
@@ -832,7 +844,7 @@ def _study_ctes(spec: _StudySpec, through: str = "ranked_stays") -> str:
             f.*,
             ROW_NUMBER() OVER (
                 PARTITION BY f.subject_id
-                ORDER BY {_study_order_by(spec.rule, spec.seed)}
+                ORDER BY {_study_order_by(spec.rule, spec.seed, spec.pinned_keys)}
             ) AS stay_rank
         FROM filtered_stays f
     )"""
@@ -1194,6 +1206,8 @@ def define_study_cohort(
     table_name: str | None = None,
     schema: str | None = None,
     attrition: bool = True,
+    one_per_patient: bool = True,
+    persist_keys: str | os.PathLike | None = None,
 ) -> pd.DataFrame:
     r"""Defines a leak-free index-stay study cohort (one stay per patient) with an optional outcome.
 
@@ -1299,6 +1313,14 @@ def define_study_cohort(
         Schema (or ``catalog.schema``) holding the CDM tables. Default: resolved through the search path.
     attrition : bool, default True
         Compute the stepwise patient attrition (via :func:`compute_attrition`) into ``attrs``.
+    one_per_patient : bool, default True
+        The engine always selects exactly one index stay per patient; ``False`` is rejected.
+    persist_keys : path, optional
+        CSV (``subject_id,visit_occurrence_id``, sorted by subject) of the selected index stays. When the file
+        exists, the listed stays are preferred over resampling (so selection is identical across re-runs, sites
+        sharing the file, and changed seeds); a patient missing from the file, or whose listed stay is no longer
+        eligible, is sampled by ``sampling_rule`` and the file is rewritten. The file is only written when its
+        content changes, and is byte-identical for identical selections.
 
     Returns
     -------
@@ -1370,6 +1392,8 @@ def define_study_cohort(
     ... )  # doctest: +SKIP
     >>> cohort.attrs["attrition"]  # doctest: +SKIP
     """
+    if not one_per_patient:
+        raise ValueError("define_study_cohort selects exactly one index stay per patient; one_per_patient=False is unsupported.")
     visit_ids = _resolve_visit_types(visit_type, "visit_type", allow_none=True)
     study_start, study_end = _resolve_study_window(study_window)
     min_age_n = _whole_number(min_age, "min_age", minimum=0, allow_none=True)
@@ -1459,6 +1483,18 @@ def define_study_cohort(
         verified=verified, evidence=tuple(evidence), rule=rule, seed=seed_n,
     )
 
+    keys_path = Path(persist_keys) if persist_keys is not None else None
+    if keys_path is not None and keys_path.exists():
+        pinned = pd.read_csv(keys_path)
+        if "visit_occurrence_id" not in pinned.columns:
+            raise ValueError(f"persist_keys file {str(keys_path)!r} needs a visit_occurrence_id column.")
+        con.register("_study_pinned_df", pinned[["visit_occurrence_id"]].dropna().astype("int64"))
+        try:
+            con.execute(f"CREATE OR REPLACE TEMP TABLE {_STUDY_PINNED_TABLE} AS SELECT * FROM _study_pinned_df")
+        finally:
+            con.unregister("_study_pinned_df")
+        spec = dataclasses.replace(spec, pinned_keys=True)
+
     if materialise == "auto":
         if _database_is_read_only(con, schema):
             warnings.warn(
@@ -1481,8 +1517,14 @@ def define_study_cohort(
         outcome_style="visits" if outcome == "readmission" else "event_date",
         overwrite=True,
     )
-    df = _run_study_engine(con, spec, _STUDY_COLUMNS, materialise=materialise, table_name=table_name,
-                           materialize_kwargs=mat_kwargs)
+    try:
+        df = _run_study_engine(con, spec, _STUDY_COLUMNS, materialise=materialise, table_name=table_name,
+                               materialize_kwargs=mat_kwargs)
+    finally:
+        if spec.pinned_keys:
+            con.execute(f"DROP TABLE IF EXISTS {_STUDY_PINNED_TABLE}")
+    if keys_path is not None:
+        _write_index_keys(df, keys_path)
 
     if attrition:
         df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec))
@@ -1509,6 +1551,17 @@ def define_study_cohort(
         "schema": schema,
     }
     return df
+
+
+def _write_index_keys(df: pd.DataFrame, path: Path) -> None:
+    """Writes ``subject_id,visit_occurrence_id`` sorted by subject; leaves an identical file untouched."""
+    keys = df[["subject_id", "visit_occurrence_id"]].sort_values("subject_id")
+    text = keys.to_csv(index=False, lineterminator=chr(10))
+    path = Path(path)
+    if path.exists() and path.read_bytes() == text.encode("utf-8"):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode("utf-8"))
 
 
 # ---- legacy builders: thin wrappers over the engine -------------------------------------------------

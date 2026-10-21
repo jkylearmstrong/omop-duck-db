@@ -23,13 +23,27 @@ import pandas as pd
 from omop_etl.build_omop_cdm import _resource_path
 
 
+_PLAUSIBLE_DATE_TABLES = [
+    "visit_occurrence", "visit_detail", "condition_occurrence", "procedure_occurrence", "drug_exposure",
+    "measurement", "observation", "device_exposure", "death", "observation_period", "condition_era", "drug_era",
+]
+
+
 def run_dqd(
     con: duckdb.DuckDBPyConnection,
     output_json: str | Path | None = None,
     check_levels: Sequence[str] = ("TABLE", "FIELD", "CONCEPT", "TEMPORAL"),
     cdm_version: str = "5.4",
+    plausible_date_range: tuple[Any, Any] = ("1950-01-01", None),
+    date_fail_threshold_pct: float = 0.0,
 ) -> dict[str, Any]:
     """Runs native vectorized OHDSI DataQualityDashboard checks in DuckDB.
+
+    The FIELD level includes ``plausibleDateRange`` on every ``*_date`` column of the clinical tables (visits,
+    conditions, procedures, drugs, measurements, observations, death, observation periods, eras): values before
+    ``plausible_date_range[0]`` (default 1950-01-01) or after ``plausible_date_range[1]`` (default: the extraction
+    date) violate it; the check fails when the violating share exceeds ``date_fail_threshold_pct``. Sites that use a
+    far-future sentinel (e.g. 2099-12-31 open-ended observation periods) should pass an explicit upper bound.
     
     Args:
         con: Active DuckDB connection to the OMOP CDM database.
@@ -325,6 +339,43 @@ def run_dqd(
                     "num_denominator_rows": total,
                     "execution_status": "PASSED" if pre_birth_cnt == 0 else "FAILED",
                     "failed": pre_birth_cnt > 0,
+                })
+
+    # 2b. plausibleDateRange on every *_date column of the clinical tables
+    if "FIELD" in check_levels_set:
+        lo, hi = plausible_date_range
+        lo_s = str(lo) if lo is not None else "1900-01-01"
+        hi_s = str(hi) if hi is not None else datetime.date.today().isoformat()
+        for tbl in _PLAUSIBLE_DATE_TABLES:
+            if not _has_table(tbl):
+                continue
+            cols = [r[0] for r in con.execute(
+                "SELECT column_name FROM information_schema.columns WHERE lower(table_name) = ? "
+                "AND lower(column_name) LIKE '%!_date' ESCAPE '!' AND upper(data_type) IN ('DATE') "
+                "ORDER BY ordinal_position", [tbl]).fetchall()]
+            for col in cols:
+                lo_lit, hi_lit = f"DATE '{lo_s}'", f"DATE '{hi_s}'"
+                n_total, n_bad, n_early, n_late = con.execute(
+                    f'SELECT count("{col}"), '
+                    f'count(*) FILTER (WHERE "{col}" < {lo_lit} OR "{col}" > {hi_lit}), '
+                    f'count(*) FILTER (WHERE "{col}" < {lo_lit}), '
+                    f'count(*) FILTER (WHERE "{col}" > {hi_lit}) FROM {tbl}').fetchone()
+                pct = (100.0 * n_bad / n_total) if n_total else 0.0
+                failed = pct > date_fail_threshold_pct
+                results.append({
+                    "check_id": f"FIELD_PLAUSIBLE_DATE_RANGE_{tbl.upper()}_{col.upper()}",
+                    "check_name": "plausibleDateRange",
+                    "check_level": "FIELD",
+                    "cdm_table_name": tbl,
+                    "cdm_field_name": col,
+                    "check_description": f"{tbl}.{col} lies within [{lo_s}, {hi_s}].",
+                    "num_violated_rows": int(n_bad),
+                    "num_before_lower_bound": int(n_early),
+                    "num_after_upper_bound": int(n_late),
+                    "pct_violated_rows": round(pct, 4),
+                    "num_denominator_rows": int(n_total),
+                    "execution_status": "FAILED" if failed else "PASSED",
+                    "failed": failed,
                 })
 
     # Overview aggregation

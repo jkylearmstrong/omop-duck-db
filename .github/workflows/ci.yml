@@ -7,6 +7,27 @@ on:
   workflow_dispatch:
 
 jobs:
+  secret-scan:
+    # Fails the build on a committed credential; fetch-depth 0 lets gitleaks scan the full history.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Offline scan of tracked files
+        run: python scripts/secret_scan.py
+
+      - name: Scanner self-test (a planted dummy token must be caught)
+        run: |
+          printf 'token = "%s"
+' "pypi-Age$(printf 'A%.0s' $(seq 1 60))" > /tmp/planted.txt
+          if python scripts/secret_scan.py /tmp/planted.txt; then echo "planted token was NOT detected"; exit 1; fi
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   r-check:
     runs-on: ${{ matrix.os }}
     strategy:

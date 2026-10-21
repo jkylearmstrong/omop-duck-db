@@ -6,6 +6,9 @@ Commands:
     omop-duckdb cohort define --db <db> --type <type> --out <tbl>
     omop-duckdb table1 export --db <db> --cohort <tbl> [--format <fmt>] [--out <path>]
     omop-duckdb export parquet --db <db> --table <tbl> --out <dir>
+    omop-duckdb extract --url <sqlalchemy-url|env:VAR> --tables a,b --out <dir>
+    omop-duckdb import-omop --url <url> --schema <cdm_schema> --out site.duckdb
+    omop-duckdb check-source <dir> [--format csv|parquet]
 """
 
 from __future__ import annotations
@@ -30,6 +33,12 @@ from omop_etl import (
 )
 
 
+def _add_manifest_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--manifest", default=None, help="Write a run_manifest.json (versions, seeds, input hashes, counts) here.")
+    p.add_argument("--verify-manifest", default=None, metavar="MANIFEST",
+                   help="Re-check input hashes recorded in this manifest before running; fail if any changed.")
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Builds the main command line parser with all subcommands."""
     parser = argparse.ArgumentParser(
@@ -51,6 +60,8 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--vocab", "-v", default=None, help="Path to central Athena vocabulary DuckDB database.")
     build_parser.add_argument("--site-id", default=None, help="Unique site identifier for namespacing.")
     build_parser.add_argument("--site-name", default=None, help="Descriptive site facility name.")
+    build_parser.add_argument("--strict-source", action="store_true", help="Fail fast on missing required source tables/columns.")
+    _add_manifest_args(build_parser)
 
     # 2. DQD
     dqd_parser = subparsers.add_parser("dqd", help="Run Duck-DQD data quality and integrity checks.")
@@ -71,6 +82,9 @@ def create_parser() -> argparse.ArgumentParser:
     )
     define_sub.add_argument("--out", "-o", default="cohort", help="Destination cohort table name.")
     define_sub.add_argument("--circe-json", default=None, help="Path to CIRCE JSON file (if type is circe).")
+    define_sub.add_argument("--seed", type=int, default=42, help="Random seed for index-stay sampling (inpatient type).")
+    define_sub.add_argument("--persist-keys", default=None, help="CSV of selected index stays; reused if it exists (inpatient type).")
+    _add_manifest_args(define_sub)
 
     # 4. Table 1
     t1_parser = subparsers.add_parser("table1", help="Generate and export Table 1 demographic reconciliation.")
@@ -96,25 +110,134 @@ def create_parser() -> argparse.ArgumentParser:
     pq_exp.add_argument("--out", "-o", required=True, help="Destination directory.")
     pq_exp.add_argument("--partition-by", default=None, help="Column to partition by.")
 
+    # 6. Source-database neutrality
+    ex = subparsers.add_parser("extract", help="Stream source tables from a SQL server to Parquet.")
+    ex.add_argument("--url", required=True, help="SQLAlchemy URL, or env:VARNAME to read it from the environment.")
+    ex.add_argument("--tables", required=True, help="Comma-separated tables (name or name=SOURCE_TABLE).")
+    ex.add_argument("--out", "-o", required=True, help="Output directory for <table>.parquet files.")
+    ex.add_argument("--schema", default=None, help="Source schema.")
+    ex.add_argument("--table-map", default=None, help="JSON or 'expected,source' CSV mapping expected -> actual table names.")
+    ex.add_argument("--chunksize", type=int, default=500_000, help="Rows per chunk (default 500000).")
+
+    imp = subparsers.add_parser("import-omop", help="Copy an existing OMOP CDM from a SQL server into a DuckDB file.")
+    imp.add_argument("--url", required=True, help="SQLAlchemy URL, or env:VARNAME.")
+    imp.add_argument("--schema", default=None, help="CDM schema on the server.")
+    imp.add_argument("--out", "-o", required=True, help="Destination DuckDB file.")
+    imp.add_argument("--tables", default=None, help="Comma-separated subset of CDM tables.")
+    imp.add_argument("--include-vocab", action="store_true", help="Also copy vocabulary tables.")
+    imp.add_argument("--table-map", default=None, help="JSON or CSV mapping CDM table -> server table name.")
+    imp.add_argument("--chunksize", type=int, default=500_000)
+
+    cs = subparsers.add_parser("check-source", help="Check a source directory against the ETL file/column contract.")
+    cs.add_argument("source_dir", help="Directory of <table>.csv / <table>.parquet files.")
+    cs.add_argument("--format", choices=["csv", "parquet"], default=None, help="Restrict to one format.")
+    cs.add_argument("--json", action="store_true", help="Print the report as JSON.")
+
+    sc = subparsers.add_parser("score", help="Score a feature table with a hash-verified model bundle.")
+    sc.add_argument("--bundle", required=True, help="Model bundle directory.")
+    sc.add_argument("--features", required=True, help="Feature table (.parquet or .csv).")
+    sc.add_argument("--out", "-o", required=True, help="Output scores file (.parquet or .csv).")
+    sc.add_argument("--on-violation", choices=["raise", "clip", "nullify"], default="raise")
+    _add_manifest_args(sc)
+
+    vm = subparsers.add_parser("verify-manifest", help="Verify input hashes recorded in a run_manifest.json.")
+    vm.add_argument("manifest", help="Path to run_manifest.json.")
+
     return parser
+
+
+def _verify_first(args: argparse.Namespace) -> None:
+    if getattr(args, "verify_manifest", None):
+        from omop_etl.run_manifest import verify_manifest
+
+        verify_manifest(args.verify_manifest)
+        print(f"Manifest {args.verify_manifest} verified.")
+
+
+def handle_score(args: argparse.Namespace) -> int:
+    from omop_etl.run_manifest import RunManifest
+    from omop_etl.scoring import load_model_bundle, score_cohort
+
+    _verify_first(args)
+    with RunManifest("score", inputs=[args.bundle + "/manifest.json", args.features],
+                     feature_spec=Path(args.bundle) / "feature_spec.json") as m:
+        scores = score_cohort(load_model_bundle(args.bundle), args.features, on_violation=args.on_violation)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.suffix.lower() == ".parquet":
+            scores.to_parquet(out, index=False)
+        else:
+            scores.to_csv(out, index=False)
+        m.add_step("scored", len(scores))
+    if args.manifest:
+        m.write(args.manifest)
+    print(f"Scored {len(scores)} rows -> {args.out}")
+    return 0
+
+
+def handle_verify_manifest(args: argparse.Namespace) -> int:
+    from omop_etl.run_manifest import verify_manifest
+
+    verify_manifest(args.manifest)
+    print(f"Manifest {args.manifest} verified.")
+    return 0
+
+
+def handle_extract(args: argparse.Namespace) -> int:
+    from omop_etl.extract import from_sql
+
+    report = from_sql(args.url, [t for t in args.tables.split(",") if t.strip()], args.out, chunksize=args.chunksize,
+                      schema=args.schema, table_map=args.table_map)
+    for r in report:
+        print(f"{r['table']}: {r['rows']} rows, {len(r['columns'])} columns -> {r['file']}")
+    return 0
+
+
+def handle_import_omop(args: argparse.Namespace) -> int:
+    from omop_etl.extract import import_omop
+
+    tables = [t for t in args.tables.split(",") if t.strip()] if args.tables else None
+    for r in import_omop(args.url, args.out, schema=args.schema, tables=tables, include_vocab=args.include_vocab,
+                         chunksize=args.chunksize, table_map=args.table_map):
+        print(f"{r['table']}: " + (f"{r['rows']} rows" if r.get("rows") is not None else f"skipped ({r.get('skipped')})"))
+    return 0
+
+
+def handle_check_source(args: argparse.Namespace) -> int:
+    from omop_etl.source_check import check_source, format_report
+
+    report = check_source(args.source_dir, args.format)
+    print(json.dumps(report, indent=2) if args.json else format_report(report))
+    return 0 if report["ok"] else 1
 
 
 def handle_build(args: argparse.Namespace) -> int:
     """Executes the build command."""
+    from omop_etl.run_manifest import RunManifest
+
+    _verify_first(args)
     print(f"Building OMOP CDM from '{args.source}' -> '{args.target}'...")
-    con = duckdb.connect(args.target)
-    try:
+    src_files = sorted(p for p in Path(args.source).glob("*") if p.is_file() and p.suffix.lower() in (".csv", ".parquet"))
+    with RunManifest("build", inputs=src_files, extra={"site_id": args.site_id}) as m:
         etl_pcornet(
-            con=con,
-            source_dir=args.source,
-            vocab_db=args.vocab,
+            args.source,
+            args.target,
+            build_schema_flag=True,
+            central_vocab=args.vocab,
             site_id=args.site_id,
             site_name=args.site_name,
+            strict_source=args.strict_source,
         )
-        print("Build completed successfully.")
-        return 0
-    finally:
-        con.close()
+        con = duckdb.connect(args.target, read_only=True)
+        try:
+            for t in ("person", "visit_occurrence", "condition_occurrence", "measurement", "drug_exposure"):
+                m.add_step(f"rows:{t}", con.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
+        finally:
+            con.close()
+    if args.manifest:
+        m.write(args.manifest)
+    print("Build completed successfully.")
+    return 0
 
 
 def handle_dqd(args: argparse.Namespace) -> int:
@@ -142,10 +265,20 @@ def handle_dqd(args: argparse.Namespace) -> int:
 
 def handle_cohort(args: argparse.Namespace) -> int:
     """Executes cohort definition subcommands."""
+    from omop_etl.run_manifest import RunManifest
+
+    _verify_first(args)
+    # the database is written by this command, so it is not hashed; its source row counts are recorded instead
+    manifest = RunManifest("cohort define", seeds={"random_state": args.seed},
+                           extra={"type": args.type, "out": args.out, "db": str(args.db)})
     con = duckdb.connect(args.db)
     try:
         if args.type == "inpatient":
-            define_study_cohort(con, cohort_table=args.out, visit_concept_ids=[9201])
+            df = define_study_cohort(con, visit_type="inpatient", random_state=args.seed, persist_keys=args.persist_keys,
+                                     table_name=args.out)
+            manifest.add_attrition(df.attrs.get("attrition", []))
+            if args.persist_keys:
+                manifest.add_input(args.persist_keys)
         elif args.type == "readmission":
             build_readmission_cohort(con, target_table=args.out)
         elif args.type == "mortality":
@@ -157,7 +290,13 @@ def handle_cohort(args: argparse.Namespace) -> int:
             circe_def = json.loads(Path(args.circe_json).read_text(encoding="utf-8"))
             execute_circe_cohort(con, circe_def, target_cohort_table=args.out)
         count = con.execute(f"SELECT count(*) FROM {args.out}").fetchone()[0]
+        for t in ("person", "visit_occurrence"):
+            manifest.add_step(f"source_rows:{t}", con.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
+        manifest.add_step("cohort_rows", count)
         print(f"Cohort '{args.out}' generated with {count} records.")
+        con.close()
+        if args.manifest:
+            manifest.finish().write(args.manifest)
         return 0
     finally:
         con.close()
@@ -216,6 +355,16 @@ def main(argv: list[str] | None = None) -> int:
         return handle_table1(args)
     if args.command == "export":
         return handle_export(args)
+    if args.command == "score":
+        return handle_score(args)
+    if args.command == "verify-manifest":
+        return handle_verify_manifest(args)
+    if args.command == "extract":
+        return handle_extract(args)
+    if args.command == "import-omop":
+        return handle_import_omop(args)
+    if args.command == "check-source":
+        return handle_check_source(args)
 
     parser.print_help()
     return 0
