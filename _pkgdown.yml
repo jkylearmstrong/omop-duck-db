@@ -158,6 +158,10 @@ reference:
   - verify_manifest
   - split_by_date
   - DEFAULT_SPLIT_DATE_COLUMNS
+  - EXTRA_EXPORT_TARGETS
+  - load_cdm_schema
+  - generate_ddl
+  - lint_ddl
 - title: Production scoring and train/serve skew guard
   desc: A fitted imputer, scaler and model bundled with the ordered feature schema; scoring refuses frames that do not match it.
   contents:

@@ -33,7 +33,7 @@ oracle = ["sqlalchemy>=1.4", "oracledb"]
 snowflake = ["sqlalchemy>=1.4", "snowflake-sqlalchemy"]
 # Model bundles (FR-A1): native XGBoost JSON and ONNX runtimes.
 bundle = ["xgboost>=2.0", "onnxruntime>=1.16"]
-dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4"]
+dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot"]
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
