@@ -40,7 +40,7 @@ def _meas(c, mid, pid, cid, date, val, unit):
 
 def test_loinc_48642_is_egfr_not_anion_gap():
     assert "48642-3" not in DEFAULT_LAB_LOINCS["anion_gap"]
-    assert set(DEFAULT_LAB_LOINCS["anion_gap"]) == {"1863-0", "33037-3"}
+    assert set(DEFAULT_LAB_LOINCS["anion_gap"]) == {"1863-0", "33037-3", "41276-7"}
     assert "48642-3" in DEFAULT_LAB_LOINCS["egfr"]
 
 
