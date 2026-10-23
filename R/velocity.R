@@ -31,10 +31,23 @@ REQUIRED_VELOCITY_INPUTS <- c(
 #' @format A named list of integer vectors.
 #' @export
 VELOCITY_CONCEPTS <- list(heart_rate = 3027018L, systolic_bp = 3004249L, diastolic_bp = 3012888L,
-                          lab_bun = 3013682L, lab_creatinine = 3016723L)
+                          lab_bun = 3013682L, lab_creatinine = 3016723L,
+                          lab_sodium = c(3019550L, 3014576L), lab_potassium = c(3023103L, 3028437L),
+                          lab_chloride = c(3014576L, 3010813L), lab_bicarbonate = c(3007220L, 3016462L),
+                          lab_anion_gap = c(3037278L, 3013444L, 3020564L),
+                          lab_egfr = c(40764999L, 1619025L, 36306178L, 36303797L))
 
 .fill <- function(x, v) { x[is.na(x)] <- v; x }
 .clip <- function(x, lower = -Inf, upper = Inf) pmin(pmax(x, lower), upper)  # NA stays NA
+
+# Race-free CKD-EPI 2021 eGFR (mL/min/1.73m^2); port of `omop_etl.velocity.compute_ckd_epi_2021`.
+compute_ckd_epi_2021 <- function(creatinine, age, is_female) {
+  fem <- as.logical(is_female)
+  kappa <- ifelse(fem, 0.7, 0.9)
+  alpha <- ifelse(fem, -0.241, -0.302)
+  scr_kappa <- pmax(creatinine, 0.1) / kappa
+  142 * pmin(scr_kappa, 1)^alpha * pmax(scr_kappa, 1)^(-1.2) * 0.9938^age * ifelse(fem, 1.012, 1)
+}
 
 #' Clinical velocity, LACE-proxy, hemodynamic and organ-dysfunction features
 #'
