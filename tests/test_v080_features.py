@@ -39,6 +39,18 @@ def test_63bit_surrogate_key_generation():
     assert len({k1, k2, k3}) == 3
     assert all(k >= 0 for k in (k1, k2, k3))
 
+    # Key must be MD5-derived (DuckDB hash() collides on real encounter IDs)
+    md5_k = con.execute(
+        "SELECT (md5_number_lower('ENC_SITE_D_1234567890') & 9223372036854775807)::BIGINT"
+    ).fetchone()[0]
+    assert k1 == md5_k
+
+    # No collisions over a large synthetic ID set
+    n, d = con.execute(
+        "SELECT count(*), count(DISTINCT pcornet_id(i::VARCHAR)) FROM range(5000000) t(i)"
+    ).fetchone()
+    assert n == d
+
 
 def test_parse_omop_datetime_single_digit_hour():
     con = duckdb.connect()
