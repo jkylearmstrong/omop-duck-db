@@ -54,12 +54,12 @@ CREATE OR REPLACE MACRO source_concept_id(source_vocabulary_id, source_code) AS 
     )
 );
 
--- Derive a surrogate integer ID from a source identifier (e.g. PCORnet PATID).
--- CDM v5.4's *_id columns are 32-bit `integer`, but DuckDB's hash() returns a
--- 64-bit UBIGINT -- this folds it into the 32-bit-safe range [0, 2000000000)
--- so both ETLs generate identical, non-overflowing surrogate keys.
+-- Derive a surrogate 63-bit signed BIGINT from a source identifier (e.g. PCORnet PATID / ENCOUNTERID).
+-- Bitwise AND with 0x7FFFFFFFFFFFFFFF ensures a strictly non-negative 63-bit integer [0, 9223372036854775807]
+-- that completely avoids the birthday paradox collision defects (FR-C8) suffered with 31-bit integer hashes
+-- at large health systems with tens of millions of encounters.
 CREATE OR REPLACE MACRO pcornet_id(source_id) AS (
-    (hash(source_id) % 2000000000)::INTEGER
+    (hash(source_id) & 9223372036854775807)::BIGINT
 );
 
 -- Multi-format date parsing macro to prevent silent data loss (NULLs) across
@@ -75,12 +75,31 @@ CREATE OR REPLACE MACRO parse_omop_date(col) AS (
     )
 );
 
--- Multi-format timestamp parsing macro
+-- Normalize time string to ensure valid HH:MM:SS format (FR-C6: handles single-digit hours e.g. '1:01' -> '01:01:00')
+CREATE OR REPLACE MACRO normalize_time_str(t) AS (
+    CASE
+        WHEN t IS NULL OR trim(t) = '' THEN '00:00:00'
+        WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}$') THEN '0' || trim(t) || ':00'
+        WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}:[0-9]{2}$') THEN '0' || trim(t)
+        WHEN regexp_matches(trim(t), '^[0-9]{2}:[0-9]{2}$') THEN trim(t) || ':00'
+        ELSE trim(t)
+    END
+);
+
+-- Multi-format timestamp parsing macro (resilient to single-digit hours & unstandardized clinical timestamps)
 CREATE OR REPLACE MACRO parse_omop_datetime(date_col, time_col) AS (
     COALESCE(
-        TRY_CAST(date_col || ' ' || COALESCE(time_col, '00:00:00') AS TIMESTAMP),
-        TRY_STRPTIME(date_col || ' ' || COALESCE(time_col, '00:00:00'), '%d%b%Y %H:%M:%S'),
-        TRY_STRPTIME(date_col || ' ' || COALESCE(time_col, '00:00:00'), '%d%b%Y %H:%M'),
+        TRY_CAST(date_col || ' ' || normalize_time_str(time_col) AS TIMESTAMP),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d%b%Y %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d%b%Y %H:%M'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d-%b-%Y %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d-%b-%Y %H:%M'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y-%m-%d %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y-%m-%d %H:%M'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%m/%d/%Y %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%m/%d/%Y %H:%M'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d%b%Y %I:%M:%S %p'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d%b%Y %I:%M %p'),
         TRY_CAST(parse_omop_date(date_col) AS TIMESTAMP)
     )
 );

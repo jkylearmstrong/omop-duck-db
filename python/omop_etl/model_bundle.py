@@ -38,9 +38,10 @@ __all__ = ["BundleIntegrityError", "ModelBundle", "load_model_bundle", "score_co
 
 BUNDLE_SCHEMA_VERSION = 1
 DEFAULT_RISK_TIERS = [{"name": "low", "min": 0.0}, {"name": "moderate", "min": 0.10}, {"name": "high", "min": 0.25}]
-_FORBIDDEN_SUFFIXES = (".pkl", ".pickle", ".joblib", ".skops", ".dill", ".npy", ".npz", ".pt", ".pth", ".bin")
+_FORBIDDEN_SUFFIXES = (".pkl", ".pickle", ".joblib", ".skops", ".dill", ".npy", ".npz")
 _KIND_SUFFIX = {"logistic": (".json",), "xgboost_json": (".json", ".ubj"), "onnx": (".onnx",),
-                "torchscript": (".ts", ".torchscript")}
+                "torchscript": (".ts", ".torchscript", ".pt"),
+                "deep_residual": (".pt", ".ts", ".onnx", ".json")}
 
 
 class BundleIntegrityError(RuntimeError):
@@ -73,7 +74,7 @@ class _Component:
     options: dict[str, Any]
     _model: Any = None
 
-    def predict(self, X: np.ndarray, feature_names: list[str]) -> np.ndarray:
+    def predict(self, X: np.ndarray, feature_names: list[str], X_seq: np.ndarray | None = None) -> np.ndarray:
         if self.kind == "logistic":
             if self._model is None:
                 spec = json.loads(self.path.read_text(encoding="utf-8"))
@@ -109,15 +110,25 @@ class _Component:
                 out = np.array([[d[k] for k in sorted(d)] for d in out])
             out = np.asarray(out, dtype="float64")
             return out[:, -1] if out.ndim == 2 and out.shape[1] > 1 else out.reshape(-1)
-        if self.kind == "torchscript":
+        if self.kind in ("torchscript", "deep_residual"):
             try:
                 import torch
             except ImportError as exc:
-                raise ImportError("torch is required for 'torchscript' components.") from exc
+                raise ImportError("torch is required for torchscript / deep_residual components.") from exc
             if self._model is None:
-                self._model = torch.jit.load(str(self.path), map_location="cpu").eval()
+                try:
+                    self._model = torch.jit.load(str(self.path), map_location="cpu").eval()
+                except Exception:
+                    self._model = torch.load(str(self.path), map_location="cpu", weights_only=False)
+                    if hasattr(self._model, "eval"):
+                        self._model.eval()
+            inp_data = X_seq if (self.options.get("input") in ("sequence_tensor", "tensor") and X_seq is not None) else X
             with torch.no_grad():
-                out = self._model(torch.as_tensor(X, dtype=torch.float32)).detach().cpu().numpy().astype("float64").reshape(-1)
+                inp_tensor = torch.as_tensor(inp_data, dtype=torch.float32)
+                out = self._model(inp_tensor)
+                if hasattr(out, "logits"):
+                    out = out.logits
+                out = out.detach().cpu().numpy().astype("float64").reshape(-1)
             return _sigmoid(out) if self.options.get("output", "prob") == "logit" else out
         raise BundleIntegrityError(f"unknown component kind {self.kind!r}")
 
@@ -135,10 +146,10 @@ class ModelBundle:
     def feature_names(self) -> list[str]:
         return [f["name"] for f in self.feature_spec["features"]]
 
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+    def predict_proba(self, X: np.ndarray, X_seq: np.ndarray | None = None) -> np.ndarray:
         """Blend + calibrate a matrix already ordered as ``feature_names`` (no NaN)."""
         w = np.array([c.weight for c in self.components], dtype="float64")
-        p = sum(wi * c.predict(X, self.feature_names) for wi, c in zip(w, self.components)) / w.sum()
+        p = sum(wi * c.predict(X, self.feature_names, X_seq=X_seq) for wi, c in zip(w, self.components)) / w.sum()
         cal = self.calibration
         if cal:
             m = cal.get("method")
@@ -217,6 +228,7 @@ def score_cohort(
     key_columns: Sequence[str] | None = None,
     on_violation: str = "raise",
     return_validation: bool = False,
+    X_seq: np.ndarray | None = None,
 ) -> pd.DataFrame | tuple[pd.DataFrame, FeatureValidationReport]:
     """Scores a feature table (DataFrame, ``.parquet`` or ``.csv``) with a bundle.
 
@@ -240,7 +252,7 @@ def score_cohort(
                 raise ValueError(f"feature {n!r} has missing values and no 'impute' value in the feature spec.")
             X[n] = X[n].fillna(f["impute"])
     names = b.feature_names
-    prob = b.predict_proba(X[names].to_numpy(dtype="float64"))
+    prob = b.predict_proba(X[names].to_numpy(dtype="float64"), X_seq=X_seq)
     keys = list(key_columns) if key_columns is not None else [c for c in df.columns if c.endswith("_id") and c not in names]
     out = df[keys].reset_index(drop=True).copy()
     out["prob"] = prob

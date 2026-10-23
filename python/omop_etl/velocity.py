@@ -41,12 +41,53 @@ import numpy as np
 import pandas as pd
 
 __all__ = ["NO_PRIOR_VISIT_DAYS", "VELOCITY_FEATURES", "VELOCITY_CONCEPTS", "REQUIRED_INPUTS",
-           "engineer_clinical_features", "extract_velocity_features", "site_baseline_risk"]
+           "engineer_clinical_features", "extract_velocity_features", "site_baseline_risk",
+           "compute_ckd_epi_2021"]
 
 NO_PRIOR_VISIT_DAYS = 365
 # Standard OMOP measurement concepts (LOINC): heart rate, systolic BP, diastolic BP, BUN, serum creatinine.
-VELOCITY_CONCEPTS = {"heart_rate": (3027018,), "systolic_bp": (3004249,), "diastolic_bp": (3012888,),
-                     "lab_bun": (3013682,), "lab_creatinine": (3016723,)}
+VELOCITY_CONCEPTS = {
+    "heart_rate": (3027018,),
+    "systolic_bp": (3004249,),
+    "diastolic_bp": (3012888,),
+    "lab_bun": (3013682,),
+    "lab_creatinine": (3016723,),
+    "lab_sodium": (3019550, 3014576),
+    "lab_potassium": (3023103, 3028437),
+    "lab_chloride": (3014576, 3010813),
+    "lab_bicarbonate": (3007220, 3016462),
+    "lab_anion_gap": (3037278, 3013444, 3020564),
+    "lab_egfr": (40764999, 1619025, 36306178, 36303797),
+}
+
+
+def compute_ckd_epi_2021(
+    creatinine: Any,
+    age: Any,
+    is_female: Any,
+) -> Any:
+    """Calculates race-free CKD-EPI 2021 eGFR (mL/min/1.73m^2) (FR-A6).
+
+    Formula:
+      eGFR = 142 * min(Scr/kappa, 1)^alpha * max(Scr/kappa, 1)^(-1.200) * 0.9938^Age * (1.012 if female)
+      where kappa = 0.7 (female) / 0.9 (male), alpha = -0.241 (female) / -0.302 (male).
+    """
+    creat = np.asarray(creatinine, dtype=float)
+    a = np.asarray(age, dtype=float)
+    fem = np.asarray(is_female, dtype=bool)
+
+    creat_clipped = np.maximum(creat, 0.1)
+    kappa = np.where(fem, 0.7, 0.9)
+    alpha = np.where(fem, -0.241, -0.302)
+    fem_factor = np.where(fem, 1.012, 1.0)
+
+    scr_kappa = creat_clipped / kappa
+    min_term = np.minimum(scr_kappa, 1.0) ** alpha
+    max_term = np.maximum(scr_kappa, 1.0) ** (-1.200)
+    egfr = 142.0 * min_term * max_term * (0.9938 ** a) * fem_factor
+    if isinstance(creatinine, pd.Series):
+        return pd.Series(egfr, index=creatinine.index)
+    return egfr
 REQUIRED_INPUTS = [
     "days_since_prior_encounter", "days_since_prior_ip_ed", "prior_ip_os_ed_count", "prior_ip_count", "prior_ed_count",
     "prior_encounters_all_count", "readmission_count_twelve_months", "prior_ip_los_days", "index_los_days",
@@ -125,10 +166,30 @@ def engineer_clinical_features(df: pd.DataFrame, *, warn_missing: bool = True) -
     feat["bun_creat_azotemia_flag"] = (feat["bun_to_creatinine"] > 20.0).astype(float)
     feat["severe_anemia_flag"] = (feat["lab_hemoglobin"].fillna(13.0) < 8.5).astype(float)
     feat["hypoalbuminemia_flag"] = (feat["lab_albumin"].fillna(3.8) < 3.2).astype(float)
-    feat["egfr_stage4_5_flag"] = (feat["lab_egfr"].fillna(85.0) < 30.0).astype(float)
+
+    # Dynamic Race-Free CKD-EPI 2021 eGFR Calculation (FR-A6)
+    # Eliminates cross-site missingness and artificial reporting ceilings (>60 mL/min).
+    has_demog = ("age" in feat.columns or "age_at_admission" in feat.columns) and ("gender_concept_id" in feat.columns or "is_female" in feat.columns)
+    if has_demog:
+        age_col = feat["age"] if "age" in feat.columns else feat["age_at_admission"]
+        is_fem = (feat["gender_concept_id"] == 8532) if "gender_concept_id" in feat.columns else feat["is_female"].astype(bool)
+        computed_egfr = compute_ckd_epi_2021(creat, age_col.fillna(65.0), is_fem)
+        resolved_egfr = np.where(feat["lab_egfr"].isna() | (feat["lab_egfr"] >= 60.0), computed_egfr, feat["lab_egfr"])
+        feat["egfr_stage4_5_flag"] = (pd.Series(resolved_egfr, index=feat.index).fillna(85.0) < 30.0).astype(float)
+    else:
+        feat["egfr_stage4_5_flag"] = (feat["lab_egfr"].fillna(85.0) < 30.0).astype(float)
+
     feat["hyponatremia_flag"] = (feat["lab_sodium"].fillna(140.0) < 135.0).astype(float)
     feat["hyperkalemia_flag"] = (feat["lab_potassium"].fillna(4.2) > 5.1).astype(float)
-    feat["elevated_anion_gap_flag"] = (feat["lab_anion_gap"].fillna(10.0) > 14.0).astype(float)
+
+    # Dynamic Anion Gap Stoichiometric Fallback (FR-A6): Na - (Cl + HCO3)
+    has_lytes = "lab_sodium" in feat.columns and "lab_chloride" in feat.columns and "lab_bicarbonate" in feat.columns
+    if has_lytes:
+        calc_ag = feat["lab_sodium"] - (feat["lab_chloride"] + feat["lab_bicarbonate"])
+        resolved_ag = np.where(feat["lab_anion_gap"].isna(), calc_ag, feat["lab_anion_gap"])
+        feat["elevated_anion_gap_flag"] = (pd.Series(resolved_ag, index=feat.index).fillna(10.0) > 14.0).astype(float)
+    else:
+        feat["elevated_anion_gap_flag"] = (feat["lab_anion_gap"].fillna(10.0) > 14.0).astype(float)
 
     med_cols = [c for c in feat.columns if c.startswith("med_") and not c.endswith("_legacy")]
     feat["polypharmacy_count"] = feat[med_cols].sum(axis=1)
@@ -236,9 +297,17 @@ def extract_velocity_features(
         SELECT c.subject_id, c.cohort_start_date,
                {pick('heart_rate')} AS heart_rate, {pick('systolic_bp')} AS systolic_bp,
                {pick('diastolic_bp')} AS diastolic_bp, {pick('lab_bun')} AS lab_bun,
-               {pick('lab_creatinine')} AS lab_creatinine
+               {pick('lab_creatinine')} AS lab_creatinine,
+               {pick('lab_sodium')} AS lab_sodium, {pick('lab_potassium')} AS lab_potassium,
+               {pick('lab_chloride')} AS lab_chloride, {pick('lab_bicarbonate')} AS lab_bicarbonate,
+               {pick('lab_anion_gap')} AS lab_anion_gap, {pick('lab_egfr')} AS lab_egfr
         FROM c JOIN measurement m ON m.person_id = c.subject_id AND m.measurement_date = c.cohort_start_date
         GROUP BY 1, 2
+    ),
+    demo AS (
+        SELECT person_id AS subject_id, gender_concept_id,
+               COALESCE(year_of_birth, date_part('year', birth_datetime)) AS birth_year
+        FROM person
     )
     SELECT c.subject_id, c.cohort_start_date,
            date_diff('day', agg.last_any_end, c.cohort_start_date)    AS days_since_prior_encounter,
@@ -250,14 +319,34 @@ def extract_velocity_features(
            COALESCE(readm.n_readmit, 0)                               AS readmission_count_twelve_months,
            COALESCE(agg.prior_ip_los_days, 0)                         AS prior_ip_los_days,
            date_diff('day', c.cohort_start_date, c.cohort_end_date)   AS index_los_days,
-           m.heart_rate, m.systolic_bp, m.diastolic_bp, m.lab_bun, m.lab_creatinine
+           demo.gender_concept_id,
+           (date_part('year', c.cohort_start_date) - demo.birth_year) AS age,
+           m.heart_rate, m.systolic_bp, m.diastolic_bp, m.lab_bun, m.lab_creatinine,
+           m.lab_sodium, m.lab_potassium, m.lab_chloride, m.lab_bicarbonate,
+           m.lab_anion_gap, m.lab_egfr
     FROM c
     LEFT JOIN agg USING (subject_id, cohort_start_date)
     LEFT JOIN readm USING (subject_id, cohort_start_date)
     LEFT JOIN m USING (subject_id, cohort_start_date)
+    LEFT JOIN demo ON demo.subject_id = c.subject_id
     ORDER BY c.subject_id, c.cohort_start_date
     """
     raw = con.execute(sql).df()
+    # Dynamic CKD-EPI 2021 eGFR (FR-A6) to remove >60 ceiling and eliminate cross-site missingness
+    if "lab_creatinine" in raw.columns and "age" in raw.columns and "gender_concept_id" in raw.columns:
+        creat_series = raw["lab_creatinine"]
+        has_creat = creat_series.notna()
+        if has_creat.any():
+            calc_egfr = compute_ckd_epi_2021(creat_series.fillna(1.0), raw["age"].fillna(65.0), raw["gender_concept_id"] == 8532)
+            egfr_current = raw["lab_egfr"] if "lab_egfr" in raw.columns else pd.Series(np.nan, index=raw.index)
+            raw["lab_egfr"] = np.where(has_creat & (egfr_current.isna() | (egfr_current >= 60.0)), calc_egfr, egfr_current)
+
+    # Dynamic Anion Gap Stoichiometric Fallback: Na - (Cl + HCO3)
+    if all(k in raw.columns for k in ("lab_sodium", "lab_chloride", "lab_bicarbonate")):
+        calc_ag = raw["lab_sodium"] - (raw["lab_chloride"] + raw["lab_bicarbonate"])
+        ag_current = raw["lab_anion_gap"] if "lab_anion_gap" in raw.columns else pd.Series(np.nan, index=raw.index)
+        raw["lab_anion_gap"] = np.where(ag_current.isna(), calc_ag, ag_current)
+
     if extra_features is not None:
         extra = extra_features.drop(columns=[c for c in extra_features.columns if c in raw.columns
                                              and c not in ("subject_id", "cohort_start_date")])

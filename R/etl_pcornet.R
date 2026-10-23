@@ -759,125 +759,75 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
 
-  run_insert(con, "MEASUREMENT (from VITAL)", sprintf("
-    WITH unpivoted_vitals AS (
+  # Staged, single-analyte inserts (FR-C5) avoid DuckDB memory access violations
+  analytes <- list(
+    list(tag = "HT", loinc = "8302-2", val = "TRY_CAST(HT AS DOUBLE)", unit = "[in_us]", cid = 9326L, cond = "HT IS NOT NULL AND TRY_CAST(HT AS DOUBLE) IS NOT NULL AND TRY_CAST(HT AS DOUBLE) > 0"),
+    list(tag = "WT", loinc = "29463-7", val = "TRY_CAST(WT AS DOUBLE)", unit = "[lb_av]", cid = 8739L, cond = "WT IS NOT NULL AND TRY_CAST(WT AS DOUBLE) IS NOT NULL AND TRY_CAST(WT AS DOUBLE) > 0"),
+    list(tag = "BMI", loinc = "39156-5", val = "TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE)", unit = "kg/m2", cid = 9531L, cond = "COALESCE(ORIGINAL_BMI, BMI) IS NOT NULL AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) IS NOT NULL AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) > 0"),
+    list(tag = "SYSTOLIC", loinc = "8480-6", val = "TRY_CAST(SYSTOLIC AS DOUBLE)", unit = "mm[Hg]", cid = 8876L, cond = "SYSTOLIC IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) > 0"),
+    list(tag = "DIASTOLIC", loinc = "8462-4", val = "TRY_CAST(DIASTOLIC AS DOUBLE)", unit = "mm[Hg]", cid = 8876L, cond = "DIASTOLIC IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) > 0")
+  )
+
+  for (a in analytes) {
+    run_insert(con, sprintf("MEASUREMENT (from VITAL - %s)", a$tag), sprintf("
+      INSERT INTO measurement
       SELECT
-        VITALID || '_HT' AS vital_sub_id,
-        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
-        '8302-2' AS loinc_code,
-        TRY_CAST(HT AS DOUBLE) AS val_num,
-        '[in_us]' AS unit_str,
-        9326 AS unit_concept_id
-      FROM _temp_vital
-      WHERE HT IS NOT NULL AND TRY_CAST(HT AS DOUBLE) IS NOT NULL AND TRY_CAST(HT AS DOUBLE) > 0
-
-      UNION ALL
-
-      SELECT
-        VITALID || '_WT' AS vital_sub_id,
-        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
-        '29463-7' AS loinc_code,
-        TRY_CAST(WT AS DOUBLE) AS val_num,
-        '[lb_av]' AS unit_str,
-        8739 AS unit_concept_id
-      FROM _temp_vital
-      WHERE WT IS NOT NULL AND TRY_CAST(WT AS DOUBLE) IS NOT NULL AND TRY_CAST(WT AS DOUBLE) > 0
-
-      UNION ALL
-
-      SELECT
-        VITALID || '_BMI' AS vital_sub_id,
-        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
-        '39156-5' AS loinc_code,
-        TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) AS val_num,
-        'kg/m2' AS unit_str,
-        9531 AS unit_concept_id
-      FROM _temp_vital
-      WHERE COALESCE(ORIGINAL_BMI, BMI) IS NOT NULL
-        AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) IS NOT NULL
-        AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) > 0
-
-      UNION ALL
-
-      SELECT
-        VITALID || '_SYSTOLIC' AS vital_sub_id,
-        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
-        '8480-6' AS loinc_code,
-        TRY_CAST(SYSTOLIC AS DOUBLE) AS val_num,
-        'mm[Hg]' AS unit_str,
-        8876 AS unit_concept_id
-      FROM _temp_vital
-      WHERE SYSTOLIC IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) > 0
-
-      UNION ALL
-
-      SELECT
-        VITALID || '_DIASTOLIC' AS vital_sub_id,
-        PATID, ENCOUNTERID, MEASURE_DATE, MEASURE_TIME,
-        '8462-4' AS loinc_code,
-        TRY_CAST(DIASTOLIC AS DOUBLE) AS val_num,
-        'mm[Hg]' AS unit_str,
-        8876 AS unit_concept_id
-      FROM _temp_vital
-      WHERE DIASTOLIC IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) > 0
-    )
-    INSERT INTO measurement
-    SELECT
-        ROW_NUMBER() OVER (ORDER BY src.vital_sub_id) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
-        COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
-        COALESCE(
-            stcm.target_concept_id,
-            cr.concept_id_2,
-            CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
-            0
-        ) AS measurement_concept_id,
-        parse_omop_date(src.MEASURE_DATE) AS measurement_date,
-        parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS measurement_datetime,
-        src.MEASURE_TIME AS measurement_time,
-        %d AS measurement_type_concept_id,
-        0 AS operator_concept_id,
-        src.val_num AS value_as_number,
-        0 AS value_as_concept_id,
-        src.unit_concept_id AS unit_concept_id,
-        NULL AS range_low,
-        NULL AS range_high,
-        NULL AS provider_id,
-        COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
-        NULL AS visit_detail_id,
-        src.loinc_code AS measurement_source_value,
-        COALESCE(c.concept_id, 0) AS measurement_source_concept_id,
-        src.unit_str AS unit_source_value,
-        src.unit_concept_id AS unit_source_concept_id,
-        CAST(src.val_num AS VARCHAR) AS value_source_value,
-        NULL AS measurement_event_id,
-        0 AS meas_event_field_concept_id
-    FROM unpivoted_vitals src
-    LEFT JOIN person p
-      ON p.person_source_value = %s
-    LEFT JOIN visit_occurrence vo
-      ON vo.visit_source_value = src.ENCOUNTERID
-    LEFT JOIN concept c
-      ON c.vocabulary_id = 'LOINC'
-     AND c.concept_code = src.loinc_code
-    LEFT JOIN (
-        SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
-        FROM concept_relationship
-        WHERE relationship_id = 'Maps to'
-        GROUP BY concept_id_1
-    ) cr
-      ON cr.concept_id_1 = c.concept_id
-    LEFT JOIN (
-        SELECT source_code, MIN(target_concept_id) AS target_concept_id
-        FROM source_to_concept_map
-        WHERE source_vocabulary_id = 'LOINC'
-          AND (invalid_reason IS NULL OR invalid_reason = '')
-          AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
-        GROUP BY source_code
-    ) stcm
-      ON stcm.source_code = src.loinc_code
-    WHERE src.vital_sub_id IS NOT NULL
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY src.vital_sub_id) = 1;
-  ", patid_expr, .TYPE_CONCEPT_EHR_MEASUREMENT, patid_expr, .today_iso()))
+          ROW_NUMBER() OVER () + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
+          COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
+          COALESCE(
+              stcm.target_concept_id,
+              cr.concept_id_2,
+              CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+              0
+          ) AS measurement_concept_id,
+          parse_omop_date(src.MEASURE_DATE) AS measurement_date,
+          parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS measurement_datetime,
+          src.MEASURE_TIME AS measurement_time,
+          %d AS measurement_type_concept_id,
+          0 AS operator_concept_id,
+          %s AS value_as_number,
+          0 AS value_as_concept_id,
+          %d AS unit_concept_id,
+          NULL AS range_low,
+          NULL AS range_high,
+          NULL AS provider_id,
+          COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
+          NULL AS visit_detail_id,
+          '%s' AS measurement_source_value,
+          COALESCE(c.concept_id, 0) AS measurement_source_concept_id,
+          '%s' AS unit_source_value,
+          %d AS unit_source_concept_id,
+          CAST(%s AS VARCHAR) AS value_source_value,
+          NULL AS measurement_event_id,
+          0 AS meas_event_field_concept_id
+      FROM _temp_vital src
+      LEFT JOIN person p
+        ON p.person_source_value = %s
+      LEFT JOIN visit_occurrence vo
+        ON vo.visit_source_value = src.ENCOUNTERID
+      LEFT JOIN concept c
+        ON c.vocabulary_id = 'LOINC'
+       AND c.concept_code = '%s'
+      LEFT JOIN (
+          SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
+          FROM concept_relationship
+          WHERE relationship_id = 'Maps to'
+          GROUP BY concept_id_1
+      ) cr
+        ON cr.concept_id_1 = c.concept_id
+      LEFT JOIN (
+          SELECT source_code, MIN(target_concept_id) AS target_concept_id
+          FROM source_to_concept_map
+          WHERE source_vocabulary_id = 'LOINC'
+            AND (invalid_reason IS NULL OR invalid_reason = '')
+            AND (valid_end_date IS NULL OR valid_end_date >= DATE '%s')
+          GROUP BY source_code
+      ) stcm
+        ON stcm.source_code = '%s'
+      WHERE %s
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID, '%s') = 1;
+    ", patid_expr, .TYPE_CONCEPT_EHR_MEASUREMENT, a$val, a$cid, a$loinc, a$unit, a$cid, a$val, patid_expr, a$loinc, .today_iso(), a$loinc, a$cond, a$tag))
+  }
   # PCORnet VITAL.SMOKING -> OBSERVATION "Tobacco smoking status" (LOINC 72166-2, concept 43054909) with the
   # matching LOINC answer concept in value_as_concept_id. NI/UN/OT and unrecognized codes carry no status.
   run_insert(con, "OBSERVATION (smoking status from VITAL)", gsub("__PATID__", patid_expr, "

@@ -559,6 +559,7 @@ class _StudySpec:
     rule: str = "random"
     seed: int = 42
     pinned_keys: bool = False  # prefer stays listed in the _study_pinned_keys temp table (see persist_keys)
+    require_diabetes: bool = False
 
 
 # ---- identifier / literal helpers -------------------------------------------------------------------
@@ -683,6 +684,42 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
         ))
     else:
         conds.append(("Alive at index admission", "(pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"))
+
+    if getattr(spec, "require_diabetes", False):
+        co, de, meas = _tbl(spec, "condition_occurrence"), _tbl(spec, "drug_exposure"), _tbl(spec, "measurement")
+        ca = _tbl(spec, "concept_ancestor")
+        conds.append((
+            "eDERRI diabetes phenotype (ICD-9 249/250, ICD-10 E08-E13, antidiabetic medication, or HbA1c >= 6.5%)",
+            f"""(
+                EXISTS (
+                    SELECT 1 FROM {co} co
+                    WHERE co.person_id = v.person_id
+                      AND co.condition_start_date <= v.visit_start_date
+                      AND (
+                          co.condition_concept_id IN (201820, 201254, 435222, 443729, 443730, 443731, 443732, 443733, 443734, 443735, 4016045)
+                          OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E13)')
+                      )
+                )
+                OR EXISTS (
+                    SELECT 1 FROM {de} de
+                    WHERE de.person_id = v.person_id
+                      AND de.drug_exposure_start_date <= v.visit_start_date
+                      AND (
+                          regexp_matches(lower(COALESCE(de.drug_source_value, '')), '(insulin|metformin|glipizide|glyburide|glimepiride|sitagliptin|empagliflozin|dapagliflozin|liraglutide|semaglutide)')
+                      )
+                )
+                OR EXISTS (
+                    SELECT 1 FROM {meas} m
+                    WHERE m.person_id = v.person_id
+                      AND m.measurement_date <= v.visit_start_date
+                      AND m.value_as_number >= 6.5
+                      AND (
+                          m.measurement_concept_id IN (3004410, 3005673, 40762352)
+                          OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|17856-6|4549-2|A1C|HBA1C|HbA1c)')
+                      )
+                )
+            )""",
+        ))
     return conds
 
 
@@ -1208,6 +1245,7 @@ def define_study_cohort(
     attrition: bool = True,
     one_per_patient: bool = True,
     persist_keys: str | os.PathLike | None = None,
+    require_diabetes: bool = False,
 ) -> pd.DataFrame:
     r"""Defines a leak-free index-stay study cohort (one stay per patient) with an optional outcome.
 
@@ -1481,6 +1519,7 @@ def define_study_cohort(
         age_method=method, min_los_days=min_los, washin_days=washin_n, exclude_death=exclude,
         death_ids=tuple(death_ids), death_sources=tuple(sources), window_days=window, gap_days=gap_n,
         verified=verified, evidence=tuple(evidence), rule=rule, seed=seed_n,
+        require_diabetes=bool(require_diabetes),
     )
 
     keys_path = Path(persist_keys) if persist_keys is not None else None
@@ -2339,3 +2378,46 @@ def filter_measurements(
 
 
 
+
+
+def build_ederri_diabetes_cohort(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    target_table: str = "cohort",
+    cohort_definition_id: int = 1,
+    random_state: int = 42,
+    persist_keys: str | os.PathLike | None = None,
+    materialise: bool | str = "auto",
+    schema: str | None = None,
+    followup_days: int | None = None,
+    require_verified_followup: bool = False,
+) -> pd.DataFrame:
+    """Builds the authoritative eDERRI diabetes inclusion cohort (FR-A6).
+
+    Phenotype:
+      Adult (>=18y) inpatient stays with length of stay >= 1 day, >=365 days wash-in,
+      discharged alive, with diabetes evidence:
+      - ICD-9: 249, 250
+      - ICD-10: E08, E09, E10, E11, E13 (or standard descendant of concept 201820)
+      - Antidiabetic medications (insulin, metformin, sulfonylureas, GLP-1, SGLT2)
+      - HbA1c >= 6.5% prior to or on index date.
+    """
+    return define_study_cohort(
+        con,
+        visit_type="inpatient",
+        require_diabetes=True,
+        min_age=18,
+        min_los_days=1,
+        washin_days=365,
+        target_outcome="none",
+        followup_days=followup_days,
+        require_verified_followup=require_verified_followup,
+        random_state=random_state,
+        persist_keys=persist_keys,
+        cohort_definition_id=cohort_definition_id,
+        cohort_name="eDERRI Diabetes Inpatient Cohort",
+        cohort_description="Authoritative eDERRI diabetes inclusion phenotype (adult inpatient, DM dx/rx/A1c)",
+        table_name=target_table,
+        materialise=materialise,
+        schema=schema,
+    )

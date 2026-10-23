@@ -64,7 +64,7 @@ load_cdm_schema <- function(ddl_path = NULL) {
       if (nzchar(trimws(line))) stop("Unparsed DDL line: ", trimws(line), call. = FALSE)
       next
     }
-    base <- c(integer = "integer", varchar = "varchar", text = "text", date = "date", timestamp = "timestamp",
+    base <- c(integer = "integer", bigint = "bigint", varchar = "varchar", text = "text", date = "date", timestamp = "timestamp",
               numeric = "numeric")[tolower(c_[3])]
     if (is.na(base)) stop("Unknown type '", c_[3], "' in the DDL.", call. = FALSE)
     schema[[current]][[length(schema[[current]]) + 1L]] <- data.frame(
@@ -77,13 +77,13 @@ load_cdm_schema <- function(ddl_path = NULL) {
 
 .col_type <- function(dialect, base, len) {
   switch(dialect,
-    oracle = switch(base, integer = "NUMBER(10)", date = "DATE", timestamp = "TIMESTAMP(0)", numeric = "NUMBER",
+    oracle = switch(base, bigint = "NUMBER(19)", integer = "NUMBER(10)", date = "DATE", timestamp = "TIMESTAMP(0)", numeric = "NUMBER",
                     text = "CLOB", sprintf("VARCHAR2(%d CHAR)", len)),
-    sqlserver = switch(base, integer = "INT", date = "DATE", timestamp = "DATETIME2(0)", numeric = "FLOAT",
+    sqlserver = switch(base, bigint = "BIGINT", integer = "INT", date = "DATE", timestamp = "DATETIME2(0)", numeric = "FLOAT",
                        text = "VARCHAR(MAX)", sprintf("VARCHAR(%d)", len)),
-    snowflake = switch(base, integer = "NUMBER(10,0)", date = "DATE", timestamp = "TIMESTAMP_NTZ(0)", numeric = "FLOAT",
+    snowflake = switch(base, bigint = "NUMBER(19,0)", integer = "NUMBER(10,0)", date = "DATE", timestamp = "TIMESTAMP_NTZ(0)", numeric = "FLOAT",
                        text = "VARCHAR", sprintf("VARCHAR(%d)", len)),
-    bigquery = switch(base, integer = "INT64", date = "DATE", timestamp = "DATETIME", numeric = "FLOAT64", "STRING"),
+    bigquery = switch(base, bigint = "INT64", integer = "INT64", date = "DATE", timestamp = "DATETIME", numeric = "FLOAT64", "STRING"),
     stop("Unsupported dialect '", dialect, "'; use one of ", paste(EXTRA_EXPORT_TARGETS, collapse = ", "), ".", call. = FALSE))
 }
 
@@ -187,9 +187,9 @@ generate_ddl <- function(dialect, tables = NULL, schema_name = NULL, schema = NU
 lint_ddl <- function(sql, dialect, oracle_max_identifier = 30L) {
   limit <- switch(dialect, oracle = oracle_max_identifier, sqlserver = 128L, snowflake = 255L, bigquery = 300L)
   allowed <- switch(dialect,
-    oracle = "^(NUMBER(\\(\\d+\\))?|DATE|TIMESTAMP\\(0\\)|CLOB|VARCHAR2\\(\\d+ CHAR\\))$",
-    sqlserver = "^(INT|DATE|DATETIME2\\(0\\)|FLOAT|VARCHAR\\((MAX|\\d+)\\))$",
-    snowflake = "^(NUMBER\\(10,0\\)|DATE|TIMESTAMP_NTZ\\(0\\)|FLOAT|VARCHAR(\\(\\d+\\))?)$",
+    oracle = "^(NUMBER(\\(\\d+(,\\d+)?\\))?|DATE|TIMESTAMP\\(0\\)|CLOB|VARCHAR2\\(\\d+ CHAR\\))$",
+    sqlserver = "^(INT|BIGINT|DATE|DATETIME2\\(0\\)|FLOAT|VARCHAR\\((MAX|\\d+)\\))$",
+    snowflake = "^(NUMBER\\(\\d+,0\\)|DATE|TIMESTAMP_NTZ\\(0\\)|FLOAT|VARCHAR(\\(\\d+\\))?)$",
     bigquery = "^(INT64|DATE|DATETIME|FLOAT64|STRING)$")
   stmts <- trimws(Filter(function(s) nzchar(trimws(s)), strsplit(sql, ";", fixed = TRUE)[[1]]))
   if (!length(stmts)) return("no statements")

@@ -516,13 +516,13 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                             exclude_death = TRUE, death_ids = 4216643, death_sources = "death_table",
                             window_days = 30, gap_days = 0, verified = TRUE,
                             evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42,
-                            pinned_keys = FALSE) {
+                            pinned_keys = FALSE, require_diabetes = FALSE) {
   list(cohort_id = cohort_id, outcome = outcome, label = label, schema = schema, visit_ids = visit_ids,
        outcome_visit_ids = outcome_visit_ids, study_start = study_start, study_end = study_end,
        min_age = min_age, age_method = age_method, min_los_days = min_los_days, washin_days = washin_days,
        exclude_death = exclude_death, death_ids = death_ids, death_sources = death_sources,
        window_days = window_days, gap_days = gap_days, verified = verified, evidence = evidence,
-       rule = rule, seed = seed, pinned_keys = pinned_keys)
+       rule = rule, seed = seed, pinned_keys = pinned_keys, require_diabetes = require_diabetes)
 }
 
 # ---- identifier / literal helpers --------------------------------------------------------------------
@@ -668,6 +668,42 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                 .int_list(spec$death_ids)))
   } else {
     add("Alive at index admission", "(pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)")
+  }
+
+  if (isTRUE(spec$require_diabetes)) {
+    co <- .study_tbl(spec, "condition_occurrence")
+    de <- .study_tbl(spec, "drug_exposure")
+    meas <- .study_tbl(spec, "measurement")
+    add("eDERRI diabetes phenotype (ICD-9 249/250, ICD-10 E08-E13, antidiabetic medication, or HbA1c >= 6.5%)",
+        sprintf("(
+            EXISTS (
+                SELECT 1 FROM %s co
+                WHERE co.person_id = v.person_id
+                  AND co.condition_start_date <= v.visit_start_date
+                  AND (
+                      co.condition_concept_id IN (201820, 201254, 435222, 443729, 443730, 443731, 443732, 443733, 443734, 443735, 4016045)
+                      OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E13)')
+                  )
+            )
+            OR EXISTS (
+                SELECT 1 FROM %s de
+                WHERE de.person_id = v.person_id
+                  AND de.drug_exposure_start_date <= v.visit_start_date
+                  AND (
+                      regexp_matches(lower(COALESCE(de.drug_source_value, '')), '(insulin|metformin|glipizide|glyburide|glimepiride|sitagliptin|empagliflozin|dapagliflozin|liraglutide|semaglutide)')
+                  )
+            )
+            OR EXISTS (
+                SELECT 1 FROM %s m
+                WHERE m.person_id = v.person_id
+                  AND m.measurement_date <= v.visit_start_date
+                  AND m.value_as_number >= 6.5
+                  AND (
+                      m.measurement_concept_id IN (3004410, 3005673, 40762352)
+                      OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|17856-6|4549-2|A1C|HBA1C|HbA1c)')
+                  )
+            )
+        )", co, de, meas))
   }
   conds
 }
@@ -1387,7 +1423,8 @@ define_study_cohort <- function(con,
                                 schema = NULL,
                                 attrition = TRUE,
                                 one_per_patient = TRUE,
-                                persist_keys = NULL) {
+                                persist_keys = NULL,
+                                require_diabetes = FALSE) {
   if (!isTRUE(one_per_patient)) {
     stop("define_study_cohort selects exactly one index stay per patient; one_per_patient = FALSE is unsupported.", call. = FALSE)
   }
@@ -1480,7 +1517,7 @@ define_study_cohort <- function(con,
     outcome_visit_ids = outcome_ids, study_start = win$start, study_end = win$end, min_age = min_age_n,
     age_method = method, min_los_days = min_los, washin_days = washin_n, exclude_death = exclude,
     death_ids = death_ids, death_sources = sources, window_days = window, gap_days = gap_n, verified = verified,
-    evidence = evidence, rule = rule, seed = seed_n
+    evidence = evidence, rule = rule, seed = seed_n, require_diabetes = isTRUE(require_diabetes)
   )
 
   if (!is.null(persist_keys) && file.exists(persist_keys)) {
@@ -2361,3 +2398,37 @@ filter_measurements <- function(con,
 
 
 
+
+
+#' Authoritative eDERRI Diabetes Inclusion Cohort (FR-A6)
+#'
+#' @export
+build_ederri_diabetes_cohort <- function(con,
+                                         target_table = "cohort",
+                                         cohort_definition_id = 1,
+                                         random_state = 42,
+                                         persist_keys = NULL,
+                                         materialise = "auto",
+                                         schema = NULL,
+                                         followup_days = NULL,
+                                         require_verified_followup = FALSE) {
+  define_study_cohort(
+    con,
+    visit_type = "inpatient",
+    require_diabetes = TRUE,
+    min_age = 18,
+    min_los_days = 1,
+    washin_days = 365,
+    target_outcome = "none",
+    followup_days = followup_days,
+    require_verified_followup = require_verified_followup,
+    random_state = random_state,
+    persist_keys = persist_keys,
+    cohort_definition_id = cohort_definition_id,
+    cohort_name = "eDERRI Diabetes Inpatient Cohort",
+    cohort_description = "Authoritative eDERRI diabetes inclusion phenotype (adult inpatient, DM dx/rx/A1c)",
+    table_name = target_table,
+    materialise = materialise,
+    schema = schema
+  )
+}

@@ -234,6 +234,43 @@ def run_dqd(
                     "failed": orphan_count > 0,
                 })
 
+        # Relational Person-Visit Consistency (FR-C7):
+        # When a clinical table record has a non-null visit_occurrence_id,
+        # its person_id must match the linked visit_occurrence.person_id.
+        fk_visit_tables = [
+            "condition_occurrence", "procedure_occurrence", "drug_exposure",
+            "measurement", "observation", "device_exposure"
+        ]
+        if _has_table("visit_occurrence"):
+            for tbl in fk_visit_tables:
+                if not _has_table(tbl):
+                    continue
+                total = _get_row_count(tbl)
+                if total == 0:
+                    continue
+                linked_total = con.execute(f"SELECT COUNT(*) FROM {tbl} WHERE visit_occurrence_id IS NOT NULL;").fetchone()[0]
+                if linked_total == 0:
+                    continue
+                mismatch_count = con.execute(f"""
+                    SELECT COUNT(*) FROM {tbl} t
+                    JOIN visit_occurrence vo ON t.visit_occurrence_id = vo.visit_occurrence_id
+                    WHERE t.visit_occurrence_id IS NOT NULL AND t.person_id != vo.person_id;
+                """).fetchone()[0]
+                pct = round((mismatch_count / linked_total * 100.0), 2)
+                results.append({
+                    "check_id": f"FIELD_FK_PERSON_VISIT_{tbl.upper()}",
+                    "check_name": "fkPersonVisitConsistency",
+                    "check_level": "FIELD",
+                    "cdm_table_name": tbl,
+                    "cdm_field_name": "visit_occurrence_id",
+                    "check_description": f"The number and percent of records in {tbl} where person_id does not match the linked visit_occurrence.person_id (FR-C7).",
+                    "num_violated_rows": mismatch_count,
+                    "pct_violated_rows": pct,
+                    "num_denominator_rows": linked_total,
+                    "execution_status": "PASSED" if mismatch_count == 0 else "FAILED",
+                    "failed": mismatch_count > 0,
+                })
+
     # 3. CONCEPT CHECKS (Standard concepts conformance & Unmapped audit)
     if "CONCEPT" in check_levels_set and _has_table("concept") and _get_row_count("concept") > 0:
         concept_fields = [

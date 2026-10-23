@@ -102,10 +102,32 @@ engineer_clinical_features <- function(df, warn_missing = TRUE) {
   feat$bun_creat_azotemia_flag <- as.numeric(feat$bun_to_creatinine > 20)
   feat$severe_anemia_flag <- as.numeric(.fill(feat$lab_hemoglobin, 13) < 8.5)
   feat$hypoalbuminemia_flag <- as.numeric(.fill(feat$lab_albumin, 3.8) < 3.2)
-  feat$egfr_stage4_5_flag <- as.numeric(.fill(feat$lab_egfr, 85) < 30)
+
+  # Dynamic Race-Free CKD-EPI 2021 eGFR (FR-A6)
+  has_demog <- (("age" %in% names(feat) || "age_at_admission" %in% names(feat)) && ("gender_concept_id" %in% names(feat) || "is_female" %in% names(feat)))
+  if (has_demog) {
+    age_col <- if ("age" %in% names(feat)) .fill(feat$age, 65) else .fill(feat$age_at_admission, 65)
+    is_fem <- if ("gender_concept_id" %in% names(feat)) (feat$gender_concept_id == 8532) else as.logical(feat$is_female)
+    computed_egfr <- compute_ckd_epi_2021(creat, age_col, is_fem)
+    egfr_val <- feat$lab_egfr
+    resolved_egfr <- ifelse(is.na(egfr_val) | egfr_val >= 60.0, computed_egfr, egfr_val)
+    feat$egfr_stage4_5_flag <- as.numeric(.fill(resolved_egfr, 85) < 30)
+  } else {
+    feat$egfr_stage4_5_flag <- as.numeric(.fill(feat$lab_egfr, 85) < 30)
+  }
+
   feat$hyponatremia_flag <- as.numeric(.fill(feat$lab_sodium, 140) < 135)
   feat$hyperkalemia_flag <- as.numeric(.fill(feat$lab_potassium, 4.2) > 5.1)
-  feat$elevated_anion_gap_flag <- as.numeric(.fill(feat$lab_anion_gap, 10) > 14)
+
+  # Dynamic Anion Gap Stoichiometric Fallback (FR-A6): Na - (Cl + HCO3)
+  has_lytes <- all(c("lab_sodium", "lab_chloride", "lab_bicarbonate") %in% names(feat))
+  if (has_lytes) {
+    calc_ag <- feat$lab_sodium - (feat$lab_chloride + feat$lab_bicarbonate)
+    resolved_ag <- ifelse(is.na(feat$lab_anion_gap), calc_ag, feat$lab_anion_gap)
+    feat$elevated_anion_gap_flag <- as.numeric(.fill(resolved_ag, 10) > 14)
+  } else {
+    feat$elevated_anion_gap_flag <- as.numeric(.fill(feat$lab_anion_gap, 10) > 14)
+  }
 
   med_cols <- names(feat)[startsWith(names(feat), "med_") & !endsWith(names(feat), "_legacy")]
   feat$polypharmacy_count <- if (length(med_cols)) rowSums(feat[, med_cols, drop = FALSE], na.rm = TRUE) else 0
@@ -209,9 +231,16 @@ extract_velocity_features <- function(con, cohort_table = "cohort", lookback_day
     ),
     m AS (
         SELECT c.subject_id, c.cohort_start_date,
-               %9$s AS heart_rate, %10$s AS systolic_bp, %11$s AS diastolic_bp, %12$s AS lab_bun, %13$s AS lab_creatinine
+               %9$s AS heart_rate, %10$s AS systolic_bp, %11$s AS diastolic_bp, %12$s AS lab_bun, %13$s AS lab_creatinine,
+               %14$s AS lab_sodium, %15$s AS lab_potassium, %16$s AS lab_chloride, %17$s AS lab_bicarbonate,
+               %18$s AS lab_anion_gap, %19$s AS lab_egfr
         FROM c JOIN measurement m ON m.person_id = c.subject_id AND m.measurement_date = c.cohort_start_date
         GROUP BY 1, 2
+    ),
+    demo AS (
+        SELECT person_id AS subject_id, gender_concept_id,
+               COALESCE(year_of_birth, date_part('year', birth_datetime)) AS birth_year
+        FROM person
     )
     SELECT c.subject_id, c.cohort_start_date,
            date_diff('day', agg.last_any_end, c.cohort_start_date)    AS days_since_prior_encounter,
@@ -223,15 +252,36 @@ extract_velocity_features <- function(con, cohort_table = "cohort", lookback_day
            COALESCE(readm.n_readmit, 0)                               AS readmission_count_twelve_months,
            COALESCE(agg.prior_ip_los_days, 0)                         AS prior_ip_los_days,
            date_diff('day', c.cohort_start_date, c.cohort_end_date)   AS index_los_days,
-           m.heart_rate, m.systolic_bp, m.diastolic_bp, m.lab_bun, m.lab_creatinine
+           demo.gender_concept_id,
+           (date_part('year', c.cohort_start_date) - demo.birth_year) AS age,
+           m.heart_rate, m.systolic_bp, m.diastolic_bp, m.lab_bun, m.lab_creatinine,
+           m.lab_sodium, m.lab_potassium, m.lab_chloride, m.lab_bicarbonate,
+           m.lab_anion_gap, m.lab_egfr
     FROM c
     LEFT JOIN agg USING (subject_id, cohort_start_date)
     LEFT JOIN readm USING (subject_id, cohort_start_date)
     LEFT JOIN m USING (subject_id, cohort_start_date)
+    LEFT JOIN demo ON demo.subject_id = c.subject_id
     ORDER BY c.subject_id, c.cohort_start_date",
     end_expr, cohort_table, where, lb, ip, ed, os_, gap,
-    pick("heart_rate"), pick("systolic_bp"), pick("diastolic_bp"), pick("lab_bun"), pick("lab_creatinine"))
+    pick("heart_rate"), pick("systolic_bp"), pick("diastolic_bp"), pick("lab_bun"), pick("lab_creatinine"),
+    pick("lab_sodium"), pick("lab_potassium"), pick("lab_chloride"), pick("lab_bicarbonate"),
+    pick("lab_anion_gap"), pick("lab_egfr"))
   raw <- DBI::dbGetQuery(con, sql)
+  # Dynamic CKD-EPI 2021 eGFR (FR-A6)
+  if (all(c("lab_creatinine", "age", "gender_concept_id") %in% names(raw))) {
+    has_creat <- !is.na(raw$lab_creatinine)
+    if (any(has_creat)) {
+      calc_egfr <- compute_ckd_epi_2021(.fill(raw$lab_creatinine, 1.0), .fill(raw$age, 65.0), raw$gender_concept_id == 8532)
+      egfr_cur <- raw$lab_egfr
+      raw$lab_egfr <- ifelse(has_creat & (is.na(egfr_cur) | egfr_cur >= 60.0), calc_egfr, egfr_cur)
+    }
+  }
+  # Dynamic Anion Gap Stoichiometric Fallback: Na - (Cl + HCO3)
+  if (all(c("lab_sodium", "lab_chloride", "lab_bicarbonate") %in% names(raw))) {
+    calc_ag <- raw$lab_sodium - (raw$lab_chloride + raw$lab_bicarbonate)
+    raw$lab_anion_gap <- ifelse(is.na(raw$lab_anion_gap), calc_ag, raw$lab_anion_gap)
+  }
   if (!is.null(extra_features)) {
     extra <- extra_features[, setdiff(names(extra_features), setdiff(names(raw), c("subject_id", "cohort_start_date"))), drop = FALSE]
     raw <- merge(raw, extra, by = c("subject_id", "cohort_start_date"), all.x = TRUE, sort = TRUE)

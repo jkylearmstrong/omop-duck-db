@@ -51,7 +51,7 @@ class Column:
 
 _COL_RE = re.compile(r'^\s*"?([a-z_0-9]+)"?\s+([A-Za-z]+)(?:\(\s*(\d+)\s*\))?\s+(NOT NULL|NULL)\s*,?\s*\)?\s*;?\s*$', re.I)
 _TABLE_RE = re.compile(r"CREATE TABLE\s+@cdmDatabaseSchema\.([a-z_0-9]+)\s*\(", re.I)
-_BASES = {"integer": "integer", "varchar": "varchar", "text": "text", "date": "date", "timestamp": "timestamp",
+_BASES = {"integer": "integer", "bigint": "bigint", "varchar": "varchar", "text": "text", "date": "date", "timestamp": "timestamp",
           "numeric": "numeric"}
 
 
@@ -129,16 +129,16 @@ _BIGQUERY_RESERVED = {
 def _types(dialect: str, col: Column) -> str:
     b, n = col.base, col.length
     if dialect == "oracle":
-        return {"integer": "NUMBER(10)", "date": "DATE", "timestamp": "TIMESTAMP(0)", "numeric": "NUMBER",
+        return {"bigint": "NUMBER(19)", "integer": "NUMBER(10)", "date": "DATE", "timestamp": "TIMESTAMP(0)", "numeric": "NUMBER",
                 "text": "CLOB"}.get(b) or f"VARCHAR2({n} CHAR)"
     if dialect == "sqlserver":
-        return {"integer": "INT", "date": "DATE", "timestamp": "DATETIME2(0)", "numeric": "FLOAT",
+        return {"bigint": "BIGINT", "integer": "INT", "date": "DATE", "timestamp": "DATETIME2(0)", "numeric": "FLOAT",
                 "text": "VARCHAR(MAX)"}.get(b) or f"VARCHAR({n})"
     if dialect == "snowflake":
-        return {"integer": "NUMBER(10,0)", "date": "DATE", "timestamp": "TIMESTAMP_NTZ(0)", "numeric": "FLOAT",
+        return {"bigint": "NUMBER(19,0)", "integer": "NUMBER(10,0)", "date": "DATE", "timestamp": "TIMESTAMP_NTZ(0)", "numeric": "FLOAT",
                 "text": "VARCHAR"}.get(b) or f"VARCHAR({n})"
     if dialect == "bigquery":
-        return {"integer": "INT64", "date": "DATE", "timestamp": "DATETIME", "numeric": "FLOAT64"}.get(b, "STRING")
+        return {"bigint": "INT64", "integer": "INT64", "date": "DATE", "timestamp": "DATETIME", "numeric": "FLOAT64"}.get(b, "STRING")
     raise ValueError(f"Unsupported dialect {dialect!r}; use one of {EXTRA_TARGETS}.")
 
 
@@ -243,9 +243,9 @@ def bigquery_load_script(tables: Sequence[str], data_dir: str = ".", dataset: st
 # ---- linting ----------------------------------------------------------------------------------------------------------
 
 _ALLOWED = {
-    "oracle": re.compile(r"^(NUMBER(\(\d+\))?|DATE|TIMESTAMP\(0\)|CLOB|VARCHAR2\(\d+ CHAR\))$"),
-    "sqlserver": re.compile(r"^(INT|DATE|DATETIME2\(0\)|FLOAT|VARCHAR\((MAX|\d+)\))$"),
-    "snowflake": re.compile(r"^(NUMBER\(10,0\)|DATE|TIMESTAMP_NTZ\(0\)|FLOAT|VARCHAR(\(\d+\))?)$"),
+    "oracle": re.compile(r"^(NUMBER(\(\d+(,\d+)?\))?|DATE|TIMESTAMP\(0\)|CLOB|VARCHAR2\(\d+ CHAR\))$"),
+    "sqlserver": re.compile(r"^(INT|BIGINT|DATE|DATETIME2\(0\)|FLOAT|VARCHAR\((MAX|\d+)\))$"),
+    "snowflake": re.compile(r"^(NUMBER\(\d+,0\)|DATE|TIMESTAMP_NTZ\(0\)|FLOAT|VARCHAR(\(\d+\))?)$"),
     "bigquery": re.compile(r"^(INT64|DATE|DATETIME|FLOAT64|STRING)$"),
 }
 

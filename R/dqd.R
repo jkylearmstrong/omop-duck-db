@@ -207,6 +207,38 @@ run_dqd <- function(con,
         )
       }
     }
+
+    # Relational Person-Visit Consistency (FR-C7)
+    fk_visit_tables <- c("condition_occurrence", "procedure_occurrence", "drug_exposure",
+                         "measurement", "observation", "device_exposure")
+    if (has_table("visit_occurrence")) {
+      for (tbl in fk_visit_tables) {
+        if (!has_table(tbl)) next
+        total <- get_row_count(tbl)
+        if (total == 0L) next
+        linked_total <- as.integer(DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM %s WHERE visit_occurrence_id IS NOT NULL", tbl))$n[1])
+        if (linked_total == 0L) next
+        mismatch_count <- as.integer(DBI::dbGetQuery(con, sprintf("
+          SELECT COUNT(*) AS n FROM %s t
+          JOIN visit_occurrence vo ON t.visit_occurrence_id = vo.visit_occurrence_id
+          WHERE t.visit_occurrence_id IS NOT NULL AND t.person_id != vo.person_id
+        ", tbl))$n[1])
+        pct <- round((mismatch_count / linked_total * 100.0), 2)
+        results[[length(results) + 1]] <- list(
+          check_id = sprintf("FIELD_FK_PERSON_VISIT_%s", toupper(tbl)),
+          check_name = "fkPersonVisitConsistency",
+          check_level = "FIELD",
+          cdm_table_name = tbl,
+          cdm_field_name = "visit_occurrence_id",
+          check_description = sprintf("The number and percent of records in %s where person_id does not match the linked visit_occurrence.person_id (FR-C7).", tbl),
+          num_violated_rows = mismatch_count,
+          pct_violated_rows = pct,
+          num_denominator_rows = linked_total,
+          execution_status = if (mismatch_count == 0L) "PASSED" else "FAILED",
+          failed = mismatch_count > 0L
+        )
+      }
+    }
   }
 
   # 3. CONCEPT CHECKS

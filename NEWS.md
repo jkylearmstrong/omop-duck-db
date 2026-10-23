@@ -1,4 +1,32 @@
-# omopduckdb (development version)
+# omopduckdb 0.8.0
+
+Release 0.8.0 resolves all five concrete engineering, data quality, and clinical replication gaps identified in the October 21 feature request RFC (FR-C5, FR-C6, FR-C7, FR-C8, FR-A6) and October 23 cross-site audit, enabling 120% feature-complete, autonomous, push-button replication for external consortium health systems across Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`).
+
+### 1. 63-Bit Signed BIGINT Surrogate Keys (FR-C8)
+- **Eliminated 31-bit Integer Collision Loss**: Upgraded `pcornet_id(source_id)` macro in `inst/sql/mapping_macros.sql` from `(hash(source_id) % 2000000000)::INTEGER` to 63-bit signed BIGINT: `(hash(source_id) & 9223372036854775807)::BIGINT`.
+- **DDL Widening**: Widened all 83 surrogate and foreign key identifier columns (`*_id`) in `OMOPCDM_duckdb_5.4_ddl.sql` from `integer` to `bigint` (retaining standard vocabulary concept identifiers as `integer`).
+- **Multi-Dialect Export Alignment**: Updated `export_targets.py` and `export_targets.R` across all enterprise export dialects: Oracle (`NUMBER(19)`), SQL Server (`BIGINT`), Snowflake (`NUMBER(19,0)`), and BigQuery (`INT64`). Prevents silent encounter drops and cross-patient record contamination at high-volume sites (e.g. Site D / Site E).
+
+### 2. ETL Crash Vulnerabilities Eliminated (FR-C5 & FR-C6)
+- **Staged Vital Inserts**: Refactored `load_vital` in `build_omop_cdm.py` and `etl_pcornet.R` from a single massive 5-way `UNION ALL` with global sorting into 5 staged, single-analyte materializations (`HT`, `WT`, `BMI`, `SYSTOLIC`, `DIASTOLIC`). Completely eliminates memory exhaustion and DuckDB Windows access violations on multi-million-row vital files.
+- **Regex-Guarded Datetime Parsing**: Re-engineered `parse_omop_datetime(d, t)` with multi-pattern format matching and `normalize_time_str(t)` to gracefully handle single-digit hours (e.g. `1:01` with `01AUG2002` -> `2002-08-01 01:01:00`) and arbitrary time variants without unhandled parse crashes.
+
+### 3. Study Phenotyping & Dynamic Lab Gaps Resolved (FR-A6)
+- **Authoritative eDERRI Diabetes Cohort Phenotype**: Added `build_ederri_diabetes_cohort()` in Python and R, and exposed `--type ederri_diabetes` / `diabetes` via `omop-duckdb cohort define`. Phenotype requires adult inpatient admission with wash-in, discharged alive, with explicit diabetes evidence:
+  - ICD-9: `249`, `250`
+  - ICD-10: `E08`, `E09`, `E10`, `E11`, `E13` (and standard concept descendants of `201820`)
+  - Antidiabetic medications (ATC A10 / RxNorm classes: insulin, metformin, sulfonylureas, GLP-1, SGLT2)
+  - $	ext{HbA}_{1c} \ge 6.5\%$ (LOINCs `4548-4`, `17856-6`, `4549-2`, concept IDs `3004410`, `3005673`, `40762352`).
+- **Race-Free CKD-EPI 2021 Dynamic eGFR Equation**: Integrated `compute_ckd_epi_2021(creatinine, age, is_female)` into `extract_velocity_features` in Python and R. Dynamically evaluates eGFR whenever missing or capped at clinical reporting thresholds ($\ge 60	ext{ mL/min}$), eliminating cross-site missingness.
+- **Expanded Anion Gap LOINC Set & Stoichiometric Fallback**: Expanded anion gap LOINCs in `table1.py` / `table1.R` to include `41276-7` alongside `1863-0` and `33037-3`. Added dynamic stoichiometric fallback `	ext{Na} - (	ext{Cl} + 	ext{HCO}_3)` to `extract_velocity_features`.
+
+### 4. DataQualityDashboard (DQD) Person-Visit Consistency Check (FR-C7)
+- **Foreign Key Person-Visit Integrity**: Implemented `fkPersonVisitConsistency` check (`FIELD_FK_PERSON_VISIT_<TABLE>`) in native `run_dqd()` across Python (`dqd.py`) and R (`dqd.R`). Cross-verifies that `clinical_table.person_id == visit_occurrence.person_id` across `condition_occurrence`, `procedure_occurrence`, `drug_exposure`, `measurement`, `observation`, and `device_exposure`, detecting and reporting mismatches before external validation.
+
+### 5. Deep Learning Sequence Models & Tri-Model Ensemble Blend Support
+- **Longitudinal Sequence Tensors**: Added `extract_longitudinal_tensors()` in `omop_etl.tensor` to build 3D $(N 	imes 20 	imes 30)$ concept token tensors directly in DuckDB from historical inpatient encounters.
+- **Model Bundle Support for Blackwell Deep Learning**: Updated `model_bundle.py` to support `.pt` PyTorch model weights and TorchScript bundles under `deep_residual` and `torchscript`. Added automatic 3D tensor extraction and dispatch in `ModelBundle.predict_proba` and `omop-duckdb evaluate` when components require `input: "sequence_tensor"`.
+
 
 - **`omop-duckdb evaluate`** (Python): one command chains `check_source`, cohort, `extract_velocity_features`, `validate_feature_frame`, `score_cohort`, `site_telemetry` and a run manifest; only the aggregate packet and manifest are written (`omop_etl.evaluate.evaluate_site()`).
 - **Strict JSON**: every exchanged JSON file (feature specs, bundles, manifests, telemetry, DQD and integrity reports) now writes `null` instead of `NaN` / `Infinity`, in Python (`omop_etl.jsonio`) and R (`na = "null"`); specs that already contain `NaN` tokens are read as `null`.

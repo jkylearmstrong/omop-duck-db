@@ -23,6 +23,7 @@ from omop_etl.build_omop_cdm import (
 )
 from omop_etl.cohort import (
     ConsortAttrition,
+    build_ederri_diabetes_cohort,
     build_end_of_life_cohort,
     build_mortality_cohort,
     build_readmission_cohort,
@@ -618,3 +619,10 @@ __all__ = [
 __version__ = "0.7.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
+
+from omop_etl.tensor import (
+    extract_longitudinal_tensors,
+    MAX_LONGITUDINAL_VISITS,
+    MAX_TOKENS_PER_VISIT,
+    VOCAB_SIZE,
+)

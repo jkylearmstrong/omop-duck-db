@@ -188,6 +188,40 @@ def test_native_dqd(fresh_cdm):
     assert any("TEMPORAL_START_BEFORE_END_VISIT_OCCURRENCE" in r["check_id"] for r in failed_checks)
 
 
+def test_dqd_person_visit_consistency(fresh_cdm):
+    con = fresh_cdm
+    load_person(con, str(SAMPLE_DIR))
+    
+    con.execute("""
+        INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id)
+        VALUES (501, 1001, 9201, DATE '2020-01-01', DATE '2020-01-02', 32817);
+    """)
+    con.execute("""
+        INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, visit_occurrence_id)
+        VALUES (9001, 1001, 3004410, DATE '2020-01-01', 32817, 501);
+    """)
+    
+    dqd_clean = run_dqd(con, check_levels=["FIELD"])
+    chk_clean = [c for c in dqd_clean["CheckResults"] if c["check_id"] == "FIELD_FK_PERSON_VISIT_MEASUREMENT"]
+    assert len(chk_clean) == 1
+    assert chk_clean[0]["failed"] is False
+    assert chk_clean[0]["num_violated_rows"] == 0
+
+    # Inject mismatched person_id (measurement belongs to patient 1002, but visit 501 belongs to 1001) - FR-C7
+    con.execute("""
+        INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, visit_occurrence_id)
+        VALUES (9002, 1002, 3004410, DATE '2020-01-01', 32817, 501);
+    """)
+
+    dqd_corrupt = run_dqd(con, check_levels=["FIELD"])
+    chk_corrupt = [c for c in dqd_corrupt["CheckResults"] if c["check_id"] == "FIELD_FK_PERSON_VISIT_MEASUREMENT"]
+    assert len(chk_corrupt) == 1
+    assert chk_corrupt[0]["failed"] is True
+    assert chk_corrupt[0]["num_violated_rows"] == 1
+    assert chk_corrupt[0]["pct_violated_rows"] == 50.0
+
+
+
 def test_ml_feature_extractor(fresh_cdm):
     con = fresh_cdm
     # Seed person, condition, drug

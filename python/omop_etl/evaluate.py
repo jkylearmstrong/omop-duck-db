@@ -110,6 +110,14 @@ def evaluate_site(
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)  # absent optional inputs are surfaced by the contract check below
             feats = extract_velocity_features(con, "_eval_cohort", extra_features=extra)
+
+        has_seq = any(c.options.get("input") in ("sequence_tensor", "tensor") or c.kind == "deep_residual"
+                      for c in b.components)
+        X_seq = None
+        if has_seq:
+            stage("extract_longitudinal_tensors")
+            from omop_etl.tensor import extract_longitudinal_tensors
+            X_seq = extract_longitudinal_tensors(con, "_eval_cohort")
     finally:
         con.close()
     keep = ["subject_id", "cohort_start_date"] + [c for c in ("visit_occurrence_id",) if c in cohort.columns]
@@ -128,7 +136,7 @@ def evaluate_site(
 
     # 5. score
     stage("score_cohort")
-    scores = score_cohort(b, frame, on_violation=on_violation)
+    scores = score_cohort(b, frame, on_violation=on_violation, X_seq=X_seq)
     if len(scores) != len(frame):
         raise EvaluationError("scored row count differs from the cohort.")
     m.add_step("scored", len(scores))

@@ -79,7 +79,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--type",
         "-t",
         required=True,
-        choices=["inpatient", "readmission", "mortality", "circe"],
+        choices=["inpatient", "ederri_diabetes", "diabetes", "readmission", "mortality", "circe"],
         help="Type of study cohort to construct.",
     )
     define_sub.add_argument("--out", "-o", default="cohort", help="Destination cohort table name.")
@@ -307,6 +307,12 @@ def handle_cohort(args: argparse.Namespace) -> int:
         if args.type == "inpatient":
             df = define_study_cohort(con, visit_type="inpatient", random_state=args.seed, persist_keys=args.persist_keys,
                                      table_name=args.out)
+            manifest.add_attrition(df.attrs.get("attrition", []))
+            if args.persist_keys:
+                manifest.add_input(args.persist_keys)
+        elif args.type in ("ederri_diabetes", "diabetes"):
+            df = define_study_cohort(con, visit_type="inpatient", require_diabetes=True, random_state=args.seed,
+                                     persist_keys=args.persist_keys, table_name=args.out)
             manifest.add_attrition(df.attrs.get("attrition", []))
             if args.persist_keys:
                 manifest.add_input(args.persist_keys)
