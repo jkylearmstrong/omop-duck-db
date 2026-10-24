@@ -51,6 +51,12 @@ to attach in read-only mode with zero-copy views.}
 \item{threads}{Optional DuckDB worker thread count.}
 
 \item{temp_dir}{Optional DuckDB disk-spill directory.}
+
+\item{source_format}{\code{"csv"}, \code{"parquet"} or \code{NULL} (either); restricts which source files are read when checking the
+source contract (see \code{\link[=check_source]{check_source()}}). Only used when \code{strict_source = TRUE}.}
+
+\item{strict_source}{Logical. If \code{TRUE}, run \code{\link[=check_source]{check_source()}} first and stop with a \code{source_contract_error} when a
+required source table or column is missing.}
 }
 \value{
 Invisibly, \code{db_path}.

@@ -27,6 +27,7 @@ PATTERNS: dict[str, re.Pattern[str]] = {
 }
 SKIP_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".xlsx", ".parquet", ".duckdb", ".pdf", ".zip", ".gz", ".ico", ".rds"}
 ALLOW_MARK = "secret-scan:allow"
+SKIP_DIRS = {".git", "renv", "node_modules", ".venv", "venv", "__pycache__", ".Rproj.user"}
 
 
 def _files(args: list[str]) -> list[Path]:
@@ -36,8 +37,16 @@ def _files(args: list[str]) -> list[Path]:
     elif [a for a in args if not a.startswith("--")]:
         return [Path(a) for a in args if not a.startswith("--")]
     else:
-        out = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split("\n")
+        try:
+            out = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split("\n")
+        except (OSError, subprocess.CalledProcessError):
+            return _walk_tree()  # no git or no .git (e.g. a Docker build context): scan the files on disk
     return [Path(p) for p in out if p]
+
+
+def _walk_tree() -> list[Path]:
+    root = Path(__file__).resolve().parent.parent
+    return [p for p in root.rglob("*") if p.is_file() and not SKIP_DIRS.intersection(p.relative_to(root).parts)]
 
 
 def scan_text(text: str) -> list[tuple[int, str]]:
