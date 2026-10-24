@@ -47,7 +47,7 @@ r2_cohort <- function(con) {
 
 test_that("LOINC 48642-3 is eGFR, not anion gap", {
   expect_false("48642-3" %in% DEFAULT_LAB_LOINCS$anion_gap)
-  expect_setequal(DEFAULT_LAB_LOINCS$anion_gap, c("1863-0", "33037-3"))
+  expect_setequal(DEFAULT_LAB_LOINCS$anion_gap, c("1863-0", "33037-3", "41276-7"))
   expect_true("48642-3" %in% DEFAULT_LAB_LOINCS$egfr)
 })
 

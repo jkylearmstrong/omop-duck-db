@@ -1,3 +1,7 @@
+# omopduckdb 0.8.1
+
+- **Fix: `pcornet_id()` no longer uses DuckDB `hash()`**. Widening to 63 bits in 0.8.0 did not help: `hash()` itself collides on real encounter IDs (160 of 75,804,013 and 62 of 46,990,031 distinct raw encounters lost at two large sites; zero lost with MD5). The macro is now `(md5_number_lower(source_id::VARCHAR) & 9223372036854775807)::BIGINT`. Databases rebuilt with 0.8.0 should be rebuilt.
+
 # omopduckdb 0.8.0
 
 Release 0.8.0 resolves all five concrete engineering, data quality, and clinical replication gaps identified in the October 21 feature request RFC (FR-C5, FR-C6, FR-C7, FR-C8, FR-A6) and October 23 cross-site audit, enabling 120% feature-complete, autonomous, push-button replication for external consortium health systems across Python (`omop_etl`, `omop_duck_db`) and R (`omopduckdb`).

@@ -58,8 +58,10 @@ CREATE OR REPLACE MACRO source_concept_id(source_vocabulary_id, source_code) AS 
 -- Bitwise AND with 0x7FFFFFFFFFFFFFFF ensures a strictly non-negative 63-bit integer [0, 9223372036854775807]
 -- that completely avoids the birthday paradox collision defects (FR-C8) suffered with 31-bit integer hashes
 -- at large health systems with tens of millions of encounters.
+-- Built on MD5 (low 64 bits), NOT DuckDB hash(): hash() has structural collisions on real ID sets
+-- (160 of 75.8M and 62 of 47.0M distinct encounters lost in v0.8.0 at two large sites, zero with MD5).
 CREATE OR REPLACE MACRO pcornet_id(source_id) AS (
-    (hash(source_id) & 9223372036854775807)::BIGINT
+    (md5_number_lower(source_id::VARCHAR) & 9223372036854775807)::BIGINT
 );
 
 -- Multi-format date parsing macro to prevent silent data loss (NULLs) across
