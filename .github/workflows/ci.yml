@@ -20,8 +20,7 @@ jobs:
 
       - name: Scanner self-test (a planted dummy token must be caught)
         run: |
-          printf 'token = "%s"
-' "pypi-Age$(printf 'A%.0s' $(seq 1 60))" > /tmp/planted.txt
+          printf 'token = "%s"\n' "pypi-Age$(printf 'A%.0s' $(seq 1 60))" > /tmp/planted.txt
           if python scripts/secret_scan.py /tmp/planted.txt; then echo "planted token was NOT detected"; exit 1; fi
 
       - uses: gitleaks/gitleaks-action@v2
