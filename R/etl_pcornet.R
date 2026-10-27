@@ -24,6 +24,10 @@
 #' @param memory_limit Optional DuckDB `memory_limit`, e.g. `"16GB"`.
 #' @param threads Optional DuckDB worker thread count.
 #' @param temp_dir Optional DuckDB disk-spill directory.
+#' @param source_format `"csv"`, `"parquet"` or `NULL` (either); restricts which source files are read when checking the
+#'   source contract (see [check_source()]). Only used when `strict_source = TRUE`.
+#' @param strict_source Logical. If `TRUE`, run [check_source()] first and stop with a `source_contract_error` when a
+#'   required source table or column is missing.
 #' @return Invisibly, `db_path`.
 #' @export
 etl_pcornet <- function(

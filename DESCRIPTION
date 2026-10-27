@@ -46,6 +46,7 @@ Suggests:
     tidypredict,
     glmnet,
     Andromeda,
+    callr,
     DatabaseConnector,
     PatientLevelPrediction,
     reticulate,

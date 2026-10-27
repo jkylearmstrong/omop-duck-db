@@ -1316,6 +1316,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #'   the stay minimising `hash(visit_occurrence_id, random_state)` (ties by id), the earliest start, or the latest
 #'   start.
 #' @param random_state Seed of the `"random"` rule (default 42).
+#' @param require_diabetes `TRUE` keeps only index stays with diabetes evidence (diagnosis, prescription or elevated
+#'   HbA1c) in the wash-in window; used by [build_ederri_diabetes_cohort()]. Default `FALSE`.
 #' @param require_verified_followup Keep a stay only if it has an outcome event or verified follow-up
 #'   (default `TRUE`). Not applicable to in-hospital mortality or when `followup_days` is `NULL`. The result
 #'   column `followup_verified` is reported either way.
@@ -2402,6 +2404,12 @@ filter_measurements <- function(con,
 
 #' Authoritative eDERRI Diabetes Inclusion Cohort (FR-A6)
 #'
+#' Thin wrapper over [define_study_cohort()] that fixes the eDERRI diabetes phenotype: adult (>= 18) inpatient
+#' stays of at least one day with diabetes evidence and a 365-day wash-in, with no outcome (`target_outcome = "none"`).
+#'
+#' @inheritParams define_study_cohort
+#' @param target_table Name of the table the cohort is written to when materialised (default `"cohort"`).
+#' @return As [define_study_cohort()].
 #' @export
 build_ederri_diabetes_cohort <- function(con,
                                          target_table = "cohort",

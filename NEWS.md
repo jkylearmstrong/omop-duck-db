@@ -17,6 +17,8 @@ Cohort tooling follow-up to 0.8.2 (notes N4, N7, FR-D3).
 
 # omopduckdb 0.8.2
 
+> **Known CI gap (Windows)**: on the GitHub Windows runner the R process running the full test suite exits without a message when tests write real Andromeda 1.x tables (7 of 9 runs; Ubuntu and a local Windows 11 machine are fine; identical package versions in passing and failing runs; output buffering hides where it dies). The three tests that write Andromeda tables are skipped on Windows, so `duckdb_to_andromeda()` is **unverified on Windows CI** (it works on Ubuntu and on a local Windows machine). Cause unknown; tracked for a later release.
+
 Closes the gaps left by the 2026-10 consortium audit. Most audit items (FR-A1-A5, B1-B4, C1-C6) had already shipped in 0.7.0/0.8.x; this release adds what was missing.
 
 - **FR-C9 (HADES)**: `hades_set_integer64()` (R) sets `databaseConnectorInteger64AsNumeric = FALSE` so 63-bit ids no longer stop `DatabaseConnector::querySql()` with "integers >= 2^53"; `plp_database_details()` and `cm_database_details()` call it when the database holds ids >= 2^53 (`integer64 = "auto"`; `hades_needs_integer64()` does the check), because forcing `integer64` for small ids crashed `getPlpData()` on Windows. New `pcornet_id53()` macro (53-bit keys, safe as R doubles) for callers who need it; the ETL still uses `pcornet_id()` and sequential person ids. `materialize_vocabulary()` / `omop-duckdb materialize-vocab` copies `central_vocab` views into real tables so a file opened alone resolves `concept`.
