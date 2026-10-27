@@ -134,3 +134,56 @@ def test_portable_cohorts_run_and_pick_earliest_stay():
     for stmt in _render("target_cohort.sql", target_cohort_id=1, followup_days=30, min_age=18, **common):
         con.execute(stmt)
     assert con.execute("SELECT COUNT(*) FROM cohort WHERE cohort_definition_id = 1").fetchone()[0] == 2
+
+
+def test_materialize_vocab_cli(tmp_path):
+    from omop_etl.cli import main
+    db = tmp_path / "site.duckdb"
+    vocab = tmp_path / "vocab.duckdb"
+    v = duckdb.connect(str(vocab))
+    v.execute("CREATE TABLE concept AS SELECT 1 AS concept_id, 'a' AS concept_name")
+    v.close()
+    c = duckdb.connect(str(db))
+    c.close()
+    assert main(["materialize-vocab", str(db), "--vocab", str(vocab)]) == 0
+    c = duckdb.connect(str(db))
+    # the file opened alone (nothing attached) must resolve concept as a real table
+    assert c.execute("SELECT table_type FROM information_schema.tables WHERE table_name = 'concept'").fetchone()[0] == "BASE TABLE"
+    c.close()
+
+
+def test_standard_labs_rejects_bad_egfr_option():
+    with pytest.raises(ValueError):
+        extract_standard_labs(_labs_fixture(), "cohort", egfr="bogus")
+
+
+def test_key_check_validates_inputs():
+    con = _con()
+    with pytest.raises(ValueError):
+        check_key_collisions(con, "src", "bad col")
+    with pytest.raises(ValueError):
+        check_key_collisions(con, "src; DROP TABLE x", "id")
+    with pytest.raises(ValueError):
+        check_key_collisions(con, "src", "id", on_collision="explode")
+
+
+def test_stable_random_and_persist_index_visits():
+    from omop_etl import define_study_cohort, persist_index_visits
+    con = _labs_fixture()
+    for vid, s, e in ((2, "2020-02-01", "2020-02-04"), (3, "2020-03-01", "2020-03-05")):
+        con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
+                    f" visit_end_date, visit_type_concept_id) VALUES ({vid},1,9201,DATE '{s}',DATE '{e}',0)")
+    con.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date,"
+                " observation_period_end_date, period_type_concept_id) VALUES (1,1,DATE '2015-01-01',DATE '2021-12-31',0)")
+    first = define_study_cohort(con, sampling_rule="earliest", materialise=False, washin_days=None,
+                                min_los_days=0, require_verified_followup=False)
+    a = define_study_cohort(con, sampling_rule="stable_random", materialise=False, washin_days=None,
+                            min_los_days=0, require_verified_followup=False)
+    b = define_study_cohort(con, sampling_rule="stable_random", materialise=False, washin_days=None,
+                            min_los_days=0, require_verified_followup=False)
+    assert a.equals(b) and len(first) == 1 and len(a) == 1
+    con.execute("DELETE FROM cohort")
+    con.execute("INSERT INTO cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)"
+                " VALUES (1, 1, DATE '2020-02-04', DATE '2020-02-04')")
+    assert persist_index_visits(con) == 1
+    assert con.execute("SELECT visit_occurrence_id FROM index_visit").fetchone()[0] == 2
