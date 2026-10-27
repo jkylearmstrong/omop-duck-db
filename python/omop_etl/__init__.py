@@ -32,6 +32,7 @@ from omop_etl.cohort import (
     compute_attrition,
     create_cohort,
     define_study_cohort,
+    persist_index_visits,
     ensure_cohort_tables,
     generate_consort_attrition,
     get_cohort_summary,
@@ -202,6 +203,7 @@ from omop_etl.andromeda import (
     AndromedaAdapter,
     export_to_andromeda,
 )
+from omop_etl.key_checks import KeyCollisionError, check_key_collisions
 from omop_etl.features import (
     ACUTE_LAB_PANEL,
     CORE_14_LAB_PANEL,
@@ -211,6 +213,8 @@ from omop_etl.features import (
     extract_measurements,
     extract_patient_features,
     extract_standard_labs,
+    ANION_GAP_LOINCS,
+    EGFR_LOINCS,
     extract_temporal_features,
 )
 from omop_etl.federation import (
@@ -408,6 +412,7 @@ __all__ = [
     "resolve_concept_set",
     "create_cohort",
     "define_study_cohort",
+    "persist_index_visits",
     "compute_attrition",
     "ConsortAttrition",
     "generate_consort_attrition",
@@ -431,6 +436,10 @@ __all__ = [
     "aggregate_concept_sets",
     "extract_measurements",
     "extract_standard_labs",
+    "ANION_GAP_LOINCS",
+    "EGFR_LOINCS",
+    "check_key_collisions",
+    "KeyCollisionError",
     "CORE_14_LAB_PANEL",
     # ML Feature Extraction & Builders (RFC-6)
     "CohortExtractor",

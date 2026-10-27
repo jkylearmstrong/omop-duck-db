@@ -1,3 +1,55 @@
+#' Keep 63-bit surrogate keys exact in DatabaseConnector (FR-C9)
+#'
+#' Visit and event ids are 63-bit BIGINTs (above 2^53), which R doubles cannot hold exactly. With the default
+#' `databaseConnectorInteger64AsNumeric = TRUE`, `DatabaseConnector::querySql()` stops with "The data contains
+#' integers >= 2^53" (for example when PatientLevelPrediction fetches cohorts). This sets the option to `FALSE`
+#' so such columns come back as `integer64`. [plp_database_details()] and [cm_database_details()] call it for you
+#' only when the database really holds ids that large (`integer64 = "auto"`), because `integer64` columns make
+#' the rest of the HADES stack do more work and crash some Windows setups when no id needs it.
+#'
+#' @return The previous value of the option, invisibly.
+#' @export
+hades_set_integer64 <- function() {
+  old <- getOption("databaseConnectorInteger64AsNumeric")
+  options(databaseConnectorInteger64AsNumeric = FALSE)
+  invisible(old)
+}
+
+#' Does a CDM file hold ids that R doubles cannot represent?
+#'
+#' Reads the largest primary key of the main CDM tables through a fresh read-only connection and reports whether
+#' any is at or above 2^53 (the limit of exact integers in an R double).
+#'
+#' @param db_path Path to the DuckDB database file.
+#' @param cdm_database_schema Schema holding the CDM tables (default `"main"`).
+#' @return `TRUE` if some id is >= 2^53, otherwise `FALSE`.
+#' @export
+hades_needs_integer64 <- function(db_path, cdm_database_schema = "main") {
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = TRUE)
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  schema <- DBI::dbQuoteIdentifier(con, cdm_database_schema)
+  keys <- c(person = "person_id", visit_occurrence = "visit_occurrence_id",
+            condition_occurrence = "condition_occurrence_id", drug_exposure = "drug_exposure_id",
+            measurement = "measurement_id", procedure_occurrence = "procedure_occurrence_id")
+  for (tbl in names(keys)) {
+    mx <- tryCatch(
+      DBI::dbGetQuery(con, sprintf("SELECT CAST(MAX(%s) AS DOUBLE) AS m FROM %s.%s",
+                                   keys[[tbl]], schema, DBI::dbQuoteIdentifier(con, tbl)))$m,
+      error = function(e) NA_real_)
+    if (length(mx) == 1L && !is.na(mx) && mx >= 2^53) return(TRUE)
+  }
+  FALSE
+}
+
+# Applies the `integer64` policy of plp_database_details() / cm_database_details().
+apply_integer64_policy <- function(integer64, db_path, cdm_database_schema) {
+  integer64 <- match.arg(integer64, c("auto", "always", "never"))
+  if (integer64 == "always" || (integer64 == "auto" && hades_needs_integer64(db_path, cdm_database_schema))) {
+    hades_set_integer64()
+  }
+  invisible(integer64)
+}
+
 #' Check that a DuckDB file is ready for OHDSI HADES (PatientLevelPrediction / DeepPatientLevelPrediction)
 #'
 #' PatientLevelPrediction, DeepPatientLevelPrediction and FeatureExtraction read the CDM through
@@ -126,6 +178,8 @@ print.hades_preflight <- function(x, ...) {
 #' @param cdm_database_id Identifier recorded with results; default is `cdm_source_abbreviation` if present,
 #'   otherwise the file name.
 #' @param preflight Run [hades_preflight()] first and stop on failure (default `TRUE`).
+#' @param integer64 `"auto"` (default) sets `databaseConnectorInteger64AsNumeric = FALSE` only when the CDM holds ids
+#'   >= 2^53 (see [hades_needs_integer64()]); `"always"` sets it unconditionally, `"never"` leaves it alone.
 #' @return A `databaseDetails` object from PatientLevelPrediction.
 #' @export
 plp_database_details <- function(db_path,
@@ -137,7 +191,8 @@ plp_database_details <- function(db_path,
                                  outcome_database_schema = cohort_database_schema,
                                  outcome_table = cohort_table,
                                  cdm_database_id = NULL,
-                                 preflight = TRUE) {
+                                 preflight = TRUE,
+                                 integer64 = c("auto", "always", "never")) {
   for (pkg in c("DatabaseConnector", "PatientLevelPrediction")) {
     if (!requireNamespace(pkg, quietly = TRUE)) stop(sprintf("plp_database_details() needs the '%s' package.", pkg), call. = FALSE)
   }
@@ -149,6 +204,7 @@ plp_database_details <- function(db_path,
                    paste(sprintf("  - %s: %s", bad$check, bad$detail), collapse = "\n")), call. = FALSE)
     }
   }
+  apply_integer64_policy(integer64, db_path, cdm_database_schema)
   if (is.null(cdm_database_id)) {
     cdm_database_id <- tools::file_path_sans_ext(basename(db_path))
     con <- tryCatch(DBI::dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = TRUE), error = function(e) NULL)
@@ -183,13 +239,15 @@ plp_database_details <- function(db_path,
 #' @param cohort_database_schema Schema holding the cohort table (default: the CDM schema).
 #' @param cohort_table Cohort table name in OHDSI format (default `"cohort"`).
 #' @param preflight Run [hades_preflight()] first and stop on failure (default `TRUE`).
+#' @param integer64 `"auto"` (default), `"always"` or `"never"`; see [plp_database_details()].
 #' @return A list with `connectionDetails`, `cdmDatabaseSchema`, `cohortDatabaseSchema`, `cohortTable`.
 #' @export
 cm_database_details <- function(db_path,
                                 cdm_database_schema = "main",
                                 cohort_database_schema = cdm_database_schema,
                                 cohort_table = "cohort",
-                                preflight = TRUE) {
+                                preflight = TRUE,
+                                integer64 = c("auto", "always", "never")) {
   if (!requireNamespace("DatabaseConnector", quietly = TRUE)) {
     stop("cm_database_details() needs the 'DatabaseConnector' package.", call. = FALSE)
   }
@@ -201,6 +259,7 @@ cm_database_details <- function(db_path,
                    paste(sprintf("  - %s: %s", bad$check, bad$detail), collapse = "\n")), call. = FALSE)
     }
   }
+  apply_integer64_policy(integer64, db_path, cdm_database_schema)
   list(
     connectionDetails = DatabaseConnector::createConnectionDetails(dbms = "duckdb", server = db_path),
     cdmDatabaseSchema = cdm_database_schema,

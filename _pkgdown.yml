@@ -180,6 +180,8 @@ reference:
   desc: Interoperability with OHDSI HADES PatientLevelPrediction and R tidymodels / orbital scoring.
   contents:
   - hades_preflight
+  - hades_needs_integer64
+  - hades_set_integer64
   - plp_database_details
   - cm_database_details
   - as_plp_data

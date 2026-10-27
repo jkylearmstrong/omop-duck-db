@@ -251,3 +251,23 @@ test_that("FeatureExtraction temporal sequences (DeepPLP's input) extract from a
   expect_gt(nrow(cov), 0)
   expect_true(FeatureExtraction::isCovariateData(plp$covariateData))
 })
+
+test_that("hades_needs_integer64 only reports ids at or above 2^53; hades_set_integer64 sets the option (FR-C9)", {
+  db <- tempfile(fileext = ".duckdb")
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
+  DBI::dbExecute(con, "CREATE TABLE person AS SELECT 1::BIGINT AS person_id")
+  DBI::dbExecute(con, "CREATE TABLE visit_occurrence AS SELECT 9007199254740991::BIGINT AS visit_occurrence_id")
+  DBI::dbDisconnect(con, shutdown = TRUE)
+  expect_false(hades_needs_integer64(db))                     # 2^53 - 1 is still exact in a double
+
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
+  DBI::dbExecute(con, "INSERT INTO visit_occurrence VALUES (9007199254740993)")
+  DBI::dbDisconnect(con, shutdown = TRUE)
+  expect_true(hades_needs_integer64(db))
+
+  old <- getOption("databaseConnectorInteger64AsNumeric")
+  on.exit(options(databaseConnectorInteger64AsNumeric = old), add = TRUE)
+  options(databaseConnectorInteger64AsNumeric = NULL)
+  hades_set_integer64()
+  expect_false(getOption("databaseConnectorInteger64AsNumeric"))
+})

@@ -493,7 +493,7 @@ def get_cohort_summary(
 # ======================================================================================================
 
 _VISIT_TYPE_CONCEPTS = {"inpatient": (9201,), "emergency": (9203,), "outpatient": (9202,)}
-_SAMPLING_RULES = ("first", "last", "random")
+_SAMPLING_RULES = ("first", "earliest", "last", "random", "stable_random")
 _AGE_METHODS = ("year_difference", "completed_years")
 _DEATH_SOURCES = ("death_table", "discharge_disposition")
 _FOLLOWUP_EVIDENCE = ("observation_period", "visit", "measurement", "condition", "drug", "death")
@@ -602,11 +602,14 @@ def _study_order_by(rule: str, seed: int, pinned: bool = False) -> str:
 def _study_order_by_rule(rule: str, seed: int) -> str:
     if rule == "random":
         return f"hash(f.visit_occurrence_id, {int(seed)}), f.visit_occurrence_id"
-    if rule == "first":
+    if rule == "stable_random":
+        # MD5 is specified by RFC 1321 and stable across DuckDB versions, unlike hash() (FR-D2).
+        return f"md5_number_lower(CAST(f.visit_occurrence_id AS VARCHAR) || ':{int(seed)}'), f.visit_occurrence_id"
+    if rule in ("first", "earliest"):
         return "f.visit_start_date ASC, f.visit_occurrence_id ASC"
     if rule == "last":
         return "f.visit_start_date DESC, f.visit_occurrence_id DESC"
-    raise ValueError(f"Unsupported sampling rule '{rule}'. Use 'first', 'last', or 'random'.")
+    raise ValueError(f"Unsupported sampling rule '{rule}'. Use 'first' (alias 'earliest'), 'last', 'random' or 'stable_random'.")
 
 
 def _study_age_expr(spec: _StudySpec) -> str:
@@ -1214,6 +1217,26 @@ def _describe_study(spec: _StudySpec) -> str:
     return "Study cohort: " + "; ".join(bits)
 
 
+def persist_index_visits(con: duckdb.DuckDBPyConnection, cohort_table: str = "cohort",
+                         table: str = "index_visit", *, cohort_id: int | None = None) -> int:
+    """Writes the chosen index stays to a durable ``index_visit`` table once so later builds reuse them (FR-D2).
+
+    Reads ``subject_id`` and ``cohort_start_date`` from ``cohort_table``, resolves each to its
+    ``visit_occurrence_id`` (the stay discharged on ``cohort_start_date``) and returns the row count written.
+    """
+    _quote_ident_path(cohort_table, "cohort_table", 2)
+    _quote_ident_path(table, "table", 2)
+    where = "" if cohort_id is None else f"WHERE c.cohort_definition_id = {int(cohort_id)}"
+    con.execute(f"""
+        CREATE OR REPLACE TABLE {table} AS
+        SELECT DISTINCT v.person_id, v.visit_occurrence_id, c.cohort_start_date
+        FROM {cohort_table} c
+        JOIN visit_occurrence v ON v.person_id = c.subject_id
+         AND COALESCE(v.visit_end_date, v.visit_start_date) = c.cohort_start_date
+        {where}""")
+    return int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
 def define_study_cohort(
     con: duckdb.DuckDBPyConnection,
     *,
@@ -1305,7 +1328,9 @@ def define_study_cohort(
         ``build_readmission_cohort``, ``gap_days`` in ``build_end_of_life_cohort``). Must be < ``followup_days``.
     sampling_rule : {"random", "first", "last"}, default "random"
         Which eligible stay represents a patient: earliest start (``first``), latest start (``last``) or the
-        stay minimising ``hash(visit_occurrence_id, random_state)`` (``random``, reproducible; ties broken by
+        stay minimising ``md5(visit_occurrence_id:random_state)`` (``stable_random``: identical across DuckDB versions
+        and engines; ``earliest`` is an alias of ``first``). ``random`` minimises DuckDB ``hash(visit_occurrence_id,
+        random_state)``, reproducible within one DuckDB version only (FR-D2); ties broken by
         visit_occurrence_id).
     random_state : int, default 42
         Seed of the ``random`` rule.
@@ -1446,7 +1471,7 @@ def define_study_cohort(
 
     rule = str(sampling_rule).strip().lower()
     if rule not in _SAMPLING_RULES:
-        raise ValueError(f"Unsupported sampling_rule '{sampling_rule}'. Use 'first', 'last', or 'random'.")
+        raise ValueError(f"Unsupported sampling_rule '{sampling_rule}'. Use 'first' (alias 'earliest'), 'last', 'random' or 'stable_random'.")
     method = str(age_method).strip().lower()
     if method not in _AGE_METHODS:
         raise ValueError(f"Unsupported age_method '{age_method}'. Use one of {_AGE_METHODS}.")

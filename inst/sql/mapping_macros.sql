@@ -64,6 +64,12 @@ CREATE OR REPLACE MACRO pcornet_id(source_id) AS (
     (md5_number_lower(source_id::VARCHAR) & 9223372036854775807)::BIGINT
 );
 
+-- 53-bit variant for keys that R must hold as doubles (FR-C9): DatabaseConnector stops on integers >= 2^53.
+-- Collision-free in practice at one site's person count (1e5-1e6); keep pcornet_id() for visit/event ids.
+CREATE OR REPLACE MACRO pcornet_id53(source_id) AS (
+    (md5_number_lower(source_id::VARCHAR) & 9007199254740991)::BIGINT
+);
+
 -- Multi-format date parsing macro to prevent silent data loss (NULLs) across
 -- disparate PCORnet date formats (e.g. '01JAN2020', '2020-01-01', '01/01/2020').
 CREATE OR REPLACE MACRO parse_omop_date(col) AS (

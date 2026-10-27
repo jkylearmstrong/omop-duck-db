@@ -1,30 +1,40 @@
-#' Direct Andromeda Zero-Copy View Adapter
+#' Stream DuckDB Tables into an Andromeda Object
 #'
-#' Replaces the SQLite disk serialization bottleneck inside OHDSI Andromeda by
-#' directly mounting or bulk-streaming DuckDB tables into Andromeda SQLite containers.
+#' Copies DuckDB tables into an OHDSI Andromeda object in chunks, so large covariate tables never have to fit in
+#' memory twice. Tables are always written through Andromeda's own interface (`andromeda[[name]] <- data` and
+#' `Andromeda::appendToTable()`), so they are visible in `names(andromeda)` whichever storage engine the installed
+#' Andromeda version uses (SQLite in 0.x, DuckDB in 1.x). Earlier versions attached the Andromeda file to DuckDB as
+#' SQLite; that wrote into a different file than the one Andromeda reads whenever the SQLite extension was
+#' available, and returned an empty Andromeda.
 #'
 #' @param con Active DuckDB connection (duckdb::duckdb()).
 #' @param table_names Character vector of table names in DuckDB to transfer (e.g. `c("covariates", "covariateRef", "analysisRef")`).
-#'   If `NULL`, transfers all tables present matching Andromeda covariate structures.
+#'   If `NULL`, transfers the covariate tables present, or every table when none match.
 #' @param andromeda Existing Andromeda object. If `NULL`, a new one is initialized.
-#' @param output_file Path to backing SQLite file if creating a new Andromeda object.
+#' @param output_file Deprecated and ignored (kept so existing calls still work).
+#' @param chunk_size Rows copied per batch (default 50000).
 #' @return A populated `Andromeda` object.
 #' @export
 duckdb_to_andromeda <- function(con,
                                 table_names = NULL,
                                 andromeda = NULL,
-                                output_file = tempfile(fileext = ".sqlite")) {
+                                output_file = NULL,
+                                chunk_size = 50000L) {
   if (!requireNamespace("Andromeda", quietly = TRUE)) {
     stop("Package 'Andromeda' is required for duckdb_to_andromeda().", call. = FALSE)
   }
   if (!inherits(con, "duckdb_connection")) {
     stop("`con` must be an active DuckDB connection.", call. = FALSE)
   }
+  chunk_size <- as.integer(chunk_size)
+  if (length(chunk_size) != 1L || is.na(chunk_size) || chunk_size < 1L) {
+    stop("`chunk_size` must be a positive whole number.", call. = FALSE)
+  }
 
   if (is.null(table_names)) {
     all_tbls <- DBI::dbListTables(con)
     candidates <- c("covariates", "covariateref", "analysisref")
-    table_names <- intersect(tolower(all_tbls), candidates)
+    table_names <- all_tbls[tolower(all_tbls) %in% candidates]
     if (length(table_names) == 0) table_names <- all_tbls
   }
 
@@ -32,63 +42,24 @@ duckdb_to_andromeda <- function(con,
     andromeda <- Andromeda::andromeda()
   }
 
-  # Identify SQLite database file backing Andromeda
-  sqlite_file <- tryCatch({
-    conn <- attr(andromeda, "connection")
-    if (is.null(conn) && inherits(andromeda, "Andromeda")) {
-      conn <- andromeda@connection
+  for (tbl in table_names) {
+    qtbl <- DBI::dbQuoteIdentifier(con, tbl)
+    total <- as.numeric(DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM %s;", qtbl))$n)
+    if (total == 0) {
+      # Keep the table's columns even when it is empty.
+      andromeda[[tbl]] <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s LIMIT 0;", qtbl))
+      next
     }
-    if (!is.null(conn)) {
-      f <- tryCatch(DBI::dbGetInfo(conn)$dbname, error = function(e) NULL)
-      if (is.null(f) || !nzchar(f)) f <- tryCatch(conn@dbname, error = function(e) NULL)
-      f
-    } else {
-      NULL
-    }
-  }, error = function(e) NULL)
-
-  if (is.null(sqlite_file) || !file.exists(sqlite_file)) {
-    sqlite_file <- output_file
-  }
-
-  norm_sqlite <- sql_path_literal(sqlite_file)
-
-  # Method 1: Try native DuckDB SQLite ATTACH zero-copy write
-  attached <- tryCatch({
-    DBI::dbExecute(con, sprintf("ATTACH %s AS andr_sq (TYPE SQLITE);", norm_sqlite))
-    for (tbl in table_names) {
-      DBI::dbExecute(con, sprintf("CREATE TABLE andr_sq.%s AS SELECT * FROM %s;", tbl, tbl))
-    }
-    DBI::dbExecute(con, "DETACH andr_sq;")
-    TRUE
-  }, error = function(e) FALSE)
-
-  # Method 2: Chunked batch streaming fallback (avoids monolithic memory blowup)
-  if (!attached) {
-    conn <- tryCatch(attr(andromeda, "connection"), error = function(e) NULL)
-    if (is.null(conn) && inherits(andromeda, "Andromeda")) {
-      conn <- tryCatch(andromeda@connection, error = function(e) NULL)
-    }
-
-    for (tbl in table_names) {
-      total <- as.numeric(DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM %s;", tbl))$n)
-      chunk_size <- 50000L
-      offset <- 0L
-
-      while (offset < total) {
-        chunk <- DBI::dbGetQuery(
-          con,
-          sprintf("SELECT * FROM %s LIMIT %d OFFSET %d;", tbl, chunk_size, offset)
-        )
-        if (nrow(chunk) == 0) break
-
-        if (!is.null(conn)) {
-          DBI::dbWriteTable(conn, tbl, chunk, append = (offset > 0L), row.names = FALSE)
-        } else {
-          andromeda[[tbl]] <- chunk
-        }
-        offset <- offset + nrow(chunk)
+    offset <- 0
+    while (offset < total) {
+      chunk <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s LIMIT %d OFFSET %.0f;", qtbl, chunk_size, offset))
+      if (nrow(chunk) == 0) break
+      if (offset == 0) {
+        andromeda[[tbl]] <- chunk
+      } else {
+        Andromeda::appendToTable(andromeda[[tbl]], chunk)
       }
+      offset <- offset + nrow(chunk)
     }
   }
 

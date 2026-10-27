@@ -160,7 +160,29 @@ def create_parser() -> argparse.ArgumentParser:
     vm = subparsers.add_parser("verify-manifest", help="Verify input hashes recorded in a run_manifest.json.")
     vm.add_argument("manifest", help="Path to run_manifest.json.")
 
+    mv = subparsers.add_parser("materialize-vocab", help="Copy central_vocab views into real tables so HADES can open the file alone.")
+    mv.add_argument("db", help="DuckDB CDM file.")
+    mv.add_argument("--vocab", default=None, help="Vocabulary DuckDB file to ATTACH read-only as central_vocab first.")
+
     return parser
+
+
+def handle_materialize_vocab(args: argparse.Namespace) -> int:
+    import duckdb
+    from omop_etl.build_omop_cdm import attach_central_vocabulary, materialize_vocabulary
+
+    con = duckdb.connect(args.db)
+    try:
+        if args.vocab:
+            attach_central_vocabulary(con, args.vocab, temporary=True)
+        done = materialize_vocabulary(con)
+    finally:
+        con.close()
+    for tbl, n in done.items():
+        print(f"{tbl}: {n} rows")
+    if not done:
+        print("No vocabulary views to materialize.")
+    return 0
 
 
 def _verify_first(args: argparse.Namespace) -> None:
@@ -396,6 +418,8 @@ def main(argv: list[str] | None = None) -> int:
         return handle_score(args)
     if args.command == "evaluate":
         return handle_evaluate(args)
+    if args.command == "materialize-vocab":
+        return handle_materialize_vocab(args)
     if args.command == "verify-manifest":
         return handle_verify_manifest(args)
     if args.command == "extract":
