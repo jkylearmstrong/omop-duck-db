@@ -1,6 +1,6 @@
 # omopduckdb 0.8.2
 
-> **Known CI gap (Windows)**: on the GitHub Windows runner the R process running the full test suite intermittently exits without a message right after the "FeatureExtraction temporal sequences" test fetches data (FeatureExtraction + Andromeda 1.x + DuckDB, not this package's code; Linux and a local Windows 11 machine are fine; identical package versions in passing and failing runs). That one HADES test is skipped on Windows; the Andromeda adapter tests run everywhere, including once in a child R process. Treat Windows + PatientLevelPrediction temporal sequences as unverified.
+> **Known CI gap (Windows)**: on the GitHub Windows runner the R process running the full test suite exits without a message when tests write real Andromeda 1.x tables (7 of 9 runs; Ubuntu and a local Windows 11 machine are fine; identical package versions in passing and failing runs; output buffering hides where it dies). The three tests that write Andromeda tables are skipped on Windows, so `duckdb_to_andromeda()` is **unverified on Windows CI** (it works on Ubuntu and on a local Windows machine). Cause unknown; tracked for a later release.
 
 Closes the gaps left by the 2026-10 consortium audit. Most audit items (FR-A1-A5, B1-B4, C1-C6) had already shipped in 0.7.0/0.8.x; this release adds what was missing.
 
