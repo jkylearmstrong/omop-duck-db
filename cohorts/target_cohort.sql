@@ -12,6 +12,7 @@
      @target_cohort_id        cohort_definition_id written for this cohort
      @followup_days           verified follow-up after discharge (30)
      @min_age                 minimum age in years at discharge (18)
+     @followup_evidence       'observation_period' (default) or 'observation_period_or_event' (rule 4, see below)
 
    Rules
      1. Index stay: visit_concept_id 9201 (Inpatient Visit) or 262 (Emergency Room and Inpatient Visit),
@@ -21,10 +22,14 @@
         the discharge date.
      4. Verified follow-up: an observation_period covers the discharge date through discharge + @followup_days,
         or the person died within that window.
+        With 'observation_period_or_event' a later visit, measurement, condition or drug record dated on or after
+        discharge + @followup_days also counts as verified follow-up (the rule define_study_cohort() uses). Use it when
+        observation_period is only an event span; on data with real enrolment windows the default is the stricter test.
      5. One index per patient: the EARLIEST qualifying stay (ties broken by the lowest visit_occurrence_id).
         This is deterministic and needs no random number generator, so every engine selects the same stay.
      6. cohort_start_date = cohort_end_date = discharge date.
    ============================================================================================ */
+{DEFAULT @followup_evidence = 'observation_period'}
 DELETE FROM @target_database_schema.@target_cohort_table WHERE cohort_definition_id = @target_cohort_id;
 
 INSERT INTO @target_database_schema.@target_cohort_table (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
@@ -62,6 +67,21 @@ FROM (
                   WHERE d2.person_id = v.person_id
                     AND d2.death_date > v.visit_end_date
                     AND d2.death_date <= DATEADD(day, @followup_days, v.visit_end_date))
+              {@followup_evidence == 'observation_period_or_event'}?{
+              OR EXISTS (
+                  SELECT 1 FROM @cdm_database_schema.visit_occurrence v2
+                  WHERE v2.person_id = v.person_id AND v2.visit_occurrence_id <> v.visit_occurrence_id
+                    AND v2.visit_start_date >= DATEADD(day, @followup_days, v.visit_end_date))
+              OR EXISTS (
+                  SELECT 1 FROM @cdm_database_schema.measurement m
+                  WHERE m.person_id = v.person_id AND m.measurement_date >= DATEADD(day, @followup_days, v.visit_end_date))
+              OR EXISTS (
+                  SELECT 1 FROM @cdm_database_schema.condition_occurrence c
+                  WHERE c.person_id = v.person_id AND c.condition_start_date >= DATEADD(day, @followup_days, v.visit_end_date))
+              OR EXISTS (
+                  SELECT 1 FROM @cdm_database_schema.drug_exposure dx
+                  WHERE dx.person_id = v.person_id AND dx.drug_exposure_start_date >= DATEADD(day, @followup_days, v.visit_end_date))
+              }
           )
     ) q
 ) ranked

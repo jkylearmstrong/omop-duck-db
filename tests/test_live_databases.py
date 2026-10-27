@@ -206,3 +206,70 @@ def test_generated_ddl_executes_and_accepts_exported_values(dialect, tmp_path):
     finally:
         _drop(eng, *model)
         eng.dispose()
+
+
+# ---- FR-D6: the portable cohort SQL on real servers -------------------------------------------------------------
+_COHORT_TABLES = {
+    "person": "person_id BIGINT, year_of_birth INTEGER",
+    "visit_occurrence": ("visit_occurrence_id BIGINT, person_id BIGINT, visit_concept_id INTEGER, visit_start_date DATE, "
+                         "visit_end_date DATE, discharged_to_concept_id INTEGER"),
+    "observation_period": "person_id BIGINT, observation_period_start_date DATE, observation_period_end_date DATE",
+    "death": "person_id BIGINT, death_date DATE",
+    "measurement": "person_id BIGINT, measurement_date DATE",
+    "condition_occurrence": "person_id BIGINT, condition_start_date DATE",
+    "drug_exposure": "person_id BIGINT, drug_exposure_start_date DATE",
+    "cohort": "cohort_definition_id INTEGER, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE",
+}
+_SQLGLOT_DIALECT = {"postgres": "postgres", "mssql": "tsql"}   # sqlglot renders DATEADD wrongly for Oracle: use SqlRender there
+
+
+def _statements(sql: str, backend: str) -> list[str]:
+    import sqlglot
+
+    return [s for s in sqlglot.transpile(sql, read="tsql", write=_SQLGLOT_DIALECT[backend]) if s.strip()]
+
+
+@pytest.mark.parametrize("backend", ["postgres", "mssql"])
+def test_portable_cohort_sql_gives_the_same_cohorts_on_every_server(backend):
+    """Same CDM rows -> same target / outcome cohorts as on DuckDB, with the SQL translated for each dialect.
+
+    Translation here uses sqlglot, not SqlRender (the reference translator): it checks the SQL's constructs (DATEADD,
+    correlated EXISTS, window functions, schema-qualified DELETE/INSERT) on each engine, not SqlRender's output.
+    """
+    pytest.importorskip("sqlglot")
+    from omop_etl.cohort_sql import render_cohort_sql
+
+    eng = _engine(backend)
+    schema = {"postgres": "public", "mssql": "dbo"}[backend]
+    _drop(eng, *_COHORT_TABLES)
+    with eng.begin() as c:
+        for name, cols in _COHORT_TABLES.items():
+            c.execute(sa.text(f"CREATE TABLE {name} ({cols})"))
+        d = dt.date.fromisoformat
+        for pid, yob in {1: 1980, 2: 1980, 3: 2015, 4: 1980, 5: 1980}.items():
+            c.execute(sa.text("INSERT INTO person VALUES (:p, :y)"), {"p": pid, "y": yob})
+            end = d("2020-12-31") if pid != 4 else d("2020-02-01")
+            c.execute(sa.text("INSERT INTO observation_period VALUES (:p, :s, :e)"), {"p": pid, "s": d("2015-01-01"), "e": end})
+        for row in [(1, 1, 9201, "2020-03-01", "2020-03-05", None), (2, 1, 9201, "2020-02-01", "2020-02-04", None),
+                    (3, 2, 9201, "2020-03-01", "2020-03-05", 4216643), (4, 3, 9201, "2020-03-01", "2020-03-05", None),
+                    (5, 4, 9201, "2020-01-10", "2020-01-20", None), (6, 5, 262, "2020-03-01", "2020-03-05", None),
+                    (7, 1, 9203, "2020-01-01", "2020-01-01", None)]:
+            c.execute(sa.text("INSERT INTO visit_occurrence VALUES (:v, :p, :c, :s, :e, :dc)"),
+                      {"v": row[0], "p": row[1], "c": row[2], "s": d(row[3]), "e": d(row[4]), "dc": row[5]})
+
+    common = dict(cdm_database_schema=schema, target_database_schema=schema, target_cohort_table="cohort",
+                  followup_days=30, min_age=18)
+    try:
+        with eng.begin() as c:
+            for stmt in _statements(render_cohort_sql(REPO_ROOT / "cohorts" / "target_cohort.sql", target_cohort_id=1, **common), backend):
+                c.execute(sa.text(stmt))
+            for stmt in _statements(render_cohort_sql(REPO_ROOT / "cohorts" / "outcome_cohort.sql", target_cohort_id=2, **common), backend):
+                c.execute(sa.text(stmt))
+        with eng.connect() as c:
+            target = c.execute(sa.text(
+                "SELECT subject_id, cohort_start_date FROM cohort WHERE cohort_definition_id = 1 ORDER BY subject_id")).fetchall()
+            n_outcome = c.execute(sa.text("SELECT COUNT(*) FROM cohort WHERE cohort_definition_id = 2")).scalar()
+    finally:
+        _drop(eng, *_COHORT_TABLES)
+    assert [(r[0], str(r[1])[:10]) for r in target] == [(1, "2020-02-04"), (5, "2020-03-05")]   # same as DuckDB
+    assert n_outcome == 6

@@ -1,3 +1,14 @@
+# omopduckdb 0.8.5
+
+Remaining requests from the 2026-10 consortium notes (FR-D6, FR-D7, FR-D8, FR-B5, FR-A7, enrolment-based observation periods).
+
+- **FR-D7 follow-up rule option**: `cohorts/target_cohort.sql` takes `@followup_evidence` (`'observation_period'` by default, or `'observation_period_or_event'`): the second also accepts a later visit, measurement, condition or drug record dated on or after discharge + `@followup_days`, as `define_study_cohort()` does. `cohort_definition_set(followup_evidence=)` renders it. On the consortium data the two rules differ for 27 of 59,117 readmissions; sites with real enrolment windows should compare.
+- **FR-D8 `compare_cohort_definitions()`** (Python): runs two target-cohort SQL files, optionally with the outcome SQL, on one CDM (TEMP table, so a read-only CDM works) and returns per-definition counts and outcome rates plus the `cohort_overlap()` table. Helpers `render_cohort_sql()`, `run_cohort_sql()` and `translate_to_duckdb()` execute the shipped SQL on DuckDB without SqlRender (needs `pip install omop-duck-db[cohorts]`, i.e. sqlglot).
+- **FR-D6 cross-dialect test**: `tests/test_live_databases.py` runs the cohort SQL on PostgreSQL and SQL Server containers (translated with sqlglot, not SqlRender) and expects the DuckDB cohorts. It runs in the `live-db` workflow and passes on the PostgreSQL 16 and SQL Server 2022 service containers (target cohort and outcome cohort match the DuckDB result). Oracle is not covered (sqlglot renders `DATEADD` wrongly for it; use SqlRender).
+- **Enrolment-based observation periods (Python)**: `etl_pcornet(use_enrollment="auto")` builds `observation_period` from the PCORnet ENROLLMENT file when present (clipped to `[1900-01-02, today]`, overlapping or touching spans merged, `enrollment_type_concept_id` sets the period type), and keeps the event-span rule for people with no enrolment record.
+- **FR-A7 sequence tensors**: `extract_longitudinal_tensors(include_index_stay=, include_labs=)`. Lab tokens combine the concept with a low/normal/high flag from `range_low`/`range_high`. For cohorts anchored at discharge (`cohorts/target_cohort.sql`) the default window already contains the index stay; the option matters for admission-anchored cohorts and carries a leakage risk. Tokens use DuckDB `hash()` and are stable only within one DuckDB version.
+- **FR-B5**: `NOTES.md` documents the one-line `ATTACH` for a shared vocabulary file and the helpers.
+
 # omopduckdb 0.8.4
 
 Requests FR-C10, FR-C12, FR-D4 and FR-D5 from the 2026-10 consortium notes. Not done: building `observation_period` from real enrolment data (the ETL has no PCORnet ENROLLMENT loader).
@@ -17,7 +28,7 @@ Cohort tooling follow-up to 0.8.2 (notes N4, N7, FR-D3).
 
 # omopduckdb 0.8.2
 
-> **Known CI gap (Windows)**: on the GitHub Windows runner the R process running the full test suite exits without a message when tests write real Andromeda 1.x tables (7 of 9 runs; Ubuntu and a local Windows 11 machine are fine; identical package versions in passing and failing runs; output buffering hides where it dies). The three tests that write Andromeda tables are skipped on Windows, so `duckdb_to_andromeda()` is **unverified on Windows CI** (it works on Ubuntu and on a local Windows machine). Cause unknown; tracked for a later release.
+> **Known CI gap (Windows)**: on the GitHub Windows runner the R process running the full test suite intermittently exits without a message (no testthat failure; output buffering hides where). It happened in 7 of 9 runs when tests wrote real Andromeda 1.x tables, and about 1 in 6 runs even with those tests skipped, always in the PatientLevelPrediction / FeatureExtraction / Andromeda / DuckDB tests (identical package versions in passing and failing runs; Ubuntu and a local Windows 11 machine are fine). The three tests that write Andromeda tables are skipped on Windows, so `duckdb_to_andromeda()` is **unverified on Windows CI**. Re-running the Windows `r-check` job usually passes. Cause unknown; an upstream (HADES/Andromeda/DuckDB) problem is the leading suspect.
 
 Closes the gaps left by the 2026-10 consortium audit. Most audit items (FR-A1-A5, B1-B4, C1-C6) had already shipped in 0.7.0/0.8.x; this release adds what was missing.
 

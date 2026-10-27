@@ -1338,7 +1338,50 @@ def _iso_date(value, name):
         raise ValueError(f"{name} must be a date like '1900-01-02', got {value!r}.") from exc
 
 
-def build_observation_period(con, min_date="1900-01-02", max_date=None):
+def load_enrollment_spans(con, source_dir, site_id=None, disambiguate_patids=False,
+                          min_date="1900-01-02", max_date=None):
+    """Builds ``_enrollment_spans(person_id, start_date, end_date)`` from the PCORnet ENROLLMENT file (FR-C10).
+
+    Returns the number of merged enrolment spans (0 and no table when the source has no ENROLLMENT file). Spans are
+    clipped to ``[min_date, max_date]`` (default: today), dropped when empty, and merged when they overlap or touch,
+    so each row is one continuous enrolment. Persons are matched on ``person_source_value``.
+    """
+    path = find_source_file(source_dir, "enrollment")
+    if path is None:
+        return 0
+    lo = _iso_date(min_date, "min_date")
+    hi = f"DATE '{_iso_date(max_date, 'max_date')}'" if max_date is not None else "CURRENT_DATE"
+    prepare_source_view(con, "_temp_enrollment", path, ["PATID", "ENR_START_DATE", "ENR_END_DATE"])
+    patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+    con.execute("DROP TABLE IF EXISTS _enrollment_spans;")
+    con.execute(f"""
+        CREATE TEMPORARY TABLE _enrollment_spans AS
+        WITH raw AS (
+            SELECT p.person_id,
+                   GREATEST(CAST(parse_omop_date(src.ENR_START_DATE) AS DATE), DATE '{lo}') AS s,
+                   LEAST(COALESCE(CAST(parse_omop_date(src.ENR_END_DATE) AS DATE), {hi}), {hi}) AS e
+            FROM _temp_enrollment src
+            JOIN person p ON p.person_source_value = {patid_expr}
+            WHERE parse_omop_date(src.ENR_START_DATE) IS NOT NULL
+        ),
+        valid AS (SELECT * FROM raw WHERE s <= e),
+        marked AS (
+            SELECT *, CASE WHEN s <= MAX(e) OVER (PARTITION BY person_id ORDER BY s, e
+                                                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) + INTERVAL 1 DAY
+                           THEN 0 ELSE 1 END AS new_span
+            FROM valid
+        ),
+        grouped AS (SELECT *, SUM(new_span) OVER (PARTITION BY person_id ORDER BY s, e) AS span_id FROM marked)
+        SELECT person_id, MIN(s) AS start_date, MAX(e) AS end_date
+        FROM grouped GROUP BY person_id, span_id;
+    """)
+    n = con.execute("SELECT COUNT(*) FROM _enrollment_spans").fetchone()[0]
+    print(f"  -> {n} enrolment spans from {os.path.basename(path)}")
+    return int(n)
+
+
+def build_observation_period(con, min_date="1900-01-02", max_date=None, use_enrollment=False,
+                             enrollment_type_concept_id=0):
     """Synthesizes patient observation envelopes across all clinical event tables (FR-C10).
 
     The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events
@@ -1346,10 +1389,22 @@ def build_observation_period(con, min_date="1900-01-02", max_date=None):
     ``1900-01-01`` placeholders) or after ``max_date`` (default: today, the extraction date) are ignored. A person
     with no plausible event gets no observation period. Pass the source's real data cutoff as ``max_date`` when events
     are filled with the build date, which today's date cannot distinguish from a genuine event.
+
+    ``use_enrollment=True`` (needs ``_enrollment_spans`` from :func:`load_enrollment_spans`) writes each person's real
+    enrolment spans with ``period_type_concept_id = enrollment_type_concept_id`` (default 0: set your site's concept)
+    and keeps the event-span rule only for people with no enrolment record.
     """
     lo = _iso_date(min_date, "min_date")
     hi = f"DATE '{_iso_date(max_date, 'max_date')}'" if max_date is not None else "CURRENT_DATE"
     con.execute("DELETE FROM observation_period;")
+    if use_enrollment:
+        enr_type = int(enrollment_type_concept_id)
+        run_insert(con, "OBSERVATION_PERIOD (enrolment spans)", f"""
+            INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date,
+                                            observation_period_end_date, period_type_concept_id)
+            SELECT ROW_NUMBER() OVER (ORDER BY person_id, start_date), person_id, start_date, end_date, {enr_type}
+            FROM _enrollment_spans;
+        """)
     run_insert(con, "OBSERVATION_PERIOD (synthesized)", f"""
         INSERT INTO observation_period (
             observation_period_id,
@@ -1385,12 +1440,14 @@ def build_observation_period(con, min_date="1900-01-02", max_date=None):
             GROUP BY person_id
         )
         SELECT
-            ROW_NUMBER() OVER (ORDER BY person_id) AS observation_period_id,
+            ROW_NUMBER() OVER (ORDER BY person_id) + (SELECT COALESCE(MAX(observation_period_id), 0) FROM observation_period)
+                AS observation_period_id,
             person_id,
             obs_start_date AS observation_period_start_date,
             obs_end_date AS observation_period_end_date,
             32827 AS period_type_concept_id -- EHR encounter record
-        FROM envelopes;
+        FROM envelopes
+        {"WHERE person_id NOT IN (SELECT person_id FROM _enrollment_spans)" if use_enrollment else ""};
     """)
 
 
@@ -1594,12 +1651,17 @@ def etl_pcornet(
     strict_source=False,
     key_check="warn",
     key_check_callback=None,
+    use_enrollment="auto",
+    enrollment_type_concept_id=0,
 ):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline.
 
     ``key_check`` ('warn' | 'raise' | 'ignore') compares distinct source ids with distinct surrogate keys at the end
     of the build (FR-C12, see ``omop_etl.key_checks.check_etl_keys``); ``key_check_callback`` receives the list of
     result dicts (the CLI writes them to ``run_manifest.json``).
+
+    ``use_enrollment`` ('auto' | True | False) builds ``observation_period`` from the PCORnet ENROLLMENT file when the
+    source has one (see ``build_observation_period``); people without an enrolment record keep the event-span period.
 
     ``auto_resources=True`` sizes DuckDB to the host (see ``omop_etl.resources.configure_resources``);
     explicit ``memory_limit`` / ``threads`` / ``temp_dir`` still win over the detected values.
@@ -1651,7 +1713,12 @@ def etl_pcornet(
     load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
 
-    build_observation_period(con)
+    enrolled = False
+    if use_enrollment in ("auto", True):
+        enrolled = load_enrollment_spans(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids) > 0
+        if use_enrollment is True and not enrolled:
+            raise FileNotFoundError(f"use_enrollment=True but {source_dir} has no ENROLLMENT file with usable rows.")
+    build_observation_period(con, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
     build_drug_era(con)
     build_condition_era(con)
     load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)

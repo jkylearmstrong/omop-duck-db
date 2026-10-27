@@ -89,11 +89,9 @@ _COHORTS = Path(__file__).resolve().parent.parent / "cohorts"
 
 
 def _render(name, **params):
-    sql = (_COHORTS / name).read_text(encoding="utf-8")
-    for k, v in params.items():
-        sql = sql.replace(f"@{k}", str(v))
-    sqlglot = pytest.importorskip("sqlglot")
-    return [s for s in sqlglot.transpile(sql, read="tsql", write="duckdb") if s.strip()]
+    from omop_etl.cohort_sql import render_cohort_sql, translate_to_duckdb
+    pytest.importorskip("sqlglot")
+    return translate_to_duckdb(render_cohort_sql(_COHORTS / name, **params))
 
 
 def test_portable_cohorts_run_and_pick_earliest_stay():
@@ -334,3 +332,124 @@ def test_circe_json_is_consistent_with_the_authoritative_sql():
     visit = target["PrimaryCriteria"]["CriteriaList"][0]["VisitOccurrence"]
     assert visit["Age"]["Value"] == 18 and target["PrimaryCriteria"]["ObservationWindow"]["PostDays"] == 30
     assert "discharged_to_concept_id" in target["InclusionRules"][0]["description"]   # the documented rule-3 gap
+
+
+def test_followup_evidence_option_counts_later_events(tmp_path):
+    """FR-D7: observation_period must reach discharge + 30 days by default; the option also accepts later events."""
+    pytest.importorskip("sqlglot")
+    from omop_etl.cohort_sql import run_cohort_sql
+    con = duckdb.connect()
+    build_schema(con)
+    for pid in (1, 2):
+        con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)"
+                    f" VALUES ({pid}, 8507, 1980, 0, 0)")
+        # observation ends the day after discharge for both: not enough follow-up by the default rule
+        con.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date,"
+                    f" observation_period_end_date, period_type_concept_id) VALUES ({pid}, {pid}, DATE '2015-01-01', DATE '2020-02-05', 0)")
+        con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
+                    f" visit_end_date, visit_type_concept_id) VALUES ({pid}, {pid}, 9201, DATE '2020-02-01', DATE '2020-02-04', 0)")
+    # person 2 has a later outpatient visit 60 days after discharge
+    con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
+                " visit_end_date, visit_type_concept_id) VALUES (3, 2, 9202, DATE '2020-04-05', DATE '2020-04-05', 0)")
+    common = dict(cdm_database_schema="main", target_database_schema="main", target_cohort_table="cohort",
+                  followup_days=30, min_age=18)
+    run_cohort_sql(con, _COHORTS / "target_cohort.sql", target_cohort_id=1, **common)
+    assert con.execute("SELECT COUNT(*) FROM cohort WHERE cohort_definition_id = 1").fetchone()[0] == 0
+    run_cohort_sql(con, _COHORTS / "target_cohort.sql", target_cohort_id=2, followup_evidence="observation_period_or_event", **common)
+    assert [r[0] for r in con.execute("SELECT subject_id FROM cohort WHERE cohort_definition_id = 2").fetchall()] == [2]
+
+
+def test_compare_cohort_definitions_reports_counts_overlap_and_outcome_rates():
+    pytest.importorskip("sqlglot")
+    from omop_etl.cohort_sql import compare_cohort_definitions
+    con = duckdb.connect()
+    build_schema(con)
+    for pid in (1, 2, 3):
+        con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)"
+                    f" VALUES ({pid}, 8507, 1980, 0, 0)")
+    # p1, p2: observation covers follow-up; p3: only a later visit evidences it (counts under definition B only)
+    for pid, end in ((1, "2020-12-31"), (2, "2020-12-31"), (3, "2020-02-05")):
+        con.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date,"
+                    f" observation_period_end_date, period_type_concept_id) VALUES ({pid}, {pid}, DATE '2015-01-01', DATE '{end}', 0)")
+    visits = [(1, 1, 9201, "2020-02-01", "2020-02-04"), (2, 2, 9201, "2020-02-01", "2020-02-04"),
+              (3, 3, 9201, "2020-02-01", "2020-02-04"), (4, 3, 9202, "2020-04-05", "2020-04-05"),
+              (5, 1, 9201, "2020-02-20", "2020-02-22")]            # p1 readmitted 16 days after discharge
+    for vid, pid, c, s, e in visits:
+        con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
+                    f" visit_end_date, visit_type_concept_id) VALUES ({vid}, {pid}, {c}, DATE '{s}', DATE '{e}', 0)")
+    res = compare_cohort_definitions(
+        con, _COHORTS / "target_cohort.sql", _COHORTS / "target_cohort.sql", outcome_sql=_COHORTS / "outcome_cohort.sql",
+        params_b={"followup_evidence": "observation_period_or_event"})
+    s = res["summary"].set_index("definition")
+    assert (s.loc["A", "n"], s.loc["B", "n"]) == (2, 3)
+    assert s.loc["A", "events"] == 1 and s.loc["A", "outcome_rate"] == 0.5
+    o = res["overlap"].iloc[0]
+    assert (o["both_count"], o["a_only_count"], o["b_only_count"]) == (2, 0, 1)
+    assert o["jaccard_index"] == pytest.approx(2 / 3, abs=1e-3)
+    no_outcome = compare_cohort_definitions(con, _COHORTS / "target_cohort.sql", _COHORTS / "target_cohort.sql")
+    assert no_outcome["summary"]["events"].isna().all()
+
+
+def test_observation_period_from_enrollment_merges_spans_and_falls_back_to_events(tmp_path):
+    import shutil
+    from omop_etl.build_omop_cdm import etl_pcornet
+    src = tmp_path / "src"
+    shutil.copytree("tests/fixtures/pcornet_sample", src)
+    (src / "enrollment.csv").write_text(
+        "PATID,ENR_START_DATE,ENR_END_DATE,CHART,ENR_BASIS\n"
+        "FAKE-P001,2023-01-01,2023-06-30,Y,I\n"
+        "FAKE-P001,2023-07-01,2024-12-31,Y,I\n"      # touches the first span: merged into one
+        "FAKE-P001,2025-02-01,2025-06-30,Y,I\n"      # after a gap: a second period
+        "FAKE-P001,1850-01-01,1850-02-01,Y,I\n", encoding="utf-8")   # placeholder span before min_date: dropped
+    db = tmp_path / "cdm.duckdb"
+    etl_pcornet(str(src), str(db), build_schema_flag=True, key_check="ignore", enrollment_type_concept_id=32880)
+    con = duckdb.connect(str(db), read_only=True)
+    rows = con.execute("SELECT p.person_source_value, o.observation_period_start_date, o.observation_period_end_date, "
+                       "o.period_type_concept_id FROM observation_period o JOIN person p USING (person_id) "
+                       "ORDER BY 1, 2").fetchall()
+    p1 = [(str(r[1]), str(r[2]), r[3]) for r in rows if r[0] == "FAKE-P001"]
+    assert p1 == [("2023-01-01", "2024-12-31", 32880), ("2025-02-01", "2025-06-30", 32880)]
+    others = [r for r in rows if r[0] != "FAKE-P001"]
+    assert others and all(r[3] == 32827 for r in others)                # event-span fallback for people not enrolled
+    assert con.execute("SELECT COUNT(DISTINCT observation_period_id) = COUNT(*) FROM observation_period").fetchone()[0]
+    con.close()
+    # use_enrollment=True without an ENROLLMENT file fails loudly
+    with pytest.raises(FileNotFoundError):
+        etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "x.duckdb"), build_schema_flag=True,
+                    key_check="ignore", use_enrollment=True)
+
+
+def test_sequence_tensor_can_include_index_stay_and_lab_tokens():
+    import numpy as np
+    from omop_etl.tensor import extract_longitudinal_tensors
+    con = duckdb.connect()
+    build_schema(con)
+    con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)"
+                " VALUES (1, 8507, 1960, 0, 0)")
+    # cohort anchored at ADMISSION: the index stay (visit 30) starts on cohort_start_date
+    con.execute("INSERT INTO cohort (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)"
+                " VALUES (1, 1, DATE '2021-12-28', DATE '2022-01-01')")
+    for vid, s_, e in ((20, "2021-11-01", "2021-11-04"), (30, "2021-12-28", "2022-01-01")):
+        con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
+                    f" visit_end_date, visit_type_concept_id) VALUES ({vid}, 1, 9201, DATE '{s_}', DATE '{e}', 0)")
+    con.execute("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, visit_occurrence_id, condition_concept_id,"
+                " condition_start_date, condition_type_concept_id) VALUES (1, 1, 20, 201820, DATE '2021-11-01', 0),"
+                " (2, 1, 30, 316866, DATE '2021-12-28', 0)")
+    # same lab concept, above and below the reference range during the index stay: two different tokens
+    con.execute("INSERT INTO measurement (measurement_id, person_id, visit_occurrence_id, measurement_concept_id, measurement_date,"
+                " measurement_type_concept_id, value_as_number, range_low, range_high) VALUES"
+                " (1, 1, 30, 3004249, DATE '2021-12-29', 0, 9.0, 1.0, 5.0), (2, 1, 30, 3004249, DATE '2021-12-30', 0, 0.2, 1.0, 5.0)")
+
+    base = extract_longitudinal_tensors(con, "cohort")
+    assert base[0, 0, 0] > 0 and (base[0, 1] == 0).all()                    # admission-anchored: index stay dropped
+    idx = extract_longitudinal_tensors(con, "cohort", include_index_stay=True)
+    assert idx[0, 0, 0] > 0 and idx[0, 1, 0] > 0                            # slot 0 = index stay, slot 1 = earlier visit
+    assert idx[0, 1, 0] == base[0, 0, 0] and idx[0, 0, 0] != idx[0, 1, 0]
+    no_labs = int((idx[0, 0] > 0).sum())
+    labs = extract_longitudinal_tensors(con, "cohort", include_index_stay=True, include_labs=True)
+    assert int((labs[0, 0] > 0).sum()) == no_labs + 2                       # above- and below-range are distinct tokens
+    assert np.array_equal(extract_longitudinal_tensors(con, "cohort"), base)   # defaults unchanged
+
+    # discharge-anchored cohort: the index stay started earlier, so the default window already has it
+    con.execute("UPDATE cohort SET cohort_start_date = DATE '2022-01-01'")
+    assert (extract_longitudinal_tensors(con, "cohort")[0, 1] > 0).any()
