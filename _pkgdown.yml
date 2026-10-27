@@ -184,6 +184,7 @@ reference:
   - hades_set_integer64
   - plp_database_details
   - cm_database_details
+  - cohort_definition_set
   - as_plp_data
   - export_plp_study_package
   - duckdb_to_andromeda

@@ -1,3 +1,11 @@
+# omopduckdb 0.8.3
+
+Cohort tooling follow-up to 0.8.2 (notes N4, N7, FR-D3).
+
+- **Renamed SQL parameters (breaking for direct callers of the cohort SQL)**: `cohorts/target_cohort.sql` and `outcome_cohort.sql` now share CohortGenerator's names `@cdm_database_schema`, `@target_database_schema`, `@target_cohort_table`, `@target_cohort_id` (was `@cohort_database_schema`, `@cohort_table`, `@outcome_cohort_id`). Cohort behaviour is unchanged.
+- **`cohort_definition_set()`** (R) returns a CohortGenerator-style `cohortDefinitionSet` (`cohortId`, `cohortName`, `sql`, `json`) with `@followup_days` / `@min_age` rendered. Not yet run through `CohortGenerator::generateCohortSet()`.
+- **`cohorts/run_plp_readonly_example.R`**: runs the cohorts and PatientLevelPrediction on a read-only CDM (attached `READ_ONLY`, cohort rows in a scratch DuckDB). The SQL part is tested; the `DatabaseConnector::connect` wrapper is not.
+
 # omopduckdb 0.8.2
 
 > **Known CI gap (Windows)**: on the GitHub Windows runner the R process running the full test suite exits without a message when tests write real Andromeda 1.x tables (7 of 9 runs; Ubuntu and a local Windows 11 machine are fine; identical package versions in passing and failing runs; output buffering hides where it dies). The three tests that write Andromeda tables are skipped on Windows, so `duckdb_to_andromeda()` is **unverified on Windows CI** (it works on Ubuntu and on a local Windows machine). Cause unknown; tracked for a later release.

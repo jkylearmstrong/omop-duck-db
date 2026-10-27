@@ -120,14 +120,14 @@ def test_portable_cohorts_run_and_pick_earliest_stay():
         con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
                     " visit_end_date, visit_type_concept_id, discharged_to_concept_id)"
                     f" VALUES ({vid}, {pid}, {c}, DATE '{s}', DATE '{e}', 0, {dv})")
-    common = dict(cdm_database_schema="main", cohort_database_schema="main", cohort_table="cohort")
+    common = dict(cdm_database_schema="main", target_database_schema="main", target_cohort_table="cohort")
     for stmt in _render("target_cohort.sql", target_cohort_id=1, followup_days=30, min_age=18, **common):
         con.execute(stmt)
     got = con.execute("SELECT subject_id, cohort_start_date, cohort_end_date FROM cohort WHERE cohort_definition_id = 1"
                       " ORDER BY subject_id").fetchall()
     assert [(r[0], str(r[1])) for r in got] == [(1, "2020-02-04"), (5, "2020-03-05")]
     assert all(r[1] == r[2] for r in got)
-    for stmt in _render("outcome_cohort.sql", outcome_cohort_id=2, **common):
+    for stmt in _render("outcome_cohort.sql", target_cohort_id=2, **common):
         con.execute(stmt)
     assert con.execute("SELECT COUNT(*) FROM cohort WHERE cohort_definition_id = 2").fetchone()[0] == 6
     # re-running is idempotent
@@ -187,3 +187,32 @@ def test_stable_random_and_persist_index_visits():
                 " VALUES (1, 1, DATE '2020-02-04', DATE '2020-02-04')")
     assert persist_index_visits(con) == 1
     assert con.execute("SELECT visit_occurrence_id FROM index_visit").fetchone()[0] == 2
+
+
+def test_portable_cohorts_run_with_cdm_attached_read_only(tmp_path):
+    """N4 / FR-D3: the CDM is attached READ_ONLY and the cohort rows are written to a separate database."""
+    cdm = tmp_path / "cdm.duckdb"
+    c = duckdb.connect(str(cdm))
+    build_schema(c)
+    c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)"
+              " VALUES (1, 8507, 1980, 0, 0)")
+    c.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date,"
+              " observation_period_end_date, period_type_concept_id) VALUES (1, 1, DATE '2015-01-01', DATE '2021-12-31', 0)")
+    c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
+              " visit_end_date, visit_type_concept_id) VALUES (1, 1, 9201, DATE '2020-02-01', DATE '2020-02-04', 0)")
+    c.close()
+
+    scratch = duckdb.connect(str(tmp_path / "scratch.duckdb"))
+    scratch.execute(f"ATTACH '{cdm.as_posix()}' AS cdm (READ_ONLY)")
+    scratch.execute("CREATE TABLE main.cohort (cohort_definition_id INTEGER, subject_id BIGINT,"
+                    " cohort_start_date DATE, cohort_end_date DATE)")
+    common = dict(cdm_database_schema="cdm.main", target_database_schema="main", target_cohort_table="cohort")
+    for stmt in _render("target_cohort.sql", target_cohort_id=1, followup_days=30, min_age=18, **common):
+        scratch.execute(stmt)
+    for stmt in _render("outcome_cohort.sql", target_cohort_id=2, **common):
+        scratch.execute(stmt)
+    assert scratch.execute("SELECT COUNT(*) FROM main.cohort WHERE cohort_definition_id = 1").fetchone()[0] == 1
+    assert scratch.execute("SELECT COUNT(*) FROM main.cohort WHERE cohort_definition_id = 2").fetchone()[0] == 1
+    with pytest.raises(duckdb.Error):  # the CDM really is read-only
+        scratch.execute("INSERT INTO cdm.main.cohort (cohort_definition_id, subject_id) VALUES (9, 9)")
+    scratch.close()

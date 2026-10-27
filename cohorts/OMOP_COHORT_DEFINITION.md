@@ -7,7 +7,13 @@ Files in `cohorts/`:
 | `target_cohort.sql` | Adult IP and ED-to-IP index stays, one per patient (OHDSI SQL / SqlRender) |
 | `outcome_cohort.sql` | Inpatient admissions (outcome events) |
 | `*.circe.json` | ATLAS/Circe versions (see caveat below) |
-| `run_plp_example.R` | SqlRender render + translate, then `PatientLevelPrediction::runPlp()` |
+| `run_plp_example.R` | SqlRender render + translate, then `PatientLevelPrediction::runPlp()` (writes `main.cohort`; needs a writable CDM) |
+| `run_plp_readonly_example.R` | Same on a **read-only** CDM: attached `READ_ONLY`, cohort rows written to a scratch DuckDB |
+| `omopduckdb::cohort_definition_set()` | CohortGenerator `cohortDefinitionSet` (`cohortId`, `cohortName`, `sql`, `json`) |
+
+## Parameters
+
+Both SQL files use CohortGenerator's names: `@cdm_database_schema`, `@target_database_schema`, `@target_cohort_table`, `@target_cohort_id`. The target cohort also takes `@followup_days` (30) and `@min_age` (18); `cohort_definition_set()` renders those two into the SQL so `CohortGenerator::generateCohortSet()` only has to fill the four above. (v0.8.2 used `cohort_database_schema`, `cohort_table` and `outcome_cohort_id`; rename them in your own calls.)
 
 ## Target cohort
 
@@ -34,5 +40,7 @@ switched off. `sampling_rule="random"` uses DuckDB `hash()`, which is not stable
 ## Verification status
 
 - `tests/test_v082_features.py` renders the SQL, translates it with `sqlglot` (T-SQL to DuckDB) and checks the cohorts on a fixture on DuckDB.
+- v0.8.3: the SQL also runs with the CDM attached `READ_ONLY` and the cohort table in a separate database (tested on DuckDB).
 - **Not yet verified**: execution on PostgreSQL and SQL Server through SqlRender, and cross-engine count agreement. Add the SQL to the live-database CI job before relying on it.
+- `cohort_definition_set()` and the `DatabaseConnector::connect` wrapper in `run_plp_readonly_example.R` have not been run with CohortGenerator, SqlRender or a real read-only file; only the SQL and the data-frame shape are tested.
 - The Circe JSON was written by hand and has **not been imported into ATLAS**. Circe cannot test `discharged_to_concept_id`, so the SQL is authoritative. `DateAdjustment` (start at visit end) needs Circe/ATLAS 2.12 or later.
