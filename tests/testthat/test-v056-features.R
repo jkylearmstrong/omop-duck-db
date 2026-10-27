@@ -189,3 +189,31 @@ test_that("duckdb_to_andromeda copies every row across chunks and keeps empty ta
   expect_equal(names(dplyr::collect(andr$analysisref)), "analysis_id")
   expect_error(duckdb_to_andromeda(con, chunk_size = 0), "chunk_size")
 })
+
+test_that("duckdb_to_andromeda survives a full copy, teardown and exit in its own R process (all platforms)", {
+  skip_if_not_installed("Andromeda")
+  skip_if_not_installed("callr")
+  # Run in a child process: on the GitHub Windows runner the R process hosting the whole suite exited without a message
+  # once the in-process Andromeda tests wrote tables (intermittent, cause unknown). A child that dies fails this test
+  # with a message instead of ending the suite, and shows whether the adapter itself is at fault.
+  out <- tryCatch(
+    callr::r(function() {
+      library(omopduckdb)
+      con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+      DBI::dbExecute(con, "CREATE TABLE covariates AS SELECT i AS row_id, 1 AS covariate_id FROM range(25) t(i)")
+      DBI::dbExecute(con, "CREATE TABLE analysisref AS SELECT 1 AS analysis_id WHERE false")
+      andr <- duckdb_to_andromeda(con, table_names = c("covariates", "analysisref"), chunk_size = 10L)
+      res <- list(tables = sort(names(andr)), rows = nrow(dplyr::collect(andr$covariates)),
+                  cols = names(dplyr::collect(andr$analysisref)))
+      Andromeda::close(andr)
+      DBI::dbDisconnect(con, shutdown = TRUE)
+      res
+    }, show = FALSE),
+    error = function(e) e)
+  expect_false(inherits(out, "error"), info = if (inherits(out, "error")) conditionMessage(out) else "")
+  if (!inherits(out, "error")) {
+    expect_equal(out$tables, c("analysisref", "covariates"))
+    expect_equal(out$rows, 25L)
+    expect_equal(out$cols, "analysis_id")
+  }
+})
