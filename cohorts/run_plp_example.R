@@ -1,5 +1,6 @@
 # Example: run the portable eDERRI cohorts and a PatientLevelPrediction readmission model (FR-D1).
-# Works on any OMOP CDM that DatabaseConnector can reach; the DuckDB connection below is only the example.
+# Writes the cohort table into the CDM schema, so the database must be writable. For a read-only CDM use
+# run_plp_readonly_example.R. Works on any OMOP CDM that DatabaseConnector can reach; DuckDB is only the example.
 library(DatabaseConnector)
 library(SqlRender)
 library(PatientLevelPrediction)
@@ -18,10 +19,10 @@ run_sql <- function(file, ...) {
   executeSql(connection, sql)
 }
 
-run_sql("cohorts/target_cohort.sql", cdm_database_schema = "main", cohort_database_schema = "main",
-        cohort_table = "cohort", target_cohort_id = 1, followup_days = 30, min_age = 18)
-run_sql("cohorts/outcome_cohort.sql", cdm_database_schema = "main", cohort_database_schema = "main",
-        cohort_table = "cohort", outcome_cohort_id = 2)
+run_sql("cohorts/target_cohort.sql", cdm_database_schema = "main", target_database_schema = "main",
+        target_cohort_table = "cohort", target_cohort_id = 1, followup_days = 30, min_age = 18)
+run_sql("cohorts/outcome_cohort.sql", cdm_database_schema = "main", target_database_schema = "main",
+        target_cohort_table = "cohort", target_cohort_id = 2)
 
 databaseDetails <- createDatabaseDetails(
   connectionDetails = connectionDetails, cdmDatabaseSchema = "main", cdmDatabaseName = "site",

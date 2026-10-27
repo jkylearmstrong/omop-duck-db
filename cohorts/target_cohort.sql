@@ -4,8 +4,8 @@
    OHDSI SQL (SqlRender dialect). Translate with SqlRender::translate(sql, targetDialect = ...) for
    DuckDB, PostgreSQL, SQL Server, Oracle, Snowflake. Parameters:
      @cdm_database_schema     schema holding the OMOP CDM
-     @cohort_database_schema  schema holding the cohort table
-     @cohort_table            cohort table (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+     @target_database_schema  schema holding the cohort table
+     @target_cohort_table     cohort table (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
      @target_cohort_id        cohort_definition_id written for this cohort
      @followup_days           verified follow-up after discharge (30)
      @min_age                 minimum age in years at discharge (18)
@@ -22,9 +22,9 @@
         This is deterministic and needs no random number generator, so every engine selects the same stay.
      6. cohort_start_date = cohort_end_date = discharge date.
    ============================================================================================ */
-DELETE FROM @cohort_database_schema.@cohort_table WHERE cohort_definition_id = @target_cohort_id;
+DELETE FROM @target_database_schema.@target_cohort_table WHERE cohort_definition_id = @target_cohort_id;
 
-INSERT INTO @cohort_database_schema.@cohort_table (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
+INSERT INTO @target_database_schema.@target_cohort_table (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)
 SELECT @target_cohort_id AS cohort_definition_id,
        ranked.person_id AS subject_id,
        ranked.discharge_date AS cohort_start_date,
