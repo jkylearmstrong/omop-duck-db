@@ -37,9 +37,6 @@ test_that("export_plp_study_package generates complete R study package structure
 
 test_that("duckdb_to_andromeda and as_andromeda stream tables to Andromeda", {
   skip_if_not_installed("Andromeda")
-  # DIAGNOSTIC: the R process exits without a testthat message on the GitHub Windows runner once these tests write
-  # real Andromeda tables (passes on Ubuntu and on a local Windows 11 machine). Skipped there until the cause is known.
-  skip_on_os("windows")
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
 
@@ -174,9 +171,6 @@ test_that("federated_meta_analysis calculates DerSimonian-Laird pooled estimates
 
 test_that("duckdb_to_andromeda copies every row across chunks and keeps empty tables (SQLite extension independent)", {
   skip_if_not_installed("Andromeda")
-  # DIAGNOSTIC: the R process exits without a testthat message on the GitHub Windows runner once these tests write
-  # real Andromeda tables (passes on Ubuntu and on a local Windows 11 machine). Skipped there until the cause is known.
-  skip_on_os("windows")
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
   DBI::dbExecute(con, "CREATE TABLE covariates AS SELECT i AS row_id, 1 AS covariate_id FROM range(25) t(i)")

@@ -1,5 +1,7 @@
 # omopduckdb 0.8.2
 
+> **Known CI gap (Windows)**: on the GitHub Windows runner the R process running the full test suite intermittently exits without a message right after the "FeatureExtraction temporal sequences" test fetches data (FeatureExtraction + Andromeda 1.x + DuckDB, not this package's code; Linux and a local Windows 11 machine are fine; identical package versions in passing and failing runs). That one HADES test is skipped on Windows; the Andromeda adapter tests run everywhere, including once in a child R process. Treat Windows + PatientLevelPrediction temporal sequences as unverified.
+
 Closes the gaps left by the 2026-10 consortium audit. Most audit items (FR-A1-A5, B1-B4, C1-C6) had already shipped in 0.7.0/0.8.x; this release adds what was missing.
 
 - **FR-C9 (HADES)**: `hades_set_integer64()` (R) sets `databaseConnectorInteger64AsNumeric = FALSE` so 63-bit ids no longer stop `DatabaseConnector::querySql()` with "integers >= 2^53"; `plp_database_details()` and `cm_database_details()` call it when the database holds ids >= 2^53 (`integer64 = "auto"`; `hades_needs_integer64()` does the check), because forcing `integer64` for small ids crashed `getPlpData()` on Windows. New `pcornet_id53()` macro (53-bit keys, safe as R doubles) for callers who need it; the ETL still uses `pcornet_id()` and sequential person ids. `materialize_vocabulary()` / `omop-duckdb materialize-vocab` copies `central_vocab` views into real tables so a file opened alone resolves `concept`.
