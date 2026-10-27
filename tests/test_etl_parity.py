@@ -105,7 +105,19 @@ def _snapshot(db_path):
     return result
 
 
-@pytest.mark.skipif(shutil.which("Rscript") is None, reason="R/Rscript not available on this machine")
+def _omopduckdb_installed_in_r() -> bool:
+    """True when Rscript exists AND can load the omopduckdb package the CLI wrapper under inst/scripts/ needs."""
+    if shutil.which("Rscript") is None:
+        return False
+    try:
+        r = subprocess.run(["Rscript", "--vanilla", "-e", "quit(status = !requireNamespace('omopduckdb', quietly = TRUE))"],
+                           capture_output=True, timeout=120, shell=RSCRIPT_SHELL)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+@pytest.mark.skipif(not _omopduckdb_installed_in_r(), reason="Rscript with the omopduckdb R package is not available")
 def test_r_and_python_etl_produce_identical_output():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)

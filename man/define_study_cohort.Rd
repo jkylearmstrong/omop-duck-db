@@ -33,7 +33,8 @@ define_study_cohort(
   schema = NULL,
   attrition = TRUE,
   one_per_patient = TRUE,
-  persist_keys = NULL
+  persist_keys = NULL,
+  require_diabetes = FALSE
 )
 }
 \arguments{
@@ -136,6 +137,9 @@ path.}
 stays. When the file exists the listed stays are preferred over resampling, so selection is identical across
 re-runs and sites sharing the file; patients missing from it are sampled by \code{sampling_rule} and the file is
 rewritten. It is only written when its content changes (byte-identical for identical selections).}
+
+\item{require_diabetes}{\code{TRUE} keeps only index stays with diabetes evidence (diagnosis, prescription or elevated
+HbA1c) in the wash-in window; used by \code{\link[=build_ederri_diabetes_cohort]{build_ederri_diabetes_cohort()}}. Default \code{FALSE}.}
 }
 \value{
 A \code{data.frame}, one row per patient ordered by \code{subject_id}, with columns \code{cohort_definition_id},
