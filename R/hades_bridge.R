@@ -50,6 +50,31 @@ apply_integer64_policy <- function(integer64, db_path, cdm_database_schema) {
   invisible(integer64)
 }
 
+#' SQL to attach a CDM file (and its vocabulary) read-only on every connection (FR-D4)
+#'
+#' Site files often expose `concept` and the other vocabulary tables as views into a catalog named `central_vocab`.
+#' Those views only resolve when the vocabulary file is attached under exactly that name. HADES opens several
+#' connections per run and DatabaseConnector cannot ATTACH on connect, so run these statements on each new connection
+#' (see `cohorts/run_plp_readonly_example.R`). Nothing is written to either file.
+#'
+#' @param cdm_db Path to the CDM DuckDB file.
+#' @param vocab_db Optional path to the vocabulary DuckDB file; `NULL` when the CDM holds real vocabulary tables.
+#' @param cdm_alias,vocab_alias Catalog names (default `"cdm"` and `"central_vocab"`).
+#' @return A character vector of `ATTACH ... (READ_ONLY)` statements.
+#' @export
+readonly_attach_sql <- function(cdm_db, vocab_db = NULL, cdm_alias = "cdm", vocab_alias = "central_vocab") {
+  for (a in c(cdm_alias, vocab_alias)) {
+    if (!grepl("^[A-Za-z_][A-Za-z0-9_]*$", a)) stop(sprintf("Invalid catalog alias '%s'.", a), call. = FALSE)
+  }
+  one <- function(path, alias, label) {
+    if (!file.exists(path)) stop(sprintf("%s database not found: %s", label, path), call. = FALSE)
+    sprintf("ATTACH '%s' AS %s (READ_ONLY)", gsub("'", "''", normalizePath(path, winslash = "/", mustWork = TRUE)), alias)
+  }
+  out <- one(cdm_db, cdm_alias, "CDM")
+  if (!is.null(vocab_db)) out <- c(out, one(vocab_db, vocab_alias, "Vocabulary"))
+  out
+}
+
 #' Check that a DuckDB file is ready for OHDSI HADES (PatientLevelPrediction / DeepPatientLevelPrediction)
 #'
 #' PatientLevelPrediction, DeepPatientLevelPrediction and FeatureExtraction read the CDM through

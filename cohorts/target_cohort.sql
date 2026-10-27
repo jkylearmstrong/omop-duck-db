@@ -1,6 +1,9 @@
 /* ============================================================================================
    Target cohort: adult inpatient (IP) and ED-to-IP index stays, one per patient (FR-D1 / FR-D2)
 
+   THIS SQL IS THE AUTHORITATIVE DEFINITION. target_cohort.circe.json approximates it for ATLAS but cannot express
+   rule 3 (discharge disposition) and has not been imported into ATLAS; an ATLAS-built cohort can differ.
+
    OHDSI SQL (SqlRender dialect). Translate with SqlRender::translate(sql, targetDialect = ...) for
    DuckDB, PostgreSQL, SQL Server, Oracle, Snowflake. Parameters:
      @cdm_database_schema     schema holding the OMOP CDM

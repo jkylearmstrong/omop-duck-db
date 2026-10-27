@@ -4,11 +4,18 @@
 \alias{build_observation_period}
 \title{Synthesize Observation Period envelopes}
 \usage{
-build_observation_period(con)
+build_observation_period(con, min_date = "1900-01-02", max_date = NULL)
 }
 \arguments{
 \item{con}{Active DuckDB connection}
+
+\item{min_date}{Earliest plausible event date (default \code{"1900-01-02"}).}
+
+\item{max_date}{Latest plausible event date; default \code{NULL} is today (the extraction date). Pass the source's data
+cutoff when events are filled with the build date.}
 }
 \description{
-Synthesize Observation Period envelopes
+The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events dated
+before \code{min_date} (SAS/Excel zero dates such as 1840-12-31 and 1899-12-30, \verb{1900-01-01} placeholders) or after
+\code{max_date} are ignored; a person with no plausible event gets no observation period (FR-C10).
 }

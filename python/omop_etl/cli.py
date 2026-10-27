@@ -280,6 +280,10 @@ def handle_build(args: argparse.Namespace) -> int:
             site_id=args.site_id,
             site_name=args.site_name,
             strict_source=args.strict_source,
+            key_check_callback=lambda report: [
+                m.add_step(f"key_check:{r['table']}.{r['id_column']}", r["distinct_ids"], distinct_keys=r["distinct_keys"],
+                           lost=r["lost"], ok=r["ok"], cdm_table=r["cdm_table"], cdm_rows=r["cdm_rows"])
+                for r in report],
         )
         con = duckdb.connect(args.target, read_only=True)
         try:

@@ -13,6 +13,7 @@
 #' @param output_json Optional file path to write standard OHDSI DQD JSON.
 #' @param check_levels Character vector of check categories: `"TABLE"`, `"FIELD"`, `"CONCEPT"`, `"TEMPORAL"`.
 #' @param cdm_version Character CDM version (default `"5.4"`).
+#' @param observation_period_min Earliest plausible observation period start for `plausibleObservationPeriod` (default `"1900-01-02"`).
 #' @param plausible_date_range `c(lower, upper)` for the FIELD-level `plausibleDateRange` check on every `*_date` column of the
 #'   clinical tables; `upper = NA` means the extraction date. Default `c("1950-01-01", NA)`, so a 1913 visit is flagged.
 #'   Sites with a far-future sentinel (e.g. 2099-12-31) should pass an explicit upper bound.
@@ -24,7 +25,8 @@ run_dqd <- function(con,
                     check_levels = c("TABLE", "FIELD", "CONCEPT", "TEMPORAL"),
                     cdm_version = "5.4",
                     plausible_date_range = c("1950-01-01", NA),
-                    date_fail_threshold_pct = 0) {
+                    date_fail_threshold_pct = 0,
+                    observation_period_min = "1900-01-02") {
   check_levels <- toupper(check_levels)
   results <- list()
 
@@ -375,6 +377,30 @@ run_dqd <- function(con,
           num_denominator_rows = as.integer(r$n),
           execution_status = if (failed) "FAILED" else "PASSED", failed = failed)
       }
+    }
+  }
+
+  # plausibleObservationPeriod (FR-C10): placeholder starts, build-date ends, inverted periods
+  if ("FIELD" %in% check_levels && has_table("observation_period")) {
+    op_lo <- format(as.Date(observation_period_min))
+    op_hi <- if (is.na(plausible_date_range[2])) format(Sys.Date()) else format(as.Date(plausible_date_range[2]))
+    r <- DBI::dbGetQuery(con, sprintf(paste0(
+      "SELECT count(*) AS n, ",
+      "count(*) FILTER (WHERE observation_period_start_date < DATE '%1$s' OR observation_period_end_date > DATE '%2$s' ",
+      "OR observation_period_end_date < observation_period_start_date) AS bad, ",
+      "count(*) FILTER (WHERE observation_period_start_date < DATE '%1$s') AS early, ",
+      "count(*) FILTER (WHERE observation_period_end_date > DATE '%2$s') AS late, ",
+      "count(*) FILTER (WHERE observation_period_end_date < observation_period_start_date) AS inverted ",
+      "FROM observation_period"), op_lo, op_hi))
+    if (r$n > 0) {
+      results[[length(results) + 1L]] <- list(
+        check_id = "FIELD_PLAUSIBLE_OBSERVATION_PERIOD", check_name = "plausibleObservationPeriod",
+        check_level = "FIELD", cdm_table_name = "observation_period", cdm_field_name = "observation_period_start_date",
+        check_description = sprintf("observation_period starts on or after %s, ends on or before %s and does not end before it starts (FR-C10).", op_lo, op_hi),
+        num_violated_rows = as.integer(r$bad), num_before_lower_bound = as.integer(r$early),
+        num_after_upper_bound = as.integer(r$late), num_inverted = as.integer(r$inverted),
+        pct_violated_rows = round(100 * r$bad / r$n, 4), num_denominator_rows = as.integer(r$n),
+        execution_status = if (r$bad > 0) "FAILED" else "PASSED", failed = r$bad > 0)
     }
   }
 

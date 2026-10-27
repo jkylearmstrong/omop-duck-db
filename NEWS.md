@@ -1,3 +1,12 @@
+# omopduckdb 0.8.4
+
+Requests FR-C10, FR-C12, FR-D4 and FR-D5 from the 2026-10 consortium notes. Not done: building `observation_period` from real enrolment data (the ETL has no PCORnet ENROLLMENT loader).
+
+- **FR-C10 observation periods**: `build_observation_period(con, min_date = "1900-01-02", max_date = NULL)` (Python and R) ignores events before `min_date` (SAS/Excel zero dates, `1900-01-01` placeholders) or after `max_date` (default today); a person with no plausible event gets no period. Pass the source's data cutoff as `max_date` when events are filled with the build date. New DQD check `plausibleObservationPeriod` (`run_dqd(observation_period_min=)`) flags starts before the minimum, ends after the extraction date and inverted periods. Rebuild existing databases to apply the rule.
+- **FR-C12 key check at build time (Python)**: `etl_pcornet(key_check="warn"|"raise"|"ignore", key_check_callback=)` runs `check_etl_keys()` on `ENCOUNTERID` (and `PATID` with `disambiguate_patids`), reports distinct ids against distinct keys and the `visit_occurrence` / `person` row count, and `omop-duckdb build` writes the results to `run_manifest.json` as `key_check:*` steps.
+- **FR-D4 read-only vocabulary**: `attach_read_only()` (Python) and `readonly_attach_sql()` (R) attach the CDM and the shared vocabulary file `READ_ONLY` under the name `central_vocab`, so site files whose `concept` is a view into it work without `materialize-vocab`. `cohorts/run_plp_readonly_example.R` takes `vocab_file`.
+- **FR-D5 Circe JSON**: both cohort SQL files now state they are the authoritative definition; tests check the Circe JSON's structure and consistency with the SQL. The JSON has still not been imported into ATLAS.
+
 # omopduckdb 0.8.3
 
 Cohort tooling follow-up to 0.8.2 (notes N4, N7, FR-D3).

@@ -1,6 +1,8 @@
 /* ============================================================================================
    Outcome cohort: inpatient admissions (FR-D1)
 
+   THIS SQL IS THE AUTHORITATIVE DEFINITION; outcome_cohort.circe.json is an unimported ATLAS approximation.
+
    OHDSI SQL (SqlRender dialect). Every IP (9201) and ED-to-IP (262) admission is written as an event
    (cohort_start_date = admission date, cohort_end_date = discharge date, or the admission date when open).
    PatientLevelPrediction restricts events to the risk window after each target cohort start date, so a
