@@ -9,7 +9,8 @@ cm_database_details(
   cdm_database_schema = "main",
   cohort_database_schema = cdm_database_schema,
   cohort_table = "cohort",
-  preflight = TRUE
+  preflight = TRUE,
+  integer64 = c("auto", "always", "never")
 )
 }
 \arguments{
@@ -22,6 +23,8 @@ cm_database_details(
 \item{cohort_table}{Cohort table name in OHDSI format (default \code{"cohort"}).}
 
 \item{preflight}{Run \code{\link[=hades_preflight]{hades_preflight()}} first and stop on failure (default \code{TRUE}).}
+
+\item{integer64}{\code{"auto"} (default), \code{"always"} or \code{"never"}; see \code{\link[=plp_database_details]{plp_database_details()}}.}
 }
 \value{
 A list with \code{connectionDetails}, \code{cdmDatabaseSchema}, \code{cohortDatabaseSchema}, \code{cohortTable}.
