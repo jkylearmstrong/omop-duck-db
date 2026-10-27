@@ -166,3 +166,17 @@ test_that("federated_meta_analysis calculates DerSimonian-Laird pooled estimates
   expect_true(grepl("flowchart TD", mermaid_txt))
   expect_true(grepl("POOLED", mermaid_txt))
 })
+
+test_that("duckdb_to_andromeda copies every row across chunks and keeps empty tables (SQLite extension independent)", {
+  skip_if_not_installed("Andromeda")
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  DBI::dbExecute(con, "CREATE TABLE covariates AS SELECT i AS row_id, 1 AS covariate_id FROM range(25) t(i)")
+  DBI::dbExecute(con, "CREATE TABLE analysisref AS SELECT 1 AS analysis_id WHERE false")
+
+  andr <- duckdb_to_andromeda(con, table_names = c("covariates", "analysisref"), chunk_size = 10L)
+  expect_setequal(names(andr), c("covariates", "analysisref"))
+  expect_equal(nrow(dplyr::collect(andr$covariates)), 25L)
+  expect_equal(names(dplyr::collect(andr$analysisref)), "analysis_id")
+  expect_error(duckdb_to_andromeda(con, chunk_size = 0), "chunk_size")
+})

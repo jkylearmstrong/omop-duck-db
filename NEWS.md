@@ -7,6 +7,7 @@ Closes the gaps left by the 2026-10 consortium audit. Most audit items (FR-A1-A5
 - **FR-D2**: `sampling_rule="earliest"` (alias of `first`) and `"stable_random"` (MD5-based, version-stable); `persist_index_visits()` writes an `index_visit` table. `"random"` is unchanged (DuckDB `hash()`).
 - **FR-C8**: `check_key_collisions()` compares distinct source ids with distinct surrogate keys (warn/raise).
 - **FR-C7**: DQD `isPrimaryKeyDuplicate` check on `visit_occurrence_id`.
+- **Fix (R): `duckdb_to_andromeda()` returned an empty Andromeda** whenever DuckDB's SQLite extension was available: it attached the Andromeda file as SQLite, but Andromeda 1.x is DuckDB-backed, so tables landed in an unrelated file. It now always writes through Andromeda's own interface in chunks (new `chunk_size`; `output_file` is deprecated and ignored). This was the `test-v056-features.R` failure in R CMD check and test-coverage.
 - **FR-A6**: `extract_standard_labs(egfr="ckd_epi_2021"|"measured", anion_gap=True)`; complete `ANION_GAP_LOINCS` / `EGFR_LOINCS` sets (69405-9 and 77147-7 added to the Table 1 eGFR set); warns when a standard lab is empty.
 
 # omopduckdb 0.8.1

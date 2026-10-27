@@ -2,29 +2,36 @@
 % Please edit documentation in R/andromeda_adapter.R
 \name{duckdb_to_andromeda}
 \alias{duckdb_to_andromeda}
-\title{Direct Andromeda Zero-Copy View Adapter}
+\title{Stream DuckDB Tables into an Andromeda Object}
 \usage{
 duckdb_to_andromeda(
   con,
   table_names = NULL,
   andromeda = NULL,
-  output_file = tempfile(fileext = ".sqlite")
+  output_file = NULL,
+  chunk_size = 50000L
 )
 }
 \arguments{
 \item{con}{Active DuckDB connection (duckdb::duckdb()).}
 
 \item{table_names}{Character vector of table names in DuckDB to transfer (e.g. \code{c("covariates", "covariateRef", "analysisRef")}).
-If \code{NULL}, transfers all tables present matching Andromeda covariate structures.}
+If \code{NULL}, transfers the covariate tables present, or every table when none match.}
 
 \item{andromeda}{Existing Andromeda object. If \code{NULL}, a new one is initialized.}
 
-\item{output_file}{Path to backing SQLite file if creating a new Andromeda object.}
+\item{output_file}{Deprecated and ignored (kept so existing calls still work).}
+
+\item{chunk_size}{Rows copied per batch (default 50000).}
 }
 \value{
 A populated \code{Andromeda} object.
 }
 \description{
-Replaces the SQLite disk serialization bottleneck inside OHDSI Andromeda by
-directly mounting or bulk-streaming DuckDB tables into Andromeda SQLite containers.
+Copies DuckDB tables into an OHDSI Andromeda object in chunks, so large covariate tables never have to fit in
+memory twice. Tables are always written through Andromeda's own interface (\code{andromeda[[name]] <- data} and
+\code{Andromeda::appendToTable()}), so they are visible in \code{names(andromeda)} whichever storage engine the installed
+Andromeda version uses (SQLite in 0.x, DuckDB in 1.x). Earlier versions attached the Andromeda file to DuckDB as
+SQLite; that wrote into a different file than the one Andromeda reads whenever the SQLite extension was
+available, and returned an empty Andromeda.
 }
