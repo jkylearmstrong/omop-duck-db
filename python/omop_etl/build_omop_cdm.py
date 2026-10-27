@@ -291,6 +291,26 @@ def materialize_vocabulary(con, tables=VOCABULARY_TABLES, catalog="central_vocab
     return done
 
 
+def attach_read_only(con, cdm_db, vocab_db=None, cdm_alias="cdm", vocab_alias="central_vocab"):
+    """ATTACHes a CDM file, and optionally a vocabulary file, READ_ONLY on ``con`` (FR-D4).
+
+    Site files often expose ``concept`` and the other vocabulary tables as views into a catalog named
+    ``central_vocab``; those views only resolve when the vocabulary file is attached under exactly that name
+    (``vocab_alias``). Run this on every connection that reads the CDM. Nothing is written to either file.
+    Returns ``{"cdm": cdm_alias, "vocab": vocab_alias or None}``.
+    """
+    for alias in (cdm_alias, vocab_alias):
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", alias):
+            raise ValueError(f"Invalid catalog alias {alias!r}.")
+    for label, path in (("CDM", cdm_db), ("vocabulary", vocab_db)):
+        if path is not None and not os.path.exists(path):
+            raise FileNotFoundError(f"{label} database not found: {path}")
+    con.execute(f"ATTACH {sql_path_literal(cdm_db)} AS {cdm_alias} (READ_ONLY);")
+    if vocab_db is not None:
+        con.execute(f"ATTACH {sql_path_literal(vocab_db)} AS {vocab_alias} (READ_ONLY);")
+    return {"cdm": cdm_alias, "vocab": vocab_alias if vocab_db is not None else None}
+
+
 def load_care_site(con, source_dir, site_id=None, site_anon=None, site_name=None):
     """Loads care_site records from facility.csv if present and/or seeds root institutional care_site."""
     path = find_source_file(source_dir, "facility")
@@ -1308,10 +1328,29 @@ def load_death(con, source_dir, site_id=None, disambiguate_patids=False):
     con.execute("DROP VIEW IF EXISTS _temp_death;")
 
 
-def build_observation_period(con):
-    """Synthesizes patient observation envelopes across all clinical event tables."""
+def _iso_date(value, name):
+    """Returns ``value`` (a date or ISO string) as a validated ``YYYY-MM-DD`` string."""
+    import datetime as _dt
+
+    try:
+        return _dt.date.fromisoformat(str(value)[:10]).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a date like '1900-01-02', got {value!r}.") from exc
+
+
+def build_observation_period(con, min_date="1900-01-02", max_date=None):
+    """Synthesizes patient observation envelopes across all clinical event tables (FR-C10).
+
+    The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events
+    dated before ``min_date`` (default 1900-01-02: SAS/Excel zero dates such as 1840-12-31 and 1899-12-30 and
+    ``1900-01-01`` placeholders) or after ``max_date`` (default: today, the extraction date) are ignored. A person
+    with no plausible event gets no observation period. Pass the source's real data cutoff as ``max_date`` when events
+    are filled with the build date, which today's date cannot distinguish from a genuine event.
+    """
+    lo = _iso_date(min_date, "min_date")
+    hi = f"DATE '{_iso_date(max_date, 'max_date')}'" if max_date is not None else "CURRENT_DATE"
     con.execute("DELETE FROM observation_period;")
-    run_insert(con, "OBSERVATION_PERIOD (synthesized)", """
+    run_insert(con, "OBSERVATION_PERIOD (synthesized)", f"""
         INSERT INTO observation_period (
             observation_period_id,
             person_id,
@@ -1342,6 +1381,7 @@ def build_observation_period(con):
                 MIN(event_date) AS obs_start_date,
                 MAX(event_date) AS obs_end_date
             FROM clinical_events
+            WHERE event_date >= DATE '{lo}' AND event_date <= {hi}
             GROUP BY person_id
         )
         SELECT
@@ -1552,8 +1592,14 @@ def etl_pcornet(
     auto_resources=False,
     source_format=None,
     strict_source=False,
+    key_check="warn",
+    key_check_callback=None,
 ):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline.
+
+    ``key_check`` ('warn' | 'raise' | 'ignore') compares distinct source ids with distinct surrogate keys at the end
+    of the build (FR-C12, see ``omop_etl.key_checks.check_etl_keys``); ``key_check_callback`` receives the list of
+    result dicts (the CLI writes them to ``run_manifest.json``).
 
     ``auto_resources=True`` sizes DuckDB to the host (see ``omop_etl.resources.configure_resources``);
     explicit ``memory_limit`` / ``threads`` / ``temp_dir`` still win over the detected values.
@@ -1609,6 +1655,21 @@ def etl_pcornet(
     build_drug_era(con)
     build_condition_era(con)
     load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
+
+    if key_check != "ignore":
+        from omop_etl.key_checks import check_etl_keys
+
+        try:
+            report = check_etl_keys(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids,
+                                    on_collision=key_check)
+        except Exception:
+            con.close()
+            raise
+        for r in report:
+            print(f"Key check {r['table']}.{r['id_column']}: {r['distinct_ids']} ids -> {r['distinct_keys']} keys "
+                  f"({'ok' if r['ok'] else str(r['lost']) + ' lost'}); {r['cdm_table']} rows = {r['cdm_rows']}")
+        if key_check_callback is not None:
+            key_check_callback(report)
 
     con.close()
     print("PCORnet ETL complete.")

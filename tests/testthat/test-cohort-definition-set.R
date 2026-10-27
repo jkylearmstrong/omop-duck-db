@@ -48,3 +48,18 @@ test_that("cohort_definition_set renders parameters and validates inputs on stub
   expect_error(cohort_definition_set(d, min_age = 1.5), "min_age")
   expect_error(cohort_definition_set(file.path(d, "missing")), "not found")
 })
+
+test_that("readonly_attach_sql builds READ_ONLY ATTACH statements and validates inputs (FR-D4)", {
+  cdm <- tempfile(fileext = ".duckdb"); vocab <- tempfile(fileext = ".duckdb")
+  file.create(cdm, vocab)
+  on.exit(unlink(c(cdm, vocab)), add = TRUE)
+  expect_length(readonly_attach_sql(cdm), 1L)
+  sql <- readonly_attach_sql(cdm, vocab)
+  expect_length(sql, 2L)
+  expect_true(all(grepl("^ATTACH '.*' AS .* [(]READ_ONLY[)]$", sql)))
+  expect_match(sql[1], " AS cdm ", fixed = TRUE)
+  expect_match(sql[2], " AS central_vocab ", fixed = TRUE)
+  expect_error(readonly_attach_sql(cdm, vocab, cdm_alias = "bad alias"), "alias")
+  expect_error(readonly_attach_sql(file.path(tempdir(), "nope.duckdb")), "not found")
+  expect_error(readonly_attach_sql(cdm, file.path(tempdir(), "nope.duckdb")), "not found")
+})

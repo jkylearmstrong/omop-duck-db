@@ -216,3 +216,121 @@ def test_portable_cohorts_run_with_cdm_attached_read_only(tmp_path):
     with pytest.raises(duckdb.Error):  # the CDM really is read-only
         scratch.execute("INSERT INTO cdm.main.cohort (cohort_definition_id, subject_id) VALUES (9, 9)")
     scratch.close()
+
+
+# ---- v0.8.4 ------------------------------------------------------------------------------------------------
+def test_observation_period_ignores_placeholder_and_future_dates():
+    from omop_etl.build_omop_cdm import build_observation_period
+    con = _con()
+    for pid in (1, 2, 3):
+        con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)"
+                    f" VALUES ({pid}, 8507, 1980, 0, 0)")
+    visits = [(1, 1, "1899-12-30", "1899-12-30"), (2, 1, "2020-01-01", "2020-03-01"),   # person 1: epoch start dropped
+              (3, 2, "2021-05-01", "2999-01-01"),                                       # person 2: far-future end dropped
+              (4, 3, "1900-01-01", "1900-01-01")]                                       # person 3: only placeholders
+    for vid, pid, s, e in visits:
+        con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
+                    f" visit_end_date, visit_type_concept_id) VALUES ({vid}, {pid}, 9201, DATE '{s}', DATE '{e}', 0)")
+    build_observation_period(con)
+    rows = con.execute("SELECT person_id, observation_period_start_date, observation_period_end_date"
+                       " FROM observation_period ORDER BY person_id").fetchall()
+    assert [(r[0], str(r[1]), str(r[2])) for r in rows] == [(1, "2020-01-01", "2020-03-01"), (2, "2021-05-01", "2021-05-01")]
+    build_observation_period(con, max_date="2021-01-01")   # explicit data cutoff
+    assert [r[0] for r in con.execute("SELECT person_id FROM observation_period").fetchall()] == [1]
+    with pytest.raises(ValueError):
+        build_observation_period(con, min_date="not a date")
+
+
+def test_dqd_plausible_observation_period_flags_epoch_dates():
+    con = _con()
+    con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)"
+                " VALUES (1, 8507, 1980, 0, 0), (2, 8507, 1980, 0, 0)")
+    con.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date,"
+                " observation_period_end_date, period_type_concept_id) VALUES"
+                " (1, 1, DATE '1899-12-30', DATE '2020-01-01', 0), (2, 2, DATE '2015-01-01', DATE '2020-01-01', 0)")
+    df = pd.DataFrame(run_dqd(con)["CheckResults"])
+    row = df[df["check_id"] == "FIELD_PLAUSIBLE_OBSERVATION_PERIOD"].iloc[0]
+    assert row["num_violated_rows"] == 1 and row["num_before_lower_bound"] == 1 and bool(row["failed"])
+    con.execute("UPDATE observation_period SET observation_period_start_date = DATE '2000-01-01' WHERE person_id = 1")
+    df = pd.DataFrame(run_dqd(con)["CheckResults"])
+    assert not bool(df[df["check_id"] == "FIELD_PLAUSIBLE_OBSERVATION_PERIOD"].iloc[0]["failed"])
+
+
+def test_etl_reports_key_check_and_visit_rows_match_distinct_encounters(tmp_path):
+    from omop_etl.build_omop_cdm import etl_pcornet
+    seen = []
+    etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "cdm.duckdb"), build_schema_flag=True,
+                key_check_callback=seen.extend)
+    visit = next(r for r in seen if r["cdm_table"] == "visit_occurrence")
+    assert visit["ok"] and visit["lost"] == 0 and visit["id_column"] in ("ENCOUNTERID", "encounterid")
+    assert visit["distinct_ids"] == visit["cdm_rows"]          # raw distinct encounters == visit_occurrence rows
+
+
+def test_etl_key_check_ignore_and_person_check_when_disambiguated(tmp_path):
+    from omop_etl.build_omop_cdm import etl_pcornet
+    seen = []
+    etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "a.duckdb"), build_schema_flag=True,
+                key_check="ignore", key_check_callback=seen.extend)
+    assert seen == []
+    etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "b.duckdb"), build_schema_flag=True,
+                site_id=7, disambiguate_patids=True, key_check_callback=seen.extend)
+    person = next(r for r in seen if r["cdm_table"] == "person")
+    assert person["ok"] and person["distinct_ids"] == person["cdm_rows"]
+
+
+def test_cli_build_writes_key_check_steps_to_manifest(tmp_path):
+    import json
+    from omop_etl.cli import main
+    manifest = tmp_path / "run_manifest.json"
+    rc = main(["build", "--source", "tests/fixtures/pcornet_sample", "--target", str(tmp_path / "site.duckdb"),
+               "--manifest", str(manifest)])
+    assert rc == 0
+    steps = [s["step"] for s in json.loads(manifest.read_text())["attrition"]]
+    assert any(s.startswith("key_check:encounter") for s in steps)
+
+
+def test_attach_read_only_resolves_central_vocab_views(tmp_path):
+    from omop_etl import attach_read_only
+    vocab = tmp_path / "vocab.duckdb"
+    v = duckdb.connect(str(vocab))
+    v.execute("CREATE TABLE concept AS SELECT 1 AS concept_id, 'a' AS concept_name")
+    v.close()
+    site = tmp_path / "site.duckdb"
+    c = duckdb.connect(str(site))
+    c.execute(f"ATTACH '{vocab.as_posix()}' AS central_vocab (READ_ONLY)")
+    c.execute("CREATE VIEW concept AS SELECT * FROM central_vocab.concept")
+    c.close()
+
+    s = duckdb.connect(str(tmp_path / "scratch.duckdb"))
+    attach_read_only(s, str(site))                                    # CDM only: the view cannot resolve
+    with pytest.raises(duckdb.Error, match="central_vocab"):
+        s.execute("SELECT count(*) FROM cdm.main.concept").fetchone()
+    s.close()
+    s = duckdb.connect(str(tmp_path / "scratch2.duckdb"))
+    aliases = attach_read_only(s, str(site), str(vocab))              # CDM + vocabulary, both read-only
+    assert aliases == {"cdm": "cdm", "vocab": "central_vocab"}
+    assert s.execute("SELECT count(*) FROM cdm.main.concept").fetchone()[0] == 1
+    with pytest.raises(duckdb.Error):
+        s.execute("INSERT INTO central_vocab.main.concept VALUES (2, 'b')")
+    with pytest.raises(ValueError):
+        attach_read_only(s, str(site), cdm_alias="bad alias")
+    with pytest.raises(FileNotFoundError):
+        attach_read_only(s, str(tmp_path / "nope.duckdb"), cdm_alias="other")
+    s.close()
+
+
+def test_circe_json_is_consistent_with_the_authoritative_sql():
+    import json, re
+    for name in ("target_cohort", "outcome_cohort"):
+        expr = json.loads((_COHORTS / f"{name}.circe.json").read_text(encoding="utf-8"))
+        for key in ("ConceptSets", "PrimaryCriteria", "InclusionRules", "EndStrategy", "CollapseSettings"):
+            assert key in expr, (name, key)
+        ids = sorted(i["concept"]["CONCEPT_ID"] for i in expr["ConceptSets"][0]["expression"]["items"])
+        sql = (_COHORTS / f"{name}.sql").read_text(encoding="utf-8")
+        sql_ids = sorted(int(x) for x in re.search(r"visit_concept_id IN \(([\d, ]+)\)", sql).group(1).split(","))
+        assert ids == sql_ids == [262, 9201]
+        assert "AUTHORITATIVE" in sql
+    target = json.loads((_COHORTS / "target_cohort.circe.json").read_text(encoding="utf-8"))
+    visit = target["PrimaryCriteria"]["CriteriaList"][0]["VisitOccurrence"]
+    assert visit["Age"]["Value"] == 18 and target["PrimaryCriteria"]["ObservationWindow"]["PostDays"] == 30
+    assert "discharged_to_concept_id" in target["InclusionRules"][0]["description"]   # the documented rule-3 gap

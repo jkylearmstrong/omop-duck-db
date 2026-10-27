@@ -43,4 +43,5 @@ switched off. `sampling_rule="random"` uses DuckDB `hash()`, which is not stable
 - v0.8.3: the SQL also runs with the CDM attached `READ_ONLY` and the cohort table in a separate database (tested on DuckDB).
 - **Not yet verified**: execution on PostgreSQL and SQL Server through SqlRender, and cross-engine count agreement. Add the SQL to the live-database CI job before relying on it.
 - `cohort_definition_set()` and the `DatabaseConnector::connect` wrapper in `run_plp_readonly_example.R` have not been run with CohortGenerator, SqlRender or a real read-only file; only the SQL and the data-frame shape are tested.
+- `tests/test_v082_features.py` checks the Circe JSON structurally and against the SQL (same visit concepts, age and follow-up defaults, and that the JSON carries the documented rule-3 gap). That is a consistency test, not an ATLAS import.
 - The Circe JSON was written by hand and has **not been imported into ATLAS**. Circe cannot test `discharged_to_concept_id`, so the SQL is authoritative. `DateAdjustment` (start at visit end) needs Circe/ATLAS 2.12 or later.

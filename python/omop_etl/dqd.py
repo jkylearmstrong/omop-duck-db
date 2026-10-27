@@ -37,6 +37,7 @@ def run_dqd(
     cdm_version: str = "5.4",
     plausible_date_range: tuple[Any, Any] = ("1950-01-01", None),
     date_fail_threshold_pct: float = 0.0,
+    observation_period_min: Any = "1900-01-02",
 ) -> dict[str, Any]:
     """Runs native vectorized OHDSI DataQualityDashboard checks in DuckDB.
 
@@ -439,6 +440,40 @@ def run_dqd(
                     "execution_status": "FAILED" if failed else "PASSED",
                     "failed": failed,
                 })
+
+    # 2c. plausibleObservationPeriod (FR-C10): placeholder starts (1840-12-31, 1899-12-30, 1900-01-01), build-date ends
+    # and inverted periods. Independent of plausible_date_range[0], which defaults to 1950.
+    if "FIELD" in check_levels_set and _has_table("observation_period"):
+        op_lo = datetime.date.fromisoformat(str(observation_period_min)[:10]).isoformat()
+        op_hi = datetime.date.fromisoformat(str(plausible_date_range[1])[:10]).isoformat()             if plausible_date_range[1] is not None else datetime.date.today().isoformat()
+        n_total, n_bad, n_early, n_late, n_inv = con.execute(
+            "SELECT count(*), "
+            f"count(*) FILTER (WHERE observation_period_start_date < DATE '{op_lo}' "
+            f"OR observation_period_end_date > DATE '{op_hi}' "
+            "OR observation_period_end_date < observation_period_start_date), "
+            f"count(*) FILTER (WHERE observation_period_start_date < DATE '{op_lo}'), "
+            f"count(*) FILTER (WHERE observation_period_end_date > DATE '{op_hi}'), "
+            "count(*) FILTER (WHERE observation_period_end_date < observation_period_start_date) "
+            "FROM observation_period").fetchone()
+        if n_total:
+            pct = 100.0 * n_bad / n_total
+            results.append({
+                "check_id": "FIELD_PLAUSIBLE_OBSERVATION_PERIOD",
+                "check_name": "plausibleObservationPeriod",
+                "check_level": "FIELD",
+                "cdm_table_name": "observation_period",
+                "cdm_field_name": "observation_period_start_date",
+                "check_description": (f"observation_period starts on or after {op_lo}, ends on or before {op_hi} "
+                                      "and does not end before it starts (FR-C10)."),
+                "num_violated_rows": int(n_bad),
+                "num_before_lower_bound": int(n_early),
+                "num_after_upper_bound": int(n_late),
+                "num_inverted": int(n_inv),
+                "pct_violated_rows": round(pct, 4),
+                "num_denominator_rows": int(n_total),
+                "execution_status": "FAILED" if n_bad > 0 else "PASSED",
+                "failed": n_bad > 0,
+            })
 
     # Overview aggregation
     total_checks = len(results)

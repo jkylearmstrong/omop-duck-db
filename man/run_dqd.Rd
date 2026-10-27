@@ -10,7 +10,8 @@ run_dqd(
   check_levels = c("TABLE", "FIELD", "CONCEPT", "TEMPORAL"),
   cdm_version = "5.4",
   plausible_date_range = c("1950-01-01", NA),
-  date_fail_threshold_pct = 0
+  date_fail_threshold_pct = 0,
+  observation_period_min = "1900-01-02"
 )
 }
 \arguments{
@@ -27,6 +28,8 @@ clinical tables; \code{upper = NA} means the extraction date. Default \code{c("1
 Sites with a far-future sentinel (e.g. 2099-12-31) should pass an explicit upper bound.}
 
 \item{date_fail_threshold_pct}{The check fails when the violating share exceeds this percentage (default 0).}
+
+\item{observation_period_min}{Earliest plausible observation period start for \code{plausibleObservationPeriod} (default \code{"1900-01-02"}).}
 }
 \value{
 A list with \code{Metadata}, \code{Overview}, and \code{CheckResults}.

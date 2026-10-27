@@ -1167,11 +1167,26 @@ load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_pat
 }
 
 #' Synthesize Observation Period envelopes
+#'
+#' The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events dated
+#' before `min_date` (SAS/Excel zero dates such as 1840-12-31 and 1899-12-30, `1900-01-01` placeholders) or after
+#' `max_date` are ignored; a person with no plausible event gets no observation period (FR-C10).
+#'
 #' @param con Active DuckDB connection
+#' @param min_date Earliest plausible event date (default `"1900-01-02"`).
+#' @param max_date Latest plausible event date; default `NULL` is today (the extraction date). Pass the source's data
+#'   cutoff when events are filled with the build date.
 #' @export
-build_observation_period <- function(con) {
+build_observation_period <- function(con, min_date = "1900-01-02", max_date = NULL) {
+  as_iso <- function(x, nm) {
+    d <- tryCatch(as.Date(x), error = function(e) NA)
+    if (length(d) != 1L || is.na(d)) stop(sprintf("`%s` must be a date like '1900-01-02'.", nm), call. = FALSE)
+    format(d, "%Y-%m-%d")
+  }
+  lo <- as_iso(min_date, "min_date")
+  hi <- if (is.null(max_date)) "CURRENT_DATE" else sprintf("DATE '%s'", as_iso(max_date, "max_date"))
   DBI::dbExecute(con, "DELETE FROM observation_period;")
-  run_insert(con, "OBSERVATION_PERIOD (synthesized)", "
+  run_insert(con, "OBSERVATION_PERIOD (synthesized)", sprintf("
     INSERT INTO observation_period (
         observation_period_id,
         person_id,
@@ -1202,6 +1217,7 @@ build_observation_period <- function(con) {
             MIN(event_date) AS obs_start_date,
             MAX(event_date) AS obs_end_date
         FROM clinical_events
+        WHERE event_date >= DATE '%s' AND event_date <= %s
         GROUP BY person_id
     )
     SELECT
@@ -1211,7 +1227,7 @@ build_observation_period <- function(con) {
         obs_end_date AS observation_period_end_date,
         32827 AS period_type_concept_id
     FROM envelopes;
-  ")
+  ", lo, hi))
 }
 
 #' Synthesize Drug Eras

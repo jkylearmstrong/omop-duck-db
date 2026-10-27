@@ -5,14 +5,15 @@
 # wrapped to run the ATTACH. That wrapper patches DatabaseConnector::connect for this R session only; it is the
 # same pattern the consortium runner uses. It has NOT been run against a real read-only file by the package tests.
 #
-# The CDM must resolve its own vocabulary: either it holds real `concept` tables, or run
-#   omop-duckdb materialize-vocab site.duckdb --vocab central_vocab.duckdb
-# once on a writable copy first (views into an attached central_vocab are not visible to a read-only attach alone).
+# Vocabulary: site files often expose `concept` as views into a catalog named `central_vocab`. Set `vocab_file` to
+# the shared vocabulary file and it is attached READ_ONLY under that name on every connection, so nothing has to be
+# copied or materialized. Leave it NULL when the CDM file holds real vocabulary tables.
 library(DatabaseConnector)
 library(SqlRender)
 library(PatientLevelPrediction)
 
 cdm_file <- "site.duckdb"          # read-only CDM
+vocab_file <- NULL                 # e.g. "central_vocab.duckdb" when the CDM's concept tables are views into it
 scratch_file <- "cohorts_scratch.duckdb"  # writable; holds only the cohort table
 
 # 63-bit ids are exact only as integer64. omopduckdb::plp_database_details() sets this itself when needed
@@ -24,13 +25,11 @@ if (requireNamespace("omopduckdb", quietly = TRUE) && omopduckdb::hades_needs_in
 # --- attach the CDM read-only on every connection -------------------------------------------------------
 ns <- asNamespace("DatabaseConnector")
 original_connect <- get("connect", envir = ns)
-attach_sql <- sprintf("ATTACH '%s' AS cdm (READ_ONLY)", normalizePath(cdm_file, winslash = "/", mustWork = TRUE))
+attach_sql <- omopduckdb::readonly_attach_sql(cdm_file, vocab_file)   # one ATTACH ... (READ_ONLY) per file
 unlockBinding("connect", ns)
 assign("connect", function(...) {
   conn <- original_connect(...)
-  if (!inherits(try(executeSql(conn, attach_sql, progressBar = FALSE, reportOverallTime = FALSE), silent = TRUE), "try-error")) {
-    invisible(NULL)
-  }
+  for (stmt in attach_sql) executeSql(conn, stmt, progressBar = FALSE, reportOverallTime = FALSE)
   conn
 }, envir = ns)
 lockBinding("connect", ns)
