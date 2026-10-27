@@ -9,7 +9,8 @@ cohort_definition_set(
   target_cohort_id = 1L,
   outcome_cohort_id = 2L,
   followup_days = 30L,
-  min_age = 18L
+  min_age = 18L,
+  followup_evidence = c("observation_period", "observation_period_or_event")
 )
 }
 \arguments{
@@ -20,6 +21,9 @@ cohort_definition_set(
 \item{followup_days}{Verified follow-up after discharge in days (default 30).}
 
 \item{min_age}{Minimum age in years at discharge (default 18).}
+
+\item{followup_evidence}{\code{"observation_period"} (default) or \code{"observation_period_or_event"}: whether a later visit,
+measurement, condition or drug record also counts as verified follow-up (FR-D7).}
 }
 \value{
 A data frame with columns \code{cohortId}, \code{cohortName}, \code{sql}, \code{json}.

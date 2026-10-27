@@ -63,3 +63,17 @@ test_that("readonly_attach_sql builds READ_ONLY ATTACH statements and validates 
   expect_error(readonly_attach_sql(file.path(tempdir(), "nope.duckdb")), "not found")
   expect_error(readonly_attach_sql(cdm, file.path(tempdir(), "nope.duckdb")), "not found")
 })
+
+test_that("followup_evidence switches the later-event follow-up rule on and leaves no SqlRender syntax behind (FR-D7)", {
+  d <- cohorts_dir()
+  base <- cohort_definition_set(d)
+  ext <- cohort_definition_set(d, followup_evidence = "observation_period_or_event")
+  expect_false(grepl("m.measurement_date", base$sql[1], fixed = TRUE))
+  expect_true(grepl("m.measurement_date", ext$sql[1], fixed = TRUE))
+  for (sql in c(base$sql, ext$sql)) {
+    expect_false(grepl("{DEFAULT", sql, fixed = TRUE))
+    expect_false(grepl("@followup_evidence", sql, fixed = TRUE))
+    expect_false(grepl("}?{", sql, fixed = TRUE))
+  }
+  expect_error(cohort_definition_set(d, followup_evidence = "nope"), "arg")
+})

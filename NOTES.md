@@ -87,6 +87,22 @@ If a credential was ever committed (for example the TestPyPI token noted in QUES
    force-push all branches/tags and ask collaborators to re-clone. Re-run step 2 to confirm.
 4. Publish with a trusted publisher / a new scoped token stored only in GitHub Actions secrets.
 
+## Shared vocabulary by reference (FR-B5)
+
+A site file does not have to hold the 5-18 GB vocabulary. `omop-duckdb build --vocab central_vocab.duckdb` creates
+`concept` and the other vocabulary tables as **views** into a catalog named `central_vocab`. Any client that opens
+such a file must attach the vocabulary file under exactly that name, read-only:
+
+```sql
+ATTACH 'central_vocab.duckdb' AS central_vocab (READ_ONLY);   -- one line, on every connection
+```
+
+* Python: `omop_etl.attach_read_only(con, "site.duckdb", "central_vocab.duckdb")` attaches both files read-only.
+* R / HADES: `omopduckdb::readonly_attach_sql("site.duckdb", "central_vocab.duckdb")` returns the statements; DatabaseConnector
+  cannot ATTACH on connect, so run them on each new connection (see `cohorts/run_plp_readonly_example.R`).
+* To make one file self-contained instead (and larger): `omop-duckdb materialize-vocab site.duckdb --vocab central_vocab.duckdb`
+  copies the views into real tables, which needs a writable file.
+
 ## Where it's heading
 
 - **Production Consortium Deployments**: Automated validation against multi-hospital health network nodes (eDERRI study).

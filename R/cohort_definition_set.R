@@ -13,13 +13,17 @@
 #' @param target_cohort_id,outcome_cohort_id Cohort ids to assign (default 1 and 2).
 #' @param followup_days Verified follow-up after discharge in days (default 30).
 #' @param min_age Minimum age in years at discharge (default 18).
+#' @param followup_evidence `"observation_period"` (default) or `"observation_period_or_event"`: whether a later visit,
+#'   measurement, condition or drug record also counts as verified follow-up (FR-D7).
 #' @return A data frame with columns `cohortId`, `cohortName`, `sql`, `json`.
 #' @export
 cohort_definition_set <- function(cohorts_dir = "cohorts",
                                   target_cohort_id = 1L,
                                   outcome_cohort_id = 2L,
                                   followup_days = 30L,
-                                  min_age = 18L) {
+                                  min_age = 18L,
+                                  followup_evidence = c("observation_period", "observation_period_or_event")) {
+  followup_evidence <- match.arg(followup_evidence)
   whole <- function(x, nm) {
     if (length(x) != 1L || is.na(x) || x != round(x) || x < 0) stop(sprintf("`%s` must be a non-negative whole number.", nm), call. = FALSE)
     as.integer(x)
@@ -36,6 +40,17 @@ cohort_definition_set <- function(cohorts_dir = "cohorts",
     paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
   }
   render <- function(sql) {
+    # the SqlRender subset the cohort files use: {DEFAULT ...} lines and {@p == 'v'}?{then}:{else} conditionals
+    sql <- gsub("[{]DEFAULT[[:space:]]+@[A-Za-z_]+[[:space:]]*=[[:space:]]*[^}]*[}][[:space:]]*", "", sql, perl = TRUE)
+    pat <- paste0("[{]@followup_evidence[[:space:]]*==[[:space:]]*'([^']*)'[}][[:space:]]*[?][[:space:]]*[{]([^{}]*)[}]",
+                  "([[:space:]]*:[[:space:]]*[{]([^{}]*)[}])?")
+    repeat {
+      hit <- regmatches(sql, regexec(pat, sql, perl = TRUE))[[1]]
+      if (length(hit) == 0L) break
+      keep <- if (identical(hit[2], followup_evidence)) hit[3] else hit[5]
+      regmatches(sql, regexpr(pat, sql, perl = TRUE)) <- keep
+    }
+    sql <- gsub("@followup_evidence", followup_evidence, sql, fixed = TRUE)
     sql <- gsub("@followup_days", as.character(followup_days), sql, fixed = TRUE)
     gsub("@min_age", as.character(min_age), sql, fixed = TRUE)
   }

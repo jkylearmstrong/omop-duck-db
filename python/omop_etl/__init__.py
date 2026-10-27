@@ -205,6 +205,7 @@ from omop_etl.andromeda import (
     AndromedaAdapter,
     export_to_andromeda,
 )
+from omop_etl.cohort_sql import compare_cohort_definitions, render_cohort_sql, run_cohort_sql, translate_to_duckdb
 from omop_etl.key_checks import KeyCollisionError, check_key_collisions
 from omop_etl.features import (
     ACUTE_LAB_PANEL,
@@ -443,6 +444,10 @@ __all__ = [
     "ANION_GAP_LOINCS",
     "EGFR_LOINCS",
     "check_key_collisions",
+    "compare_cohort_definitions",
+    "render_cohort_sql",
+    "run_cohort_sql",
+    "translate_to_duckdb",
     "KeyCollisionError",
     "CORE_14_LAB_PANEL",
     # ML Feature Extraction & Builders (RFC-6)
