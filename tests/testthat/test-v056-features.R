@@ -54,6 +54,8 @@ test_that("duckdb_to_andromeda and as_andromeda stream tables to Andromeda", {
   ")
 
   andr <- duckdb_to_andromeda(con, table_names = c("covariates", "covariateref", "analysisref"))
+  # Close Andromeda's own DuckDB connection before the test's connection is shut down (runs first).
+  on.exit(try(Andromeda::close(andr), silent = TRUE), add = TRUE, after = FALSE)
   expect_true(inherits(andr, "Andromeda") || inherits(andr, "environment") || is.list(andr))
 
   # Test table existence in Andromeda
@@ -175,6 +177,7 @@ test_that("duckdb_to_andromeda copies every row across chunks and keeps empty ta
   DBI::dbExecute(con, "CREATE TABLE analysisref AS SELECT 1 AS analysis_id WHERE false")
 
   andr <- duckdb_to_andromeda(con, table_names = c("covariates", "analysisref"), chunk_size = 10L)
+  on.exit(try(Andromeda::close(andr), silent = TRUE), add = TRUE, after = FALSE)
   expect_setequal(names(andr), c("covariates", "analysisref"))
   expect_equal(nrow(dplyr::collect(andr$covariates)), 25L)
   expect_equal(names(dplyr::collect(andr$analysisref)), "analysis_id")
