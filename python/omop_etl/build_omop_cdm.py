@@ -265,6 +265,32 @@ def attach_central_vocabulary(con, vocab_db_path, temporary=True):
     print(f"Attached central vocabulary from {vocab_db_path} with zero-copy views.")
 
 
+VOCABULARY_TABLES = ("concept", "vocabulary", "domain", "concept_class", "relationship", "concept_relationship",
+                     "concept_ancestor", "concept_synonym", "drug_strength")
+
+
+def materialize_vocabulary(con, tables=VOCABULARY_TABLES, catalog="central_vocab"):
+    """Copies vocabulary tables that are views over an attached ``central_vocab`` into real tables (FR-C9).
+
+    HADES (DatabaseConnector) opens the file alone and cannot ATTACH, so views into ``central_vocab`` fail with
+    "schema central_vocab does not exist". Returns ``{table: row_count}`` for the tables copied.
+    """
+    done = {}
+    for tbl in tables:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", tbl):
+            raise ValueError(f"Invalid table name {tbl!r}.")
+        kind = con.execute(
+            "SELECT table_type FROM information_schema.tables WHERE table_name = ? "
+            "AND table_catalog IN (current_database(), 'temp') AND table_type = 'VIEW'", [tbl]).fetchone()
+        if kind is None:
+            continue
+        con.execute(f"CREATE OR REPLACE TABLE {tbl}__mat AS SELECT * FROM {tbl};")
+        con.execute(f"DROP VIEW IF EXISTS {tbl};")
+        con.execute(f"ALTER TABLE {tbl}__mat RENAME TO {tbl};")
+        done[tbl] = int(con.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0])
+    return done
+
+
 def load_care_site(con, source_dir, site_id=None, site_anon=None, site_name=None):
     """Loads care_site records from facility.csv if present and/or seeds root institutional care_site."""
     path = find_source_file(source_dir, "facility")

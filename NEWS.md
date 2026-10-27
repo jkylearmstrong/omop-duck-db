@@ -1,3 +1,14 @@
+# omopduckdb 0.8.2
+
+Closes the gaps left by the 2026-10 consortium audit. Most audit items (FR-A1-A5, B1-B4, C1-C6) had already shipped in 0.7.0/0.8.x; this release adds what was missing.
+
+- **FR-C9 (HADES)**: `hades_set_integer64()` (R) sets `databaseConnectorInteger64AsNumeric = FALSE` so 63-bit ids no longer stop `DatabaseConnector::querySql()` with "integers >= 2^53"; `plp_database_details()` and `cm_database_details()` call it. New `pcornet_id53()` macro (53-bit keys, safe as R doubles) for callers who need it; the ETL still uses `pcornet_id()` and sequential person ids. `materialize_vocabulary()` / `omop-duckdb materialize-vocab` copies `central_vocab` views into real tables so a file opened alone resolves `concept`.
+- **FR-D1**: portable `cohorts/target_cohort.sql`, `outcome_cohort.sql` (OHDSI SQL), Circe JSON, `cohorts/run_plp_example.R` and `cohorts/OMOP_COHORT_DEFINITION.md`. Verified on DuckDB only; see the doc.
+- **FR-D2**: `sampling_rule="earliest"` (alias of `first`) and `"stable_random"` (MD5-based, version-stable); `persist_index_visits()` writes an `index_visit` table. `"random"` is unchanged (DuckDB `hash()`).
+- **FR-C8**: `check_key_collisions()` compares distinct source ids with distinct surrogate keys (warn/raise).
+- **FR-C7**: DQD `isPrimaryKeyDuplicate` check on `visit_occurrence_id`.
+- **FR-A6**: `extract_standard_labs(egfr="ckd_epi_2021"|"measured", anion_gap=True)`; complete `ANION_GAP_LOINCS` / `EGFR_LOINCS` sets (69405-9 and 77147-7 added to the Table 1 eGFR set); warns when a standard lab is empty.
+
 # omopduckdb 0.8.1
 
 - **Fix: `pcornet_id()` no longer uses DuckDB `hash()`**. Widening to 63 bits in 0.8.0 did not help: `hash()` itself collides on real encounter IDs (160 of 75,804,013 and 62 of 46,990,031 distinct raw encounters lost at two large sites; zero lost with MD5). The macro is now `(md5_number_lower(source_id::VARCHAR) & 9223372036854775807)::BIGINT`. Databases rebuilt with 0.8.0 should be rebuilt.

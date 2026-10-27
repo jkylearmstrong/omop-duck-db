@@ -1,3 +1,18 @@
+#' Keep 63-bit surrogate keys exact in DatabaseConnector (FR-C9)
+#'
+#' Visit and event ids are 63-bit BIGINTs (above 2^53), which R doubles cannot hold exactly. With the default
+#' `databaseConnectorInteger64AsNumeric = TRUE`, `DatabaseConnector::querySql()` stops with "The data contains
+#' integers >= 2^53" (for example when PatientLevelPrediction fetches cohorts). This sets the option to `FALSE`
+#' so such columns come back as `integer64`. [plp_database_details()] and [cm_database_details()] call it for you.
+#'
+#' @return The previous value of the option, invisibly.
+#' @export
+hades_set_integer64 <- function() {
+  old <- getOption("databaseConnectorInteger64AsNumeric")
+  options(databaseConnectorInteger64AsNumeric = FALSE)
+  invisible(old)
+}
+
 #' Check that a DuckDB file is ready for OHDSI HADES (PatientLevelPrediction / DeepPatientLevelPrediction)
 #'
 #' PatientLevelPrediction, DeepPatientLevelPrediction and FeatureExtraction read the CDM through
@@ -141,6 +156,7 @@ plp_database_details <- function(db_path,
   for (pkg in c("DatabaseConnector", "PatientLevelPrediction")) {
     if (!requireNamespace(pkg, quietly = TRUE)) stop(sprintf("plp_database_details() needs the '%s' package.", pkg), call. = FALSE)
   }
+  hades_set_integer64()
   if (isTRUE(preflight)) {
     pf <- hades_preflight(db_path, cdm_database_schema, cohort_database_schema, cohort_table)
     if (!isTRUE(attr(pf, "all_ok"))) {
@@ -193,6 +209,7 @@ cm_database_details <- function(db_path,
   if (!requireNamespace("DatabaseConnector", quietly = TRUE)) {
     stop("cm_database_details() needs the 'DatabaseConnector' package.", call. = FALSE)
   }
+  hades_set_integer64()
   if (isTRUE(preflight)) {
     pf <- hades_preflight(db_path, cdm_database_schema, cohort_database_schema, cohort_table)
     if (!isTRUE(attr(pf, "all_ok"))) {

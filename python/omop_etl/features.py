@@ -7,8 +7,10 @@ windows (30d/180d/365d), demographics, and exports to PyArrow, Polars, or Pandas
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Sequence
 import duckdb
+import numpy as np
 import pandas as pd
 
 
@@ -791,6 +793,10 @@ CORE_14_LAB_PANEL: dict[str, list[str]] = {
     "hba1c": ["4548-4", "59261-8"],
 }
 
+# Complete LOINC sets for labs that sites code under many different codes (FR-A6).
+ANION_GAP_LOINCS: list[str] = ["33037-3", "41276-7", "1863-0"]
+EGFR_LOINCS: list[str] = ["33914-3", "48642-3", "48643-1", "62238-1", "69405-9", "77147-7", "88293-6", "88294-4"]
+
 # Direction in which each lab is clinically "worse" (used by ``strategy='worst'``).
 WORST_LAB_DIRECTION: dict[str, str] = {
     "bun": "max", "creatinine": "max", "sodium": "min", "potassium": "max", "chloride": "min",
@@ -840,6 +846,9 @@ def extract_standard_labs(
     window: str = "stay",
     winsorize: bool | tuple[float, float] = True,
     format: str = "df",
+    egfr: str | None = None,
+    anion_gap: bool = False,
+    warn_empty: bool = True,
 ) -> Any:
     """Extract harmonized inpatient lab panels with outlier sanitization.
 
@@ -854,22 +863,65 @@ def extract_standard_labs(
         winsorize: True to clamp to physiologic bounds; tuple (low_q, high_q) for percentile
                    winsorization; or False for raw values.
         format: Output format ('df', 'arrow', 'polars').
+        egfr: None (default, no eGFR column), 'measured' (reported eGFR from ``EGFR_LOINCS``) or
+              'ckd_epi_2021' (race-free CKD-EPI 2021 from creatinine, age and sex; a measured value is only the
+              fallback when creatinine, age or sex is missing). Adds an ``egfr`` column.
+        anion_gap: Adds an ``anion_gap`` column from ``ANION_GAP_LOINCS``.
+        warn_empty: Warn when a requested standard lab has no values at all in the cohort.
 
     Returns:
         pd.DataFrame, pyarrow.Table, or polars.DataFrame.
     """
     if panel.lower() not in ("core_14", "core14", "default"):
         raise ValueError(f"Unknown panel '{panel}'. Available panels: 'core_14'.")
+    if egfr not in (None, "measured", "ckd_epi_2021"):
+        raise ValueError("egfr must be None, 'measured' or 'ckd_epi_2021'.")
+
+    loinc_map = dict(CORE_14_LAB_PANEL)
+    if anion_gap:
+        loinc_map["anion_gap"] = list(ANION_GAP_LOINCS)
+    if egfr is not None:
+        loinc_map["egfr_measured"] = list(EGFR_LOINCS)
 
     df = extract_measurements(
         con=con,
         cohort_table=cohort_table,
         cohort_id=cohort_id,
-        loinc_map=CORE_14_LAB_PANEL,
+        loinc_map=loinc_map,
         strategy=aggregation,
         window=window,
         format="df",
     )
+
+    if egfr is not None:
+        measured = df["egfr_measured"] if "egfr_measured" in df.columns else pd.Series(np.nan, index=df.index)
+        if egfr == "measured":
+            df["egfr"] = measured
+        else:
+            from .velocity import compute_ckd_epi_2021
+
+            demo = con.execute(
+                "SELECT person_id AS subject_id, year_of_birth, gender_concept_id FROM person"
+            ).df()
+            d = df[["subject_id", "cohort_start_date"]].merge(demo, on="subject_id", how="left")
+            age = pd.to_datetime(d["cohort_start_date"]).dt.year - d["year_of_birth"]
+            sex_known = d["gender_concept_id"].isin([8507, 8532]).to_numpy()
+            creat = df["creatinine"].to_numpy(dtype=float)
+            ok = ~np.isnan(creat) & sex_known & age.notna().to_numpy()
+            calc = np.full(len(df), np.nan)
+            if ok.any():
+                calc[ok] = compute_ckd_epi_2021(
+                    creat[ok], age.to_numpy(dtype=float)[ok], (d["gender_concept_id"] == 8532).to_numpy()[ok]
+                )
+            df["egfr"] = np.where(np.isnan(calc), measured.to_numpy(dtype=float), calc)
+        df = df.drop(columns=["egfr_measured"], errors="ignore")
+
+    if warn_empty and len(df):
+        empty = [c for c in list(loinc_map) if c in df.columns and df[c].notna().sum() == 0]
+        if egfr is not None and "egfr" in df.columns and df["egfr"].notna().sum() == 0:
+            empty.append("egfr")
+        if empty:
+            warnings.warn(f"Standard lab(s) with no values in this cohort: {', '.join(empty)}.", UserWarning, stacklevel=2)
 
     if winsorize is True:
         for lab_col, (low, high) in PHYSIOLOGIC_LAB_BOUNDS.items():

@@ -271,6 +271,30 @@ def run_dqd(
                     "failed": mismatch_count > 0,
                 })
 
+    # Duplicate visit_occurrence_id (FR-C7): a primary-key collision silently merges two visits.
+    if "TABLE" in check_levels_set or "FIELD" in check_levels_set:
+        if _has_table("visit_occurrence"):
+            vo_total = _get_row_count("visit_occurrence")
+            if vo_total > 0:
+                dup_rows = con.execute("""
+                    SELECT COALESCE(SUM(n), 0) FROM (
+                        SELECT COUNT(*) AS n FROM visit_occurrence
+                        GROUP BY visit_occurrence_id HAVING COUNT(*) > 1)""").fetchone()[0]
+                dup_rows = int(dup_rows)
+                results.append({
+                    "check_id": "FIELD_PK_DUPLICATE_VISIT_OCCURRENCE",
+                    "check_name": "isPrimaryKeyDuplicate",
+                    "check_level": "FIELD",
+                    "cdm_table_name": "visit_occurrence",
+                    "cdm_field_name": "visit_occurrence_id",
+                    "check_description": "The number and percent of visit_occurrence rows sharing a visit_occurrence_id with another row (surrogate key collision, FR-C7/FR-C8).",
+                    "num_violated_rows": dup_rows,
+                    "pct_violated_rows": round(dup_rows / vo_total * 100.0, 2),
+                    "num_denominator_rows": vo_total,
+                    "execution_status": "PASSED" if dup_rows == 0 else "FAILED",
+                    "failed": dup_rows > 0,
+                })
+
     # 3. CONCEPT CHECKS (Standard concepts conformance & Unmapped audit)
     if "CONCEPT" in check_levels_set and _has_table("concept") and _get_row_count("concept") > 0:
         concept_fields = [
