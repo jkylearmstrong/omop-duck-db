@@ -458,3 +458,20 @@ def test_sequence_tensor_can_include_index_stay_and_lab_tokens():
     # discharge-anchored cohort: the index stay started earlier, so the default window already has it
     con.execute("UPDATE cohort SET cohort_start_date = DATE '2022-01-01'")
     assert (extract_longitudinal_tensors(con, "cohort")[0, 1] > 0).any()
+
+
+def test_cli_passes_key_check_and_enrollment_flags(monkeypatch):
+    from omop_etl import build_omop_cdm as b
+
+    seen = {}
+    monkeypatch.setattr(b, "etl_pcornet", lambda **kw: seen.update(kw))
+    monkeypatch.setattr("sys.argv", ["build_omop_cdm.py", "--source-dir", "x", "--key-check", "raise",
+                                     "--use-enrollment", "false", "--enrollment-type-concept-id", "32817"])
+    b.main()
+    assert seen["key_check"] == "raise"
+    assert seen["use_enrollment"] is False
+    assert seen["enrollment_type_concept_id"] == 32817
+
+    monkeypatch.setattr("sys.argv", ["build_omop_cdm.py", "--source-dir", "x"])
+    b.main()
+    assert (seen["key_check"], seen["use_enrollment"], seen["enrollment_type_concept_id"]) == ("warn", "auto", 0)
