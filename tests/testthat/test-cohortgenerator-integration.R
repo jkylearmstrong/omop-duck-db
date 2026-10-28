@@ -1,8 +1,9 @@
 # Real HADES CohortGenerator execution of cohort_definition_set() on a tiny DuckDB CDM (v0.8.7).
-# Optional: skipped unless CohortGenerator, DatabaseConnector (with its DuckDB driver) and Java are available.
+# Optional: skipped unless OMOP_RUN_HADES_TESTS=true and CohortGenerator, DatabaseConnector (with its DuckDB driver) and Java are available.
 
 test_that("CohortGenerator::generateCohortSet runs cohort_definition_set() on a DuckDB CDM", {
   skip_on_cran()
+  if (!identical(Sys.getenv("OMOP_RUN_HADES_TESTS"), "true")) skip("set OMOP_RUN_HADES_TESTS=true (the HADES integration workflow does)")
   skip_if_not_installed("CohortGenerator")
   skip_if_not_installed("DatabaseConnector")
   skip_if_not_installed("duckdb")

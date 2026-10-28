@@ -244,6 +244,8 @@ def test_portable_cohort_sql_gives_the_same_cohorts_on_every_server(backend):
     _drop(eng, *_COHORT_TABLES)
     with eng.begin() as c:
         for name, cols in _COHORT_TABLES.items():
+            if backend == "oracle":   # Oracle has no BIGINT / INTEGER
+                cols = cols.replace("BIGINT", "NUMBER(19)").replace("INTEGER", "NUMBER(10)")
             c.execute(sa.text(f"CREATE TABLE {name} ({cols})"))
         d = dt.date.fromisoformat
         for pid, yob in {1: 1980, 2: 1980, 3: 2015, 4: 1980, 5: 1980}.items():

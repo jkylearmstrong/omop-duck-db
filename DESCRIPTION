@@ -49,6 +49,7 @@ Suggests:
     Andromeda,
     callr,
     DatabaseConnector,
+    CohortGenerator,
     PatientLevelPrediction,
     reticulate,
     FeatureExtraction,

@@ -546,3 +546,19 @@ def test_translate_cohort_sql_oracle_date_arithmetic():
     for stmt in translate_cohort_sql(rendered, "oracle"):
         code = re.sub(r"/\*.*?\*/", "", stmt, flags=re.S)
         assert "DATE_ADD" not in code and "YEAR(" not in code
+
+
+def test_translate_cohort_sql_units_dialects_and_missing_sqlglot(monkeypatch):
+    pytest.importorskip("sqlglot")
+    from omop_etl.cohort_sql import translate_cohort_sql
+
+    (w,) = translate_cohort_sql("SELECT DATEADD(week, 2, d) FROM t", "oracle")
+    assert "7 * (2)" in w
+    with pytest.raises(ValueError, match="no Oracle DATE rewrite"):
+        translate_cohort_sql("SELECT DATEADD(hour, 2, d) FROM t", "oracle")
+    (pg,) = translate_cohort_sql("SELECT DATEADD(day, 2, d) FROM t", "postgres")
+    assert "INTERVAL" in pg.upper()
+    import sys
+    monkeypatch.setitem(sys.modules, "sqlglot", None)
+    with pytest.raises(ImportError, match="sqlglot"):
+        translate_cohort_sql("SELECT 1", "oracle")

@@ -19,6 +19,7 @@ jobs:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       RENV_CONFIG_AUTOLOADER_ENABLED: false
       NOT_CRAN: "true"
+      OMOP_RUN_HADES_TESTS: "true"
     steps:
       - uses: actions/checkout@v4
 
