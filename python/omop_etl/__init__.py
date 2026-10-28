@@ -312,6 +312,7 @@ from omop_etl.trajectories import (
     extract_temporal_trajectories,
 )
 from omop_etl.achilles import ACHILLES_ANALYSES, achilles_analysis_catalog, run_achilles
+from omop_etl.categorical_encoding import encode_categoricals, encoded_column_names
 from omop_etl.geography import (
     assign_sdi_quintile,
     derive_geography_features,
@@ -615,6 +616,8 @@ __all__ = [
     "ACHILLES_ANALYSES",
     "achilles_analysis_catalog",
     "run_achilles",
+    "encode_categoricals",
+    "encoded_column_names",
     "assign_sdi_quintile",
     "derive_geography_features",
     "fit_sdi_cut_points",

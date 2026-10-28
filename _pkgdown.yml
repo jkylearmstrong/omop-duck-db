@@ -211,6 +211,8 @@ reference:
   - assign_sdi_quintile
   - read_ruca_crosswalk
   - read_sdi_table
+  - encode_categoricals
+  - encoded_column_names
 - title: Data quality, Table 1, and Export
   desc: Run Data Quality Dashboard checks, build publication-grade Table 1s, and export datasets.
   contents:

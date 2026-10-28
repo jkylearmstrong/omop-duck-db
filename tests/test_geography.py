@@ -186,3 +186,24 @@ def test_load_location_repairs_unquoted_comma_in_city(tmp_path):
     assert con.execute("SELECT city, state, zip FROM location WHERE state = 'MO'").fetchall() == [("St. Louis, MO", "MO", "63101")]
     row = con.execute("SELECT zip5, address_start, address_end FROM person_address_history WHERE zip5 = '63101'").fetchall()
     assert len(row) == 1 and str(row[0][1]) == "2013-01-01" and row[0][2] is None
+
+
+def test_pcornet_discharge_status_home_is_not_hospice(tmp_path):
+    import shutil
+
+    src = tmp_path / "src"
+    shutil.copytree(SAMPLE_DIR, src)
+    (src / "encounter.csv").write_text(
+        "ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,ADMIT_TIME,DISCHARGE_DATE,DISCHARGE_TIME,PROVIDERID,FACILITYID,DISCHARGE_STATUS\n"
+        + "".join(f"E{i},FAKE-P001,IP,2024-01-0{i},08:00,2024-01-0{i},11:00,,,{s}\n"
+                  for i, s in enumerate(["HO", "HS", "AM", "EX", "SN", "A"], start=1)), encoding="utf-8")
+    con = duckdb.connect()
+    build_schema(con)
+    load_macros(con)
+    load_person(con, str(src))
+    from omop_etl import load_visit_occurrence
+
+    load_visit_occurrence(con, str(src))
+    got = dict(con.execute("SELECT discharged_to_source_value, discharged_to_concept_id FROM visit_occurrence").fetchall())
+    assert got["HO"] == 8536 and got["A"] == 8536 and got["HS"] == 8546
+    assert got["EX"] == 4216643 and got["AM"] == 4155309 and got["SN"] == 8863
