@@ -34,3 +34,28 @@ test_that("etl_pcornet(key_check = 'ignore') skips the check", {
   out <- capture.output(etl_pcornet(fixture_dir(), db_path, key_check = "ignore"))
   expect_false(any(grepl("Key check", out)))
 })
+
+test_that("check_etl_keys also checks PATID when ids are disambiguated by site", {
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit(unlink(db_path))
+  build_schema(db_path = db_path)
+  capture.output(etl_pcornet(fixture_dir(), db_path, site_id = 1, disambiguate_patids = TRUE, key_check = "ignore"))
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE, after = FALSE)
+  load_mapping_macros(con)
+  rep <- check_etl_keys(con, fixture_dir(), site_id = 1, disambiguate_patids = TRUE)
+  expect_equal(vapply(rep, `[[`, "", "table"), c("encounter", "demographic"))
+  expect_true(all(vapply(rep, `[[`, NA, "ok")))
+  expect_equal(rep[[2]]$cdm_table, "person")
+  # a source directory without encounter/demographic files yields an empty report
+  expect_length(check_etl_keys(con, tempfile()), 0)
+})
+
+test_that("check_key_collisions rejects bad sources and accepts quoted columns", {
+  con <- DBI::dbConnect(duckdb::duckdb())
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
+  DBI::dbExecute(con, "CREATE TABLE t AS SELECT 'a' AS \"My Id\"")
+  DBI::dbExecute(con, "CREATE MACRO pcornet_id(x) AS hash(x)")
+  expect_error(check_key_collisions(con, "t; DROP TABLE t", "id"), "Invalid source")
+  expect_true(check_key_collisions(con, "t", "\"My Id\"")$ok)
+})
