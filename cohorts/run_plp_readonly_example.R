@@ -3,7 +3,8 @@
 # The CDM file is attached read-only and never written. Cohort rows go into a separate scratch DuckDB file.
 # DatabaseConnector cannot ATTACH on connect, and HADES opens several connections per run, so every connection is
 # wrapped to run the ATTACH. That wrapper patches DatabaseConnector::connect for this R session only; it is the
-# same pattern the consortium runner uses. It has NOT been run against a real read-only file by the package tests.
+# same pattern the consortium runner uses. The wrapper itself (`readonly_connect_wrapper()`) is tested against a real
+# read-only DuckDB file; patching DatabaseConnector::connect with HADES running on top is not.
 #
 # Vocabulary: site files often expose `concept` as views into a catalog named `central_vocab`. Set `vocab_file` to
 # the shared vocabulary file and it is attached READ_ONLY under that name on every connection, so nothing has to be
@@ -27,11 +28,9 @@ ns <- asNamespace("DatabaseConnector")
 original_connect <- get("connect", envir = ns)
 attach_sql <- omopduckdb::readonly_attach_sql(cdm_file, vocab_file)   # one ATTACH ... (READ_ONLY) per file
 unlockBinding("connect", ns)
-assign("connect", function(...) {
-  conn <- original_connect(...)
-  for (stmt in attach_sql) executeSql(conn, stmt, progressBar = FALSE, reportOverallTime = FALSE)
-  conn
-}, envir = ns)
+assign("connect", omopduckdb::readonly_connect_wrapper(
+  original_connect, attach_sql,
+  execute = function(conn, sql) executeSql(conn, sql, progressBar = FALSE, reportOverallTime = FALSE)), envir = ns)
 lockBinding("connect", ns)
 on.exit({
   unlockBinding("connect", ns); assign("connect", original_connect, envir = ns); lockBinding("connect", ns)

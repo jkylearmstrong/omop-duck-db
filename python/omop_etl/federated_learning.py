@@ -8,8 +8,11 @@ sums and event totals. The coordinator runs Newton-Raphson on the summed aggrega
 
 Privacy: no row leaves a node, but aggregates are not anonymous. ``min_site_n`` refuses a node with too few rows, Cox
 time grids are optionally coarsened (``time_bin``) so a risk-set sum cannot isolate one patient, and
-``noise_scale`` adds Gaussian noise to every shared aggregate (a rough guard, not a formal differential-privacy
-guarantee; noisy fits no longer equal the pooled fit). A real deployment still needs transport security and a
+``noise_scale`` adds Gaussian noise to the shared aggregates: the logistic log-likelihood, gradient and Hessian, and the
+Cox event counts per time, covariate sums and risk-set sums (a rough guard, not a formal differential-privacy
+guarantee; noisy fits no longer equal the pooled fit). The row count ``n`` (already checked against ``min_site_n``) and
+the total event count are bookkeeping figures and are not blurred. A Cox fit whose noisy risk-set sum is not positive
+raises instead of silently dropping that time. A real deployment still needs transport security and a
 governance review of the shared aggregates.
 """
 
@@ -17,6 +20,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
+
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -77,7 +82,11 @@ class FederatedNode:
         p = 1.0 / (1.0 + np.exp(-eta))
         w = p * (1 - p)
         ll = float(np.sum(y * eta - np.logaddexp(0.0, eta)))
+        ll = float(self._blur(np.asarray(ll)))
         return {"n": len(y), "ll": ll, "grad": self._blur(X.T @ (y - p)), "hess": self._blur((X * w[:, None]).T @ X)}
+
+    def n_events(self, event: str) -> int:
+        return int((self._df[event] == 1).sum())
 
     # -- Cox ---------------------------------------------------------------------------------------
     def cox_grid(self, time: str, event: str, time_bin: float | None) -> np.ndarray:
@@ -106,7 +115,7 @@ class FederatedNode:
         if ev.any():
             np.add.at(d, np.searchsorted(grid, t[ev]), 1)
             sx = X[ev].sum(axis=0)
-        return {"n": len(t), "events": int(ev.sum()), "d": d, "sx": self._blur(sx),
+        return {"n": len(t), "events": int(ev.sum()), "d": self._blur(d), "sx": self._blur(sx),
                 "s0": self._blur(s0), "s1": self._blur(s1), "s2": self._blur(s2)}
 
 
@@ -150,30 +159,49 @@ def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str
     terms = ["(Intercept)", *covariates]
     pen = np.diag([0.0] + [float(l2)] * len(covariates))
     beta = np.zeros(len(terms))
+    exact = all(n._noise <= 0 for n in nodes)    # step-halving needs an exact log-likelihood
+
+    def evaluate(b):
+        parts = [n.logistic_stats(b, covariates, outcome) for n in nodes]
+        return (parts, sum(p["ll"] for p in parts) - 0.5 * float(b @ pen @ b),
+                sum(p["grad"] for p in parts) - pen @ b, sum(p["hess"] for p in parts) + pen)
+
+    parts, ll, grad, hess = evaluate(beta)
     trace, converged = [], False
     it = 0
     for it in range(1, max_iter + 1):
-        parts = [n.logistic_stats(beta, covariates, outcome) for n in nodes]
-        ll = sum(p["ll"] for p in parts) - 0.5 * float(beta @ pen @ beta)
-        grad = sum(p["grad"] for p in parts) - pen @ beta
-        hess = sum(p["hess"] for p in parts) + pen
         step = np.linalg.solve(hess + 1e-12 * np.eye(len(beta)), grad)
-        beta = beta + step
-        trace.append({"iter": it, "log_likelihood": ll, "max_abs_step": float(np.max(np.abs(step)))})
-        if np.max(np.abs(step)) < tol:
+        scale = 1.0
+        while True:
+            cand = evaluate(beta + scale * step)
+            if not exact or (np.isfinite(cand[1]) and cand[1] >= ll - 1e-10):
+                break
+            scale /= 2
+            if scale < 1e-10:
+                break
+        if scale < 1e-10:        # no step improves the likelihood: at a maximum, or numerically stuck
+            converged = bool(np.max(np.abs(step)) < tol)
+            break
+        beta = beta + scale * step
+        parts, ll, grad, hess = cand
+        trace.append({"iter": it, "log_likelihood": ll, "max_abs_step": float(np.max(np.abs(scale * step))), "step_scale": scale})
+        if np.max(np.abs(scale * step)) < tol:
             converged = True
             break
-    parts = [n.logistic_stats(beta, covariates, outcome) for n in nodes]
-    ll = sum(p["ll"] for p in parts) - 0.5 * float(beta @ pen @ beta)
-    hess = sum(p["hess"] for p in parts) + pen
+    if not converged:
+        separated = float(l2) == 0.0 and (np.max(np.abs(beta)) > 15 or ll > -1e-6 * max(1, sum(p["n"] for p in parts)))
+        warnings.warn("federated logistic regression did not converge in " + str(it) + " iterations"
+                      + ("; coefficients are very large, which usually means complete or quasi-complete separation "
+                         "(a covariate predicts the outcome perfectly). Drop or combine that covariate or set l2 > 0."
+                         if separated else "") + "; estimates and standard errors are unreliable.", UserWarning, stacklevel=2)
     cov = np.linalg.inv(hess)
     return FederatedFitResult("logistic", _summarise(terms, beta, cov, "odds_ratio", alpha), converged, it, ll,
                               sum(p["n"] for p in parts), None, {n.name: len(n) for n in nodes}, trace, cov)
 
 
 def federated_cox(sites, covariates: Sequence[str], time: str, event: str, *, max_iter: int = 50, tol: float = 1e-8,
-                  time_bin: float | None = None, min_site_n: int = 10, noise_scale: float = 0.0,
-                  seed: int | None = None, alpha: float = 0.05) -> FederatedFitResult:
+                  time_bin: float | None = None, min_site_n: int = 10, min_site_events: int = 0,
+                  noise_scale: float = 0.0, seed: int | None = None, alpha: float = 0.05) -> FederatedFitResult:
     """Cox proportional hazards (Breslow ties) by Newton-Raphson on per-event-time risk-set aggregates.
 
     Every site first reveals its distinct event times (coarsen with ``time_bin`` to limit this); the coordinator
@@ -185,25 +213,38 @@ def federated_cox(sites, covariates: Sequence[str], time: str, event: str, *, ma
     grid = np.unique(np.concatenate([n.cox_grid(time, event, time_bin) for n in nodes]))
     if grid.size == 0:
         raise ValueError("no events at any site")
+    for n in nodes:
+        if n.n_events(event) < min_site_events:
+            raise ValueError(f"site {n.name} has {n.n_events(event)} events, below min_site_events={min_site_events}")
     beta = np.zeros(len(covariates))
-    trace, converged = [], False
-    it = 0
-    for it in range(1, max_iter + 1):
-        parts = [n.cox_stats(beta, covariates, time, event, grid, time_bin) for n in nodes]
+
+    def evaluate(b):
+        parts = [n.cox_stats(b, covariates, time, event, grid, time_bin) for n in nodes]
         d = sum(p["d"] for p in parts)
         sx = sum(p["sx"] for p in parts)
         s0, s1, s2 = (sum(p[k] for p in parts) for k in ("s0", "s1", "s2"))
-        s0 = np.where(s0 > 0, s0, np.nan)
-        ll = float(sx @ beta - np.nansum(d * np.log(s0)))
+        if not (s0 > 0).all():
+            raise ValueError("a risk-set sum is not positive after noise; lower noise_scale, raise time_bin or "
+                             "min_site_n, or use more sites")
         xbar = s1 / s0[:, None]
-        grad = sx - np.nansum(d[:, None] * xbar, axis=0)
-        info = np.nansum(d[:, None, None] * (s2 / s0[:, None, None] - xbar[:, :, None] * xbar[:, None, :]), axis=0)
+        ll = float(sx @ b - np.sum(d * np.log(s0)))
+        grad = sx - np.sum(d[:, None] * xbar, axis=0)
+        info = np.sum(d[:, None, None] * (s2 / s0[:, None, None] - xbar[:, :, None] * xbar[:, None, :]), axis=0)
+        return parts, ll, grad, info
+
+    trace, converged = [], False
+    it = 0
+    for it in range(1, max_iter + 1):
+        _, ll, grad, info = evaluate(beta)
         step = np.linalg.solve(info + 1e-12 * np.eye(len(beta)), grad)
         beta = beta + step
         trace.append({"iter": it, "log_likelihood": ll, "max_abs_step": float(np.max(np.abs(step)))})
         if np.max(np.abs(step)) < tol:
             converged = True
             break
+    if not converged and all(n._noise <= 0 for n in nodes):    # noisy aggregates never settle to tol
+        warnings.warn(f"federated Cox fit did not converge in {it} iterations; estimates are unreliable.", UserWarning, stacklevel=2)
+    parts, ll, _, info = evaluate(beta)      # log-likelihood and covariance at the final coefficients
     cov = np.linalg.inv(info)
     return FederatedFitResult("cox", _summarise(covariates, beta, cov, "hazard_ratio", alpha), converged, it, ll,
                               sum(p["n"] for p in parts), int(sum(p["events"] for p in parts)),

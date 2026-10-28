@@ -85,11 +85,12 @@ def translate_cohort_sql(sql: str, dialect: str = "duckdb") -> list[str]:
     """Translates rendered OHDSI/T-SQL cohort SQL for ``dialect`` (``duckdb``, ``postgres``, ``tsql``, ``oracle``).
 
     Oracle gets an AST rewrite of ``DATEADD`` (day/week -> ``d + n``, month/year -> ``ADD_MONTHS``) and ``YEAR(d)`` -> ``EXTRACT(YEAR FROM d)`` that plain
-    sqlglot lacks. Only constructs the shipped cohort files use are covered; anything else: SqlRender.
+    sqlglot lacks. Only constructs the shipped cohort files use are covered; any other construct sqlglot cannot express in
+    Oracle raises ``UnsupportedError`` instead of emitting approximate SQL (use SqlRender then). Not yet run against a real Oracle database.
     """
     try:
         import sqlglot
-        from sqlglot import exp
+        from sqlglot import ErrorLevel, exp
     except ImportError as exc:  # pragma: no cover
         raise ImportError("translate_cohort_sql needs sqlglot: pip install omop-duck-db[sql]") from exc
     if dialect.lower() != "oracle":
@@ -100,7 +101,7 @@ def translate_cohort_sql(sql: str, dialect: str = "duckdb") -> list[str]:
             continue
         tree = tree.transform(lambda n: _oracle_dateadd(n) if isinstance(n, exp.DateAdd)
                               else exp.Extract(this=exp.var("YEAR"), expression=n.this) if isinstance(n, exp.Year) else n)
-        out.append(tree.sql(dialect="oracle"))
+        out.append(tree.sql(dialect="oracle", unsupported_level=ErrorLevel.RAISE))
     return [s for s in out if s.strip()]
 
 

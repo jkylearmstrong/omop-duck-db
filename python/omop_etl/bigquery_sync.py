@@ -28,6 +28,10 @@ _PROJECT = re.compile(r"^[A-Za-z0-9._:-]+$")
 Reader = Callable[[str, "Sequence[str] | None"], Iterable[Any]]
 
 
+class _EmptyTable(ValueError):
+    """The source returned no batches, so the table is missing or has no schema."""
+
+
 def _ident(name: str, what: str) -> str:
     if not isinstance(name, str) or not _IDENT.match(name):
         raise ValueError(f"{what} must be a plain identifier, got {name!r}")
@@ -43,7 +47,14 @@ def _bq_reader(billing_project: str | None, client: Any = None) -> Reader:
             except ImportError as exc:
                 raise ImportError("BigQuery sync needs google-cloud-bigquery: pip install omop-duck-db[bigquery]") from exc
             client = bigquery.Client(project=billing_project)
-        yield from client.list_rows(table_ref).to_arrow_iterable()
+        storage = None
+        try:
+            from google.cloud import bigquery_storage
+            storage = bigquery_storage.BigQueryReadClient()
+        except Exception:  # noqa: BLE001 - optional; falls back to the REST path (slow for large tables)
+            pass
+        rows = client.list_rows(table_ref)
+        yield from (rows.to_arrow_iterable(bqstorage_client=storage) if storage is not None else rows.to_arrow_iterable())
     return read
 
 
@@ -68,26 +79,49 @@ def read_bigquery_table(con: duckdb.DuckDBPyConnection, source: str, table: str,
     read = reader or _bq_reader(billing_project, client)
     ref = f"{src}.{tbl}"
 
+    schema = con.execute("SELECT current_schema()").fetchone()[0]
+    kind = con.execute("SELECT table_type FROM information_schema.tables WHERE table_schema = ? AND lower(table_name) = lower(?)",
+                       [schema, tbl]).fetchone()
+    if kind is not None and "VIEW" in kind[0].upper():
+        raise ValueError(f"target {schema}.{tbl} is a view; refusing to replace or append to it")
+    exists = kind is not None
+
+    # Stream into a staging table inside one transaction, then swap: a failure mid-stream leaves the target untouched.
+    stage, batch_view = f"_bq_new_{tbl}", f"_bq_batch_{tbl}"
+    own_txn = True
+    try:
+        con.execute("BEGIN TRANSACTION")
+    except duckdb.Error:  # already inside a caller's transaction: leave commit/rollback to the caller
+        own_txn = False
     n, started = 0, False
-    stage = f"_bq_stage_{tbl}"
-    for batch in read(ref, None):
-        if batch.num_rows == 0 and started:
-            continue
-        arrow = pa.Table.from_batches([batch])
-        con.register(stage, arrow)
-        try:
-            if not started:
-                exists = con.execute("SELECT count(*) FROM information_schema.tables WHERE lower(table_name) = lower(?)",
-                                     [tbl]).fetchone()[0] > 0
-                if mode == "overwrite" or not exists:
-                    con.execute(f'CREATE OR REPLACE TABLE "{tbl}" AS SELECT * FROM {stage} WHERE false')
-                started = True
-            con.execute(f'INSERT INTO "{tbl}" BY NAME SELECT * FROM {stage}')
-        finally:
-            con.unregister(stage)
-        n += batch.num_rows
-    if not started:
-        raise ValueError(f"BigQuery table {ref} returned no batches (not found or no schema)")
+    try:
+        con.execute(f'DROP TABLE IF EXISTS "{stage}"')
+        for batch in read(ref, None):
+            if batch.num_rows == 0 and started:
+                continue
+            con.register(batch_view, pa.Table.from_batches([batch]))
+            try:
+                if not started:
+                    con.execute(f'CREATE TABLE "{stage}" AS SELECT * FROM {batch_view} WHERE false')
+                    started = True
+                con.execute(f'INSERT INTO "{stage}" BY NAME SELECT * FROM {batch_view}')
+            finally:
+                con.unregister(batch_view)
+            n += batch.num_rows
+        if not started:
+            raise _EmptyTable(f"BigQuery table {ref} returned no batches (not found or no schema)")
+        if mode == "overwrite" or not exists:
+            con.execute(f'DROP TABLE IF EXISTS "{tbl}"')
+            con.execute(f'ALTER TABLE "{stage}" RENAME TO "{tbl}"')
+        else:
+            con.execute(f'INSERT INTO "{tbl}" BY NAME SELECT * FROM "{stage}"')
+            con.execute(f'DROP TABLE "{stage}"')
+    except BaseException:
+        if own_txn:
+            con.execute("ROLLBACK")
+        raise
+    if own_txn:
+        con.execute("COMMIT")
     return n
 
 
@@ -106,7 +140,8 @@ def sync_vocabulary_from_bigquery(con: duckdb.DuckDBPyConnection, source: str,
         try:
             out[t] = read_bigquery_table(con, source, t, billing_project=billing_project, mode=mode, reader=reader, client=client)
         except Exception as exc:  # noqa: BLE001 - BigQuery NotFound is not importable without the client
-            if skip_missing and (isinstance(exc, ValueError) or type(exc).__name__ == "NotFound"):
+            # Skip only "table not found" (BigQuery NotFound, or our empty-result error); validation errors still raise.
+            if skip_missing and (type(exc).__name__ == "NotFound" or isinstance(exc, _EmptyTable)):
                 continue
             raise
     return out

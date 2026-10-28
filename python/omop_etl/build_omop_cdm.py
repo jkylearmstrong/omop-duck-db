@@ -1360,6 +1360,30 @@ def _iso_date(value, name):
         raise ValueError(f"{name} must be a date like '1900-01-02', got {value!r}.") from exc
 
 
+def resolve_max_date(con, max_date=None, min_date="1900-01-02"):
+    """Resolves the data cutoff for observation periods (N2).
+
+    ``None`` keeps today (the extraction date). ``"auto"`` takes the latest clinical event date strictly before today, so
+    events a source fills with the build date do not extend the periods. Any other value must be an ISO date. Returns an ISO
+    date string, or ``None`` when ``max_date`` is ``None`` or ``"auto"`` finds no event.
+    """
+    if max_date is None:
+        return None
+    if isinstance(max_date, str) and max_date.lower() == "auto":
+        lo = _iso_date(min_date, "min_date")
+        row = con.execute(f"""
+            SELECT MAX(d) FROM (
+                SELECT MAX(visit_start_date) d FROM visit_occurrence WHERE visit_start_date < CURRENT_DATE AND visit_start_date >= DATE '{lo}'
+                UNION ALL SELECT MAX(visit_end_date) FROM visit_occurrence WHERE visit_end_date < CURRENT_DATE AND visit_end_date >= DATE '{lo}'
+                UNION ALL SELECT MAX(condition_start_date) FROM condition_occurrence WHERE condition_start_date < CURRENT_DATE AND condition_start_date >= DATE '{lo}'
+                UNION ALL SELECT MAX(procedure_date) FROM procedure_occurrence WHERE procedure_date < CURRENT_DATE AND procedure_date >= DATE '{lo}'
+                UNION ALL SELECT MAX(drug_exposure_start_date) FROM drug_exposure WHERE drug_exposure_start_date < CURRENT_DATE AND drug_exposure_start_date >= DATE '{lo}'
+                UNION ALL SELECT MAX(measurement_date) FROM measurement WHERE measurement_date < CURRENT_DATE AND measurement_date >= DATE '{lo}'
+            )""").fetchone()[0]
+        return None if row is None else row.isoformat()
+    return _iso_date(max_date, "max_date")
+
+
 def load_enrollment_spans(con, source_dir, site_id=None, disambiguate_patids=False,
                           min_date="1900-01-02", max_date=None):
     """Builds ``_enrollment_spans(person_id, start_date, end_date)`` from the PCORnet ENROLLMENT file (FR-C10).
@@ -1410,14 +1434,16 @@ def build_observation_period(con, min_date="1900-01-02", max_date=None, use_enro
     dated before ``min_date`` (default 1900-01-02: SAS/Excel zero dates such as 1840-12-31 and 1899-12-30 and
     ``1900-01-01`` placeholders) or after ``max_date`` (default: today, the extraction date) are ignored. A person
     with no plausible event gets no observation period. Pass the source's real data cutoff as ``max_date`` when events
-    are filled with the build date, which today's date cannot distinguish from a genuine event.
+    are filled with the build date, which today's date cannot distinguish from a genuine event; ``max_date="auto"``
+    uses the latest event dated before today (see :func:`resolve_max_date`).
 
     ``use_enrollment=True`` (needs ``_enrollment_spans`` from :func:`load_enrollment_spans`) writes each person's real
     enrolment spans with ``period_type_concept_id = enrollment_type_concept_id`` (default 0: set your site's concept)
     and keeps the event-span rule only for people with no enrolment record.
     """
     lo = _iso_date(min_date, "min_date")
-    hi = f"DATE '{_iso_date(max_date, 'max_date')}'" if max_date is not None else "CURRENT_DATE"
+    cutoff = resolve_max_date(con, max_date, min_date)
+    hi = f"DATE '{cutoff}'" if cutoff is not None else "CURRENT_DATE"
     con.execute("DELETE FROM observation_period;")
     if use_enrollment:
         enr_type = int(enrollment_type_concept_id)
@@ -1675,6 +1701,7 @@ def etl_pcornet(
     key_check_callback=None,
     use_enrollment="auto",
     enrollment_type_concept_id=0,
+    data_cutoff=None,
 ):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline.
 
@@ -1684,6 +1711,9 @@ def etl_pcornet(
 
     ``use_enrollment`` ('auto' | True | False) builds ``observation_period`` from the PCORnet ENROLLMENT file when the
     source has one (see ``build_observation_period``); people without an enrolment record keep the event-span period.
+
+    ``data_cutoff`` (None | ISO date | ``"auto"``) caps observation-period ends (N2): None keeps today, ``"auto"`` uses
+    the latest event dated before today, so build-date placeholders do not set period ends.
 
     ``auto_resources=True`` sizes DuckDB to the host (see ``omop_etl.resources.configure_resources``);
     explicit ``memory_limit`` / ``threads`` / ``temp_dir`` still win over the detected values.
@@ -1735,12 +1765,14 @@ def etl_pcornet(
     load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
 
+    cutoff = resolve_max_date(con, data_cutoff)
     enrolled = False
     if use_enrollment in ("auto", True):
-        enrolled = load_enrollment_spans(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids) > 0
+        enrolled = load_enrollment_spans(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids,
+                                         max_date=cutoff) > 0
         if use_enrollment is True and not enrolled:
             raise FileNotFoundError(f"use_enrollment=True but {source_dir} has no ENROLLMENT file with usable rows.")
-    build_observation_period(con, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
+    build_observation_period(con, max_date=cutoff, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
     build_drug_era(con)
     build_condition_era(con)
     load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)

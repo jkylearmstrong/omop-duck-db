@@ -78,6 +78,29 @@ readonly_attach_sql <- function(cdm_db, vocab_db = NULL, cdm_alias = "cdm", voca
   out
 }
 
+#' Wrap a connect function so every connection attaches the CDM read-only
+#'
+#' DatabaseConnector cannot `ATTACH` on connect, and HADES opens several connections per run. This returns a function
+#' with the same arguments as `connect` that opens the connection and then runs each statement of
+#' [readonly_attach_sql()] on it. `cohorts/run_plp_readonly_example.R` patches `DatabaseConnector::connect` with it for
+#' one R session.
+#'
+#' @param connect The connect function to wrap, for example `DatabaseConnector::connect`.
+#' @param attach_sql Statements from [readonly_attach_sql()].
+#' @param execute Function `(connection, sql)` that runs one statement; defaults to `DBI::dbExecute`. Pass
+#'   `function(conn, sql) DatabaseConnector::executeSql(conn, sql, progressBar = FALSE, reportOverallTime = FALSE)`
+#'   for DatabaseConnector connections.
+#' @return A function that returns the connection after attaching.
+#' @export
+readonly_connect_wrapper <- function(connect, attach_sql, execute = function(conn, sql) DBI::dbExecute(conn, sql)) {
+  force(connect); force(attach_sql); force(execute)
+  function(...) {
+    conn <- connect(...)
+    for (stmt in attach_sql) execute(conn, stmt)
+    conn
+  }
+}
+
 #' Checkpoint a DuckDB file so it can be distributed and attached `READ_ONLY`
 #'
 #' DuckDB refuses `ATTACH ... (READ_ONLY)` while a `<file>.wal` write-ahead log exists ("WAL replay is required").
