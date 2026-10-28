@@ -69,6 +69,9 @@ def create_parser() -> argparse.ArgumentParser:
                               help="Build observation_period from the PCORnet ENROLLMENT file.")
     build_parser.add_argument("--enrollment-type-concept-id", type=int, default=0,
                               help="period_type_concept_id for enrolment-derived periods.")
+    build_parser.add_argument("--data-cutoff", default=None, metavar="YYYY-MM-DD|auto",
+                              help="Cap observation_period ends: an ISO date, or 'auto' for the latest event before today "
+                                   "(default: today).")
     _add_manifest_args(build_parser)
 
     # 2. DQD
@@ -77,7 +80,7 @@ def create_parser() -> argparse.ArgumentParser:
     dqd_parser.add_argument("--output", "-o", default=None, help="Path to output report file (JSON or MD).")
     dqd_parser.add_argument("--full", action="store_true", help="Also run the schema-driven check catalog over every CDM table.")
 
-    ach = subparsers.add_parser("achilles", help="Run in-database Achilles analyses; writes achilles_results* tables into the DB.")
+    ach = subparsers.add_parser("achilles", help="Run in-database Achilles analyses (a subset of the ~170 in the R package; see achilles_analysis_catalog()); writes achilles_results* tables into the DB.")
     ach.add_argument("--db", "-d", required=True, help="DuckDB CDM file (opened read-write: results tables are created in it).")
     ach.add_argument("--analysis", "-a", type=int, nargs="*", default=None, help="Analysis ids (default: all implemented).")
     ach.add_argument("--min-cell-count", type=int, default=0, help="Drop result rows with count_value below this.")
@@ -298,6 +301,7 @@ def handle_build(args: argparse.Namespace) -> int:
             key_check=args.key_check,
             use_enrollment={"auto": "auto", "true": True, "false": False}[args.use_enrollment],
             enrollment_type_concept_id=args.enrollment_type_concept_id,
+            data_cutoff=args.data_cutoff,
             key_check_callback=lambda report: [
                 m.add_step(f"key_check:{r['table']}.{r['id_column']}", r["distinct_ids"], distinct_keys=r["distinct_keys"],
                            lost=r["lost"], ok=r["ok"], cdm_table=r["cdm_table"], cdm_rows=r["cdm_rows"])

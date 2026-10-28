@@ -29,6 +29,7 @@ Suggests:
     SqlRender,
     googledrive,
     bigrquery,
+    bit64,
     CommonDataModel,
     covr,
     xml2,

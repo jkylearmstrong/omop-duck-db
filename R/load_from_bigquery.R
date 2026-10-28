@@ -15,6 +15,10 @@
 #' is required even for public datasets -- BigQuery needs a project to
 #' attribute query cost/quota to.
 #'
+#' Tables are downloaded whole into R memory (64-bit ids are kept exact as `integer64`), so very large tables such as
+#' `concept_relationship` may not fit; use the Python `sync_vocabulary_from_bigquery()` (Arrow streaming) for a full
+#' Athena release.
+#'
 #' @param billing_project Your own GCP project ID, used for query billing/quota.
 #'   Defaults to `billing_project` in `config/bigquery.yml`.
 #' @param dataset `"source_project.dataset_id"`, e.g.
@@ -58,7 +62,7 @@ load_from_bigquery <- function(billing_project = NULL,
   for (tbl in tables) {
     cat("Downloading", paste(source_project, dataset_id, tbl, sep = "."), "(billed to", billing_project, ") ...\n")
     bq_tbl <- bigrquery::bq_table(project = source_project, dataset = dataset_id, table = tbl)
-    df <- bigrquery::bq_table_download(bq_tbl, billing_project = billing_project)
+    df <- bigrquery::bq_table_download(bq_tbl, billing = billing_project, bigint = "integer64")
     cat("  ->", nrow(df), "rows fetched from BigQuery\n")
 
     if (tbl %in% existing_tables) {

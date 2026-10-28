@@ -277,3 +277,21 @@ test_that("hades_needs_integer64 only reports ids at or above 2^53; hades_set_in
   hades_set_integer64()
   expect_false(getOption("databaseConnectorInteger64AsNumeric"))
 })
+
+test_that("readonly_connect_wrapper attaches the CDM read-only on every connection (N5)", {
+  cdm <- tempfile(fileext = ".duckdb"); scratch <- tempfile(fileext = ".duckdb")
+  on.exit(unlink(c(cdm, scratch, paste0(cdm, ".wal"), paste0(scratch, ".wal"))), add = TRUE)
+  w <- DBI::dbConnect(duckdb::duckdb(), dbdir = cdm)
+  DBI::dbExecute(w, "CREATE TABLE person (person_id INTEGER); INSERT INTO person VALUES (1), (2)")
+  DBI::dbDisconnect(w, shutdown = TRUE)
+
+  connect <- function(server) DBI::dbConnect(duckdb::duckdb(), dbdir = server)
+  wrapped <- readonly_connect_wrapper(connect, readonly_attach_sql(cdm))
+  for (i in 1:2) {                                   # HADES opens several connections per run
+    con <- wrapped(scratch)
+    expect_equal(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM cdm.main.person")$n, 2)
+    expect_error(DBI::dbExecute(con, "INSERT INTO cdm.main.person VALUES (3)"), "read-only|read only", ignore.case = TRUE)
+    DBI::dbExecute(con, "CREATE TABLE IF NOT EXISTS main.cohort (subject_id BIGINT)")   # scratch stays writable
+    DBI::dbDisconnect(con)
+  }
+})

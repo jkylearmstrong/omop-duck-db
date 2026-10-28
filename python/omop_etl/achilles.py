@@ -132,8 +132,10 @@ def achilles_analysis_catalog() -> pd.DataFrame:
 
 
 def _columns(con: duckdb.DuckDBPyConnection) -> dict[str, set[str]]:
+    # Only the schema unqualified names resolve to: a same-named table in another schema or attached catalog (for
+    # example central_vocab) must not hide a missing CDM table or column.
     rows = con.execute("SELECT lower(table_name), lower(column_name) FROM information_schema.columns "
-                       "WHERE table_schema NOT IN ('information_schema', 'pg_catalog')").fetchall()
+                       "WHERE table_catalog = current_database() AND table_schema = current_schema()").fetchall()
     out: dict[str, set[str]] = {}
     for t, c in rows:
         out.setdefault(t, set()).add(c)
@@ -147,7 +149,9 @@ def run_achilles(con: duckdb.DuckDBPyConnection, analysis_ids: Sequence[int] | N
     """Runs the Achilles analyses on a DuckDB OMOP CDM and stores the results in DuckDB tables.
 
     ``min_cell_count`` > 0 drops result rows with ``count_value`` below it (Achilles' small-cell guard; ``0`` keeps
-    all rows). Returns ``{"run": [ids], "skipped": {id: reason}, "n_rows": int, "n_dist_rows": int}``.
+    all rows). This differs from the R package, which masks small cells instead of removing them; rows for groups
+    smaller than the threshold (including their min / max / median in the distribution table) are simply absent here.
+    Re-running an analysis replaces its earlier rows. Returns ``{"run": [ids], "skipped": {id: reason}, "n_rows": int, "n_dist_rows": int}``.
     """
     for name in (results_table, dist_table, analysis_table):
         if not name.replace("_", "").isalnum():
@@ -178,6 +182,7 @@ def run_achilles(con: duckdb.DuckDBPyConnection, analysis_ids: Sequence[int] | N
             skipped[aid] = "missing " + ", ".join(sorted(set(missing)))
             continue
         target = dist_table if an.dist else results_table
+        con.execute(f"DELETE FROM {target} WHERE analysis_id = {aid}")   # re-runs replace, never duplicate, an analysis
         con.execute(f"INSERT INTO {target} BY NAME SELECT {aid} AS analysis_id, * FROM ({an.select}){cut}")
         con.execute(f"DELETE FROM {analysis_table} WHERE analysis_id = {aid}")
         con.execute(f"INSERT INTO {analysis_table} VALUES ({aid}, ?, {int(an.dist)})", [an.name])

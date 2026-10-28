@@ -21,7 +21,8 @@ etl_pcornet(
   key_check = c("warn", "raise", "ignore"),
   key_check_callback = NULL,
   use_enrollment = "auto",
-  enrollment_type_concept_id = 0L
+  enrollment_type_concept_id = 0L,
+  data_cutoff = NULL
 )
 }
 \arguments{
@@ -72,6 +73,9 @@ file when the source has one (\code{\link[=load_enrollment_spans]{load_enrollmen
 event-span period. \code{TRUE} fails if no usable ENROLLMENT file exists.}
 
 \item{enrollment_type_concept_id}{\code{period_type_concept_id} for enrolment-derived periods (default 0).}
+
+\item{data_cutoff}{\code{NULL} (default, today), an ISO date or \code{"auto"}: caps \code{observation_period} ends. \code{"auto"} uses the
+latest event dated before today, so events filled with the build date do not set period ends.}
 }
 \value{
 Invisibly, \code{db_path}.

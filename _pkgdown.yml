@@ -188,6 +188,7 @@ reference:
   - hades_preflight
   - hades_needs_integer64
   - readonly_attach_sql
+  - readonly_connect_wrapper
   - checkpoint_database
   - hades_set_integer64
   - plp_database_details

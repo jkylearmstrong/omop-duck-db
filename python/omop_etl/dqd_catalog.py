@@ -5,11 +5,15 @@ DDL (``load_cdm_schema``) so every table and field of the CDM is covered, one ba
 
 * ``cdmTable`` / ``cdmField``      - the table / column exists (conformance)
 * ``isRequired``                   - NOT NULL columns hold no NULL (conformance)
-* ``isPrimaryKey``                 - ``<table>_id`` is unique (conformance)
+* ``isPrimaryKey``                 - the table's key (``<table>_id``, or the CDM key for ``death``, ``concept`` etc.) is unique (conformance)
 * ``isForeignKey``                 - ids resolve in person / visit / provider / care_site / location / concept (conformance)
 * ``measureValueCompleteness``     - share of NULLs per field (completeness)
 * ``standardConceptRecordCompleteness`` - share of ``*_concept_id = 0`` per field (completeness)
+* ``visitPersonMatch``             - a row's ``visit_occurrence_id`` points at a visit of the same ``person_id`` (conformance)
 * ``plausibleStartBeforeEnd``, ``plausibleAfterBirth``, ``plausibleBeforeDeath``, ``plausibleFutureDate`` (plausibility)
+
+``plausibleFutureDate`` also flags ``observation_period`` ends set to the build date (the ETL default ``max_date``); read
+those as a known artefact of the build date, not a regression.
 
 Results use the OHDSI DQD JSON shape (Metadata / Overview / CheckResults) with ``category`` and ``context`` (Kahn
 framework) added. This is a generated structural/temporal catalog, not the full ~4000-check OHDSI list: concept-level
@@ -31,17 +35,21 @@ from omop_etl.jsonio import strict_dumps
 
 __all__ = ["run_dqd_catalog", "run_dqd_full", "DQD_CATALOG_CHECKS"]
 
-DQD_CATALOG_CHECKS = ("cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "measureValueCompleteness",
+DQD_CATALOG_CHECKS = ("cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "visitPersonMatch", "measureValueCompleteness",
                       "standardConceptRecordCompleteness", "plausibleStartBeforeEnd", "plausibleAfterBirth",
                       "plausibleBeforeDeath", "plausibleFutureDate")
 _KAHN = {"cdmTable": ("Conformance", "Verification"), "cdmField": ("Conformance", "Verification"),
          "isRequired": ("Conformance", "Verification"), "isPrimaryKey": ("Conformance", "Verification"),
-         "isForeignKey": ("Conformance", "Verification"), "measureValueCompleteness": ("Completeness", "Verification"),
+         "isForeignKey": ("Conformance", "Verification"), "visitPersonMatch": ("Conformance", "Verification"),
+         "measureValueCompleteness": ("Completeness", "Verification"),
          "standardConceptRecordCompleteness": ("Completeness", "Verification"),
          "plausibleStartBeforeEnd": ("Plausibility", "Validation"), "plausibleAfterBirth": ("Plausibility", "Validation"),
          "plausibleBeforeDeath": ("Plausibility", "Validation"), "plausibleFutureDate": ("Plausibility", "Validation")}
 _FK = {"person_id": "person", "visit_occurrence_id": "visit_occurrence", "preceding_visit_occurrence_id": "visit_occurrence",
        "visit_detail_id": "visit_detail", "provider_id": "provider", "care_site_id": "care_site", "location_id": "location"}
+# CDM keys that are not ``<table>_id``
+_PK = {"death": "person_id", "concept_class": "concept_class_id", "vocabulary": "vocabulary_id", "domain": "domain_id",
+       "relationship": "relationship_id", "concept": "concept_id", "cohort_definition": "cohort_definition_id"}
 _VOCAB = {"concept", "vocabulary", "domain", "concept_class", "relationship", "concept_relationship", "concept_ancestor",
           "concept_synonym", "drug_strength", "source_to_concept_map", "cdm_source", "metadata", "cohort_definition"}
 
@@ -61,7 +69,7 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
     want = {t.lower() for t in tables} if tables else None
     today = today or datetime.date.today()
     info = con.execute("SELECT lower(table_name), lower(column_name), upper(data_type) FROM information_schema.columns "
-                       "WHERE table_schema NOT IN ('information_schema', 'pg_catalog')").fetchall()
+                       "WHERE table_catalog = current_database() AND table_schema = current_schema()").fetchall()
     present: dict[str, dict[str, str]] = {}
     for t, c, d in info:
         present.setdefault(t, {})[c] = d
@@ -100,7 +108,7 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
             aggs.append(f"count(*) FILTER (WHERE {_q(c.name)} IS NULL)")
             aggs.append(f"count(*) FILTER (WHERE {_q(c.name)} = 0)" if c.name.endswith("_concept_id") else "0")
         row = con.execute(f"SELECT {', '.join(aggs)} FROM {_q(tbl)}").fetchone() if usable else ()
-        pk = f"{tbl}_id"
+        pk = _PK.get(tbl, f"{tbl}_id")
         for i, c in enumerate(usable):
             nulls, zeros = row[2 * i], row[2 * i + 1]
             if not c.nullable:
@@ -120,6 +128,10 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
                     v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t WHERE t.{_q(c.name)} IS NOT NULL AND NOT EXISTS "
                                     f"(SELECT 1 FROM {_q(ref)} r WHERE r.{_q(rid)} = t.{_q(c.name)})").fetchone()[0]
                     add("isForeignKey", tbl, c.name, f"{tbl}.{c.name} resolves in {ref}.{rid}.", v, n, threshold_pct)
+                    if ref == "visit_occurrence" and c.name == "visit_occurrence_id" and "person_id" in have and "person_id" in present[ref]:
+                        v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t JOIN {_q(ref)} r ON r.{_q(rid)} = t.{_q(c.name)} "
+                                        f"WHERE t.person_id IS NOT NULL AND r.person_id <> t.person_id").fetchone()[0]
+                        add("visitPersonMatch", tbl, c.name, f"{tbl}.person_id equals the person of its visit_occurrence.", v, n, threshold_pct)
             elif c.name.endswith("_concept_id") and concept_rows and tbl != "concept" and n:
                 v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t WHERE t.{_q(c.name)} IS NOT NULL AND t.{_q(c.name)} <> 0 AND NOT EXISTS "
                                 f"(SELECT 1 FROM concept r WHERE r.concept_id = t.{_q(c.name)})").fetchone()[0]

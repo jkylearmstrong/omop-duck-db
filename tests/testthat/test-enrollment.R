@@ -37,3 +37,26 @@ test_that("use_enrollment = TRUE without an ENROLLMENT file fails; bad values ar
                "no ENROLLMENT file")
   expect_error(etl_pcornet(fixture_dir(), db, use_enrollment = "maybe"), "use_enrollment must be")
 })
+
+test_that("data_cutoff = 'auto' caps observation_period ends at the latest event before today (N2)", {
+  db <- tempfile(fileext = ".duckdb")
+  on.exit(unlink(db))
+  build_schema(db_path = db)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  DBI::dbExecute(con, "INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id,
+    ethnicity_concept_id) VALUES (1, 8507, 1980, 8527, 38003563)")
+  for (d in c("2020-01-05", "2023-04-01", format(Sys.Date()))) {
+    DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id,
+      visit_start_date, visit_end_date, visit_type_concept_id) VALUES (%d, 1, 9201, DATE '%s', DATE '%s', 0)",
+      match(d, c("2020-01-05", "2023-04-01", format(Sys.Date()))), d, d))
+  }
+  expect_null(omopduckdb:::.resolve_max_date(con, NULL))
+  expect_equal(omopduckdb:::.resolve_max_date(con, "auto"), "2023-04-01")
+  capture.output(build_observation_period(con))
+  expect_equal(as.character(DBI::dbGetQuery(con, "SELECT max(observation_period_end_date) AS e FROM observation_period")$e),
+               format(Sys.Date()))
+  capture.output(build_observation_period(con, max_date = "auto"))
+  expect_equal(as.character(DBI::dbGetQuery(con, "SELECT max(observation_period_end_date) AS e FROM observation_period")$e),
+               "2023-04-01")
+})

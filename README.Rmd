@@ -842,5 +842,7 @@ Configure the target Drive folder in `config/gdrive.yml` (copy from
   to concept_id 0.
 - A handful of source fields (e.g. admission source) aren't mapped yet; see
   inline comments in the ETL code for specifics.
-- The Python side doesn't yet have its own BigQuery connector — use the R
-  connector for that, either way, into the same database file.
+- The Python side syncs vocabulary tables from BigQuery with `sync_vocabulary_from_bigquery()` (needs
+  `pip install omop-duck-db[bigquery]`); the R connector remains the route for other BigQuery tables. The Python
+  BigQuery sync and the Oracle cohort-SQL translation are unit-tested only (fake Arrow reader, generated SQL); neither
+  has been run against a live BigQuery project or an Oracle database.

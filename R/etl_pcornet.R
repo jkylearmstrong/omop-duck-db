@@ -35,6 +35,8 @@
 #'   file when the source has one ([load_enrollment_spans()]); people without an enrolment record keep the
 #'   event-span period. `TRUE` fails if no usable ENROLLMENT file exists.
 #' @param enrollment_type_concept_id `period_type_concept_id` for enrolment-derived periods (default 0).
+#' @param data_cutoff `NULL` (default, today), an ISO date or `"auto"`: caps `observation_period` ends. `"auto"` uses the
+#'   latest event dated before today, so events filled with the build date do not set period ends.
 #' @return Invisibly, `db_path`.
 #' @export
 etl_pcornet <- function(
@@ -54,7 +56,8 @@ etl_pcornet <- function(
     key_check = c("warn", "raise", "ignore"),
     key_check_callback = NULL,
     use_enrollment = "auto",
-    enrollment_type_concept_id = 0L
+    enrollment_type_concept_id = 0L,
+    data_cutoff = NULL
 ) {
   key_check <- match.arg(key_check)
   if (!(isTRUE(use_enrollment) || isFALSE(use_enrollment) || identical(use_enrollment, "auto"))) {
@@ -104,14 +107,16 @@ etl_pcornet <- function(
   .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
 
+  cutoff <- .resolve_max_date(con, data_cutoff)
   enrolled <- FALSE
   if (!isFALSE(use_enrollment)) {
-    enrolled <- load_enrollment_spans(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids) > 0
+    enrolled <- load_enrollment_spans(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids,
+                                      max_date = cutoff) > 0
     if (isTRUE(use_enrollment) && !enrolled) {
       stop("use_enrollment = TRUE but ", source_dir, " has no ENROLLMENT file with usable rows.")
     }
   }
-  build_observation_period(con, use_enrollment = enrolled, enrollment_type_concept_id = enrollment_type_concept_id)
+  build_observation_period(con, max_date = cutoff, use_enrollment = enrolled, enrollment_type_concept_id = enrollment_type_concept_id)
   build_drug_era(con)
   build_condition_era(con)
   .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name)
@@ -1198,6 +1203,25 @@ load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_pat
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_death;")
 }
 
+# Resolves the data cutoff for observation periods (N2): NULL keeps today; "auto" is the latest clinical event dated
+# before today (so build-date placeholders do not extend periods); otherwise an ISO date. Returns an ISO string or NULL.
+.resolve_max_date <- function(con, max_date = NULL, min_date = "1900-01-02") {
+  if (is.null(max_date)) return(NULL)
+  if (identical(tolower(as.character(max_date)), "auto")) {
+    lo <- format(as.Date(min_date), "%Y-%m-%d")
+    cols <- list(visit_occurrence = c("visit_start_date", "visit_end_date"), condition_occurrence = "condition_start_date",
+                 procedure_occurrence = "procedure_date", drug_exposure = "drug_exposure_start_date",
+                 measurement = "measurement_date")
+    parts <- unlist(lapply(names(cols), function(t) sprintf(
+      "SELECT MAX(%1$s) AS d FROM %2$s WHERE %1$s < CURRENT_DATE AND %1$s >= DATE '%3$s'", cols[[t]], t, lo)))
+    d <- DBI::dbGetQuery(con, sprintf("SELECT MAX(d) AS d FROM (%s)", paste(parts, collapse = " UNION ALL ")))$d
+    return(if (is.na(d)) NULL else format(as.Date(d), "%Y-%m-%d"))
+  }
+  d <- tryCatch(as.Date(max_date), error = function(e) NA)
+  if (length(d) != 1L || is.na(d)) stop("`max_date` must be a date like '2024-12-31' or \"auto\".", call. = FALSE)
+  format(d, "%Y-%m-%d")
+}
+
 #' Synthesize Observation Period envelopes
 #'
 #' The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events dated
@@ -1207,7 +1231,7 @@ load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_pat
 #' @param con Active DuckDB connection
 #' @param min_date Earliest plausible event date (default `"1900-01-02"`).
 #' @param max_date Latest plausible event date; default `NULL` is today (the extraction date). Pass the source's data
-#'   cutoff when events are filled with the build date.
+#'   cutoff when events are filled with the build date, or `"auto"` for the latest event dated before today.
 #' @param use_enrollment Logical. If `TRUE` (needs `_enrollment_spans` from [load_enrollment_spans()]), write each
 #'   person's real enrolment spans with `period_type_concept_id = enrollment_type_concept_id` and keep the event-span
 #'   rule only for people with no enrolment record.
@@ -1222,7 +1246,8 @@ build_observation_period <- function(con, min_date = "1900-01-02", max_date = NU
     format(d, "%Y-%m-%d")
   }
   lo <- as_iso(min_date, "min_date")
-  hi <- if (is.null(max_date)) "CURRENT_DATE" else sprintf("DATE '%s'", as_iso(max_date, "max_date"))
+  cutoff <- .resolve_max_date(con, max_date, min_date)
+  hi <- if (is.null(cutoff)) "CURRENT_DATE" else sprintf("DATE '%s'", cutoff)
   DBI::dbExecute(con, "DELETE FROM observation_period;")
   if (isTRUE(use_enrollment)) {
     run_insert(con, "OBSERVATION_PERIOD (enrolment spans)", sprintf("

@@ -1,7 +1,7 @@
 # Local ATLAS + WebAPI + PostgreSQL for importing cohorts/*.circe.json (ATLAS 2.13+ supports DateAdjustment; WebAPI 2.14 and 2.15 cannot generate cohorts on a DuckDB source ("Unsupported data source dialect: duckdb")).
 #   docker compose -f scripts/atlas/docker-compose.yml up -d
 #   python scripts/atlas/import_circe.py --webapi http://localhost:18080/WebAPI
-# Ports are deliberately non-default (WebAPI 18080, ATLAS 18081, PostgreSQL 15432). Throwaway credentials, local use only.
+# Ports are deliberately non-default (WebAPI 18080, ATLAS 18081, PostgreSQL 15432). Throwaway credentials; ports bind to 127.0.0.1 only because WebAPI runs with DisabledSecurity and open CORS.
 services:
   postgres:
     image: postgres:16
@@ -9,7 +9,7 @@ services:
       POSTGRES_USER: ohdsi
       POSTGRES_PASSWORD: ohdsi_local_only
       POSTGRES_DB: ohdsi
-    ports: ["15432:5432"]
+    ports: ["127.0.0.1:15432:5432"]
     volumes: ["./initdb:/docker-entrypoint-initdb.d:ro"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ohdsi"]
@@ -19,10 +19,9 @@ services:
     image: ohdsi/webapi:2.15.2
     depends_on:
       postgres: {condition: service_healthy}
-    ports: ["18080:8080"]
+    ports: ["127.0.0.1:18080:8080"]
     volumes:
-      # DuckDB JDBC driver (download duckdb_jdbc-<version>.jar from Maven Central; match the DuckDB that wrote the CDM file)
-      - ./jdbc/duckdb_jdbc.jar:/var/lib/ohdsi/webapi/WEB-INF/lib/duckdb_jdbc.jar:ro
+      # No DuckDB JDBC mount: WebAPI rejects DuckDB sources, and a missing ./jdbc/duckdb_jdbc.jar (gitignored) made Docker create a directory there.
       - ./data:/data
     environment:
       DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
@@ -46,6 +45,6 @@ services:
   atlas:
     image: ohdsi/atlas:2.15.0
     depends_on: [webapi]
-    ports: ["18081:8080"]
+    ports: ["127.0.0.1:18081:8080"]
     environment:
       WEBAPI_URL: http://localhost:18080/WebAPI/

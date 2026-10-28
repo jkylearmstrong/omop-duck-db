@@ -51,6 +51,7 @@ def main() -> int:
     ap.add_argument("--webapi", default="http://localhost:18080/WebAPI")
     ap.add_argument("--cohorts", default=str(ROOT / "cohorts"))
     ap.add_argument("--wait", type=int, default=300, help="seconds to wait for WebAPI to come up")
+    ap.add_argument("--cleanup", action="store_true", help="delete the cohort definitions this run created, after checking them")
     a = ap.parse_args()
 
     info = wait_ready(a.webapi, a.wait)
@@ -72,6 +73,8 @@ def main() -> int:
         good = same and len(text) > 200 and "@target_cohort_id" in text
         ok &= good
         print(f"{'OK  ' if good else 'FAIL'} {f.name}: id={cid} round_trip={same} sql_chars={len(text)}")
+        if a.cleanup:
+            call(a.webapi, "DELETE", f"/cohortdefinition/{cid}")
     return 0 if ok else 1
 
 
