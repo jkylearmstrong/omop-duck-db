@@ -688,6 +688,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
             COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             CASE UPPER(src.ENC_TYPE)
                 WHEN 'IP' THEN 9201 -- Inpatient
+                WHEN 'EI' THEN 262 -- Emergency Room and Inpatient Visit (PCORnet emergency-to-inpatient; an index stay with 9201)
                 WHEN 'OS' THEN 581385 -- Observation Room (never an index inpatient stay; still counts as prior utilization)
                 WHEN 'ED' THEN 9203 -- Emergency
                 WHEN 'AV' THEN 9202 -- Outpatient

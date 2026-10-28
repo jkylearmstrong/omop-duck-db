@@ -711,7 +711,7 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
                       AND co.condition_start_date <= v.visit_start_date
                       AND (
                           co.condition_concept_id IN (201820, 201254, 435222, 443729, 443730, 443731, 443732, 443733, 443734, 443735, 4016045)
-                          OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E13)')
+                          OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E12|E13)')
                       )
                 )
                 OR EXISTS (
@@ -2457,7 +2457,7 @@ def build_ederri_diabetes_cohort(
     """
     return define_study_cohort(
         con,
-        visit_type="inpatient",
+        visit_type=[9201, 262],        # inpatient + emergency-to-inpatient (PCORnet IP and EI)
         require_diabetes=True,
         min_age=18,
         min_los_days=1,

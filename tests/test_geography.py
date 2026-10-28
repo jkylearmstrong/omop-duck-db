@@ -284,3 +284,29 @@ def test_diabetes_phenotype_uses_every_hba1c_loinc_of_the_sas_extraction():
                   f"measurement_type_concept_id) VALUES ({pid}, {pid}, {cid}, DATE '2020-01-01', {val}, 0)")
     out = build_ederri_diabetes_cohort(c)
     assert sorted(out["subject_id"]) == [1, 2, 3, 4, 5]
+
+
+def test_emergency_to_inpatient_is_an_index_stay_for_the_ederri_cohort(tmp_path):
+    import shutil
+
+    from omop_etl import build_ederri_diabetes_cohort, load_visit_occurrence
+
+    src = tmp_path / "src"
+    shutil.copytree(SAMPLE_DIR, src)
+    (src / "encounter.csv").write_text(
+        "ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,ADMIT_TIME,DISCHARGE_DATE,DISCHARGE_TIME,PROVIDERID,FACILITYID,DISCHARGE_STATUS\n"
+        "E1,FAKE-P001,EI,2020-03-01,08:00,2020-03-05,11:00,,,HO\n", encoding="utf-8")
+    con = duckdb.connect()
+    build_schema(con)
+    load_macros(con)
+    load_person(con, str(src))
+    load_visit_occurrence(con, str(src))
+    assert con.execute("SELECT visit_concept_id FROM visit_occurrence").fetchone()[0] == 262
+    pid = con.execute("SELECT person_id FROM visit_occurrence").fetchone()[0]
+    con.execute("UPDATE person SET year_of_birth = 1960 WHERE person_id = ?", [pid])
+    con.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, "
+                "observation_period_end_date, period_type_concept_id) VALUES (1, ?, DATE '2015-01-01', DATE '2022-01-01', 0)", [pid])
+    con.execute("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, "
+                "condition_type_concept_id, condition_source_value) VALUES (1, ?, 0, DATE '2019-01-01', 0, 'E12.9')", [pid])
+    out = build_ederri_diabetes_cohort(con)
+    assert list(out["subject_id"]) == [pid]                                  # EI stay, qualified through an E12 code

@@ -547,6 +547,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         CASE UPPER(src.ENC_TYPE)
             WHEN 'IP' THEN 9201 -- Inpatient
+            WHEN 'EI' THEN 262 -- Emergency Room and Inpatient Visit (PCORnet emergency-to-inpatient; an index stay with 9201)
             WHEN 'OS' THEN 581385 -- Observation Room (never an index inpatient stay; still counts as prior utilization)
             WHEN 'ED' THEN 9203 -- Emergency
             WHEN 'AV' THEN 9202 -- Outpatient
