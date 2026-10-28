@@ -17,7 +17,11 @@ etl_pcornet(
   threads = NULL,
   temp_dir = NULL,
   source_format = NULL,
-  strict_source = FALSE
+  strict_source = FALSE,
+  key_check = c("warn", "raise", "ignore"),
+  key_check_callback = NULL,
+  use_enrollment = "auto",
+  enrollment_type_concept_id = 0L
 )
 }
 \arguments{
@@ -57,6 +61,17 @@ source contract (see \code{\link[=check_source]{check_source()}}). Only used whe
 
 \item{strict_source}{Logical. If \code{TRUE}, run \code{\link[=check_source]{check_source()}} first and stop with a \code{source_contract_error} when a
 required source table or column is missing.}
+
+\item{key_check}{\code{"warn"} (default), \code{"raise"} or \code{"ignore"}: at the end of the build, compare distinct source ids
+with distinct surrogate keys via \code{\link[=check_etl_keys]{check_etl_keys()}} and report any encounters/patients that would be merged.}
+
+\item{key_check_callback}{Optional function called with the list returned by \code{\link[=check_etl_keys]{check_etl_keys()}}.}
+
+\item{use_enrollment}{\code{"auto"} (default), \code{TRUE} or \code{FALSE}. Build \code{observation_period} from the PCORnet ENROLLMENT
+file when the source has one (\code{\link[=load_enrollment_spans]{load_enrollment_spans()}}); people without an enrolment record keep the
+event-span period. \code{TRUE} fails if no usable ENROLLMENT file exists.}
+
+\item{enrollment_type_concept_id}{\code{period_type_concept_id} for enrolment-derived periods (default 0).}
 }
 \value{
 Invisibly, \code{db_path}.

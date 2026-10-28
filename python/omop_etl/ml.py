@@ -421,7 +421,7 @@ class FeatureMatrixBuilder:
         try:
             import torch
             return torch.as_tensor(tensor_3d, dtype=torch.float32)
-        except ImportError:
+        except (ImportError, OSError):  # OSError: torch installed but DLL init failed (Windows)
             return tensor_3d
 
 

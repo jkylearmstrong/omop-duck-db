@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import duckdb
 import numpy as np
 import pandas as pd
@@ -19,11 +21,13 @@ from omop_etl.cohort import define_study_cohort, build_ederri_diabetes_cohort
 from omop_etl.tensor import extract_longitudinal_tensors, MAX_LONGITUDINAL_VISITS, MAX_TOKENS_PER_VISIT
 from omop_etl.velocity import compute_ckd_epi_2021
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def test_63bit_surrogate_key_generation():
     con = duckdb.connect()
     build_schema(con)
-    with open("inst/sql/mapping_macros.sql", "r", encoding="utf-8") as f:
+    with open(REPO_ROOT / "inst" / "sql" / "mapping_macros.sql", "r", encoding="utf-8") as f:
         con.execute(f.read())
     
     # Test hashing with various encounters
@@ -55,7 +59,7 @@ def test_63bit_surrogate_key_generation():
 def test_parse_omop_datetime_single_digit_hour():
     con = duckdb.connect()
     build_schema(con)
-    with open("inst/sql/mapping_macros.sql", "r", encoding="utf-8") as f:
+    with open(REPO_ROOT / "inst" / "sql" / "mapping_macros.sql", "r", encoding="utf-8") as f:
         con.execute(f.read())
     
     # Single digit hour '1:01'

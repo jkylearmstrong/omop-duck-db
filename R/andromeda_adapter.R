@@ -61,6 +61,11 @@ duckdb_to_andromeda <- function(con,
       }
       offset <- offset + nrow(chunk)
     }
+    # Flush chunked appends so DuckDB is quiescent before GC finalisers run (Windows CI crash, 0.8.5 audit).
+    if (requireNamespace("Andromeda", quietly = TRUE) &&
+        exists("flushAndromeda", envir = asNamespace("Andromeda"), inherits = FALSE)) {
+      try(Andromeda::flushAndromeda(andromeda), silent = TRUE)
+    }
   }
 
   andromeda

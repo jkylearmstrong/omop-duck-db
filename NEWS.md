@@ -1,3 +1,13 @@
+# omopduckdb 0.8.6 (development)
+
+- **Fix: `FeatureMatrixBuilder.to_tensor()`** falls back to the NumPy array when torch is installed but its DLL fails to initialise on Windows (`OSError`, not just `ImportError`).
+- **Tests: no more cwd-dependent paths** in `test_v080_features.py` (resolved from the repo root).
+- **Tests/CI (R, Windows): Andromeda teardown.** `test-hades-bridge.R` closes every `plpData$covariateData`; `helper-hades.R` sets `andromedaThreads = 1` / `andromedaMemoryLimit = 0.5` (GB); `duckdb_to_andromeda()` flushes after chunked appends. Targets the silent `R CMD check` exit on 7 GB runners.
+- **Docs:** hand-written cohort SQL must be run with `CohortGenerator::generateCohortSet(..., generateStats = FALSE)`; read-only DuckDB files must be checkpointed (no `.wal`) before `ATTACH ... (READ_ONLY)`.
+- **Build-time key check (R)**: `check_key_collisions()` / `check_etl_keys()` and `etl_pcornet(key_check = "warn"|"raise"|"ignore", key_check_callback = )`, ported from `omop_etl.key_checks`.
+- **Enrolment-based observation periods (R)**: `etl_pcornet(use_enrollment = "auto"|TRUE|FALSE, enrollment_type_concept_id = )`, new `load_enrollment_spans()`, and `build_observation_period(use_enrollment=, enrollment_type_concept_id=)`; spans are clipped, merged when they overlap or touch, and people without enrolment keep the event-span period.
+- **Cohort comparison (R)**: `compare_cohort_definitions()` and `run_cohort_sql()` (SqlRender render/translate/split on DuckDB TEMP tables), ported from `omop_etl.cohort_sql`.
+- **Sequence tensors (R)**: `extract_longitudinal_tensors(include_index_stay=, include_labs=)` returns an `(N x 20 x 30)` integer array with the same DuckDB-hash tokens as Python; constants `MAX_LONGITUDINAL_VISITS`, `MAX_TOKENS_PER_VISIT`, `VOCAB_SIZE`. All four 0.8.5 Python-only features now have R equivalents.
 # omopduckdb 0.8.5
 
 Remaining requests from the 2026-10 consortium notes (FR-D6, FR-D7, FR-D8, FR-B5, FR-A7, enrolment-based observation periods).

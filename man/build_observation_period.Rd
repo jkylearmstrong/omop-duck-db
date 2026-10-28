@@ -4,7 +4,13 @@
 \alias{build_observation_period}
 \title{Synthesize Observation Period envelopes}
 \usage{
-build_observation_period(con, min_date = "1900-01-02", max_date = NULL)
+build_observation_period(
+  con,
+  min_date = "1900-01-02",
+  max_date = NULL,
+  use_enrollment = FALSE,
+  enrollment_type_concept_id = 0L
+)
 }
 \arguments{
 \item{con}{Active DuckDB connection}
@@ -13,9 +19,16 @@ build_observation_period(con, min_date = "1900-01-02", max_date = NULL)
 
 \item{max_date}{Latest plausible event date; default \code{NULL} is today (the extraction date). Pass the source's data
 cutoff when events are filled with the build date.}
+
+\item{use_enrollment}{Logical. If \code{TRUE} (needs \verb{_enrollment_spans} from \code{\link[=load_enrollment_spans]{load_enrollment_spans()}}), write each
+person's real enrolment spans with \code{period_type_concept_id = enrollment_type_concept_id} and keep the event-span
+rule only for people with no enrolment record.}
+
+\item{enrollment_type_concept_id}{\code{period_type_concept_id} for enrolment-derived periods (default 0: set your
+site's concept).}
 }
 \description{
-The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events dated
-before \code{min_date} (SAS/Excel zero dates such as 1840-12-31 and 1899-12-30, \verb{1900-01-01} placeholders) or after
+The period is the span from a person's first to last \emph{plausible} event, not a real enrolment window. Events dated
+before \code{min_date} (SAS/Excel zero dates such as 1840-12-31 and 1899-12-30, \code{1900-01-01} placeholders) or after
 \code{max_date} are ignored; a person with no plausible event gets no observation period (FR-C10).
 }
