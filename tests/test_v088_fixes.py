@@ -147,3 +147,55 @@ def test_observation_period_data_cutoff_n2():
     assert con.execute("SELECT max(observation_period_end_date) FROM observation_period").fetchone()[0].isoformat() == today
     build_observation_period(con, max_date="auto")
     assert con.execute("SELECT max(observation_period_end_date) FROM observation_period").fetchone()[0].isoformat() == "2023-04-01"
+
+
+def test_bigquery_inside_callers_transaction_leaves_commit_to_caller():
+    con = duckdb.connect()
+    con.execute("BEGIN TRANSACTION")
+    assert read_bigquery_table(con, "p.d", "concept", reader=lambda r, c: [_batch([1, 2])], transaction=False) == 2
+    con.execute("ROLLBACK")
+    assert con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'concept'").fetchone()[0] == 0
+
+
+def test_bigquery_append_adds_rows_to_existing_table():
+    con = duckdb.connect()
+    read_bigquery_table(con, "p.d", "concept", reader=lambda r, c: [_batch([1, 2])])
+    read_bigquery_table(con, "p.d", "concept", reader=lambda r, c: [_batch([3]), _batch([])], mode="append")
+    assert con.execute("SELECT count(*) FROM concept").fetchone()[0] == 3
+
+
+def test_default_reader_uses_storage_client_when_available(monkeypatch):
+    import sys
+    import types
+    from omop_etl.bigquery_sync import _bq_reader
+    calls = {}
+
+    class Rows:
+        def to_arrow_iterable(self, bqstorage_client=None):
+            calls["storage"] = bqstorage_client
+            return iter([_batch([1])])
+
+    class Client:
+        def list_rows(self, ref):
+            return Rows()
+
+    mod = types.ModuleType("google.cloud.bigquery_storage")
+    mod.BigQueryReadClient = lambda: "storage-client"
+    pkg = types.ModuleType("google.cloud")
+    pkg.bigquery_storage = mod
+    monkeypatch.setitem(sys.modules, "google", types.ModuleType("google"))
+    monkeypatch.setitem(sys.modules, "google.cloud", pkg)
+    monkeypatch.setitem(sys.modules, "google.cloud.bigquery_storage", mod)
+    assert len(list(_bq_reader(None, Client())("p.d.concept", None))) == 1
+    assert calls["storage"] == "storage-client"
+
+
+def test_federated_non_convergence_and_no_events():
+    sites = {"A": _frames(seed=1), "B": _frames(seed=2)}
+    with pytest.warns(UserWarning, match="did not converge"):
+        federated_cox(sites, ["x"], "time", "event", max_iter=1)
+    with pytest.warns(UserWarning, match="did not converge"):
+        federated_logistic_regression(sites, ["x"], "y", max_iter=1)
+    none = {k: v.assign(event=0) for k, v in sites.items()}
+    with pytest.raises(ValueError, match="no events"):
+        federated_cox(none, ["x"], "time", "event")

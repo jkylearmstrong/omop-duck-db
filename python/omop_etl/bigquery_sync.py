@@ -60,12 +60,14 @@ def _bq_reader(billing_project: str | None, client: Any = None) -> Reader:
 
 def read_bigquery_table(con: duckdb.DuckDBPyConnection, source: str, table: str, *, dataset: str | None = None,
                         billing_project: str | None = None, mode: str = "overwrite", reader: Reader | None = None,
-                        client: Any = None) -> int:
+                        client: Any = None, transaction: bool = True) -> int:
     """Streams one BigQuery table into DuckDB ``table``; returns the number of rows loaded.
 
     ``source`` is ``"project.dataset"`` (``dataset`` is accepted instead for symmetry with the R helper). ``mode`` is
     ``"overwrite"`` (replace the table) or ``"append"`` (add rows; creates the table when missing). The target is
-    created from the first Arrow batch's schema, so column types follow BigQuery's.
+    created from the first Arrow batch's schema, so column types follow BigQuery's. The load runs in its own transaction and
+    swaps the staged table in only on success; pass ``transaction=False`` when the caller already holds a transaction
+    (DuckDB cannot nest them) and will commit or roll back itself.
     """
     import pyarrow as pa
 
@@ -88,11 +90,9 @@ def read_bigquery_table(con: duckdb.DuckDBPyConnection, source: str, table: str,
 
     # Stream into a staging table inside one transaction, then swap: a failure mid-stream leaves the target untouched.
     stage, batch_view = f"_bq_new_{tbl}", f"_bq_batch_{tbl}"
-    own_txn = True
-    try:
+    own_txn = bool(transaction)
+    if own_txn:
         con.execute("BEGIN TRANSACTION")
-    except duckdb.Error:  # already inside a caller's transaction: leave commit/rollback to the caller
-        own_txn = False
     n, started = 0, False
     try:
         con.execute(f'DROP TABLE IF EXISTS "{stage}"')
