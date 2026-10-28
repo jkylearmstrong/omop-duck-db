@@ -90,7 +90,8 @@ extract_longitudinal_tensors <- function(con, cohort_table = "cohort", max_visit
     token("co", "condition_concept_id"), token("de", "drug_concept_id"), token("po", "procedure_concept_id"),
     lab_block, max_tokens)
 
-  ev <- DBI::dbGetQuery(con, sql)
+  # Partial CDMs (no procedure_occurrence / measurement) yield an all-zero tensor, as in the Python implementation.
+  ev <- tryCatch(DBI::dbGetQuery(con, sql), error = function(e) data.frame())
   if (nrow(ev) > 0L) {
     row <- match(paste(ev$subject_id, substr(ev$d, 1, 10)), keys)
     v <- as.integer(ev$visit_rank)

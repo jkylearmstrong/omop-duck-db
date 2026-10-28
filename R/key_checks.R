@@ -63,7 +63,11 @@ check_etl_keys <- function(con, source_dir, site_id = NULL, disambiguate_patids 
                                 key_expr = j[[3]], on_collision = on_collision)
     res$table <- j[[1]]
     res$cdm_table <- j[[4]]
-    res$cdm_rows <- as.numeric(DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s", j[[4]]))$n)
+    res$cdm_rows <- if (DBI::dbExistsTable(con, j[[4]])) {
+      as.numeric(DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s", j[[4]]))$n)
+    } else {
+      NA_real_
+    }
     out[[length(out) + 1L]] <- res
   }
   out
