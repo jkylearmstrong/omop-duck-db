@@ -524,6 +524,34 @@ def load_person(con, source_dir, site_id=None, disambiguate_patids=False):
     con.execute("DROP VIEW IF EXISTS _temp_demographic;")
 
 
+def _repair_address_csv(path):
+    """Return ``path``, or a repaired temp copy when rows have more fields than the header.
+
+    PCORnet address extracts often leave a comma in ``ADDRESS_CITY`` unquoted ("St. Louis, MO"), which shifts every later
+    column (state, ZIP, dates) with no error from the CSV reader. Surplus fields are folded back into the city column.
+    """
+    import csv
+    import tempfile
+
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+        rows = list(csv.reader(fh))
+    if not rows:
+        return path
+    header = rows[0]
+    city = next((i for i, h in enumerate(header) if h.strip().upper() == "ADDRESS_CITY"), None)
+    bad = [r for r in rows[1:] if len(r) > len(header)]
+    if city is None or not bad:
+        return path
+    for r in bad:
+        extra = len(r) - len(header)
+        r[city:city + extra + 1] = [",".join(r[city:city + extra + 1])]
+    out = tempfile.NamedTemporaryFile("w", suffix="_address_history.csv", delete=False, newline="", encoding="utf-8")
+    with out:
+        csv.writer(out).writerows(rows)
+    print(f"  [{os.path.basename(str(path))}] repaired {len(bad)} row(s) with unquoted commas in ADDRESS_CITY")
+    return out.name
+
+
 def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
     """Maps PCORnet lds_address_history.csv into OMOP location and updates person.location_id."""
     path = find_source_file(source_dir, "lds_address_history")
@@ -532,6 +560,7 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
     if path is None:
         print("Skipping LOCATION - no lds_address_history.csv found (optional table)")
         return
+    path = _repair_address_csv(path)
 
     prepare_source_view(
         con,

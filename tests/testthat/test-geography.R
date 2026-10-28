@@ -112,3 +112,27 @@ test_that("load_location writes a dated, idempotent person_address_history", {
   expect_equal(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM person_address_history")$n, n)
   expect_equal(DBI::dbGetQuery(con, "SELECT count(*) AS n FROM person_address_history WHERE person_id NOT IN (SELECT person_id FROM person)")$n, 0)
 })
+
+test_that("load_location repairs an unquoted comma in ADDRESS_CITY instead of shifting columns", {
+  src <- tempfile(); dir.create(src)
+  fixture_dir <- normalizePath(file.path(testthat::test_path(), "..", "fixtures", "pcornet_sample"))
+  file.copy(list.files(fixture_dir, full.names = TRUE), src)
+  pat <- utils::read.csv(file.path(src, "demographic.csv"), colClasses = "character")[[1]][1]
+  writeLines(c(
+    "ADDRESSID,PATID,ADDRESS_USE,ADDRESS_TYPE,ADDRESS_PREFERRED,ADDRESS_CITY,ADDRESS_STATE,ADDRESS_ZIP5,ADDRESS_ZIP9,ADDRESS_PERIOD_START,ADDRESS_PERIOD_END",
+    sprintf("1,%s,HO,PO,Y,Philadelphia,PA,19104,,01JAN2010,31DEC2012", pat),
+    sprintf("2,%s,HO,PO,N,St. Louis, MO,MO,63101,,01JAN2013,", pat)), file.path(src, "lds_address_history.csv"))
+  db_path <- tempfile(fileext = ".duckdb")
+  build_schema(db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  on.exit({ DBI::dbDisconnect(con, shutdown = TRUE); unlink(db_path) }, add = TRUE)
+  omopduckdb:::load_mapping_macros(con)
+  omopduckdb:::.load_person(con, src)
+  load_location(con, src)
+  loc <- DBI::dbGetQuery(con, "SELECT city, state, zip FROM location WHERE state = 'MO'")
+  expect_equal(unlist(loc[1, ]), c(city = "St. Louis, MO", state = "MO", zip = "63101"))
+  h <- DBI::dbGetQuery(con, "SELECT address_start, address_end FROM person_address_history WHERE zip5 = '63101'")
+  expect_equal(nrow(h), 1)
+  expect_equal(as.character(h$address_start), "2013-01-01")
+  expect_true(is.na(h$address_end))
+})

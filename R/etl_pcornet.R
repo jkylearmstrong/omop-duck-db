@@ -389,6 +389,28 @@ load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, si
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_demographic;")
 }
 
+# PCORnet address extracts often leave a comma in ADDRESS_CITY unquoted ("St. Louis, MO"), which shifts every later
+# column with no error from the CSV reader. Returns `path`, or a repaired temp copy with surplus fields folded into the city.
+.repair_address_csv <- function(path) {
+  header <- strsplit(readLines(path, n = 1L, warn = FALSE), ",", fixed = TRUE)[[1]]
+  header <- trimws(sub("^﻿", "", header))
+  city <- match("ADDRESS_CITY", toupper(header))
+  nf <- utils::count.fields(path, sep = ",", quote = "\"", skip = 1L, blank.lines.skip = FALSE)
+  bad <- which(!is.na(nf) & nf > length(header))
+  if (is.na(city) || !length(bad)) return(path)
+  lines <- readLines(path, warn = FALSE)
+  for (i in bad) {
+    f <- scan(text = lines[i + 1L], what = "", sep = ",", quote = "\"", quiet = TRUE, na.strings = character())
+    extra <- length(f) - length(header)
+    f <- c(f[seq_len(city - 1L)], paste(f[city:(city + extra)], collapse = ","), f[-seq_len(city + extra)])
+    lines[i + 1L] <- paste(ifelse(grepl("[\",]", f), paste0("\"", gsub("\"", "\"\"", f), "\""), f), collapse = ",")
+  }
+  out <- tempfile(fileext = "_address_history.csv")
+  writeLines(lines, out)
+  cat(sprintf("  [%s] repaired %d row(s) with unquoted commas in ADDRESS_CITY\n", basename(path), length(bad)))
+  out
+}
+
 #' Maps `lds_address_history.csv` into OMOP CDM `location` table and updates `person.location_id`
 #'
 #' @param con Active DuckDB DBI connection.
@@ -406,6 +428,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     cat("Skipping LOCATION - no lds_address_history.csv found (optional table)\n")
     return(invisible(NULL))
   }
+  path <- .repair_address_csv(path)
 
   prepare_source_view(
     con, "_temp_address_history", path,

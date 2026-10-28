@@ -163,3 +163,26 @@ def test_load_location_writes_dated_address_history():
     load_location(con, str(SAMPLE_DIR))                                  # idempotent: rows are replaced per person
     assert con.execute("SELECT count(*) FROM person_address_history").fetchone()[0] == n
     assert con.execute("SELECT count(*) FROM person_address_history WHERE zip5 IS NOT NULL AND length(zip5) <> 5").fetchone()[0] == 0
+
+
+_ADDR_HEADER = ("ADDRESSID,PATID,ADDRESS_USE,ADDRESS_TYPE,ADDRESS_PREFERRED,ADDRESS_CITY,ADDRESS_STATE,ADDRESS_ZIP5,"
+                "ADDRESS_ZIP9,ADDRESS_PERIOD_START,ADDRESS_PERIOD_END\n")
+
+
+def test_load_location_repairs_unquoted_comma_in_city(tmp_path):
+    import shutil
+
+    src = tmp_path / "src"
+    shutil.copytree(SAMPLE_DIR, src)
+    pat = next(c for c in duckdb.connect().execute(f"SELECT PATID FROM read_csv_auto('{(src / 'demographic.csv').as_posix()}', all_varchar=true)").fetchall())[0]
+    (src / "lds_address_history.csv").write_text(
+        _ADDR_HEADER + f"1,{pat},HO,PO,Y,Philadelphia,PA,19104,,01JAN2010,31DEC2012\n"
+        f"2,{pat},HO,PO,N,St. Louis, MO,MO,63101,,01JAN2013,\n", encoding="utf-8")
+    con = duckdb.connect()
+    build_schema(con)
+    load_macros(con)
+    load_person(con, str(src))
+    load_location(con, str(src))
+    assert con.execute("SELECT city, state, zip FROM location WHERE state = 'MO'").fetchall() == [("St. Louis, MO", "MO", "63101")]
+    row = con.execute("SELECT zip5, address_start, address_end FROM person_address_history WHERE zip5 = '63101'").fetchall()
+    assert len(row) == 1 and str(row[0][1]) == "2013-01-01" and row[0][2] is None
