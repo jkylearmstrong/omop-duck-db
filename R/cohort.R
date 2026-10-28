@@ -710,8 +710,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                   AND m.measurement_date <= v.visit_start_date
                   AND m.value_as_number >= 6.5
                   AND (
-                      m.measurement_concept_id IN (3004410, 3005673, 40762352)
-                      OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|17856-6|4549-2|A1C|HBA1C|HbA1c)')
+                      m.measurement_concept_id IN (3004410, 3005673, 40762352, 3007263, 3034639, 40758583, 40765129, 42869630, 3003309)
+                      OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|41995-2|55454-3|71875-9|4549-2|17856-6|59261-8|62388-4|17855-8|A1C|HBA1C|HbA1c)')
                   )
             )
         )", co, de, meas))

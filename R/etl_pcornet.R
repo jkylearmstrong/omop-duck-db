@@ -571,6 +571,9 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 32216 -- Left against medical advice or discontinued care (UB04 Pt dis status 07)
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HS', 'HOSPICE') THEN 8546 -- Hospice (PCORnet HS)
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('SN', 'SNF') THEN 8863 -- Skilled Nursing Facility
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('NH') THEN 8676 -- Nursing Facility
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HH') THEN 32215 -- UB04 06: home care of organized home health service
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('RH') THEN 32228 -- UB04 62: inpatient rehabilitation facility
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
             ELSE 0

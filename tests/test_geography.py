@@ -196,7 +196,7 @@ def test_pcornet_discharge_status_home_is_not_hospice(tmp_path):
     (src / "encounter.csv").write_text(
         "ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,ADMIT_TIME,DISCHARGE_DATE,DISCHARGE_TIME,PROVIDERID,FACILITYID,DISCHARGE_STATUS\n"
         + "".join(f"E{i},FAKE-P001,IP,2024-01-0{i},08:00,2024-01-0{i},11:00,,,{s}\n"
-                  for i, s in enumerate(["HO", "HS", "AM", "EX", "SN", "A"], start=1)), encoding="utf-8")
+                  for i, s in enumerate(["HO", "HS", "AM", "EX", "SN", "A", "NH", "HH", "RH"], start=1)), encoding="utf-8")
     con = duckdb.connect()
     build_schema(con)
     load_macros(con)
@@ -207,6 +207,7 @@ def test_pcornet_discharge_status_home_is_not_hospice(tmp_path):
     got = dict(con.execute("SELECT discharged_to_source_value, discharged_to_concept_id FROM visit_occurrence").fetchall())
     assert got["HO"] == 8536 and got["A"] == 8536 and got["HS"] == 8546
     assert got["EX"] == 4216643 and got["AM"] == 32216 and got["SN"] == 8863
+    assert got["NH"] == 8676 and got["HH"] == 32215 and got["RH"] == 32228
 
 
 def _transfer_cdm():
@@ -263,3 +264,23 @@ def test_pcornet_observation_and_acute_transfer_mapping(tmp_path):
 
     load_visit_occurrence(con, str(src))
     assert con.execute("SELECT visit_concept_id, discharged_to_concept_id FROM visit_occurrence").fetchone() == (581385, 8717)
+
+
+def test_diabetes_phenotype_uses_every_hba1c_loinc_of_the_sas_extraction():
+    from omop_etl import build_ederri_diabetes_cohort
+
+    c = duckdb.connect()
+    build_schema(c)
+    # one person per HbA1c concept the SAS extraction lists (LOINC 17855-8, 41995-2, 62388-4, 71875-9, 4549-2) plus a normal value
+    cases = {1: (3007263, 7.0), 2: (3034639, 7.0), 3: (40765129, 7.0), 4: (42869630, 7.0), 5: (3003309, 7.0), 6: (3004410, 5.0)}
+    for pid, (cid, val) in cases.items():
+        c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) "
+                  f"VALUES ({pid}, 8507, 1960, 0, 0)")
+        c.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, "
+                  f"observation_period_end_date, period_type_concept_id) VALUES ({pid}, {pid}, DATE '2015-01-01', DATE '2022-01-01', 0)")
+        c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, "
+                  f"visit_type_concept_id) VALUES ({pid}, {pid}, 9201, DATE '2020-03-01', DATE '2020-03-05', 0)")
+        c.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, value_as_number, "
+                  f"measurement_type_concept_id) VALUES ({pid}, {pid}, {cid}, DATE '2020-01-01', {val}, 0)")
+    out = build_ederri_diabetes_cohort(c)
+    assert sorted(out["subject_id"]) == [1, 2, 3, 4, 5]
