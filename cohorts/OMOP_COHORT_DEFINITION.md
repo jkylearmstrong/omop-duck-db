@@ -13,7 +13,7 @@ Files in `cohorts/`:
 
 ## Parameters
 
-Both SQL files use CohortGenerator's names: `@cdm_database_schema`, `@target_database_schema`, `@target_cohort_table`, `@target_cohort_id`. The target cohort also takes `@followup_days` (30) and `@min_age` (18); `cohort_definition_set()` renders those two into the SQL so `CohortGenerator::generateCohortSet()` only has to fill the four above. (v0.8.2 used `cohort_database_schema`, `cohort_table` and `outcome_cohort_id`; rename them in your own calls.)
+Both SQL files use CohortGenerator's names: `@cdm_database_schema`, `@target_database_schema`, `@target_cohort_table`, `@target_cohort_id`. The target cohort also takes `@followup_days` (30) and `@min_age` (18); `cohort_definition_set()` renders those two into the SQL so `CohortGenerator::generateCohortSet()` only has to fill the four above. The SQL creates no inclusion-rule statistics tables, so always pass `generateStats = FALSE`; the default fails. (v0.8.2 used `cohort_database_schema`, `cohort_table` and `outcome_cohort_id`; rename them in your own calls.)
 
 ## Target cohort
 
@@ -41,7 +41,7 @@ switched off. `sampling_rule="random"` uses DuckDB `hash()`, which is not stable
 
 - `tests/test_v082_features.py` renders the SQL, translates it with `sqlglot` (T-SQL to DuckDB) and checks the cohorts on a fixture on DuckDB.
 - v0.8.3: the SQL also runs with the CDM attached `READ_ONLY` and the cohort table in a separate database (tested on DuckDB).
-- **Verified on servers (v0.8.5)**: the `live-db` workflow runs both files, translated with sqlglot, on PostgreSQL 16 and SQL Server 2022 and gets the DuckDB cohorts. **Not verified**: execution on Oracle, and translation by SqlRender itself (sqlglot stands in for it).
+- **Verified on servers (v0.8.5)**: the `live-db` workflow runs both files, translated with sqlglot, on PostgreSQL 16 and SQL Server 2022 and gets the DuckDB cohorts. **Not verified**: execution on Oracle (use `SqlRender::translate(..., targetDialect = "oracle")`, never sqlglot, which renders `DATEADD` wrongly for Oracle), and translation by SqlRender itself (sqlglot stands in for it).
 - `cohort_definition_set()` and the `DatabaseConnector::connect` wrapper in `run_plp_readonly_example.R` have not been run with CohortGenerator, SqlRender or a real read-only file; only the SQL and the data-frame shape are tested.
 - `tests/test_v082_features.py` checks the Circe JSON structurally and against the SQL (same visit concepts, age and follow-up defaults, and that the JSON carries the documented rule-3 gap). That is a consistency test, not an ATLAS import.
-- The Circe JSON was written by hand and has **not been imported into ATLAS**. Circe cannot test `discharged_to_concept_id`, so the SQL is authoritative. `DateAdjustment` (start at visit end) needs Circe/ATLAS 2.12 or later.
+- The Circe JSON was written by hand and has **not been imported into ATLAS**. Circe cannot test `discharged_to_concept_id` (4216643, died), so an ATLAS-built cohort keeps patients who died on the index visit; the SQL is authoritative. `DateAdjustment` (start at visit end) needs Circe/ATLAS 2.12 or later.

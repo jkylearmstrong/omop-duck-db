@@ -1,4 +1,11 @@
-# omopduckdb 0.8.6 (development)
+# omopduckdb 0.8.6
+
+- **Fix (CLI):** `omop-duckdb build` takes `--key-check`, `--use-enrollment` and `--enrollment-type-concept-id`; `run_manifest.json` records the `key_check:*` collision steps and `observation_period:enrollment_spans`.
+- **Fix (R tests):** the `callr` child in the Andromeda test sets `andromedaThreads = 1` / `andromedaMemoryLimit = 0.5`.
+- **Read-only distribution:** new `checkpoint_database()` (Python, R) and `omop-duckdb checkpoint FILE...` fold the `.wal` into the file; `attach_read_only()` / `readonly_attach_sql()` warn when a `.wal` is present. `cohort_definition_set()` docs and the example scripts state that `generateStats = FALSE` is required.
+- **Fix (R tests):** removed `skip_on_os("windows")` from the three Andromeda tests in `test-v056-features.R` now that the `callr` child is constrained; re-add it if the Windows runner still aborts.
+- **Docs:** Oracle caveat for sqlglot `DATEADD` in `translate_to_duckdb()` and `target_cohort.sql`.
+- **Versions aligned** at 0.8.6 across `DESCRIPTION`, `pyproject.toml` and `omop_etl.__version__`.
 
 - **Fix: `FeatureMatrixBuilder.to_tensor()`** falls back to the NumPy array when torch is installed but its DLL fails to initialise on Windows (`OSError`, not just `ImportError`).
 - **Tests: no more cwd-dependent paths** in `test_v080_features.py` (resolved from the repo root).

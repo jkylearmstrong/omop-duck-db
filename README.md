@@ -602,7 +602,8 @@ inside the file. It also opens the file read-write, so no *other
 process* (for example a Python session that still has the database open,
 even read-only) may hold it. `hades_preflight()` checks both, from a
 fresh connection. Files distributed for read-only use must be cleanly closed
-and checkpointed (`CHECKPOINT;`): if a `.duckdb.wal` sits beside the file,
+and checkpointed (`omop-duckdb checkpoint site.duckdb`, `omop_etl.checkpoint_database()` or
+`omopduckdb::checkpoint_database()`): if a `.duckdb.wal` sits beside the file,
 `ATTACH ... (READ_ONLY)` fails with "WAL replay is required". Hand-written
 cohort SQL does not create inclusion-rule statistics tables, so call
 `CohortGenerator::generateCohortSet(..., generateStats = FALSE)`:

@@ -475,3 +475,32 @@ def test_cli_passes_key_check_and_enrollment_flags(monkeypatch):
     monkeypatch.setattr("sys.argv", ["build_omop_cdm.py", "--source-dir", "x"])
     b.main()
     assert (seen["key_check"], seen["use_enrollment"], seen["enrollment_type_concept_id"]) == ("warn", "auto", 0)
+
+
+def test_checkpoint_database_leaves_no_wal_and_allows_read_only_attach(tmp_path):
+    import duckdb
+    from omop_etl import attach_read_only, checkpoint_database
+
+    db = tmp_path / "site.duckdb"
+    c = duckdb.connect(str(db))
+    c.execute("CREATE TABLE t AS SELECT 1 AS x")
+    c.close()
+    assert checkpoint_database(str(db)) == str(db)
+    assert not (tmp_path / "site.duckdb.wal").exists()
+    s = duckdb.connect(":memory:")
+    attach_read_only(s, str(db))
+    assert s.execute("SELECT x FROM cdm.t").fetchone()[0] == 1
+
+
+def test_attach_read_only_warns_on_leftover_wal(tmp_path):
+    import duckdb
+    from omop_etl import attach_read_only
+
+    db = tmp_path / "site.duckdb"
+    duckdb.connect(str(db)).close()
+    (tmp_path / "site.duckdb.wal").write_bytes(b"")
+    with pytest.warns(UserWarning, match="checkpoint_database"):
+        try:
+            attach_read_only(duckdb.connect(":memory:"), str(db))
+        except Exception:
+            pass

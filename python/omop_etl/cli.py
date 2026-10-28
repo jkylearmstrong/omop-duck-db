@@ -63,6 +63,12 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--site-id", default=None, help="Unique site identifier for namespacing.")
     build_parser.add_argument("--site-name", default=None, help="Descriptive site facility name.")
     build_parser.add_argument("--strict-source", action="store_true", help="Fail fast on missing required source tables/columns.")
+    build_parser.add_argument("--key-check", choices=["warn", "raise", "ignore"], default="warn",
+                              help="Source-key collision check; results are logged in the run manifest.")
+    build_parser.add_argument("--use-enrollment", choices=["auto", "true", "false"], default="auto",
+                              help="Build observation_period from the PCORnet ENROLLMENT file.")
+    build_parser.add_argument("--enrollment-type-concept-id", type=int, default=0,
+                              help="period_type_concept_id for enrolment-derived periods.")
     _add_manifest_args(build_parser)
 
     # 2. DQD
@@ -156,6 +162,9 @@ def create_parser() -> argparse.ArgumentParser:
     ev.add_argument("--seed", type=int, default=42)
     ev.add_argument("--persist-keys", default=None, help="CSV of index stays to reuse/write for identical cohorts across runs.")
     ev.add_argument("--manifest", default=None, help="run_manifest.json path (default: next to --out).")
+
+    ck = subparsers.add_parser("checkpoint", help="CHECKPOINT DuckDB files so they can be attached READ_ONLY (no .wal left).")
+    ck.add_argument("db", nargs="+", help="DuckDB file(s) to checkpoint; no other process may have them open.")
 
     vm = subparsers.add_parser("verify-manifest", help="Verify input hashes recorded in a run_manifest.json.")
     vm.add_argument("manifest", help="Path to run_manifest.json.")
@@ -280,6 +289,9 @@ def handle_build(args: argparse.Namespace) -> int:
             site_id=args.site_id,
             site_name=args.site_name,
             strict_source=args.strict_source,
+            key_check=args.key_check,
+            use_enrollment={"auto": "auto", "true": True, "false": False}[args.use_enrollment],
+            enrollment_type_concept_id=args.enrollment_type_concept_id,
             key_check_callback=lambda report: [
                 m.add_step(f"key_check:{r['table']}.{r['id_column']}", r["distinct_ids"], distinct_keys=r["distinct_keys"],
                            lost=r["lost"], ok=r["ok"], cdm_table=r["cdm_table"], cdm_rows=r["cdm_rows"])
@@ -289,6 +301,12 @@ def handle_build(args: argparse.Namespace) -> int:
         try:
             for t in ("person", "visit_occurrence", "condition_occurrence", "measurement", "drug_exposure"):
                 m.add_step(f"rows:{t}", con.execute(f"SELECT count(*) FROM {t}").fetchone()[0])
+            m.add_step("observation_period:total", con.execute("SELECT count(*) FROM observation_period").fetchone()[0])
+            if args.use_enrollment != "false":
+                m.add_step("observation_period:enrollment_spans", con.execute(
+                    "SELECT count(*) FROM observation_period WHERE period_type_concept_id = ?",
+                    [args.enrollment_type_concept_id]).fetchone()[0], use_enrollment=args.use_enrollment,
+                    enrollment_type_concept_id=args.enrollment_type_concept_id)
         finally:
             con.close()
     if args.manifest:
@@ -424,6 +442,13 @@ def main(argv: list[str] | None = None) -> int:
         return handle_evaluate(args)
     if args.command == "materialize-vocab":
         return handle_materialize_vocab(args)
+    if args.command == "checkpoint":
+        from omop_etl.build_omop_cdm import checkpoint_database
+
+        for db in args.db:
+            checkpoint_database(db)
+            print(f"Checkpointed {db}")
+        return 0
     if args.command == "verify-manifest":
         return handle_verify_manifest(args)
     if args.command == "extract":

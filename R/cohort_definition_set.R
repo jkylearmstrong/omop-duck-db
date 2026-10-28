@@ -9,6 +9,9 @@
 #' The SQL is the authoritative definition. The Circe JSON is hand-written, has not been imported into ATLAS and
 #' cannot express the discharge-disposition exclusion; CohortGenerator uses the `sql` column to generate cohorts.
 #'
+#' The shipped SQL creates no inclusion-rule statistics tables (`#InclusionRules` and friends), so call
+#' `CohortGenerator::generateCohortSet(..., generateStats = FALSE)`; with the default it fails.
+#'
 #' @param cohorts_dir Directory holding `target_cohort.sql`, `outcome_cohort.sql` and the `*.circe.json` files.
 #' @param target_cohort_id,outcome_cohort_id Cohort ids to assign (default 1 and 2).
 #' @param followup_days Verified follow-up after discharge in days (default 30).

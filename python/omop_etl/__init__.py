@@ -5,6 +5,7 @@ from omop_etl.build_omop_cdm import (
     build_condition_era,
     build_drug_era,
     attach_read_only,
+    checkpoint_database,
     build_observation_period,
     materialize_vocabulary,
     build_safe_source_view,
@@ -396,6 +397,7 @@ __all__ = [
     "load_drug_exposure",
     "load_death",
     "attach_read_only",
+    "checkpoint_database",
     "build_observation_period",
     "materialize_vocabulary",
     "build_drug_era",
@@ -634,7 +636,7 @@ __all__ = [
     "filter_measurements",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.6"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 
