@@ -1,5 +1,6 @@
 test_that("load_from_bigquery calls bq_table_download with valid arguments and keeps 64-bit ids", {
   skip_if_not_installed("bigrquery")
+  skip_if_not_installed("bit64")
   seen <- NULL
   # same formals as bigrquery::bq_table_download (no `...`), so an unknown argument name is an error as in production
   fake_download <- function(x, n_max = Inf, page_size = NULL, start_index = 0L, max_connections = 6L, quiet = NA,
