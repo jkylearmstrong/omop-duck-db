@@ -568,7 +568,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         NULL AS admitted_from_source_value,
         CASE 
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('E', 'EX', 'EXPIRED', 'DIED', 'DECEASED') THEN 4216643 -- Expired
-            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 4155309 -- Left against medical advice
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 32216 -- Left against medical advice or discontinued care (UB04 Pt dis status 07)
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HS', 'HOSPICE') THEN 8546 -- Hospice (PCORnet HS)
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('SN', 'SNF') THEN 8863 -- Skilled Nursing Facility
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)

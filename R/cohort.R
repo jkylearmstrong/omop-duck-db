@@ -497,8 +497,9 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 )
 # Conventions of build_end_of_life_cohort(): death is the earliest date across the death table and every visit
 # discharged to a death concept; follow-up is also evidenced by observation periods and by a death at/after the
-# horizon. NOTE: 4155309 is kept for backwards compatibility only. In the Athena vocabulary it is 'Ileal part'
-# (an anatomic site), while this package's PCORnet ETL writes it for 'discharged against medical advice'. Pass
+# horizon. NOTE: 4155309 is kept for backwards compatibility only (pinned by golden files). In the Athena vocabulary it is
+# 'Ileal part' (an anatomic site); older PCORnet ETL versions wrote it for 'discharged against medical advice'
+# (now 32216), so databases built before that fix count AMA stays as deaths here. Pass
 # death_discharge_concept_ids = 4216643 to count only 'Patient died'.
 .STUDY_END_OF_LIFE_CONVENTIONS <- list(
   death_ids = c(4216643, 4155309),
@@ -1334,8 +1335,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #'   column `followup_verified` is reported either way.
 #' @param death_discharge_concept_ids Discharge-disposition concepts meaning "died". Default `4216643` for
 #'   readmission / cohort-only, `c(4216643, 4155309)` for mortality outcomes (the legacy end-of-life convention;
-#'   4155309 is 'Ileal part' in Athena and is written by this package's PCORnet ETL for 'discharged against
-#'   medical advice', so consider passing `4216643`).
+#'   4155309 is 'Ileal part' in Athena; PCORnet ETL versions before the fix wrote it for 'discharged against
+#'   medical advice' (now 32216), so on such databases consider passing `4216643`).
 #' @param transfer_discharge_concept_ids Discharge-disposition concepts meaning "transferred to another acute-care
 #'   hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
 #'   tables do not change; the PCORnet ETL writes `8717` for a transfer (`DISCHARGE_STATUS` 'IP'). Adds the attrition
@@ -1706,7 +1707,7 @@ build_readmission_cohort <- function(con,
 #' Resolves dual OMOP death sources:
 #' \itemize{
 #'   \item \code{death} table: \code{death_date} linked to \code{person_id}.
-#'   \item \code{visit_occurrence} table: \code{discharged_to_concept_id IN (4216643, 4155309)} (Expired / Hospice).
+#'   \item \code{visit_occurrence} table: \code{discharged_to_concept_id IN (4216643, 4155309)} (Expired / 'Ileal part'; the legacy convention, see `death_discharge_concept_ids`).
 #' }
 #' This is a thin wrapper over the shared study-cohort engine (see [define_study_cohort()], which generalises
 #' it); its legacy conventions are pinned here and covered by golden-file tests.

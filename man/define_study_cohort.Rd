@@ -93,8 +93,8 @@ column \code{followup_verified} is reported either way.}
 
 \item{death_discharge_concept_ids}{Discharge-disposition concepts meaning "died". Default \code{4216643} for
 readmission / cohort-only, \code{c(4216643, 4155309)} for mortality outcomes (the legacy end-of-life convention;
-4155309 is 'Ileal part' in Athena and is written by this package's PCORnet ETL for 'discharged against
-medical advice', so consider passing \code{4216643}).}
+4155309 is 'Ileal part' in Athena; PCORnet ETL versions before the fix wrote it for 'discharged against
+medical advice' (now 32216), so on such databases consider passing \code{4216643}).}
 
 \item{transfer_discharge_concept_ids}{Discharge-disposition concepts meaning "transferred to another acute-care
 hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
