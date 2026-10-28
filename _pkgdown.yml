@@ -26,6 +26,8 @@ reference:
   desc: Ingest PCORnet extracts and generate required OHDSI eras and observation periods.
   contents:
   - etl_pcornet
+  - load_enrollment_spans
+  - check_key_collisions
   - build_observation_period
   - build_drug_era
   - build_condition_era
@@ -84,6 +86,9 @@ reference:
   - compute_attrition
   - get_cohort_summary
   - ensure_cohort_tables
+  - build_ederri_diabetes_cohort
+  - compare_cohort_definitions
+  - run_cohort_sql
   - resolve_concept_set
   - get_concept_ancestors
   - get_concept_descendants
@@ -109,6 +114,7 @@ reference:
   desc: Extract patient-level sparse concept matrices, windowed temporal features, and measurements.
   contents:
   - extract_sparse_concept_matrix
+  - extract_longitudinal_tensors
   - extract_patient_features
   - extract_temporal_features
   - extract_clinical_sequence_tokens
