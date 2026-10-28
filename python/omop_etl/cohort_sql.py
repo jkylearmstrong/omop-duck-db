@@ -55,14 +55,53 @@ def _looks_like_path(x: str | Path) -> bool:
 def translate_to_duckdb(sql: str) -> list[str]:
     """Translates OHDSI/T-SQL text to a list of DuckDB statements using ``sqlglot``.
 
-    Not for Oracle: sqlglot renders ``DATEADD(day, n, d)`` for Oracle as ``d + n`` and mis-translates other T-SQL
-    date arithmetic. Run the cohort SQL on Oracle through ``SqlRender::translate(sql, targetDialect = "oracle")``.
+    For Oracle use ``translate_cohort_sql(sql, "oracle")``; SqlRender stays the reference translator.
     """
     try:
         import sqlglot
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise ImportError("translate_to_duckdb needs sqlglot: pip install omop-duck-db[sql]") from exc
     return [s for s in sqlglot.transpile(sql, read="tsql", write="duckdb") if s.strip()]
+
+
+def _oracle_dateadd(node):
+    """Rewrites a T-SQL DATEADD (parsed as DateAdd) into Oracle date arithmetic (sqlglot emits ``DATE_ADD(d, n, 'DAY')``)."""
+    from sqlglot import exp
+
+    unit = (node.args.get("unit").name if node.args.get("unit") is not None else "DAY").upper()
+    d, n = node.this, node.expression
+    if unit in ("DAY", "DAYS", "D", "DD"):
+        return exp.Add(this=d, expression=exp.Paren(this=n))
+    if unit in ("WEEK", "WEEKS", "WK", "WW"):
+        return exp.Add(this=d, expression=exp.Mul(this=exp.Literal.number(7), expression=exp.Paren(this=n)))
+    if unit in ("MONTH", "MONTHS", "MM", "M"):
+        return exp.Anonymous(this="ADD_MONTHS", expressions=[d, n])
+    if unit in ("YEAR", "YEARS", "YY", "YYYY"):
+        return exp.Anonymous(this="ADD_MONTHS", expressions=[d, exp.Mul(this=exp.Literal.number(12), expression=exp.Paren(this=n))])
+    raise ValueError(f"DATEADD unit {unit!r} has no Oracle DATE rewrite; use SqlRender for this SQL.")
+
+
+def translate_cohort_sql(sql: str, dialect: str = "duckdb") -> list[str]:
+    """Translates rendered OHDSI/T-SQL cohort SQL for ``dialect`` (``duckdb``, ``postgres``, ``tsql``, ``oracle``).
+
+    Oracle gets an AST rewrite of ``DATEADD`` (day/week -> ``d + n``, month/year -> ``ADD_MONTHS``) and ``YEAR(d)`` -> ``EXTRACT(YEAR FROM d)`` that plain
+    sqlglot lacks. Only constructs the shipped cohort files use are covered; anything else: SqlRender.
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("translate_cohort_sql needs sqlglot: pip install omop-duck-db[sql]") from exc
+    if dialect.lower() != "oracle":
+        return [s for s in sqlglot.transpile(sql, read="tsql", write=dialect) if s.strip()]
+    out = []
+    for tree in sqlglot.parse(sql, read="tsql"):
+        if tree is None:
+            continue
+        tree = tree.transform(lambda n: _oracle_dateadd(n) if isinstance(n, exp.DateAdd)
+                              else exp.Extract(this=exp.var("YEAR"), expression=n.this) if isinstance(n, exp.Year) else n)
+        out.append(tree.sql(dialect="oracle"))
+    return [s for s in out if s.strip()]
 
 
 def run_cohort_sql(con: duckdb.DuckDBPyConnection, sql_or_path: str | Path, **params: Any) -> None:

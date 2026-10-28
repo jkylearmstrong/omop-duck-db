@@ -206,7 +206,7 @@ from omop_etl.andromeda import (
     AndromedaAdapter,
     export_to_andromeda,
 )
-from omop_etl.cohort_sql import compare_cohort_definitions, render_cohort_sql, run_cohort_sql, translate_to_duckdb
+from omop_etl.cohort_sql import compare_cohort_definitions, render_cohort_sql, run_cohort_sql, translate_cohort_sql, translate_to_duckdb
 from omop_etl.key_checks import KeyCollisionError, check_key_collisions
 from omop_etl.features import (
     ACUTE_LAB_PANEL,
@@ -311,6 +311,10 @@ from omop_etl.trajectories import (
     extract_acute_trajectories,
     extract_temporal_trajectories,
 )
+from omop_etl.achilles import ACHILLES_ANALYSES, achilles_analysis_catalog, run_achilles
+from omop_etl.dqd_catalog import run_dqd_catalog, run_dqd_full
+from omop_etl.bigquery_sync import read_bigquery_table, sync_vocabulary_from_bigquery
+from omop_etl.federated_learning import FederatedFitResult, FederatedNode, federated_cox, federated_logistic_regression
 from omop_etl.federated_survival import (
     FederatedSurvivalResult,
     consortium_survival_meta_analysis,
@@ -449,6 +453,7 @@ __all__ = [
     "compare_cohort_definitions",
     "render_cohort_sql",
     "run_cohort_sql",
+    "translate_cohort_sql",
     "translate_to_duckdb",
     "KeyCollisionError",
     "CORE_14_LAB_PANEL",
@@ -598,6 +603,17 @@ __all__ = [
     "optimize_concept_set",
     "extract_temporal_trajectories",
     "consortium_survival_meta_analysis",
+    "ACHILLES_ANALYSES",
+    "achilles_analysis_catalog",
+    "run_achilles",
+    "run_dqd_catalog",
+    "run_dqd_full",
+    "read_bigquery_table",
+    "sync_vocabulary_from_bigquery",
+    "FederatedFitResult",
+    "FederatedNode",
+    "federated_cox",
+    "federated_logistic_regression",
     "FederatedSurvivalResult",
     "generate_synthetic_omop_twin",
     # 0.6.6 EHR Prescriptions, Multi-Anchor, Unit Discordance, Outliers, Eras & Acute Trajectories Additions
@@ -636,7 +652,7 @@ __all__ = [
     "filter_measurements",
 ]
 
-__version__ = "0.8.6"
+__version__ = "0.8.7"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 

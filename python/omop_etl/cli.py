@@ -75,6 +75,12 @@ def create_parser() -> argparse.ArgumentParser:
     dqd_parser = subparsers.add_parser("dqd", help="Run Duck-DQD data quality and integrity checks.")
     dqd_parser.add_argument("--db", "-d", required=True, help="Path to DuckDB database file.")
     dqd_parser.add_argument("--output", "-o", default=None, help="Path to output report file (JSON or MD).")
+    dqd_parser.add_argument("--full", action="store_true", help="Also run the schema-driven check catalog over every CDM table.")
+
+    ach = subparsers.add_parser("achilles", help="Run in-database Achilles analyses; writes achilles_results* tables into the DB.")
+    ach.add_argument("--db", "-d", required=True, help="DuckDB CDM file (opened read-write: results tables are created in it).")
+    ach.add_argument("--analysis", "-a", type=int, nargs="*", default=None, help="Analysis ids (default: all implemented).")
+    ach.add_argument("--min-cell-count", type=int, default=0, help="Drop result rows with count_value below this.")
 
     # 3. Cohort
     cohort_parser = subparsers.add_parser("cohort", help="Define and materialize study cohorts.")
@@ -319,7 +325,12 @@ def handle_dqd(args: argparse.Namespace) -> int:
     """Executes the DQD command."""
     con = duckdb.connect(args.db, read_only=True)
     try:
-        results = run_dqd(con)
+        if getattr(args, "full", False):
+            from omop_etl.dqd_catalog import run_dqd_full
+
+            results = run_dqd_full(con)
+        else:
+            results = run_dqd(con)
         if args.output:
             out_p = Path(args.output)
             out_p.parent.mkdir(parents=True, exist_ok=True)
@@ -430,6 +441,16 @@ def main(argv: list[str] | None = None) -> int:
         return handle_build(args)
     if args.command == "dqd":
         return handle_dqd(args)
+    if args.command == "achilles":
+        from omop_etl.achilles import run_achilles
+
+        con = duckdb.connect(args.db)
+        try:
+            out = run_achilles(con, args.analysis, min_cell_count=args.min_cell_count)
+        finally:
+            con.close()
+        print(strict_dumps(out, indent=2, default=str))
+        return 0
     if args.command == "cohort":
         return handle_cohort(args)
     if args.command == "table1":

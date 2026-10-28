@@ -1,4 +1,5 @@
 """v0.8.2: audit gaps (FR-A6, FR-C7, FR-C8, FR-C9, FR-D2)."""
+import re
 from pathlib import Path
 
 import duckdb
@@ -531,3 +532,33 @@ def test_cli_checkpoint_command(tmp_path, capsys):
     assert main(["checkpoint", str(db)]) == 0
     assert "Checkpointed" in capsys.readouterr().out
     assert not (tmp_path / "a.duckdb.wal").exists()
+
+
+def test_translate_cohort_sql_oracle_date_arithmetic():
+    pytest.importorskip("sqlglot")
+    from omop_etl.cohort_sql import translate_cohort_sql
+    (sql,) = translate_cohort_sql("SELECT DATEADD(day, 30, d), DATEADD(month, -2, d), DATEADD(year, 1, d), YEAR(d) FROM t", "oracle")
+    assert "d + (30)" in sql and "ADD_MONTHS(d, -2)" in sql and "ADD_MONTHS(d, 12 * (1))" in sql
+    assert "EXTRACT(YEAR FROM" in sql and "DATE_ADD" not in sql
+    from omop_etl.cohort_sql import render_cohort_sql
+    rendered = render_cohort_sql(_COHORTS / "target_cohort.sql", cdm_database_schema="omop", target_database_schema="omop",
+                                 target_cohort_table="cohort", target_cohort_id=1, followup_days=30, min_age=18)
+    for stmt in translate_cohort_sql(rendered, "oracle"):
+        code = re.sub(r"/\*.*?\*/", "", stmt, flags=re.S)
+        assert "DATE_ADD" not in code and "YEAR(" not in code
+
+
+def test_translate_cohort_sql_units_dialects_and_missing_sqlglot(monkeypatch):
+    pytest.importorskip("sqlglot")
+    from omop_etl.cohort_sql import translate_cohort_sql
+
+    (w,) = translate_cohort_sql("SELECT DATEADD(week, 2, d) FROM t", "oracle")
+    assert "7 * (2)" in w
+    with pytest.raises(ValueError, match="no Oracle DATE rewrite"):
+        translate_cohort_sql("SELECT DATEADD(hour, 2, d) FROM t", "oracle")
+    (pg,) = translate_cohort_sql("SELECT DATEADD(day, 2, d) FROM t", "postgres")
+    assert "INTERVAL" in pg.upper()
+    import sys
+    monkeypatch.setitem(sys.modules, "sqlglot", None)
+    with pytest.raises(ImportError, match="sqlglot"):
+        translate_cohort_sql("SELECT 1", "oracle")

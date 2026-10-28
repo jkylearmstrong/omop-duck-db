@@ -220,16 +220,16 @@ _COHORT_TABLES = {
     "drug_exposure": "person_id BIGINT, drug_exposure_start_date DATE",
     "cohort": "cohort_definition_id INTEGER, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE",
 }
-_SQLGLOT_DIALECT = {"postgres": "postgres", "mssql": "tsql"}   # sqlglot renders DATEADD wrongly for Oracle: use SqlRender there
+_SQLGLOT_DIALECT = {"postgres": "postgres", "mssql": "tsql", "oracle": "oracle"}
 
 
 def _statements(sql: str, backend: str) -> list[str]:
-    import sqlglot
+    from omop_etl.cohort_sql import translate_cohort_sql
 
-    return [s for s in sqlglot.transpile(sql, read="tsql", write=_SQLGLOT_DIALECT[backend]) if s.strip()]
+    return translate_cohort_sql(sql, _SQLGLOT_DIALECT[backend])
 
 
-@pytest.mark.parametrize("backend", ["postgres", "mssql"])
+@pytest.mark.parametrize("backend", ["postgres", "mssql", "oracle"])
 def test_portable_cohort_sql_gives_the_same_cohorts_on_every_server(backend):
     """Same CDM rows -> same target / outcome cohorts as on DuckDB, with the SQL translated for each dialect.
 
@@ -240,10 +240,12 @@ def test_portable_cohort_sql_gives_the_same_cohorts_on_every_server(backend):
     from omop_etl.cohort_sql import render_cohort_sql
 
     eng = _engine(backend)
-    schema = {"postgres": "public", "mssql": "dbo"}[backend]
+    schema = {"postgres": "public", "mssql": "dbo", "oracle": None}[backend] or sa.inspect(eng).default_schema_name
     _drop(eng, *_COHORT_TABLES)
     with eng.begin() as c:
         for name, cols in _COHORT_TABLES.items():
+            if backend == "oracle":   # Oracle has no BIGINT / INTEGER
+                cols = cols.replace("BIGINT", "NUMBER(19)").replace("INTEGER", "NUMBER(10)")
             c.execute(sa.text(f"CREATE TABLE {name} ({cols})"))
         d = dt.date.fromisoformat
         for pid, yob in {1: 1980, 2: 1980, 3: 2015, 4: 1980, 5: 1980}.items():

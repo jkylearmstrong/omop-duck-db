@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omop-duck-db"
-version = "0.8.6"
+version = "0.8.7"
 description = "Tools for building an OMOP CDM v5.4 DuckDB database and mapping PCORnet-format source data into it."
 readme = "README.md"
 license = "MIT"
@@ -34,8 +34,10 @@ mssql = ["sqlalchemy>=1.4", "pyodbc"]
 oracle = ["sqlalchemy>=2.0", "oracledb"]  # the oracle+oracledb dialect needs SQLAlchemy 2.x
 snowflake = ["sqlalchemy>=1.4", "snowflake-sqlalchemy"]
 # Model bundles (FR-A1): native XGBoost JSON and ONNX runtimes.
+# Zero-copy Athena vocabulary from BigQuery (Arrow Storage Read API into DuckDB).
+bigquery = ["google-cloud-bigquery-storage>=2.20", "google-cloud-bigquery>=3.0", "pyarrow>=14"]
 bundle = ["xgboost>=2.0", "onnxruntime>=1.16"]
-dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot"]
+dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot", "statsmodels"]
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"

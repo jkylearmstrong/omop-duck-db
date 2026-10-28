@@ -52,3 +52,7 @@ config/*.yml
 # Raw site data, manifests, and row samples (may contain PHI-adjacent
 # patient-level data) - never commit anything under here
 secrets/
+
+# local ATLAS stack artifacts
+scripts/atlas/jdbc/*.jar
+scripts/atlas/data/
