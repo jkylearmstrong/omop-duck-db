@@ -39,6 +39,6 @@ one row per cohort with \code{cohortId}, \code{cohortName}, \code{sql} and \code
 The SQL is the authoritative definition. The Circe JSON is hand-written, has not been imported into ATLAS and
 cannot express the discharge-disposition exclusion; CohortGenerator uses the \code{sql} column to generate cohorts.
 
-The shipped SQL creates no inclusion-rule statistics tables (erb{#InclusionRules} and friends), so call
-erb{CohortGenerator::generateCohortSet(..., generateStats = FALSE)}; with the default it fails.
+The shipped SQL creates no inclusion-rule statistics tables (\verb{#InclusionRules} and friends), so call
+\verb{CohortGenerator::generateCohortSet(..., generateStats = FALSE)}; with the default it fails.
 }

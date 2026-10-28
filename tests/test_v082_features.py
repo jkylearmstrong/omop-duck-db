@@ -504,3 +504,30 @@ def test_attach_read_only_warns_on_leftover_wal(tmp_path):
             attach_read_only(duckdb.connect(":memory:"), str(db))
         except Exception:
             pass
+
+
+def test_cli_build_flags_and_manifest_enrollment_step(tmp_path):
+    import json
+    from omop_etl.cli import main
+    manifest = tmp_path / "run_manifest.json"
+    rc = main(["build", "--source", str(FIXTURE), "--target", str(tmp_path / "site.duckdb"),
+               "--manifest", str(manifest), "--key-check", "ignore", "--use-enrollment", "false",
+               "--enrollment-type-concept-id", "32817"])
+    assert rc == 0
+    steps = [s["step"] for s in json.loads(manifest.read_text())["attrition"]]
+    assert "observation_period:total" in steps
+    assert "observation_period:enrollment_spans" not in steps
+    manifest2 = tmp_path / "m2.json"
+    assert main(["build", "--source", str(FIXTURE), "--target", str(tmp_path / "site2.duckdb"),
+                 "--manifest", str(manifest2), "--use-enrollment", "auto"]) == 0
+    steps2 = [s["step"] for s in json.loads(manifest2.read_text())["attrition"]]
+    assert "observation_period:enrollment_spans" in steps2
+
+
+def test_cli_checkpoint_command(tmp_path, capsys):
+    from omop_etl.cli import main
+    db = tmp_path / "a.duckdb"
+    duckdb.connect(str(db)).close()
+    assert main(["checkpoint", str(db)]) == 0
+    assert "Checkpointed" in capsys.readouterr().out
+    assert not (tmp_path / "a.duckdb.wal").exists()
