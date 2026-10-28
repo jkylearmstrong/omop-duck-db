@@ -77,3 +77,18 @@ test_that("followup_evidence switches the later-event follow-up rule on and leav
   }
   expect_error(cohort_definition_set(d, followup_evidence = "nope"), "arg")
 })
+
+test_that("checkpoint_database leaves no .wal and the file then attaches READ_ONLY; readonly_attach_sql warns on a leftover .wal", {
+  skip_if_not_installed("duckdb")
+  db <- tempfile(fileext = ".duckdb")
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
+  DBI::dbExecute(con, "CREATE TABLE t AS SELECT 1 AS x")
+  DBI::dbDisconnect(con, shutdown = TRUE)
+  expect_equal(checkpoint_database(db), db)
+  expect_false(file.exists(paste0(db, ".wal")))
+  expect_error(checkpoint_database(tempfile(fileext = ".duckdb")), "not found")
+
+  writeLines("", paste0(db, ".wal"))
+  expect_warning(readonly_attach_sql(db), "checkpoint_database")
+  unlink(c(db, paste0(db, ".wal")))
+})

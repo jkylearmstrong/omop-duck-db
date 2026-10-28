@@ -305,10 +305,32 @@ def attach_read_only(con, cdm_db, vocab_db=None, cdm_alias="cdm", vocab_alias="c
     for label, path in (("CDM", cdm_db), ("vocabulary", vocab_db)):
         if path is not None and not os.path.exists(path):
             raise FileNotFoundError(f"{label} database not found: {path}")
+        if path is not None and os.path.exists(f"{path}.wal"):
+            warnings.warn(f"{path}.wal exists: ATTACH ... (READ_ONLY) will fail with 'WAL replay is required'. "
+                          "Run checkpoint_database() on the file first.", stacklevel=2)
     con.execute(f"ATTACH {sql_path_literal(cdm_db)} AS {cdm_alias} (READ_ONLY);")
     if vocab_db is not None:
         con.execute(f"ATTACH {sql_path_literal(vocab_db)} AS {vocab_alias} (READ_ONLY);")
     return {"cdm": cdm_alias, "vocab": vocab_alias if vocab_db is not None else None}
+
+
+def checkpoint_database(db_path):
+    """Folds a DuckDB file's write-ahead log into the file so it can be distributed and attached ``READ_ONLY``.
+
+    DuckDB refuses ``ATTACH ... (READ_ONLY)`` while ``<file>.wal`` exists ("WAL replay is required"). Run this on every
+    consortium database before copying it. Needs exclusive access: no other process may have the file open. Raises
+    ``RuntimeError`` if a ``.wal`` file is still present afterwards. Returns the path.
+    """
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Database not found: {db_path}")
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute("CHECKPOINT;")
+    finally:
+        con.close()
+    if os.path.exists(f"{db_path}.wal"):
+        raise RuntimeError(f"{db_path}.wal still exists after CHECKPOINT; close every other connection and retry.")
+    return db_path
 
 
 def load_care_site(con, source_dir, site_id=None, site_anon=None, site_name=None):

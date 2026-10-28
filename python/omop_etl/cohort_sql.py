@@ -53,7 +53,11 @@ def _looks_like_path(x: str | Path) -> bool:
 
 
 def translate_to_duckdb(sql: str) -> list[str]:
-    """Translates OHDSI/T-SQL text to a list of DuckDB statements using ``sqlglot``."""
+    """Translates OHDSI/T-SQL text to a list of DuckDB statements using ``sqlglot``.
+
+    Not for Oracle: sqlglot renders ``DATEADD(day, n, d)`` for Oracle as ``d + n`` and mis-translates other T-SQL
+    date arithmetic. Run the cohort SQL on Oracle through ``SqlRender::translate(sql, targetDialect = "oracle")``.
+    """
     try:
         import sqlglot
     except ImportError as exc:  # pragma: no cover - exercised only without the extra

@@ -1,3 +1,4 @@
+# NOTE: if you use CohortGenerator::generateCohortSet() instead of run_sql(), pass generateStats = FALSE (no #InclusionRules tables).
 # Example: run the portable eDERRI cohorts and a PatientLevelPrediction readmission model (FR-D1).
 # Writes the cohort table into the CDM schema, so the database must be writable. For a read-only CDM use
 # run_plp_readonly_example.R. Works on any OMOP CDM that DatabaseConnector can reach; DuckDB is only the example.

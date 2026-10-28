@@ -5,7 +5,8 @@
    rule 3 (discharge disposition) and has not been imported into ATLAS; an ATLAS-built cohort can differ.
 
    OHDSI SQL (SqlRender dialect). Translate with SqlRender::translate(sql, targetDialect = ...) for
-   DuckDB, PostgreSQL, SQL Server, Oracle, Snowflake. Parameters:
+   DuckDB, PostgreSQL, SQL Server, Oracle, Snowflake. On Oracle always use SqlRender; sqlglot (python
+   translate_to_duckdb) renders DATEADD(day, ...) incorrectly for Oracle. Parameters:
      @cdm_database_schema     schema holding the OMOP CDM
      @target_database_schema  schema holding the cohort table
      @target_cohort_table     cohort table (cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)

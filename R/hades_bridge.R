@@ -68,11 +68,33 @@ readonly_attach_sql <- function(cdm_db, vocab_db = NULL, cdm_alias = "cdm", voca
   }
   one <- function(path, alias, label) {
     if (!file.exists(path)) stop(sprintf("%s database not found: %s", label, path), call. = FALSE)
+    if (file.exists(paste0(path, ".wal"))) {
+      warning(sprintf("%s.wal exists: ATTACH ... (READ_ONLY) will fail with 'WAL replay is required'. Run checkpoint_database() first.", path), call. = FALSE)
+    }
     sprintf("ATTACH '%s' AS %s (READ_ONLY)", gsub("'", "''", normalizePath(path, winslash = "/", mustWork = TRUE)), alias)
   }
   out <- one(cdm_db, cdm_alias, "CDM")
   if (!is.null(vocab_db)) out <- c(out, one(vocab_db, vocab_alias, "Vocabulary"))
   out
+}
+
+#' Checkpoint a DuckDB file so it can be distributed and attached `READ_ONLY`
+#'
+#' DuckDB refuses `ATTACH ... (READ_ONLY)` while a `<file>.wal` write-ahead log exists ("WAL replay is required").
+#' This opens the file read-write, runs `CHECKPOINT`, closes it and verifies no `.wal` remains. Run it on every
+#' consortium database before copying it. No other process may have the file open.
+#'
+#' @param db_path Path to the DuckDB file.
+#' @return `db_path`, invisibly.
+#' @export
+checkpoint_database <- function(db_path) {
+  if (!file.exists(db_path)) stop(sprintf("Database not found: %s", db_path), call. = FALSE)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  tryCatch(DBI::dbExecute(con, "CHECKPOINT"), finally = DBI::dbDisconnect(con, shutdown = TRUE))
+  if (file.exists(paste0(db_path, ".wal"))) {
+    stop(sprintf("%s.wal still exists after CHECKPOINT; close every other connection and retry.", db_path), call. = FALSE)
+  }
+  invisible(db_path)
 }
 
 #' Check that a DuckDB file is ready for OHDSI HADES (PatientLevelPrediction / DeepPatientLevelPrediction)
