@@ -78,4 +78,4 @@ runPlp(plpData = plpData, outcomeId = 2,
 #                                     cohortTableNames = CohortGenerator::getCohortTableNames("cohort"))
 # CohortGenerator::generateCohortSet(connectionDetails = connectionDetails, cdmDatabaseSchema = "cdm.main",
 #                                    cohortDatabaseSchema = "main", cohortTableNames = CohortGenerator::getCohortTableNames("cohort"),
-#                                    cohortDefinitionSet = cds)
+#                                    cohortDefinitionSet = cds, generateStats = FALSE)  # shipped SQL has no #InclusionRules tables

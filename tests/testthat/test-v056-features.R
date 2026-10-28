@@ -39,7 +39,7 @@ test_that("duckdb_to_andromeda and as_andromeda stream tables to Andromeda", {
   skip_if_not_installed("Andromeda")
   # The R process running the whole suite exits without a message on the GitHub Windows runner when tests write real
   # Andromeda 1.x tables (crashed in 7 of 9 runs with them; passes on Ubuntu and on a local Windows 11 machine).
-  # Skipped on Windows until the cause is understood; see NEWS.md (0.8.2).
+  # Still crashes on the Windows runner with close_plp() teardown (PR #16); see NEWS.md (0.8.2).
   skip_on_os("windows")
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
@@ -59,7 +59,7 @@ test_that("duckdb_to_andromeda and as_andromeda stream tables to Andromeda", {
 
   andr <- duckdb_to_andromeda(con, table_names = c("covariates", "covariateref", "analysisref"))
   # Close Andromeda's own DuckDB connection before the test's connection is shut down (runs first).
-  on.exit(try(Andromeda::close(andr), silent = TRUE), add = TRUE, after = FALSE)
+  on.exit(close_plp(andr), add = TRUE, after = FALSE)
   expect_true(inherits(andr, "Andromeda") || inherits(andr, "environment") || is.list(andr))
 
   # Test table existence in Andromeda
@@ -177,7 +177,7 @@ test_that("duckdb_to_andromeda copies every row across chunks and keeps empty ta
   skip_if_not_installed("Andromeda")
   # The R process running the whole suite exits without a message on the GitHub Windows runner when tests write real
   # Andromeda 1.x tables (crashed in 7 of 9 runs with them; passes on Ubuntu and on a local Windows 11 machine).
-  # Skipped on Windows until the cause is understood; see NEWS.md (0.8.2).
+  # Still crashes on the Windows runner with close_plp() teardown (PR #16); see NEWS.md (0.8.2).
   skip_on_os("windows")
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = ":memory:")
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
@@ -185,7 +185,7 @@ test_that("duckdb_to_andromeda copies every row across chunks and keeps empty ta
   DBI::dbExecute(con, "CREATE TABLE analysisref AS SELECT 1 AS analysis_id WHERE false")
 
   andr <- duckdb_to_andromeda(con, table_names = c("covariates", "analysisref"), chunk_size = 10L)
-  on.exit(try(Andromeda::close(andr), silent = TRUE), add = TRUE, after = FALSE)
+  on.exit(close_plp(andr), add = TRUE, after = FALSE)
   expect_setequal(names(andr), c("covariates", "analysisref"))
   expect_equal(nrow(dplyr::collect(andr$covariates)), 25L)
   expect_equal(names(dplyr::collect(andr$analysisref)), "analysis_id")
@@ -197,7 +197,7 @@ test_that("duckdb_to_andromeda survives a full copy, teardown and exit in its ow
   skip_if_not_installed("callr")
   # The R process running the whole suite exits without a message on the GitHub Windows runner when tests write real
   # Andromeda 1.x tables (crashed in 7 of 9 runs with them; passes on Ubuntu and on a local Windows 11 machine).
-  # Skipped on Windows until the cause is understood; see NEWS.md (0.8.2).
+  # Still crashes on the Windows runner with close_plp() teardown (PR #16); see NEWS.md (0.8.2).
   skip_on_os("windows")
   # Run in a child process: on the GitHub Windows runner the R process hosting the whole suite exited without a message
   # once the in-process Andromeda tests wrote tables (intermittent, cause unknown). A child that dies fails this test

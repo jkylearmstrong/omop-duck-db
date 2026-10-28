@@ -1757,6 +1757,9 @@ def main():
     parser.add_argument("--site-anon", default=None, help="Publication pseudonym (e.g. 'Site A')")
     parser.add_argument("--site-name", default=None, help="Optional institutional name or internal descriptor (e.g. 'Hospital System A')")
     parser.add_argument("--disambiguate-patids", action="store_true", help="Suffix PATID with -<site_id> to disambiguate patient IDs across sites")
+    parser.add_argument("--key-check", choices=["warn", "raise", "ignore"], default="warn", help="Compare distinct source ids with distinct surrogate keys after the build")
+    parser.add_argument("--use-enrollment", choices=["auto", "true", "false"], default="auto", help="Build observation_period from the PCORnet ENROLLMENT file")
+    parser.add_argument("--enrollment-type-concept-id", type=int, default=0, help="period_type_concept_id for enrolment-derived periods")
     args = parser.parse_args()
 
     etl_pcornet(
@@ -1772,6 +1775,9 @@ def main():
         site_name=args.site_name,
         disambiguate_patids=args.disambiguate_patids,
         auto_resources=args.auto_resources,
+        key_check=args.key_check,
+        use_enrollment={"auto": "auto", "true": True, "false": False}[args.use_enrollment],
+        enrollment_type_concept_id=args.enrollment_type_concept_id,
     )
 
 

@@ -1,10 +1,15 @@
 """v0.8.2: audit gaps (FR-A6, FR-C7, FR-C8, FR-C9, FR-D2)."""
+from pathlib import Path
+
 import duckdb
 import pandas as pd
 import pytest
 
 from omop_etl import check_key_collisions, KeyCollisionError, run_dqd, extract_standard_labs
 from omop_etl.build_omop_cdm import build_schema, load_macros, materialize_vocabulary
+
+
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "pcornet_sample"
 
 
 def _con():
@@ -257,7 +262,7 @@ def test_dqd_plausible_observation_period_flags_epoch_dates():
 def test_etl_reports_key_check_and_visit_rows_match_distinct_encounters(tmp_path):
     from omop_etl.build_omop_cdm import etl_pcornet
     seen = []
-    etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "cdm.duckdb"), build_schema_flag=True,
+    etl_pcornet(str(FIXTURE), str(tmp_path / "cdm.duckdb"), build_schema_flag=True,
                 key_check_callback=seen.extend)
     visit = next(r for r in seen if r["cdm_table"] == "visit_occurrence")
     assert visit["ok"] and visit["lost"] == 0 and visit["id_column"] in ("ENCOUNTERID", "encounterid")
@@ -267,10 +272,10 @@ def test_etl_reports_key_check_and_visit_rows_match_distinct_encounters(tmp_path
 def test_etl_key_check_ignore_and_person_check_when_disambiguated(tmp_path):
     from omop_etl.build_omop_cdm import etl_pcornet
     seen = []
-    etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "a.duckdb"), build_schema_flag=True,
+    etl_pcornet(str(FIXTURE), str(tmp_path / "a.duckdb"), build_schema_flag=True,
                 key_check="ignore", key_check_callback=seen.extend)
     assert seen == []
-    etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "b.duckdb"), build_schema_flag=True,
+    etl_pcornet(str(FIXTURE), str(tmp_path / "b.duckdb"), build_schema_flag=True,
                 site_id=7, disambiguate_patids=True, key_check_callback=seen.extend)
     person = next(r for r in seen if r["cdm_table"] == "person")
     assert person["ok"] and person["distinct_ids"] == person["cdm_rows"]
@@ -280,7 +285,7 @@ def test_cli_build_writes_key_check_steps_to_manifest(tmp_path):
     import json
     from omop_etl.cli import main
     manifest = tmp_path / "run_manifest.json"
-    rc = main(["build", "--source", "tests/fixtures/pcornet_sample", "--target", str(tmp_path / "site.duckdb"),
+    rc = main(["build", "--source", str(FIXTURE), "--target", str(tmp_path / "site.duckdb"),
                "--manifest", str(manifest)])
     assert rc == 0
     steps = [s["step"] for s in json.loads(manifest.read_text())["attrition"]]
@@ -394,7 +399,7 @@ def test_observation_period_from_enrollment_merges_spans_and_falls_back_to_event
     import shutil
     from omop_etl.build_omop_cdm import etl_pcornet
     src = tmp_path / "src"
-    shutil.copytree("tests/fixtures/pcornet_sample", src)
+    shutil.copytree(str(FIXTURE), src)
     (src / "enrollment.csv").write_text(
         "PATID,ENR_START_DATE,ENR_END_DATE,CHART,ENR_BASIS\n"
         "FAKE-P001,2023-01-01,2023-06-30,Y,I\n"
@@ -415,7 +420,7 @@ def test_observation_period_from_enrollment_merges_spans_and_falls_back_to_event
     con.close()
     # use_enrollment=True without an ENROLLMENT file fails loudly
     with pytest.raises(FileNotFoundError):
-        etl_pcornet("tests/fixtures/pcornet_sample", str(tmp_path / "x.duckdb"), build_schema_flag=True,
+        etl_pcornet(str(FIXTURE), str(tmp_path / "x.duckdb"), build_schema_flag=True,
                     key_check="ignore", use_enrollment=True)
 
 
@@ -453,3 +458,20 @@ def test_sequence_tensor_can_include_index_stay_and_lab_tokens():
     # discharge-anchored cohort: the index stay started earlier, so the default window already has it
     con.execute("UPDATE cohort SET cohort_start_date = DATE '2022-01-01'")
     assert (extract_longitudinal_tensors(con, "cohort")[0, 1] > 0).any()
+
+
+def test_cli_passes_key_check_and_enrollment_flags(monkeypatch):
+    from omop_etl import build_omop_cdm as b
+
+    seen = {}
+    monkeypatch.setattr(b, "etl_pcornet", lambda **kw: seen.update(kw))
+    monkeypatch.setattr("sys.argv", ["build_omop_cdm.py", "--source-dir", "x", "--key-check", "raise",
+                                     "--use-enrollment", "false", "--enrollment-type-concept-id", "32817"])
+    b.main()
+    assert seen["key_check"] == "raise"
+    assert seen["use_enrollment"] is False
+    assert seen["enrollment_type_concept_id"] == 32817
+
+    monkeypatch.setattr("sys.argv", ["build_omop_cdm.py", "--source-dir", "x"])
+    b.main()
+    assert (seen["key_check"], seen["use_enrollment"], seen["enrollment_type_concept_id"]) == ("warn", "auto", 0)
