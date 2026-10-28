@@ -2,7 +2,7 @@
 
 - **Fix: `FeatureMatrixBuilder.to_tensor()`** falls back to the NumPy array when torch is installed but its DLL fails to initialise on Windows (`OSError`, not just `ImportError`).
 - **Tests: no more cwd-dependent paths** in `test_v080_features.py` (resolved from the repo root).
-- **Tests/CI (R, Windows): Andromeda teardown.** `test-hades-bridge.R` closes every `plpData$covariateData`; `helper-hades.R` sets `andromedaThreads = 1` / `andromedaMemoryLimit = "512Mb"`; `duckdb_to_andromeda()` flushes after chunked appends. Targets the silent `R CMD check` exit on 7 GB runners.
+- **Tests/CI (R, Windows): Andromeda teardown.** `test-hades-bridge.R` closes every `plpData$covariateData`; `helper-hades.R` sets `andromedaThreads = 1` / `andromedaMemoryLimit = 0.5` (GB); `duckdb_to_andromeda()` flushes after chunked appends. Targets the silent `R CMD check` exit on 7 GB runners.
 - **Docs:** hand-written cohort SQL must be run with `CohortGenerator::generateCohortSet(..., generateStats = FALSE)`; read-only DuckDB files must be checkpointed (no `.wal`) before `ATTACH ... (READ_ONLY)`.
 - **Build-time key check (R)**: `check_key_collisions()` / `check_etl_keys()` and `etl_pcornet(key_check = "warn"|"raise"|"ignore", key_check_callback = )`, ported from `omop_etl.key_checks`.
 - **Enrolment-based observation periods (R)**: `etl_pcornet(use_enrollment = "auto"|TRUE|FALSE, enrollment_type_concept_id = )`, new `load_enrollment_spans()`, and `build_observation_period(use_enrollment=, enrollment_type_concept_id=)`; spans are clipped, merged when they overlap or touch, and people without enrolment keep the event-span period.
