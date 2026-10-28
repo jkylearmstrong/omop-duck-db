@@ -1,0 +1,165 @@
+"""RUCA / SDI geography features: address-in-effect rule, fixed SDI cut points, ZIP handling, dated address history."""
+import sys
+from pathlib import Path
+
+import duckdb
+import numpy as np
+import pandas as pd
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "python"))
+
+from omop_etl import build_schema, load_location, load_person
+from omop_etl.build_omop_cdm import load_macros
+from omop_etl.geography import (
+    RUCA_MISSING, SDI_LABELS, SDI_MISSING, assign_sdi_quintile, derive_geography_features, fit_sdi_cut_points,
+    read_ruca_crosswalk, read_sdi_table, ruca_category, validate_sdi_cut_points,
+)
+
+SAMPLE_DIR = REPO_ROOT / "tests" / "fixtures" / "pcornet_sample"
+RUCA = pd.DataFrame({"ZIPCODE": ["19104", "15213", "08101", "17821", "00501"], "RUCA_CODE": ["1", "2.1", "4", "99", "1"]})
+SDI = pd.DataFrame({"ZCTA5_FIPS": ["19104", "15213", "8101", "17821"], "SDI_score": [95, 40, 10, 70]})
+CUTS = [20.0, 45.0, 65.0, 85.0]
+
+
+def _con(addresses, visits, location_zip=None):
+    c = duckdb.connect()
+    build_schema(c)
+    for pid in (1, 2):
+        c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) "
+                  f"VALUES ({pid}, 8507, 1980, 0, 0)")
+    c.execute("CREATE TABLE person_address_history (person_id BIGINT, location_id BIGINT, zip5 VARCHAR, "
+              "address_start DATE, address_end DATE, preferred VARCHAR)")
+    for row in addresses:
+        c.execute("INSERT INTO person_address_history VALUES (?, ?, ?, ?, ?, ?)", row)
+    for vid, pid, d in visits:
+        c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, "
+                  f"visit_end_date, visit_type_concept_id) VALUES ({vid}, {pid}, 9201, DATE '{d}', DATE '{d}', 0)")
+    if location_zip:
+        c.execute(f"INSERT INTO location (location_id, zip) VALUES (1, '{location_zip}')")
+        c.execute("UPDATE person SET location_id = 1 WHERE person_id = 2")
+    return c
+
+
+def test_ruca_category_and_code_99():
+    assert ruca_category(1) == "RUCA: Metropolitan (1.0)"
+    assert ruca_category("2.1") == "RUCA: Micropolitan (2.0)"
+    assert ruca_category(4.2) == "RUCA: Small Town / Rural (3+)"
+    assert ruca_category(99) == "RUCA: Small Town / Rural (3+)"          # reference coding
+    assert ruca_category(99, code_99_missing=True) == RUCA_MISSING
+    assert ruca_category(None) == ruca_category(float("nan")) == ruca_category("x") == ruca_category(0) == RUCA_MISSING
+
+
+def test_cut_points_are_fixed_not_local():
+    scores = np.arange(1, 101)
+    fitted = fit_sdi_cut_points(scores)
+    assert fitted == pytest.approx([20.8, 40.6, 60.4, 80.2])
+    q = assign_sdi_quintile([5, 20.0, 44.9, 45.0, 99, None], CUTS)
+    assert list(q[:5]) == [SDI_LABELS[0], SDI_LABELS[1], SDI_LABELS[1], SDI_LABELS[2], SDI_LABELS[4]]
+    assert q.iloc[5] == SDI_MISSING
+    # same score, same quintile whatever the local distribution looks like
+    assert assign_sdi_quintile([52], CUTS).iloc[0] == SDI_LABELS[2]
+    for bad in ([1, 2, 3], [1, 1, 2, 3], [4, 3, 2, 1], [1, 2, 3, float("nan")]):
+        with pytest.raises(ValueError, match="sdi_cut_points must be four"):
+            validate_sdi_cut_points(bad)
+    with pytest.raises(ValueError, match="at least 5"):
+        fit_sdi_cut_points([1, 2])
+
+
+def test_readers_normalise_zip_and_headers(tmp_path):
+    ruca, sdi = read_ruca_crosswalk(RUCA), read_sdi_table(SDI)
+    assert set(sdi["zip5"]) == {"19104", "15213", "08101", "17821"}      # '8101' zero-padded
+    assert ruca.set_index("zip5").loc["15213", "ruca_code"] == 2.1
+    p = tmp_path / "sdi.csv"
+    pd.DataFrame({"zcta5": ["02139"], "sdi": [33]}).to_csv(p, index=False)
+    assert read_sdi_table(p).iloc[0].tolist() == ["02139", 33]
+    with pytest.raises(ValueError, match="RUCA crosswalk needs"):
+        read_ruca_crosswalk(pd.DataFrame({"a": [1]}))
+
+
+def test_address_in_effect_then_fallbacks():
+    addr = [
+        (1, 10, "19104", "2010-01-01", "2014-12-31", "N"),     # moved away before the 2016 stay
+        (1, 11, "15213", "2015-01-01", None, "N"),              # in effect at 2016 stay
+        (1, 12, "08101", "2020-01-01", None, "Y"),              # later address (preferred) must not win
+        (2, 13, None, "2000-01-01", None, "Y"),                 # no ZIP never beats one with a ZIP
+        (2, 14, "17821", "2030-01-01", None, "N"),              # only address starts after the stay -> earliest_after
+    ]
+    c = _con(addr, [(1, 1, "2016-06-01"), (2, 1, "2012-06-01"), (3, 1, "2008-01-01"), (4, 2, "2021-03-03")])
+    g = derive_geography_features(c, RUCA, SDI, CUTS).set_index("stay_id")
+    assert g.loc[1, ["zip5", "rule"]].tolist() == ["15213", "in_effect"]
+    assert g.loc[2, ["zip5", "rule"]].tolist() == ["19104", "in_effect"]
+    assert g.loc[3, ["zip5", "rule"]].tolist() == ["08101", "earliest_after"]      # preferred 'Y' outranks a nearer start
+    assert g.loc[4, ["zip5", "rule"]].tolist() == ["17821", "earliest_after"]
+    assert g.loc[1, "ruca_category"] == "RUCA: Micropolitan (2.0)" and g.loc[1, "sdi_quintile"] == SDI_LABELS[1]
+    assert g.loc[2, "sdi_quintile"] == SDI_LABELS[4]
+    assert g.loc[4, "ruca_category"] == "RUCA: Small Town / Rural (3+)"
+    assert g.attrs["sdi_cut_points"] == CUTS
+    assert derive_geography_features(c, RUCA, SDI, CUTS, code_99_missing=True).set_index("stay_id").loc[4, "ruca_category"] == RUCA_MISSING
+
+
+def test_latest_before_and_preference_tiebreak():
+    addr = [(1, 1, "19104", "2001-01-01", "2005-01-01", "N"), (1, 2, "15213", "2006-01-01", "2008-01-01", "N"),
+            (2, 3, "19104", "2000-01-01", None, "N"), (2, 4, "15213", "2000-01-01", None, "Y")]
+    c = _con(addr, [(1, 1, "2012-01-01"), (2, 2, "2012-01-01")])
+    g = derive_geography_features(c, RUCA, SDI, CUTS).set_index("stay_id")
+    assert g.loc[1, ["zip5", "rule"]].tolist() == ["15213", "latest_before"]
+    assert g.loc[2, "zip5"] == "15213"                                  # both in effect, preferred 'Y' wins
+
+
+def test_missing_zip_and_unmatched_zip_are_unknown():
+    c = _con([(1, 1, None, "2000-01-01", None, "Y"), (2, 2, "99999", "2000-01-01", None, "Y")],
+             [(1, 1, "2012-01-01"), (2, 2, "2012-01-01")])
+    g = derive_geography_features(c, RUCA, SDI, CUTS).set_index("stay_id")
+    assert g.loc[1, "rule"] == "no_zip" and pd.isna(g.loc[1, "zip5"])
+    assert g.loc[1, "ruca_category"] == RUCA_MISSING and g.loc[1, "sdi_quintile"] == SDI_MISSING
+    assert g.loc[2, "zip5"] == "99999" and g.loc[2, "ruca_category"] == RUCA_MISSING and g.loc[2, "sdi_quintile"] == SDI_MISSING
+
+
+def test_cut_points_required_unless_fitting():
+    c = _con([(1, 1, "19104", None, None, "Y")], [(1, 1, "2012-01-01")])
+    with pytest.raises(ValueError, match="sdi_cut_points is required"):
+        derive_geography_features(c, RUCA, SDI)
+    sdi = pd.DataFrame({"zip5": [f"{i:05d}" for i in range(1, 11)], "sdi": range(1, 11)})
+    ruca = pd.DataFrame({"zip": [f"{i:05d}" for i in range(1, 11)], "ruca": [1] * 10})
+    c = _con([(1, 1, "00001", None, None, "Y")], [])
+    stays = pd.DataFrame({"person_id": [1] * 10, "admit_date": ["2012-01-01"] * 10})
+    c.execute("DELETE FROM person_address_history")
+    for i in range(1, 11):
+        c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) "
+                  f"VALUES ({100 + i}, 8507, 1980, 0, 0)")
+        c.execute("INSERT INTO person_address_history VALUES (?, 1, ?, NULL, NULL, 'Y')", [100 + i, f"{i:05d}"])
+    stays = pd.DataFrame({"person_id": range(101, 111), "admit_date": ["2012-01-01"] * 10})
+    g = derive_geography_features(c, ruca, sdi, fit_cut_points=True, stays=stays)
+    assert g.attrs["sdi_cut_points"] == pytest.approx([2.8, 4.6, 6.4, 8.2])
+    assert g["sdi_quintile"].nunique() == 5
+
+
+def test_falls_back_to_person_location_and_explicit_stays():
+    c = _con([], [(1, 2, "2016-01-01")], location_zip="19104-1234")
+    g = derive_geography_features(c, RUCA, SDI, CUTS)
+    assert g.iloc[0][["zip5", "rule", "sdi_quintile"]].tolist() == ["19104", "person_location", SDI_LABELS[4]]
+    stays = pd.DataFrame({"person_id": [2, 1], "admit_date": ["2016-01-01", "2016-01-01"]})
+    g = derive_geography_features(c, RUCA, SDI, CUTS, stays=stays, address_table=None)
+    assert g["rule"].tolist() == ["person_location", "no_zip"]          # person 1 has no location
+    with pytest.raises(ValueError, match="missing column"):
+        derive_geography_features(c, RUCA, SDI, CUTS, stays=pd.DataFrame({"person_id": [1]}))
+    with pytest.raises(ValueError, match="unique"):
+        derive_geography_features(c, RUCA, SDI, CUTS, stays=stays.assign(stay_id=1))
+    with pytest.raises(ValueError, match="invalid address table"):
+        derive_geography_features(c, RUCA, SDI, CUTS, address_table="x; DROP")
+
+
+def test_load_location_writes_dated_address_history():
+    con = duckdb.connect()
+    build_schema(con)
+    load_macros(con)
+    load_person(con, str(SAMPLE_DIR))
+    load_location(con, str(SAMPLE_DIR))
+    n = con.execute("SELECT count(*) FROM person_address_history").fetchone()[0]
+    assert n >= 3
+    assert con.execute("SELECT count(*) FROM person_address_history WHERE person_id NOT IN (SELECT person_id FROM person)").fetchone()[0] == 0
+    load_location(con, str(SAMPLE_DIR))                                  # idempotent: rows are replaced per person
+    assert con.execute("SELECT count(*) FROM person_address_history").fetchone()[0] == n
+    assert con.execute("SELECT count(*) FROM person_address_history WHERE zip5 IS NOT NULL AND length(zip5) <> 5").fetchone()[0] == 0

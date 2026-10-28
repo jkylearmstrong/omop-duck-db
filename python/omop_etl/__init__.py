@@ -312,6 +312,15 @@ from omop_etl.trajectories import (
     extract_temporal_trajectories,
 )
 from omop_etl.achilles import ACHILLES_ANALYSES, achilles_analysis_catalog, run_achilles
+from omop_etl.geography import (
+    assign_sdi_quintile,
+    derive_geography_features,
+    fit_sdi_cut_points,
+    read_ruca_crosswalk,
+    read_sdi_table,
+    ruca_category,
+    validate_sdi_cut_points,
+)
 from omop_etl.dqd_catalog import run_dqd_catalog, run_dqd_full
 from omop_etl.bigquery_sync import read_bigquery_table, sync_vocabulary_from_bigquery
 from omop_etl.federated_learning import FederatedFitResult, FederatedNode, federated_cox, federated_logistic_regression
@@ -606,6 +615,13 @@ __all__ = [
     "ACHILLES_ANALYSES",
     "achilles_analysis_catalog",
     "run_achilles",
+    "assign_sdi_quintile",
+    "derive_geography_features",
+    "fit_sdi_cut_points",
+    "read_ruca_crosswalk",
+    "read_sdi_table",
+    "ruca_category",
+    "validate_sdi_cut_points",
     "run_dqd_catalog",
     "run_dqd_full",
     "read_bigquery_table",

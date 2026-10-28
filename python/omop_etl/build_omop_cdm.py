@@ -603,6 +603,33 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
         ) loc
         WHERE person.person_source_value = loc.patid_key;
     """)
+
+    # person.location_id keeps one address per person; the dated history is what lets a model pick the address in effect
+    # at an index admission (omop_etl.geography). Additive: not part of the CDM DDL, rebuilt per person on every call.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS person_address_history (
+            person_id BIGINT, location_id BIGINT, zip5 VARCHAR, address_start DATE, address_end DATE, preferred VARCHAR
+        );
+    """)
+    con.execute(f"""
+        CREATE OR REPLACE TEMPORARY TABLE _new_address_history AS
+        SELECT p.person_id,
+               pcornet_id(COALESCE(UPPER(src.ADDRESS_STATE), '') || '_' || COALESCE(src.ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(src.ADDRESS_CITY), '')) AS location_id,
+               regexp_extract(CAST(src.ADDRESS_ZIP5 AS VARCHAR), '^\\s*(\\d{{5}})', 1) AS zip5,
+               parse_omop_date(src.ADDRESS_PERIOD_START) AS address_start,
+               parse_omop_date(src.ADDRESS_PERIOD_END) AS address_end,
+               UPPER(src.ADDRESS_PREFERRED) AS preferred
+        FROM _temp_address_history src
+        JOIN person p ON p.person_source_value = {patid_expr}
+        WHERE src.PATID IS NOT NULL
+          AND (src.ADDRESS_STATE IS NOT NULL OR src.ADDRESS_ZIP5 IS NOT NULL OR src.ADDRESS_CITY IS NOT NULL);
+    """)
+    con.execute("DELETE FROM person_address_history WHERE person_id IN (SELECT person_id FROM _new_address_history);")
+    con.execute("""
+        INSERT INTO person_address_history
+        SELECT person_id, location_id, nullif(zip5, ''), address_start, address_end, preferred FROM _new_address_history;
+    """)
+    con.execute("DROP TABLE IF EXISTS _new_address_history;")
     con.execute("DROP VIEW IF EXISTS _temp_address_history;")
 
 
