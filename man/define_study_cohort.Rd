@@ -21,6 +21,7 @@ define_study_cohort(
   random_state = 42,
   require_verified_followup = TRUE,
   death_discharge_concept_ids = NULL,
+  transfer_discharge_concept_ids = NULL,
   death_sources = NULL,
   followup_evidence = NULL,
   age_method = "year_difference",
@@ -94,6 +95,11 @@ column \code{followup_verified} is reported either way.}
 readmission / cohort-only, \code{c(4216643, 4155309)} for mortality outcomes (the legacy end-of-life convention;
 4155309 is 'Ileal part' in Athena and is written by this package's PCORnet ETL for 'discharged against
 medical advice', so consider passing \code{4216643}).}
+
+\item{transfer_discharge_concept_ids}{Discharge-disposition concepts meaning "transferred to another acute-care
+hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
+tables do not change; the PCORnet ETL writes \code{8717} for a transfer (\code{DISCHARGE_STATUS} 'IP'). Adds the attrition
+step "Not transferred to another acute-care hospital". \code{integer(0)} keeps transfers.}
 
 \item{death_sources}{Where a patient's death date comes from: \code{"death_table"} and/or
 \code{"discharge_disposition"} (the end date of any visit discharged to a death concept). Default \code{"death_table"}

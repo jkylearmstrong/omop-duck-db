@@ -136,3 +136,24 @@ test_that("load_location repairs an unquoted comma in ADDRESS_CITY instead of sh
   expect_equal(as.character(h$address_start), "2013-01-01")
   expect_true(is.na(h$address_end))
 })
+
+test_that("transfer exclusion is opt-in, keeps AMA, and the diabetes cohort turns it on", {
+  db_path <- tempfile(fileext = ".duckdb")
+  build_schema(db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  on.exit({ DBI::dbDisconnect(con, shutdown = TRUE); unlink(db_path) }, add = TRUE)
+  for (pid in 1:3) {
+    DBI::dbExecute(con, sprintf("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES (%d, 8507, 1960, 0, 0)", pid))
+    DBI::dbExecute(con, sprintf("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, period_type_concept_id) VALUES (%d, %d, DATE '2015-01-01', DATE '2022-01-01', 0)", pid, pid))
+  }
+  dis <- c(8536, 8717, 4155309)
+  for (i in 1:3) {
+    DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id, discharged_to_concept_id) VALUES (%d, %d, 9201, DATE '2020-03-01', DATE '2020-03-05', 0, %d)", i, i, dis[i]))
+  }
+  run <- function(...) define_study_cohort(con, visit_type = "inpatient", target_outcome = "none", washin_days = 0,
+                                           require_verified_followup = FALSE, materialise = FALSE, ...)
+  expect_equal(sort(run()$subject_id), 1:3)
+  expect_equal(sort(run(transfer_discharge_concept_ids = 8717)$subject_id), c(1L, 3L))
+  expect_equal(sort(run(transfer_discharge_concept_ids = integer(0))$subject_id), 1:3)
+  expect_equal(formals(build_ederri_diabetes_cohort)$transfer_discharge_concept_ids, 8717)
+})

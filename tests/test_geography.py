@@ -207,3 +207,59 @@ def test_pcornet_discharge_status_home_is_not_hospice(tmp_path):
     got = dict(con.execute("SELECT discharged_to_source_value, discharged_to_concept_id FROM visit_occurrence").fetchall())
     assert got["HO"] == 8536 and got["A"] == 8536 and got["HS"] == 8546
     assert got["EX"] == 4216643 and got["AM"] == 4155309 and got["SN"] == 8863
+
+
+def _transfer_cdm():
+    from omop_etl import define_study_cohort  # noqa: F401  (import check)
+
+    c = duckdb.connect()
+    build_schema(c)
+    for pid in (1, 2, 3):
+        c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) "
+                  f"VALUES ({pid}, 8507, 1960, 0, 0)")
+        c.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, "
+                  f"observation_period_end_date, period_type_concept_id) VALUES ({pid}, {pid}, DATE '2015-01-01', DATE '2022-01-01', 0)")
+    for vid, pid, dis in ((1, 1, 8536), (2, 2, 8717), (3, 3, 4155309)):       # home, acute transfer, AMA
+        c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, "
+                  f"visit_type_concept_id, discharged_to_concept_id) VALUES ({vid}, {pid}, 9201, DATE '2020-03-01', DATE '2020-03-05', 0, {dis})")
+    return c
+
+
+def test_transfer_exclusion_is_opt_in_and_keeps_ama():
+    from omop_etl import define_study_cohort
+
+    kw = dict(visit_type="inpatient", target_outcome="none", washin_days=0, require_verified_followup=False)
+    default = define_study_cohort(_transfer_cdm(), **kw)
+    assert sorted(default["subject_id"]) == [1, 2, 3]                       # unchanged unless asked
+    out = define_study_cohort(_transfer_cdm(), transfer_discharge_concept_ids=(8717,), **kw)
+    assert sorted(out["subject_id"]) == [1, 3]                              # transfer dropped, AMA kept
+    steps = out.attrs["attrition"].step_name.tolist()
+    assert "Not transferred to another acute-care hospital" in steps
+    keep = define_study_cohort(_transfer_cdm(), transfer_discharge_concept_ids=(), **kw)
+    assert sorted(keep["subject_id"]) == [1, 2, 3]
+
+
+def test_ederri_diabetes_cohort_excludes_transfers_by_default():
+    import inspect
+
+    from omop_etl import build_ederri_diabetes_cohort
+
+    assert inspect.signature(build_ederri_diabetes_cohort).parameters["transfer_discharge_concept_ids"].default == (8717,)
+
+
+def test_pcornet_observation_and_acute_transfer_mapping(tmp_path):
+    import shutil
+
+    src = tmp_path / "src"
+    shutil.copytree(SAMPLE_DIR, src)
+    (src / "encounter.csv").write_text(
+        "ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,ADMIT_TIME,DISCHARGE_DATE,DISCHARGE_TIME,PROVIDERID,FACILITYID,DISCHARGE_STATUS\n"
+        "E1,FAKE-P001,OS,2024-01-01,08:00,2024-01-02,11:00,,,IP\n", encoding="utf-8")
+    con = duckdb.connect()
+    build_schema(con)
+    load_macros(con)
+    load_person(con, str(src))
+    from omop_etl import load_visit_occurrence
+
+    load_visit_occurrence(con, str(src))
+    assert con.execute("SELECT visit_concept_id, discharged_to_concept_id FROM visit_occurrence").fetchone() == (581385, 8717)

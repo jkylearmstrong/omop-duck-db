@@ -10,5 +10,5 @@ A named list of integer vectors (\code{ip}, \code{ed}, \code{os}).
 DEFAULT_VISIT_CONCEPT_GROUPS
 }
 \description{
-9201 inpatient, 9203 emergency room, 9202 outpatient, 262 emergency room + inpatient (counts as both IP and ED).
+9201 inpatient, 9203 emergency room, 9202 outpatient, 581385 observation (the "os" group), 262 emergency room + inpatient (counts as both IP and ED).
 }

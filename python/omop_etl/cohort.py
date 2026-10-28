@@ -506,6 +506,10 @@ _READMISSION_CONVENTIONS = {
     "death_ids": (4216643,),
     "death_sources": ("death_table",),
     "evidence": ("visit", "measurement", "condition", "drug"),
+    # Off by default so the pinned attrition steps of the RFC example do not change. A transfer to another acute-care
+    # hospital (PCORnet DISCHARGE_STATUS 'IP', written as 8717 'Inpatient Hospital' by the PCORnet ETL) is not a
+    # discharge to the community; build_ederri_diabetes_cohort turns the exclusion on.
+    "transfer_ids": (),
 }
 # Conventions of build_end_of_life_cohort: death is the earliest date across the death table and every
 # visit discharged to a death concept; follow-up is also evidenced by observation periods and by a death
@@ -516,6 +520,7 @@ _END_OF_LIFE_CONVENTIONS = {
     "death_ids": (4216643, 4155309),
     "death_sources": _DEATH_SOURCES,
     "evidence": _FOLLOWUP_EVIDENCE,
+    "transfer_ids": (),
 }
 # (outcome family) -> (min_los_days, exclude_in_hospital_death) used when the caller passes "auto"
 _AUTO_STAY_RULES = {
@@ -552,6 +557,7 @@ class _StudySpec:
     exclude_death: bool = True
     death_ids: tuple[int, ...] = (4216643,)
     death_sources: tuple[str, ...] = ("death_table",)
+    transfer_ids: tuple[int, ...] = ()
     window_days: int | None = 30
     gap_days: int = 0
     verified: bool = True
@@ -687,6 +693,11 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
         ))
     else:
         conds.append(("Alive at index admission", "(pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"))
+    if spec.transfer_ids:
+        conds.append((
+            "Not transferred to another acute-care hospital",
+            f"COALESCE(v.discharged_to_concept_id, 0) NOT IN ({_int_list(spec.transfer_ids)})",
+        ))
 
     if getattr(spec, "require_diabetes", False):
         co, de, meas = _tbl(spec, "condition_occurrence"), _tbl(spec, "drug_exposure"), _tbl(spec, "measurement")
@@ -1209,6 +1220,8 @@ def _describe_study(spec: _StudySpec) -> str:
     if spec.washin_days:
         bits.append(f"wash-in {spec.washin_days} d")
     bits.append("exclude in-hospital death" if spec.exclude_death else "in-hospital death retained")
+    if spec.transfer_ids:
+        bits.append("exclude acute-care transfers")
     bits.append(f"outcome {spec.label}")
     if spec.window_days is not None and spec.outcome != "in_hospital":
         bits.append(f"window ({spec.gap_days}, {spec.window_days}] d")
@@ -1256,6 +1269,7 @@ def define_study_cohort(
     require_verified_followup: bool = True,
     death_discharge_concept_ids: int | Sequence[int] | None = None,
     death_sources: str | Sequence[str] | None = None,
+    transfer_discharge_concept_ids: int | Sequence[int] | None = None,
     followup_evidence: str | Sequence[str] | None = None,
     age_method: str = "year_difference",
     cohort_definition_id: int = 1,
@@ -1343,6 +1357,11 @@ def define_study_cohort(
         ``(4216643, 4155309)`` for mortality outcomes (the legacy end-of-life convention; 4155309 is 'Ileal part'
         in Athena and is written by this package's PCORnet ETL for 'discharged against medical advice', so
         consider passing ``(4216643,)``).
+    transfer_discharge_concept_ids : int or sequence, optional
+        Discharge-disposition concepts meaning "transferred to another acute-care hospital"; those index stays are
+        excluded (replication rule A6: only death and acute transfer are ineligible, AMA is kept). Default none, so
+        existing attrition tables do not change; the PCORnet ETL writes ``8717`` for a transfer (``DISCHARGE_STATUS``
+        'IP'). Adds the attrition step "Not transferred to another acute-care hospital".
     death_sources : {"death_table", "discharge_disposition"} or sequence, optional
         Where a patient's death date comes from: the ``death`` table and / or the end date of any visit
         discharged to a death concept. Default: ``death_table`` only for readmission / cohort-only, both for
@@ -1526,6 +1545,9 @@ def define_study_cohort(
     conv = _END_OF_LIFE_CONVENTIONS if outcome in _MORTALITY_FAMILIES else _READMISSION_CONVENTIONS
     death_ids = conv["death_ids"] if death_discharge_concept_ids is None else _resolve_death_ids(
         death_discharge_concept_ids, "death_discharge_concept_ids")
+    transfer_ids = conv["transfer_ids"] if transfer_discharge_concept_ids is None else (
+        () if not isinstance(transfer_discharge_concept_ids, numbers.Real) and len(list(transfer_discharge_concept_ids)) == 0
+        else _resolve_death_ids(transfer_discharge_concept_ids, "transfer_discharge_concept_ids"))
     sources = conv["death_sources"] if death_sources is None else _resolve_choices(
         death_sources, _DEATH_SOURCES, "death_sources")
     evidence = conv["evidence"] if followup_evidence is None else _resolve_choices(
@@ -1542,7 +1564,7 @@ def define_study_cohort(
         cohort_id=cohort_id, outcome=outcome, label=label, schema=schema, visit_ids=visit_ids,
         outcome_visit_ids=outcome_ids, study_start=study_start, study_end=study_end, min_age=min_age_n,
         age_method=method, min_los_days=min_los, washin_days=washin_n, exclude_death=exclude,
-        death_ids=tuple(death_ids), death_sources=tuple(sources), window_days=window, gap_days=gap_n,
+        death_ids=tuple(death_ids), death_sources=tuple(sources), transfer_ids=tuple(transfer_ids), window_days=window, gap_days=gap_n,
         verified=verified, evidence=tuple(evidence), rule=rule, seed=seed_n,
         require_diabetes=bool(require_diabetes),
     )
@@ -1611,6 +1633,7 @@ def define_study_cohort(
         "require_verified_followup": verified and _study_followup_applicable(spec),
         "death_discharge_concept_ids": list(death_ids),
         "death_sources": list(sources),
+        "transfer_discharge_concept_ids": list(transfer_ids),
         "followup_evidence": list(evidence),
         "schema": schema,
     }
@@ -1704,7 +1727,8 @@ def build_readmission_cohort(
         min_age=18, age_method="year_difference", min_los_days=1,
         washin_days=int(washin_days) if washin_days and washin_days > 0 else 0,
         exclude_death=True, death_ids=_READMISSION_CONVENTIONS["death_ids"],
-        death_sources=_READMISSION_CONVENTIONS["death_sources"], window_days=int(followup_window_days),
+        death_sources=_READMISSION_CONVENTIONS["death_sources"], transfer_ids=_READMISSION_CONVENTIONS["transfer_ids"],
+        window_days=int(followup_window_days),
         gap_days=int(grace_days), verified=bool(require_verified_followup),
         evidence=_READMISSION_CONVENTIONS["evidence"], rule=rule, seed=int(random_state),
     )
@@ -2416,8 +2440,12 @@ def build_ederri_diabetes_cohort(
     schema: str | None = None,
     followup_days: int | None = None,
     require_verified_followup: bool = False,
+    transfer_discharge_concept_ids: int | Sequence[int] = (8717,),
 ) -> pd.DataFrame:
     """Builds the authoritative eDERRI diabetes inclusion cohort (FR-A6).
+
+    Stays discharged to another acute-care hospital (``transfer_discharge_concept_ids``, default 8717) are excluded;
+    AMA discharges are kept. Pass ``()`` to keep transfers.
 
     Phenotype:
       Adult (>=18y) inpatient stays with length of stay >= 1 day, >=365 days wash-in,
@@ -2437,6 +2465,7 @@ def build_ederri_diabetes_cohort(
         target_outcome="none",
         followup_days=followup_days,
         require_verified_followup=require_verified_followup,
+        transfer_discharge_concept_ids=transfer_discharge_concept_ids,
         random_state=random_state,
         persist_keys=persist_keys,
         cohort_definition_id=cohort_definition_id,

@@ -688,7 +688,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
             COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             CASE UPPER(src.ENC_TYPE)
                 WHEN 'IP' THEN 9201 -- Inpatient
-                WHEN 'OS' THEN 9201 -- Observation Services
+                WHEN 'OS' THEN 581385 -- Observation Room (never an index inpatient stay; still counts as prior utilization)
                 WHEN 'ED' THEN 9203 -- Emergency
                 WHEN 'AV' THEN 9202 -- Outpatient
                 WHEN 'OA' THEN 9202 -- Outpatient
@@ -712,6 +712,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 4155309 -- Left against medical advice
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HS', 'HOSPICE') THEN 8546 -- Hospice (PCORnet HS)
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('SN', 'SNF') THEN 8863 -- Skilled Nursing Facility
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
                 ELSE 0
             END AS discharged_to_concept_id,

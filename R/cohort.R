@@ -489,7 +489,11 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 .STUDY_READMISSION_CONVENTIONS <- list(
   death_ids = 4216643,
   death_sources = "death_table",
-  evidence = c("visit", "measurement", "condition", "drug")
+  evidence = c("visit", "measurement", "condition", "drug"),
+  # Off by default so the pinned attrition steps do not change. A transfer to another acute-care hospital (PCORnet
+  # DISCHARGE_STATUS 'IP', written as 8717 by the PCORnet ETL) is not a discharge to the community;
+  # build_ederri_diabetes_cohort() turns the exclusion on.
+  transfer_ids = integer(0)
 )
 # Conventions of build_end_of_life_cohort(): death is the earliest date across the death table and every visit
 # discharged to a death concept; follow-up is also evidenced by observation periods and by a death at/after the
@@ -499,7 +503,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 .STUDY_END_OF_LIFE_CONVENTIONS <- list(
   death_ids = c(4216643, 4155309),
   death_sources = .STUDY_DEATH_SOURCES,
-  evidence = .STUDY_FOLLOWUP_EVIDENCE
+  evidence = .STUDY_FOLLOWUP_EVIDENCE,
+  transfer_ids = integer(0)
 )
 # outcome family -> min_los_days (NULL = no restriction) and exclude_in_hospital_death used when "auto" is passed
 .STUDY_AUTO_MIN_LOS <- list(none = 1, readmission = 1, post_discharge = 1, composite = 1, in_hospital = 0, fixed_window = NULL)
@@ -516,13 +521,14 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                             exclude_death = TRUE, death_ids = 4216643, death_sources = "death_table",
                             window_days = 30, gap_days = 0, verified = TRUE,
                             evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42,
-                            pinned_keys = FALSE, require_diabetes = FALSE) {
+                            pinned_keys = FALSE, require_diabetes = FALSE, transfer_ids = integer(0)) {
   list(cohort_id = cohort_id, outcome = outcome, label = label, schema = schema, visit_ids = visit_ids,
        outcome_visit_ids = outcome_visit_ids, study_start = study_start, study_end = study_end,
        min_age = min_age, age_method = age_method, min_los_days = min_los_days, washin_days = washin_days,
        exclude_death = exclude_death, death_ids = death_ids, death_sources = death_sources,
        window_days = window_days, gap_days = gap_days, verified = verified, evidence = evidence,
-       rule = rule, seed = seed, pinned_keys = pinned_keys, require_diabetes = require_diabetes)
+       rule = rule, seed = seed, pinned_keys = pinned_keys, require_diabetes = require_diabetes,
+       transfer_ids = transfer_ids)
 }
 
 # ---- identifier / literal helpers --------------------------------------------------------------------
@@ -668,6 +674,10 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                 .int_list(spec$death_ids)))
   } else {
     add("Alive at index admission", "(pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)")
+  }
+  if (length(spec$transfer_ids)) {
+    add("Not transferred to another acute-care hospital",
+        sprintf("COALESCE(v.discharged_to_concept_id, 0) NOT IN (%s)", .int_list(spec$transfer_ids)))
   }
 
   if (isTRUE(spec$require_diabetes)) {
@@ -1231,7 +1241,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
   if (!is.null(spec$min_age)) bits <- c(bits, sprintf("age >= %s (%s)", .sql_int(spec$min_age), spec$age_method))
   if (!is.null(spec$min_los_days)) bits <- c(bits, sprintf("LOS >= %s d", .sql_int(spec$min_los_days)))
   if (!is.null(spec$washin_days) && spec$washin_days > 0) bits <- c(bits, sprintf("wash-in %s d", .sql_int(spec$washin_days)))
-  bits <- c(bits, if (isTRUE(spec$exclude_death)) "exclude in-hospital death" else "in-hospital death retained")
+  bits <- c(bits, if (isTRUE(spec$exclude_death)) "exclude in-hospital death" else "in-hospital death retained",
+            if (length(spec$transfer_ids)) "exclude acute-care transfers")
   bits <- c(bits, sprintf("outcome %s", spec$label))
   if (!is.null(spec$window_days) && spec$outcome != "in_hospital") {
     bits <- c(bits, sprintf("window (%s, %s] d", .sql_int(spec$gap_days), .sql_int(spec$window_days)))
@@ -1325,6 +1336,10 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #'   readmission / cohort-only, `c(4216643, 4155309)` for mortality outcomes (the legacy end-of-life convention;
 #'   4155309 is 'Ileal part' in Athena and is written by this package's PCORnet ETL for 'discharged against
 #'   medical advice', so consider passing `4216643`).
+#' @param transfer_discharge_concept_ids Discharge-disposition concepts meaning "transferred to another acute-care
+#'   hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
+#'   tables do not change; the PCORnet ETL writes `8717` for a transfer (`DISCHARGE_STATUS` 'IP'). Adds the attrition
+#'   step "Not transferred to another acute-care hospital". `integer(0)` keeps transfers.
 #' @param death_sources Where a patient's death date comes from: `"death_table"` and/or
 #'   `"discharge_disposition"` (the end date of any visit discharged to a death concept). Default `"death_table"`
 #'   for readmission / cohort-only, both for mortality outcomes.
@@ -1413,6 +1428,7 @@ define_study_cohort <- function(con,
                                 random_state = 42,
                                 require_verified_followup = TRUE,
                                 death_discharge_concept_ids = NULL,
+                                transfer_discharge_concept_ids = NULL,
                                 death_sources = NULL,
                                 followup_evidence = NULL,
                                 age_method = "year_difference",
@@ -1501,6 +1517,9 @@ define_study_cohort <- function(con,
   conv <- if (outcome %in% .STUDY_MORTALITY_FAMILIES) .STUDY_END_OF_LIFE_CONVENTIONS else .STUDY_READMISSION_CONVENTIONS
   death_ids <- if (is.null(death_discharge_concept_ids)) conv$death_ids else
     .resolve_death_ids(death_discharge_concept_ids, "death_discharge_concept_ids")
+  transfer_ids <- if (is.null(transfer_discharge_concept_ids)) conv$transfer_ids else
+    if (!length(transfer_discharge_concept_ids)) integer(0) else
+      .resolve_death_ids(transfer_discharge_concept_ids, "transfer_discharge_concept_ids")
   sources <- if (is.null(death_sources)) conv$death_sources else
     .resolve_choices(death_sources, .STUDY_DEATH_SOURCES, "death_sources")
   evidence <- if (is.null(followup_evidence)) conv$evidence else
@@ -1519,7 +1538,8 @@ define_study_cohort <- function(con,
     outcome_visit_ids = outcome_ids, study_start = win$start, study_end = win$end, min_age = min_age_n,
     age_method = method, min_los_days = min_los, washin_days = washin_n, exclude_death = exclude,
     death_ids = death_ids, death_sources = sources, window_days = window, gap_days = gap_n, verified = verified,
-    evidence = evidence, rule = rule, seed = seed_n, require_diabetes = isTRUE(require_diabetes)
+    evidence = evidence, rule = rule, seed = seed_n, require_diabetes = isTRUE(require_diabetes),
+    transfer_ids = transfer_ids
   )
 
   if (!is.null(persist_keys) && file.exists(persist_keys)) {
@@ -1583,6 +1603,7 @@ define_study_cohort <- function(con,
     random_state = seed_n,
     require_verified_followup = verified && .study_followup_applicable(spec),
     death_discharge_concept_ids = death_ids,
+    transfer_discharge_concept_ids = transfer_ids,
     death_sources = sources,
     followup_evidence = evidence,
     schema = schema
@@ -1652,7 +1673,7 @@ build_readmission_cohort <- function(con,
     exclude_death = TRUE, death_ids = conv$death_ids, death_sources = conv$death_sources,
     window_days = as.numeric(followup_window_days), gap_days = as.numeric(grace_days),
     verified = isTRUE(require_verified_followup), evidence = conv$evidence, rule = rule,
-    seed = as.numeric(random_state)
+    seed = as.numeric(random_state), transfer_ids = conv$transfer_ids
   )
   projection <- paste0(
     "cohort_definition_id, subject_id, cohort_start_date, cohort_end_date, visit_occurrence_id, outcome_flag, ",
@@ -2409,6 +2430,7 @@ filter_measurements <- function(con,
 #'
 #' @inheritParams define_study_cohort
 #' @param target_table Name of the table the cohort is written to when materialised (default `"cohort"`).
+#' @param transfer_discharge_concept_ids Transfer-to-acute-care discharge concepts to exclude (default `8717`; `integer(0)` keeps transfers).
 #' @return As [define_study_cohort()].
 #' @export
 build_ederri_diabetes_cohort <- function(con,
@@ -2419,7 +2441,8 @@ build_ederri_diabetes_cohort <- function(con,
                                          materialise = "auto",
                                          schema = NULL,
                                          followup_days = NULL,
-                                         require_verified_followup = FALSE) {
+                                         require_verified_followup = FALSE,
+                                         transfer_discharge_concept_ids = 8717) {
   define_study_cohort(
     con,
     visit_type = "inpatient",
@@ -2430,6 +2453,7 @@ build_ederri_diabetes_cohort <- function(con,
     target_outcome = "none",
     followup_days = followup_days,
     require_verified_followup = require_verified_followup,
+    transfer_discharge_concept_ids = transfer_discharge_concept_ids,
     random_state = random_state,
     persist_keys = persist_keys,
     cohort_definition_id = cohort_definition_id,
