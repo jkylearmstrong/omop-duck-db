@@ -28,6 +28,13 @@
 #'   source contract (see [check_source()]). Only used when `strict_source = TRUE`.
 #' @param strict_source Logical. If `TRUE`, run [check_source()] first and stop with a `source_contract_error` when a
 #'   required source table or column is missing.
+#' @param key_check `"warn"` (default), `"raise"` or `"ignore"`: at the end of the build, compare distinct source ids
+#'   with distinct surrogate keys via [check_etl_keys()] and report any encounters/patients that would be merged.
+#' @param key_check_callback Optional function called with the list returned by [check_etl_keys()].
+#' @param use_enrollment `"auto"` (default), `TRUE` or `FALSE`. Build `observation_period` from the PCORnet ENROLLMENT
+#'   file when the source has one ([load_enrollment_spans()]); people without an enrolment record keep the
+#'   event-span period. `TRUE` fails if no usable ENROLLMENT file exists.
+#' @param enrollment_type_concept_id `period_type_concept_id` for enrolment-derived periods (default 0).
 #' @return Invisibly, `db_path`.
 #' @export
 etl_pcornet <- function(
@@ -43,8 +50,16 @@ etl_pcornet <- function(
     threads = NULL,
     temp_dir = NULL,
     source_format = NULL,
-    strict_source = FALSE
+    strict_source = FALSE,
+    key_check = c("warn", "raise", "ignore"),
+    key_check_callback = NULL,
+    use_enrollment = "auto",
+    enrollment_type_concept_id = 0L
 ) {
+  key_check <- match.arg(key_check)
+  if (!(isTRUE(use_enrollment) || isFALSE(use_enrollment) || identical(use_enrollment, "auto"))) {
+    stop("use_enrollment must be \"auto\", TRUE or FALSE.")
+  }
   if (!dir.exists(source_dir)) {
     stop("Source directory not found: ", source_dir)
   }
@@ -89,10 +104,27 @@ etl_pcornet <- function(
   .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
 
-  build_observation_period(con)
+  enrolled <- FALSE
+  if (!isFALSE(use_enrollment)) {
+    enrolled <- load_enrollment_spans(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids) > 0
+    if (isTRUE(use_enrollment) && !enrolled) {
+      stop("use_enrollment = TRUE but ", source_dir, " has no ENROLLMENT file with usable rows.")
+    }
+  }
+  build_observation_period(con, use_enrollment = enrolled, enrollment_type_concept_id = enrollment_type_concept_id)
   build_drug_era(con)
   build_condition_era(con)
   .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name)
+
+  if (key_check != "ignore") {
+    report <- check_etl_keys(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids,
+                             on_collision = key_check)
+    for (r in report) {
+      cat(sprintf("Key check %s.%s: %.0f ids -> %.0f keys (%s); %s rows = %.0f\n", r$table, r$id_column,
+                  r$distinct_ids, r$distinct_keys, if (r$ok) "ok" else paste(r$lost, "lost"), r$cdm_table, r$cdm_rows))
+    }
+    if (!is.null(key_check_callback)) key_check_callback(report)
+  }
 
   cat("PCORnet ETL complete.\n")
   invisible(db_path)
@@ -1176,8 +1208,14 @@ load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_pat
 #' @param min_date Earliest plausible event date (default `"1900-01-02"`).
 #' @param max_date Latest plausible event date; default `NULL` is today (the extraction date). Pass the source's data
 #'   cutoff when events are filled with the build date.
+#' @param use_enrollment Logical. If `TRUE` (needs `_enrollment_spans` from [load_enrollment_spans()]), write each
+#'   person's real enrolment spans with `period_type_concept_id = enrollment_type_concept_id` and keep the event-span
+#'   rule only for people with no enrolment record.
+#' @param enrollment_type_concept_id `period_type_concept_id` for enrolment-derived periods (default 0: set your
+#'   site's concept).
 #' @export
-build_observation_period <- function(con, min_date = "1900-01-02", max_date = NULL) {
+build_observation_period <- function(con, min_date = "1900-01-02", max_date = NULL, use_enrollment = FALSE,
+                                      enrollment_type_concept_id = 0L) {
   as_iso <- function(x, nm) {
     d <- tryCatch(as.Date(x), error = function(e) NA)
     if (length(d) != 1L || is.na(d)) stop(sprintf("`%s` must be a date like '1900-01-02'.", nm), call. = FALSE)
@@ -1186,6 +1224,14 @@ build_observation_period <- function(con, min_date = "1900-01-02", max_date = NU
   lo <- as_iso(min_date, "min_date")
   hi <- if (is.null(max_date)) "CURRENT_DATE" else sprintf("DATE '%s'", as_iso(max_date, "max_date"))
   DBI::dbExecute(con, "DELETE FROM observation_period;")
+  if (isTRUE(use_enrollment)) {
+    run_insert(con, "OBSERVATION_PERIOD (enrolment spans)", sprintf("
+      INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date,
+                                      observation_period_end_date, period_type_concept_id)
+      SELECT ROW_NUMBER() OVER (ORDER BY person_id, start_date), person_id, start_date, end_date, %d
+      FROM _enrollment_spans;
+    ", as.integer(enrollment_type_concept_id)))
+  }
   run_insert(con, "OBSERVATION_PERIOD (synthesized)", sprintf("
     INSERT INTO observation_period (
         observation_period_id,
@@ -1221,13 +1267,67 @@ build_observation_period <- function(con, min_date = "1900-01-02", max_date = NU
         GROUP BY person_id
     )
     SELECT
-        ROW_NUMBER() OVER (ORDER BY person_id) AS observation_period_id,
+        ROW_NUMBER() OVER (ORDER BY person_id) +
+            (SELECT COALESCE(MAX(observation_period_id), 0) FROM observation_period) AS observation_period_id,
         person_id,
         obs_start_date AS observation_period_start_date,
         obs_end_date AS observation_period_end_date,
         32827 AS period_type_concept_id
-    FROM envelopes;
-  ", lo, hi))
+    FROM envelopes
+    %s;
+  ", lo, hi, if (isTRUE(use_enrollment)) "WHERE person_id NOT IN (SELECT person_id FROM _enrollment_spans)" else ""))
+}
+
+#' Build enrolment spans from the PCORnet ENROLLMENT file
+#'
+#' Creates the temporary table `_enrollment_spans(person_id, start_date, end_date)`. Spans are clipped to
+#' `[min_date, max_date]` (default: today), dropped when empty, and merged when they overlap or touch, so each row is
+#' one continuous enrolment. Persons are matched on `person_source_value`.
+#'
+#' @param con Active DuckDB connection (mapping macros loaded, `person` populated).
+#' @param source_dir Directory of PCORnet source files.
+#' @param site_id,disambiguate_patids As in [etl_pcornet()].
+#' @param min_date,max_date Clip bounds; see [build_observation_period()].
+#' @return The number of merged spans (0, and no table, when the source has no ENROLLMENT file), invisibly.
+#' @export
+load_enrollment_spans <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE,
+                                  min_date = "1900-01-02", max_date = NULL) {
+  path <- find_source_file(source_dir, "enrollment")
+  if (is.null(path)) return(invisible(0L))
+  as_iso <- function(x, nm) {
+    d <- tryCatch(as.Date(x), error = function(e) NA)
+    if (length(d) != 1L || is.na(d)) stop(sprintf("`%s` must be a date like '1900-01-02'.", nm), call. = FALSE)
+    format(d, "%Y-%m-%d")
+  }
+  lo <- as_iso(min_date, "min_date")
+  hi <- if (is.null(max_date)) "CURRENT_DATE" else sprintf("DATE '%s'", as_iso(max_date, "max_date"))
+  prepare_source_view(con, "_temp_enrollment", path, c("PATID", "ENR_START_DATE", "ENR_END_DATE"))
+  patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+  DBI::dbExecute(con, "DROP TABLE IF EXISTS _enrollment_spans;")
+  DBI::dbExecute(con, sprintf("
+    CREATE TEMPORARY TABLE _enrollment_spans AS
+    WITH raw AS (
+        SELECT p.person_id,
+               GREATEST(CAST(parse_omop_date(src.ENR_START_DATE) AS DATE), DATE '%s') AS s,
+               LEAST(COALESCE(CAST(parse_omop_date(src.ENR_END_DATE) AS DATE), %s), %s) AS e
+        FROM _temp_enrollment src
+        JOIN person p ON p.person_source_value = %s
+        WHERE parse_omop_date(src.ENR_START_DATE) IS NOT NULL
+    ),
+    valid AS (SELECT * FROM raw WHERE s <= e),
+    marked AS (
+        SELECT *, CASE WHEN s <= MAX(e) OVER (PARTITION BY person_id ORDER BY s, e
+                                              ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) + INTERVAL 1 DAY
+                       THEN 0 ELSE 1 END AS new_span
+        FROM valid
+    ),
+    grouped AS (SELECT *, SUM(new_span) OVER (PARTITION BY person_id ORDER BY s, e) AS span_id FROM marked)
+    SELECT person_id, MIN(s) AS start_date, MAX(e) AS end_date
+    FROM grouped GROUP BY person_id, span_id;
+  ", lo, hi, hi, patid_expr))
+  n <- as.integer(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM _enrollment_spans")$n)
+  cat(sprintf("  -> %d enrolment spans from %s\n", n, basename(path)))
+  invisible(n)
 }
 
 #' Synthesize Drug Eras

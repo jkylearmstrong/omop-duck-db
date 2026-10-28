@@ -134,6 +134,7 @@ test_that("conformance: our concept windows equal FeatureExtraction's long-term 
                                        value = "binary")
   ours <- as_plp_data(res, fx$con, target_id = 1, outcome_id = 2)
   disconnect(fx)
+  on.exit(close_plp(ours), add = TRUE)
 
   dbd <- plp_database_details(fx$db_path, target_id = 1, outcome_ids = 2)
   cs <- FeatureExtraction::createCovariateSettings(
@@ -142,6 +143,7 @@ test_that("conformance: our concept windows equal FeatureExtraction's long-term 
   native <- suppressMessages(PatientLevelPrediction::getPlpData(
     databaseDetails = dbd, covariateSettings = cs,
     restrictPlpDataSettings = PatientLevelPrediction::createRestrictPlpDataSettings()))
+  on.exit(close_plp(native), add = TRUE)
 
   # FeatureExtraction decides which concepts fall in [index-365, index-1] with its own SQL; we must agree,
   # including covariate ids (concept_id * 1000 + analysis id).
@@ -159,6 +161,7 @@ test_that("as_plp_data returns a plpData that PatientLevelPrediction accepts", {
   res <- extract_sparse_concept_matrix(fx$con, fx$parquet, domains = c("condition", "drug"), value = "binary")
   plp <- as_plp_data(res, fx$con, target_id = 1, outcome_id = 2)
   disconnect(fx)
+  on.exit(close_plp(plp), add = TRUE)
 
   expect_s3_class(plp, "plpData")
   expect_true(FeatureExtraction::isCovariateData(plp$covariateData))   # Andromeda objects are S4
@@ -192,6 +195,7 @@ test_that("as_plp_data validates its inputs and reports rows outside observation
   # a person with no observation period around the index date is dropped, loudly
   DBI::dbExecute(fx$con, "DELETE FROM observation_period WHERE person_id = 3")
   expect_warning(plp <- as_plp_data(res, fx$con, target_id = 1, outcome_id = 2), "no observation period")
+  on.exit(close_plp(plp), add = TRUE)
   expect_equal(nrow(plp$cohorts), 3)
 })
 
@@ -205,6 +209,7 @@ test_that("PatientLevelPrediction fits a model on data bridged from the sparse m
   syn <- synthetic_cdm()
   res <- extract_sparse_concept_matrix(syn$con, syn$parquet, domains = c("condition", "drug"), value = "binary")
   plp <- as_plp_data(res, syn$con, target_id = 1, outcome_id = 2)
+  on.exit(close_plp(plp), add = TRUE)
   expect_equal(nrow(plp$cohorts), 400)
   expect_equal(nrow(plp$outcomes), sum(syn$y))
 
@@ -245,6 +250,7 @@ test_that("FeatureExtraction temporal sequences (DeepPLP's input) extract from a
   plp <- suppressMessages(PatientLevelPrediction::getPlpData(
     databaseDetails = dbd, covariateSettings = temporal,
     restrictPlpDataSettings = PatientLevelPrediction::createRestrictPlpDataSettings()))
+  on.exit(close_plp(plp), add = TRUE)
   cov <- as.data.frame(plp$covariateData$covariates)
   # DeepPatientLevelPrediction switches to its temporal path when covariates carry a timeId column
   expect_true("timeId" %in% names(cov))
