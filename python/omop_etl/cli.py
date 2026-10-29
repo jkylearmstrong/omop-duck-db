@@ -172,6 +172,45 @@ def create_parser() -> argparse.ArgumentParser:
     ev.add_argument("--persist-keys", default=None, help="CSV of index stays to reuse/write for identical cohorts across runs.")
     ev.add_argument("--manifest", default=None, help="run_manifest.json path (default: next to --out).")
 
+    se = subparsers.add_parser("score-encounter", help="Score one encounter from its latest pre-discharge labs/vitals (JSON to stdout).")
+    se.add_argument("--bundle", required=True, help="Model bundle directory.")
+    se.add_argument("--db", required=True, help="OMOP CDM DuckDB file (opened read-only).")
+    se.add_argument("--visit-id", type=int, required=True, help="visit_occurrence_id to score.")
+    se.add_argument("--as-of", default=None, help="Count measurements up to this date (default: the earlier of visit end and today).")
+    se.add_argument("--extra-features", default=None, help="Parquet/CSV of extra feature columns keyed by subject_id + cohort_start_date.")
+    se.add_argument("--risk-tiers", default=None, help="JSON file of [{name, min}] cut-points replacing the bundle's tiers (see risk-tiers fit).")
+    se.add_argument("--on-violation", choices=["raise", "clip", "nullify"], default="raise")
+
+    mo = subparsers.add_parser("monitor", help="Monthly drift (PSI) and calibration report for live scores; upserts an aggregate-only CSV log.")
+    mo.add_argument("--scores", required=True, help="Live scores (.parquet or .csv) with a date, a probability and optionally an outcome column.")
+    mo.add_argument("--baseline", required=True, help="Frozen baseline scores (.parquet or .csv) with a probability column.")
+    mo.add_argument("--log", required=True, help="CSV log to upsert (keyed on model version + month).")
+    mo.add_argument("--model-version", default="", help="Model version recorded in the log.")
+    mo.add_argument("--date-col", default="score_date")
+    mo.add_argument("--prob-col", default="prob")
+    mo.add_argument("--outcome-col", default="outcome_flag")
+    mo.add_argument("--as-of", default=None, help="Report date (default today); a month is assessed once month end + follow-up <= this.")
+    mo.add_argument("--followup-days", type=int, default=30)
+    mo.add_argument("--min-events", type=int, default=30)
+    mo.add_argument("--fail-on-flag", action="store_true", help="Exit 2 if any month is 'drift' or 'miscalibrated'.")
+
+    rt = subparsers.add_parser("risk-tiers", help="Capacity-calibrated risk tiers: fit cut-points, apply them to scores.")
+    rt_sub = rt.add_subparsers(dest="risk_tiers_command", required=True)
+    rtf = rt_sub.add_parser("fit", help="Cut-points so each tier holds its share of a reference score set.")
+    rtf.add_argument("--reference", required=True, help="Reference scores (.parquet or .csv).")
+    rtf.add_argument("--prob-col", default="prob")
+    rtf.add_argument("--tier", action="append", default=[], metavar="NAME=FRACTION",
+                     help="Tier and its CUMULATIVE top fraction, highest risk first, e.g. --tier high=0.10 --tier elevated=0.30.")
+    rtf.add_argument("--lowest", default="standard", help="Name of the remainder tier (default: standard).")
+    rtf.add_argument("--out", "-o", required=True, help="Thresholds JSON to write.")
+    rta = rt_sub.add_parser("apply", help="Add a risk_tier column to a score table.")
+    rta.add_argument("--scores", required=True, help="Scores (.parquet or .csv).")
+    rta.add_argument("--thresholds", required=True, help="Thresholds JSON from 'risk-tiers fit'.")
+    rta.add_argument("--prob-col", default="prob")
+    rta.add_argument("--out", "-o", required=True, help="Output file (.parquet or .csv).")
+    rta.add_argument("--capacity", action="append", default=[], metavar="TIER=PER_PERIOD", help="Cases per period a tier's team can handle.")
+    rta.add_argument("--periods", type=int, default=1, help="Days/weeks covered by the scores (for the capacity check).")
+
     ck = subparsers.add_parser("checkpoint", help="CHECKPOINT DuckDB files so they can be attached READ_ONLY (no .wal left).")
     ck.add_argument("db", nargs="+", help="DuckDB file(s) to checkpoint; no other process may have them open.")
 
@@ -230,6 +269,94 @@ def handle_score(args: argparse.Namespace) -> int:
         m.write(args.manifest)
     print(f"Scored {len(scores)} rows -> {args.out}")
     return 0
+
+
+def _read_table(path: str):
+    import pandas as pd
+
+    return pd.read_parquet(path) if str(path).lower().endswith(".parquet") else pd.read_csv(path)
+
+
+def _write_table(df, path: str) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(out, index=False) if out.suffix.lower() == ".parquet" else df.to_csv(out, index=False)
+
+
+def handle_score_encounter(args: argparse.Namespace) -> int:
+    from omop_etl.encounter import score_encounter
+
+    tiers = json.loads(Path(args.risk_tiers).read_text(encoding="utf-8")) if args.risk_tiers else None
+    extra = _read_table(args.extra_features) if args.extra_features else None
+    con = duckdb.connect(args.db, read_only=True)
+    try:
+        res = score_encounter(con, args.visit_id, args.bundle, as_of=args.as_of, extra_features=extra,
+                              on_violation=args.on_violation, risk_tiers=tiers)
+    except (ValueError, KeyError) as exc:
+        print(f"score-encounter: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        con.close()
+    print(strict_dumps(res, indent=2, default=str))
+    return 0
+
+
+def handle_monitor(args: argparse.Namespace) -> int:
+    from omop_etl.monitoring import monitor_scores, update_monitoring_log
+
+    baseline = _read_table(args.baseline)
+    if args.prob_col not in baseline.columns:
+        print(f"monitor: baseline has no {args.prob_col!r} column.", file=sys.stderr)
+        return 1
+    try:
+        report = monitor_scores(_read_table(args.scores), baseline[args.prob_col].to_numpy(), date_col=args.date_col,
+                                prob_col=args.prob_col, outcome_col=args.outcome_col, as_of=args.as_of,
+                                followup_days=args.followup_days, min_events=args.min_events)
+    except (KeyError, ValueError) as exc:
+        print(f"monitor: {exc}", file=sys.stderr)
+        return 1
+    update_monitoring_log(report, args.log, model_version=args.model_version)
+    print(report.to_string(index=False, float_format=lambda v: f"{v:.4g}"))
+    print(f"Log -> {args.log}")
+    if args.fail_on_flag and report["status"].isin(["drift", "miscalibrated"]).any():
+        return 2
+    return 0
+
+
+def _pairs(items: list[str], what: str) -> list[tuple[str, float]]:
+    out = []
+    for it in items:
+        name, sep, val = it.partition("=")
+        try:
+            out.append((name, float(val)))
+        except ValueError:
+            raise ValueError(f"{what} expects NAME=NUMBER, got {it!r}") from None
+    return out
+
+
+def handle_risk_tiers(args: argparse.Namespace) -> int:
+    from omop_etl.risk_tiers import fit_capacity_thresholds, map_risk_tiers, tier_load
+
+    try:
+        if args.risk_tiers_command == "fit":
+            tiers = [{"name": n, "top_fraction": f} for n, f in _pairs(args.tier, "--tier")] + [{"name": args.lowest}]
+            ref = _read_table(args.reference)[args.prob_col].to_numpy()
+            ts = fit_capacity_thresholds(ref, tiers)
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(strict_dumps(ts, indent=2), encoding="utf-8")
+            for t in ts[::-1]:
+                print(f"{t['name']}: p >= {t['min']:.4g}  ({t['fraction']:.1%} of reference)")
+            return 0
+        ts = json.loads(Path(args.thresholds).read_text(encoding="utf-8"))
+        df = _read_table(args.scores)
+        df["risk_tier"] = map_risk_tiers(df[args.prob_col].to_numpy(), ts)
+        _write_table(df, args.out)
+        cap = dict(_pairs(args.capacity, "--capacity")) or None
+        print(tier_load(df[args.prob_col].to_numpy(), ts, capacity=cap, periods=args.periods).to_string(index=False))
+        return 0
+    except (KeyError, ValueError) as exc:
+        print(f"risk-tiers: {exc}", file=sys.stderr)
+        return 1
 
 
 def handle_evaluate(args: argparse.Namespace) -> int:
@@ -465,6 +592,12 @@ def main(argv: list[str] | None = None) -> int:
         return handle_score(args)
     if args.command == "evaluate":
         return handle_evaluate(args)
+    if args.command == "score-encounter":
+        return handle_score_encounter(args)
+    if args.command == "monitor":
+        return handle_monitor(args)
+    if args.command == "risk-tiers":
+        return handle_risk_tiers(args)
     if args.command == "materialize-vocab":
         return handle_materialize_vocab(args)
     if args.command == "checkpoint":

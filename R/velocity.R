@@ -49,6 +49,24 @@ compute_ckd_epi_2021 <- function(creatinine, age, is_female) {
   142 * pmin(scr_kappa, 1)^alpha * pmax(scr_kappa, 1)^(-1.2) * 0.9938^age * ifelse(fem, 1.012, 1)
 }
 
+# Fills `lab_egfr` (CKD-EPI 2021, FR-A6) and `lab_anion_gap` (Na - (Cl + HCO3)); mirror of `omop_etl.velocity.derive_labs`.
+.derive_labs <- function(raw) {
+  if (all(c("lab_creatinine", "age", "gender_concept_id") %in% names(raw))) {
+    has_creat <- !is.na(raw$lab_creatinine)
+    if (any(has_creat)) {
+      calc_egfr <- compute_ckd_epi_2021(.fill(raw$lab_creatinine, 1.0), .fill(raw$age, 65.0), raw$gender_concept_id == 8532)
+      egfr_cur <- if ("lab_egfr" %in% names(raw)) raw$lab_egfr else rep(NA_real_, nrow(raw))
+      raw$lab_egfr <- ifelse(has_creat & (is.na(egfr_cur) | egfr_cur >= 60.0), calc_egfr, egfr_cur)
+    }
+  }
+  if (all(c("lab_sodium", "lab_chloride", "lab_bicarbonate") %in% names(raw))) {
+    calc_ag <- raw$lab_sodium - (raw$lab_chloride + raw$lab_bicarbonate)
+    ag_cur <- if ("lab_anion_gap" %in% names(raw)) raw$lab_anion_gap else rep(NA_real_, nrow(raw))
+    raw$lab_anion_gap <- ifelse(is.na(ag_cur), calc_ag, ag_cur)
+  }
+  raw
+}
+
 #' Clinical velocity, LACE-proxy, hemodynamic and organ-dysfunction features
 #'
 #' Faithful port of `engineer_features()` (sections 1-5) in `scripts/engineer_clinical_features.py`, pinned to it by a
@@ -280,21 +298,7 @@ extract_velocity_features <- function(con, cohort_table = "cohort", lookback_day
     pick("heart_rate"), pick("systolic_bp"), pick("diastolic_bp"), pick("lab_bun"), pick("lab_creatinine"),
     pick("lab_sodium"), pick("lab_potassium"), pick("lab_chloride"), pick("lab_bicarbonate"),
     pick("lab_anion_gap"), pick("lab_egfr"))
-  raw <- DBI::dbGetQuery(con, sql)
-  # Dynamic CKD-EPI 2021 eGFR (FR-A6)
-  if (all(c("lab_creatinine", "age", "gender_concept_id") %in% names(raw))) {
-    has_creat <- !is.na(raw$lab_creatinine)
-    if (any(has_creat)) {
-      calc_egfr <- compute_ckd_epi_2021(.fill(raw$lab_creatinine, 1.0), .fill(raw$age, 65.0), raw$gender_concept_id == 8532)
-      egfr_cur <- raw$lab_egfr
-      raw$lab_egfr <- ifelse(has_creat & (is.na(egfr_cur) | egfr_cur >= 60.0), calc_egfr, egfr_cur)
-    }
-  }
-  # Dynamic Anion Gap Stoichiometric Fallback: Na - (Cl + HCO3)
-  if (all(c("lab_sodium", "lab_chloride", "lab_bicarbonate") %in% names(raw))) {
-    calc_ag <- raw$lab_sodium - (raw$lab_chloride + raw$lab_bicarbonate)
-    raw$lab_anion_gap <- ifelse(is.na(raw$lab_anion_gap), calc_ag, raw$lab_anion_gap)
-  }
+  raw <- .derive_labs(DBI::dbGetQuery(con, sql))
   if (!is.null(extra_features)) {
     extra <- extra_features[, setdiff(names(extra_features), setdiff(names(raw), c("subject_id", "cohort_start_date"))), drop = FALSE]
     raw <- merge(raw, extra, by = c("subject_id", "cohort_start_date"), all.x = TRUE, sort = TRUE)

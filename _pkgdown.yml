@@ -155,6 +155,10 @@ reference:
   - write_model_bundle
   - score_cohort
   - bundle_predict_proba
+  - score_encounter
+  - population_stability_index
+  - monitor_scores
+  - fit_capacity_thresholds
   - sha256_file
   - DEFAULT_RISK_TIERS
   - site_telemetry

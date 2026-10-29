@@ -217,6 +217,22 @@ def site_baseline_risk(df: pd.DataFrame, site_col: str = "site_source", label_co
     return df[site_col].map(rates).fillna(train[label_col].mean())
 
 
+def derive_labs(raw: pd.DataFrame) -> pd.DataFrame:
+    """Fills ``lab_egfr`` (CKD-EPI 2021, FR-A6: removes the >60 ceiling) and ``lab_anion_gap`` (Na - (Cl + HCO3)) in place."""
+    if "lab_creatinine" in raw.columns and "age" in raw.columns and "gender_concept_id" in raw.columns:
+        creat_series = raw["lab_creatinine"]
+        has_creat = creat_series.notna()
+        if has_creat.any():
+            calc_egfr = compute_ckd_epi_2021(creat_series.fillna(1.0), raw["age"].fillna(65.0), raw["gender_concept_id"] == 8532)
+            egfr_current = raw["lab_egfr"] if "lab_egfr" in raw.columns else pd.Series(np.nan, index=raw.index)
+            raw["lab_egfr"] = np.where(has_creat & (egfr_current.isna() | (egfr_current >= 60.0)), calc_egfr, egfr_current)
+    if all(k in raw.columns for k in ("lab_sodium", "lab_chloride", "lab_bicarbonate")):
+        calc_ag = raw["lab_sodium"] - (raw["lab_chloride"] + raw["lab_bicarbonate"])
+        ag_current = raw["lab_anion_gap"] if "lab_anion_gap" in raw.columns else pd.Series(np.nan, index=raw.index)
+        raw["lab_anion_gap"] = np.where(ag_current.isna(), calc_ag, ag_current)
+    return raw
+
+
 def extract_velocity_features(
     con: duckdb.DuckDBPyConnection,
     cohort_table: str = "cohort",
@@ -331,21 +347,7 @@ def extract_velocity_features(
     LEFT JOIN demo ON demo.subject_id = c.subject_id
     ORDER BY c.subject_id, c.cohort_start_date
     """
-    raw = con.execute(sql).df()
-    # Dynamic CKD-EPI 2021 eGFR (FR-A6) to remove >60 ceiling and eliminate cross-site missingness
-    if "lab_creatinine" in raw.columns and "age" in raw.columns and "gender_concept_id" in raw.columns:
-        creat_series = raw["lab_creatinine"]
-        has_creat = creat_series.notna()
-        if has_creat.any():
-            calc_egfr = compute_ckd_epi_2021(creat_series.fillna(1.0), raw["age"].fillna(65.0), raw["gender_concept_id"] == 8532)
-            egfr_current = raw["lab_egfr"] if "lab_egfr" in raw.columns else pd.Series(np.nan, index=raw.index)
-            raw["lab_egfr"] = np.where(has_creat & (egfr_current.isna() | (egfr_current >= 60.0)), calc_egfr, egfr_current)
-
-    # Dynamic Anion Gap Stoichiometric Fallback: Na - (Cl + HCO3)
-    if all(k in raw.columns for k in ("lab_sodium", "lab_chloride", "lab_bicarbonate")):
-        calc_ag = raw["lab_sodium"] - (raw["lab_chloride"] + raw["lab_bicarbonate"])
-        ag_current = raw["lab_anion_gap"] if "lab_anion_gap" in raw.columns else pd.Series(np.nan, index=raw.index)
-        raw["lab_anion_gap"] = np.where(ag_current.isna(), calc_ag, ag_current)
+    raw = derive_labs(con.execute(sql).df())
 
     if extra_features is not None:
         extra = extra_features.drop(columns=[c for c in extra_features.columns if c in raw.columns

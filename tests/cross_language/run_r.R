@@ -51,4 +51,12 @@ x <- do.call(rbind, lapply(inp$x, unlist))
 cut <- as.integer(inp$cut)
 out$ridge <- as.list(ridge_logistic_fit_predict(x[seq_len(cut), ], unlist(inp$y_train), x[(cut + 1):nrow(x), ]))
 
+# 5. monitoring and risk tiers on fixed numbers
+base <- unlist(inp$baseline)
+th <- fit_capacity_thresholds(base, list(list(name = "high", top_fraction = 0.10), list(name = "elevated", top_fraction = 0.30), list(name = "standard")))
+cal <- calibration_summary(y, p, min_events = 5)
+out$monitoring <- list(psi = population_stability_index(base, p), psi_tied = population_stability_index(base, unlist(inp$p_tied)),
+                       calibration = lapply(cal, function(v) if (is.na(v)) NULL else v),
+                       thresholds = lapply(th, function(t) list(t$name, t$min)), tiers = as.list(map_risk_tiers(p, th)))
+
 jsonlite::write_json(out, file.path(work, "r_results.json"), auto_unbox = TRUE, digits = NA, na = "null", null = "null")
