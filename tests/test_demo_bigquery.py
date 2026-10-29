@@ -131,6 +131,7 @@ def test_live_bigquery_synpuf_smoke(tmp_path):
 
 
 def test_cli_dry_run_reads_config_and_prints_disclaimer(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("yaml")
     from omop_etl.demo_bigquery import main
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "bigquery.yml").write_text("billing_project: cfg-proj\n", encoding="utf-8")
