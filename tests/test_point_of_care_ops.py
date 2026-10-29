@@ -176,3 +176,25 @@ def test_score_cohort_unit_check_warns_and_jsonl_log(tmp_path, bundle):
     log.to_json(lp, orient="records", lines=True)
     page = write_drift_report(lp, tmp_path / "j.html").read_text(encoding="utf-8")
     assert "2024-02" in page and "drift" in page
+
+
+def test_top_level_reexports_and_glucose_loinc():
+    import omop_etl
+    from omop_etl.fhir import LOINC_TO_FEATURE
+    from omop_etl.velocity import VELOCITY_CONCEPTS
+
+    for name in ("score_fhir_bundle", "write_drift_report", "check_unit_sanity"):
+        assert getattr(omop_etl, name) and name in omop_etl.__all__
+    assert LOINC_TO_FEATURE["2345-7"] == LOINC_TO_FEATURE["2339-0"] == "lab_glucose"
+    assert VELOCITY_CONCEPTS["lab_glucose"] == (3004501, 3000483)
+
+
+def test_fhir_history_encounters_feed_utilization_features(bundle):
+    import copy
+    b = copy.deepcopy(FHIR)
+    b["entry"] += [{"resource": {"resourceType": "Encounter", "id": f"h{i}", "class": {"code": "IMP"},
+                                 "period": {"start": s, "end": e}}}
+                   for i, (s, e) in enumerate([("2023-12-01", "2023-12-04"), ("2023-10-01", "2023-10-03")])]
+    r = score_fhir_bundle(b, bundle)
+    assert r["fhir"]["encounter_id"] == "e1"
+    assert r["features"]["prior_ip_count"] == 2
