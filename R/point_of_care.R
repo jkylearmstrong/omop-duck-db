@@ -86,7 +86,8 @@ REFERENCE_MEDIANS <- c(lab_creatinine = 1, lab_bun = 18, lab_sodium = 139, lab_p
 LOINC_TO_FEATURE <- c("8867-4" = "heart_rate", "8480-6" = "systolic_bp", "8462-4" = "diastolic_bp", "3094-0" = "lab_bun",
                       "2160-0" = "lab_creatinine", "38483-4" = "lab_creatinine", "2951-2" = "lab_sodium", "2823-3" = "lab_potassium",
                       "2075-0" = "lab_chloride", "1963-8" = "lab_bicarbonate", "2028-9" = "lab_bicarbonate",
-                      "33037-3" = "lab_anion_gap", "62238-1" = "lab_egfr", "33914-3" = "lab_egfr")
+                      "33037-3" = "lab_anion_gap", "62238-1" = "lab_egfr", "33914-3" = "lab_egfr",
+                      "2345-7" = "lab_glucose", "2339-0" = "lab_glucose")
 
 .fhir_codings <- function(res, field = "code") {
   blk <- res[[field]]
@@ -135,7 +136,8 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
   gender <- c(female = 8532L, male = 8507L)[tolower(if (is.null(patient$gender)) "" else patient$gender)]
   cmap <- as.list(concept_map)
   unmapped <- character(); skipped <- 0L
-  factors <- list(lab_creatinine = c("umol/l" = 1 / 88.4, "\u00b5mol/l" = 1 / 88.4), lab_bun = c("mmol/l" = 2.801))
+  factors <- list(lab_creatinine = c("umol/l" = 1 / 88.4, "\u00b5mol/l" = 1 / 88.4), lab_bun = c("mmol/l" = 2.801),
+                  lab_glucose = c("mmol/l" = 18.016))
   enc_class <- c(IMP = 9201L, ACUTE = 9201L, NONAC = 9201L, EMER = 9203L, AMB = 9202L, OBSENC = 581385L)
 
   db <- tempfile(fileext = ".duckdb"); build_schema(db)
@@ -148,21 +150,37 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
   cls <- if (is.null(enc$class$code)) "IMP" else enc$class$code
   ex(sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id) VALUES (1, 1, %d, %s, %s, 0)",
              if (is.na(enc_class[cls])) 9201L else enc_class[[cls]], q(start), q(end)))
+  # Other Encounters are the longitudinal history behind prior_ip_count, prior_ed_count, days_since_prior_encounter.
+  first <- start; vid <- 1L
+  for (other in res$Encounter) {
+    if (identical(other, enc)) next
+    s_o <- .fhir_date(other$period$start)
+    if (is.null(s_o)) next
+    vid <- vid + 1L; first <- min(first, s_o)
+    e_o <- .fhir_date(other$period$end); if (is.null(e_o)) e_o <- s_o
+    cls_o <- if (is.null(other$class$code)) "IMP" else other$class$code
+    ex(sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id) VALUES (%d, 1, %d, %s, %s, 0)",
+               vid, if (is.na(enc_class[cls_o])) 9201L else enc_class[[cls_o]], q(s_o), q(e_o)))
+  }
   ex(sprintf("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, period_type_concept_id) VALUES (1, 1, %s, %s, 0)",
-             q(min(start, if (is.null(birth)) start else birth)), q(max(end, today))))
+             q(min(first, if (is.null(birth)) first else birth)), q(max(end, today))))
   mid <- 0L
   for (o in res$Observation) {
-    cod <- Filter(function(c) grepl("loinc.org$", c$system) && c$code %in% names(LOINC_TO_FEATURE), .fhir_codings(o))
-    qty <- o$valueQuantity
     when <- .fhir_date(if (!is.null(o$effectiveDateTime)) o$effectiveDateTime else if (!is.null(o$effectivePeriod$start)) o$effectivePeriod$start else o$issued)
-    if (!length(cod) || is.null(qty$value) || is.null(when)) { skipped <- skipped + 1L; next }
-    feat <- LOINC_TO_FEATURE[[cod[[1]]$code]]
-    unit <- tolower(if (!is.null(qty$unit)) qty$unit else if (!is.null(qty$code)) qty$code else "")
-    f <- factors[[feat]][unit]
-    value <- as.numeric(qty$value) * (if (length(f) && !is.na(f)) f[[1]] else 1)
-    mid <- mid + 1L
-    ex(sprintf("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (%d, 1, %d, %s, 0, %.10g, 1)",
-               mid, as.integer(VELOCITY_CONCEPTS[[feat]][[1]]), q(when), value))
+    # A panel (e.g. blood pressure 85354-9 / 55284-4) has no valueQuantity; its values sit in component[].
+    parts <- if (!is.null(o$valueQuantity)) list(o) else if (length(o$component)) o$component else list(o)
+    for (part in parts) {
+      cod <- Filter(function(c) grepl("loinc.org$", c$system) && c$code %in% names(LOINC_TO_FEATURE), .fhir_codings(part))
+      qty <- part$valueQuantity
+      if (!length(cod) || is.null(qty$value) || is.null(when)) { skipped <- skipped + 1L; next }
+      feat <- LOINC_TO_FEATURE[[cod[[1]]$code]]
+      unit <- tolower(if (!is.null(qty$unit)) qty$unit else if (!is.null(qty$code)) qty$code else "")
+      f <- factors[[feat]][unit]
+      value <- as.numeric(qty$value) * (if (length(f) && !is.na(f)) f[[1]] else 1)
+      mid <- mid + 1L
+      ex(sprintf("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (%d, 1, %d, %s, 0, %.10g, 1)",
+                 mid, as.integer(VELOCITY_CONCEPTS[[feat]][[1]]), q(when), value))
+    }
   }
   lookup <- function(codings) { for (c in codings) { k <- paste0(c$system, "|", c$code); if (!is.null(cmap[[k]])) return(cmap[[k]]) }; NULL }
   note <- function(codings) unique(vapply(codings, function(c) paste0(c$system, "|", c$code), character(1)))

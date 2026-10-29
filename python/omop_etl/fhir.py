@@ -118,18 +118,21 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
                     [min(first, birth or first), max(end, today)])
         mid = 0
         for o in res.get("Observation", []):
-            feat = next((LOINC_TO_FEATURE[c] for s, c in _codings(o) if s.endswith("loinc.org") and c in LOINC_TO_FEATURE), None)
-            q = o.get("valueQuantity") or {}
             when = _date(o.get("effectiveDateTime") or (o.get("effectivePeriod") or {}).get("start") or o.get("issued"))
-            if feat is None or q.get("value") is None or when is None:
-                skipped_obs += 1
-                continue
-            unit = str(q.get("unit") or q.get("code") or "").lower()
-            value = float(q["value"]) * _UNIT_FACTORS.get((feat, unit), 1.0)
-            mid += 1
-            con.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, "
-                        "measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (?, 1, ?, ?, 0, ?, 1)",
-                        [mid, int(VELOCITY_CONCEPTS[feat][0]), when, value])
+            # A panel (e.g. blood pressure 85354-9 / 55284-4) has no valueQuantity; its values sit in component[].
+            parts = [o] if o.get("valueQuantity") else [c for c in (o.get("component") or []) if isinstance(c, Mapping)] or [o]
+            for part in parts:
+                feat = next((LOINC_TO_FEATURE[c] for s, c in _codings(part) if s.endswith("loinc.org") and c in LOINC_TO_FEATURE), None)
+                q = part.get("valueQuantity") or {}
+                if feat is None or q.get("value") is None or when is None:
+                    skipped_obs += 1
+                    continue
+                unit = str(q.get("unit") or q.get("code") or "").lower()
+                value = float(q["value"]) * _UNIT_FACTORS.get((feat, unit), 1.0)
+                mid += 1
+                con.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, "
+                            "measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (?, 1, ?, ?, 0, ?, 1)",
+                            [mid, int(VELOCITY_CONCEPTS[feat][0]), when, value])
         for i, c in enumerate(res.get("Condition", []), 1):
             cid = next((cmap[f"{s}|{k}"] for s, k in _codings(c) if f"{s}|{k}" in cmap), None)
             if cid is None:

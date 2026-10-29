@@ -199,3 +199,14 @@ def test_fhir_history_encounters_feed_utilization_features(bundle):
     r = score_fhir_bundle(b, bundle)
     assert r["fhir"]["encounter_id"] == "e1"
     assert r["features"]["prior_ip_count"] == 2
+
+
+def test_fhir_bp_panel_components_are_extracted(bundle):
+    import copy
+    b = copy.deepcopy(FHIR)
+    comp = lambda code, v: {"code": {"coding": [{"system": "http://loinc.org", "code": code}]},
+                            "valueQuantity": {"value": v, "unit": "mmHg"}}
+    b["entry"].append({"resource": {"resourceType": "Observation", "effectiveDateTime": "2024-01-04",
+                                    "code": {"coding": [{"system": "http://loinc.org", "code": "85354-9"}]},
+                                    "component": [comp("8480-6", 130), comp("8462-4", 80)]}})
+    assert score_fhir_bundle(b, bundle)["fhir"]["observations_skipped"] == 0
