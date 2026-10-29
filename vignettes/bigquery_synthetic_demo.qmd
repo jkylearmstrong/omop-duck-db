@@ -1,0 +1,87 @@
+---
+title: "Run the diabetes cohort on public BigQuery data (CMS SynPUF)"
+vignette: >
+  %\VignetteIndexEntry{Run the diabetes cohort on public BigQuery data (CMS SynPUF)}
+  %\VignetteEngine{quarto::html}
+  %\VignetteEncoding{UTF-8}
+format: html
+execute:
+  eval: false
+---
+
+::: {.callout-warning}
+## Software demonstration only
+
+`bigquery-public-data.cms_synthetic_patient_data_omop` is **synthetic claims data** (CMS DE-SynPUF). This
+walk-through checks that the cohort SQL compiles to GoogleSQL, executes, and that feature extraction survives a CDM
+with no laboratory values or vital signs. It says nothing about real-world clinical performance or human
+epidemiology, and the data are not an EHR site. Do not cite results from it as findings.
+:::
+
+## What you need
+
+- A Google Cloud project you can bill queries to (`billing_project`). Reading the public dataset costs only the
+  bytes your queries scan, billed to that project.
+- Permission in that project to run BigQuery jobs **and create a dataset** (the demo writes its cohort and feature
+  tables to `<billing_project>.omop_duckdb_demo`, or to `--scratch-dataset` if you already have a writable one).
+  The public data is never modified.
+- R: `CirceR` (needs Java), `SqlRender`, `bigrquery`. Python: `pip install "omop-duck-db[bigquery]"`.
+- Credentials: `bigrquery::bq_auth()` once in an interactive session, or
+  `gcloud auth application-default login` for Python. Keep keys out of the repository; `config/bigquery.yml` only
+  holds the project id (copy `config/bigquery.yml.example`).
+
+## 1. Check the SQL without any credentials
+
+A dry run compiles `cohorts/diabetes_phenotype.circe.json` (including the gestational-diabetes exclusion) and the
+feature queries, writes them to `output_dir`, and makes no BigQuery call:
+
+```bash
+Rscript inst/scripts/run_bigquery_demo.R --billing-project my-gcp-project --dry-run
+python -m omop_etl.demo_bigquery --billing-project my-gcp-project --dry-run
+```
+
+## 2. Run it
+
+```bash
+Rscript inst/scripts/run_bigquery_demo.R --billing-project my-gcp-project --output-dir bigquery_demo_out
+python -m omop_etl.demo_bigquery --billing-project my-gcp-project --output-dir bigquery_demo_out
+```
+
+or from R:
+
+```{r}
+library(omopduckdb)
+res <- run_bigquery_demo(billing_project = "my-gcp-project", output_dir = "bigquery_demo_out")
+res$n_cohort
+res$clinical_telemetry$serum_creatinine$status
+```
+
+Before running anything the demo lists the tables in the source dataset and stops with the missing names if the CDM
+lacks `person`, `visit_occurrence`, `observation_period`, `condition_occurrence`, `drug_exposure`, `measurement` or
+`concept_ancestor`. If your copy keeps the vocabulary in another dataset, pass `--vocabulary-dataset project.dataset`.
+
+## 3. What it writes
+
+| File | Content |
+|---|---|
+| `demo_report.md` | Disclaimer, step timings, cohort size, age/sex/race, prior-year utilization, lab/vital availability |
+| `demo_summary.json` | The same numbers, machine readable |
+| `demo_features.csv` | One row per cohort member |
+| `*.googlesql.sql` | The exact statements that were run |
+
+## How claims data are handled
+
+SynPUF has no numeric lab or vital-sign values. The demo counts them in the cohort
+(`inst/sql/bigquery_demo_availability.sql`) and reports `serum_creatinine`, `serum_glucose`, `serum_albumin`,
+`systolic_bp` and `diastolic_bp` as *unavailable (100% missing, not imputed)*. Nothing is imputed or fabricated. Only
+the administrative utilization features are built: `prior_ip_os_ed_count` and `readmission_count_twelve_months`
+(look-back 365 days strictly before the index date; inpatient = visit concepts 9201 and 262, ED = 9203,
+outpatient/observation = 9202 and 581385).
+
+## Dialect notes
+
+R compiles the definition with CirceR and translates it with `SqlRender::translate(targetDialect = "bigquery")`. The
+Python entry point has no SqlRender, so it compiles with the package's native compiler and transpiles DuckDB SQL to
+GoogleSQL with `sqlglot`. Both are covered by offline tests (`tests/test_demo_bigquery.py`,
+`tests/testthat/test-bigquery-demo.R`) that fail if the generated SQL stops parsing as GoogleSQL. Set
+`OMOP_BQ_BILLING_PROJECT` to run the opt-in live test against BigQuery (it bills that project).
