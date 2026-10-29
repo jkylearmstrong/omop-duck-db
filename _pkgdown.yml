@@ -234,6 +234,9 @@ reference:
   - run_dqd
   - run_dqd_catalog
   - run_dqd_full
+  - explain_cohort_gaps
+  - reconcile_cohort
+  - suppress_small_cells
   - sanitize_measurements
   - generate_table1
   - export_table1

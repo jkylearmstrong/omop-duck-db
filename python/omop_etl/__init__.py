@@ -324,6 +324,7 @@ from omop_etl.geography import (
     validate_sdi_cut_points,
     write_geography_measurements,
 )
+from omop_etl.cohort_reconcile import explain_cohort_gaps, reconcile_cohort, suppress_small_cells
 from omop_etl.custom_covariates import (check_custom_concepts, custom_concept_registry, export_custom_concept_registry,
                                         register_custom_concepts, write_custom_covariates, write_custom_features)
 from omop_etl.dqd_catalog import run_dqd_catalog, run_dqd_full
@@ -632,6 +633,9 @@ __all__ = [
     "validate_sdi_cut_points",
     "write_geography_measurements",
     "write_custom_covariates",
+    "explain_cohort_gaps",
+    "reconcile_cohort",
+    "suppress_small_cells",
     "check_custom_concepts",
     "custom_concept_registry",
     "export_custom_concept_registry",

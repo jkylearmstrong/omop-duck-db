@@ -320,10 +320,22 @@ def _check_definition_supported(data: dict) -> None:
                       stacklevel=3)
 
 
+def _is_file(x: str | Path) -> bool:
+    """True for an existing file. JSON text is never a path: a long string raises OSError (file name too long) on Linux."""
+    s = str(x)
+    if s.lstrip().startswith(("{", "[")):
+        return False
+    try:
+        return Path(s).exists()
+    except OSError:
+        return False
+
+
 def compile_circe_to_duckdb(
     circe_json: str | dict | Path,
     target_cohort_id: int = 1,
     cdm_schema: str = "main",
+    stage: str | None = None,
 ) -> str:
     """Compiles an OHDSI Atlas CIRCE JSON cohort definition into vectorized DuckDB SQL.
 
@@ -338,11 +350,17 @@ def compile_circe_to_duckdb(
         circe_json: CIRCE JSON string, dictionary, or Path to JSON file.
         target_cohort_id: Integer ID to populate in cohort_definition_id (default 1).
         cdm_schema: Schema name containing OMOP CDM tables (default 'main').
+        stage: Stop after an intermediate step and return ``subject_id, event_start_date`` of its events instead of the cohort:
+            ``'_primary_events_raw'`` (entry events), ``'_primary_limited'`` (inside the observation window, after the primary
+            limit) or ``'_primary_qualified'`` (after the inclusion rules). :func:`omop_etl.cohort_reconcile.explain_cohort_gaps`
+            uses it to find the step that dropped a patient.
 
     Returns:
         str: Fully executable, parameterized DuckDB SQL CTE query.
     """
-    if isinstance(circe_json, (str, Path)) and Path(str(circe_json)).exists():
+    if stage is not None and stage not in ("_primary_events_raw", "_primary_limited", "_primary_qualified"):
+        raise ValueError(f"unknown stage {stage!r}")
+    if isinstance(circe_json, (str, Path)) and _is_file(circe_json):
         with open(str(circe_json), "r", encoding="utf-8") as f:
             data = json.load(f)
     elif isinstance(circe_json, str):
@@ -547,6 +565,9 @@ def compile_circe_to_duckdb(
     {"QUALIFY ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY cohort_start_date) = 1" if expression_first else ""}
     ORDER BY subject_id, cohort_start_date;
     """
+    if stage is not None:
+        cut = sql.rindex("SELECT", 0, sql.rindex("AS cohort_definition_id"))
+        sql = sql[:cut] + f"SELECT DISTINCT subject_id, event_start_date FROM {stage}"
     return sql.strip()
 
 

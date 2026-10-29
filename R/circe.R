@@ -315,11 +315,17 @@ NULL
 #' @param circe_json JSON character string, parsed list, or file path.
 #' @param target_cohort_id Target cohort definition id (default 1).
 #' @param cdm_schema CDM schema name (default `"main"`).
+#' @param stage `NULL` (the cohort), or `"_primary_events_raw"` (entry events), `"_primary_limited"` (inside the observation window, after the
+#'   primary limit) or `"_primary_qualified"` (after the inclusion rules): returns `subject_id, event_start_date` of that step. [explain_cohort_gaps()] uses it.
 #' @return SQL character string.
 #' @export
 compile_circe_to_duckdb <- function(circe_json,
                                     target_cohort_id = 1L,
-                                    cdm_schema = "main") {
+                                    cdm_schema = "main",
+                                    stage = NULL) {
+  if (!is.null(stage) && !(stage %in% c("_primary_events_raw", "_primary_limited", "_primary_qualified"))) {
+    stop(sprintf("unknown stage '%s'", stage), call. = FALSE)
+  }
   data <- if (is.character(circe_json) && file.exists(circe_json)) {
     jsonlite::fromJSON(circe_json, simplifyVector = FALSE)
   } else if (is.character(circe_json)) {
@@ -526,6 +532,11 @@ compile_circe_to_duckdb <- function(circe_json,
     ORDER BY subject_id, cohort_start_date;
   ", cs_sql, primary_union, obs_filter, order_clause, inc_filter, end_expr, era_pad, as.integer(target_cohort_id), expression_clause)
 
+  if (!is.null(stage)) {
+    last_id <- tail(gregexpr("AS cohort_definition_id", sql, fixed = TRUE)[[1]], 1)
+    sel <- tail(gregexpr("SELECT", substr(sql, 1, last_id), fixed = TRUE)[[1]], 1)
+    sql <- paste0(substr(sql, 1, sel - 1), "SELECT DISTINCT subject_id, event_start_date FROM ", stage)
+  }
   trimws(sql)
 }
 
