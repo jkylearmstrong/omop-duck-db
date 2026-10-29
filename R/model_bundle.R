@@ -134,9 +134,10 @@ bundle_predict_proba <- function(bundle, X) {
 #' @param return_validation If `TRUE`, return `list(scores =, validation =)`.
 #' @param check_concepts A DBI connection, a registry or a registry JSON file: first check the custom concept ids recorded in the bundle's
 #'   feature spec against this site's ([validate_bundle_concepts()]) and stop on a mismatch.
+#' @param unit_check If `TRUE`, warn when a lab's median is more than 3x off the reference median ([check_unit_sanity()]).
 #' @return A data.frame with the key columns, `prob` and `risk_tier`.
 #' @export
-score_cohort <- function(bundle, features, key_columns = NULL, on_violation = "raise", return_validation = FALSE, check_concepts = NULL) {
+score_cohort <- function(bundle, features, key_columns = NULL, on_violation = "raise", return_validation = FALSE, check_concepts = NULL, unit_check = FALSE) {
   if (is.character(bundle)) bundle <- load_model_bundle(bundle)
   if (!is.null(check_concepts)) validate_bundle_concepts(bundle, check_concepts)
   if (is.character(features)) {
@@ -145,6 +146,7 @@ score_cohort <- function(bundle, features, key_columns = NULL, on_violation = "r
       as.data.frame(arrow::read_parquet(features))
     } else utils::read.csv(features, stringsAsFactors = FALSE)
   }
+  if (isTRUE(unit_check)) check_unit_sanity(features, warn = TRUE)
   rep <- validate_feature_frame(features, bundle$feature_spec, on_violation)
   X <- rep$frame
   for (f in bundle$feature_spec$features) {

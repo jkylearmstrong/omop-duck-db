@@ -14,11 +14,14 @@
 #' @param on_violation `"raise"`, `"clip"` or `"nullify"`.
 #' @param risk_tiers Optional `list(list(name =, min =), ...)` replacing the bundle's tiers (see [fit_capacity_thresholds()]).
 #' @param concepts Overrides for [VELOCITY_CONCEPTS].
+#' @param explain If `TRUE`, add `top_drivers`: the `top_k` patient-specific risk contributors (`feature`, `name`, `value`, signed `impact` on
+#'   the probability), see [explain_rows()].
+#' @param top_k Number of drivers.
 #' @return A list: `visit_occurrence_id`, `person_id`, `prob`, `risk_tier`, `as_of`, `features` (the values scored),
 #'   `measurement_dates` (date of the latest reading behind each lab/vital; absent = none found) and `validation` (contract summary).
 #' @export
 score_encounter <- function(con, visit_occurrence_id, bundle, as_of = NULL, extra_features = NULL, on_violation = "raise",
-                            risk_tiers = NULL, concepts = NULL) {
+                            risk_tiers = NULL, concepts = NULL, explain = FALSE, top_k = 5L) {
   vid <- as.integer(visit_occurrence_id)
   v <- DBI::dbGetQuery(con, sprintf("SELECT person_id, visit_start_date, visit_end_date FROM visit_occurrence WHERE visit_occurrence_id = %d", vid))
   if (!nrow(v)) stop("visit_occurrence_id ", vid, " not found.", call. = FALSE)
@@ -50,9 +53,15 @@ score_encounter <- function(con, visit_occurrence_id, bundle, as_of = NULL, extr
   nm <- vapply(bundle$feature_spec$features, function(f) f$name, character(1))
   nm <- nm[nm %in% names(feats)]
   values <- stats::setNames(lapply(nm, function(n) if (is.na(feats[[n]][[1]])) NULL else as.numeric(feats[[n]][[1]])), nm)
-  list(visit_occurrence_id = vid, person_id = as.integer(person_id), prob = prob, risk_tier = tier, as_of = format(cutoff),
-       features = values, measurement_dates = lapply(latest, function(l) format(l$date)),
-       validation = paste(format(res$validation), collapse = "\n"))
+  out <- list(visit_occurrence_id = vid, person_id = as.integer(person_id), prob = prob, risk_tier = tier, as_of = format(cutoff),
+              features = values, measurement_dates = lapply(latest, function(l) format(l$date)),
+              validation = paste(format(res$validation), collapse = "\n"))
+  if (isTRUE(explain)) {
+    filled <- res$validation$frame
+    for (f in bundle$feature_spec$features) if (anyNA(filled[[f$name]]) && !is.null(f$impute)) filled[[f$name]][is.na(filled[[f$name]])] <- f$impute
+    out$top_drivers <- explain_rows(bundle, filled, top_k = top_k)[[1]]
+  }
+  out
 }
 
 .latest_measurements <- function(con, person_id, start, cutoff, concepts) {

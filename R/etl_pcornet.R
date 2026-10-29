@@ -28,6 +28,11 @@
 #'   source contract (see [check_source()]). Only used when `strict_source = TRUE`.
 #' @param strict_source Logical. If `TRUE`, run [check_source()] first and stop with a `source_contract_error` when a
 #'   required source table or column is missing.
+#' @param mode `"full"` (default) or `"append"`: add only newly arrived rows to an existing database. Patients, providers and
+#'   encounters already present are skipped (matched on source values), events dated before `since` are skipped, surrogate keys
+#'   continue from the current maximum, care sites / locations are left alone, and `observation_period` and the eras are rebuilt.
+#'   Encounters are selected by admit date. Mirror of Python `etl_pcornet(mode = "append")`.
+#' @param since With `mode = "append"`: ISO date; only events on/after it are loaded.
 #' @param key_check `"warn"` (default), `"raise"` or `"ignore"`: at the end of the build, compare distinct source ids
 #'   with distinct surrogate keys via [check_etl_keys()] and report any encounters/patients that would be merged.
 #' @param key_check_callback Optional function called with the list returned by [check_etl_keys()].
@@ -57,9 +62,18 @@ etl_pcornet <- function(
     key_check_callback = NULL,
     use_enrollment = "auto",
     enrollment_type_concept_id = 0L,
-    data_cutoff = NULL
+    data_cutoff = NULL,
+    mode = c("full", "append"),
+    since = NULL
 ) {
   key_check <- match.arg(key_check)
+  mode <- match.arg(mode)
+  append <- identical(mode, "append")
+  if (append) {
+    if (is.null(since)) stop("mode = 'append' requires since = 'YYYY-MM-DD'.", call. = FALSE)
+    since <- .iso_date(since, "since")
+    if (!file.exists(db_path)) stop("mode = 'append' needs an existing database: ", db_path, call. = FALSE)
+  }
   if (!(isTRUE(use_enrollment) || isFALSE(use_enrollment) || identical(use_enrollment, "auto"))) {
     stop("use_enrollment must be \"auto\", TRUE or FALSE.")
   }
@@ -95,10 +109,19 @@ etl_pcornet <- function(
 
   load_mapping_macros(con)
 
-  load_care_site(con, source_dir, site_id = site_id, site_anon = site_anon, site_name = site_name)
+  rm(list = ls(.append_state), envir = .append_state)
+  on.exit(rm(list = ls(.append_state), envir = .append_state), add = TRUE)
+  if (append) {
+    .append_state$active <- TRUE
+    .append_state$since <- since
+    if (isTRUE(disambiguate_patids)) .append_state$patid_suffix <- paste0("-", site_id)
+    cat(sprintf("Append mode: new patients/providers/encounters and events dated >= %s.\n", since))
+  } else {
+    load_care_site(con, source_dir, site_id = site_id, site_anon = site_anon, site_name = site_name)
+  }
   .load_provider(con, source_dir)
   .load_person(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  load_location(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  if (!append) load_location(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_visit_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_condition_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_procedure_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
@@ -107,6 +130,8 @@ etl_pcornet <- function(
   .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
 
+  rm(list = ls(.append_state), envir = .append_state)
+  if (append) for (t in c("observation_period", "drug_era", "condition_era")) DBI::dbExecute(con, paste("DELETE FROM", t))
   cutoff <- .resolve_max_date(con, data_cutoff)
   enrolled <- FALSE
   if (!isFALSE(use_enrollment)) {
@@ -119,9 +144,9 @@ etl_pcornet <- function(
   build_observation_period(con, max_date = cutoff, use_enrollment = enrolled, enrollment_type_concept_id = enrollment_type_concept_id)
   build_drug_era(con)
   build_condition_era(con)
-  .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name)
+  if (!append) .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name)
 
-  if (key_check != "ignore") {
+  if (key_check != "ignore" && !append) {
     report <- check_etl_keys(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids,
                              on_collision = key_check)
     for (r in report) {

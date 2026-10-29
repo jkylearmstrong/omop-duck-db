@@ -10,7 +10,8 @@ score_cohort(
   key_columns = NULL,
   on_violation = "raise",
   return_validation = FALSE,
-  check_concepts = NULL
+  check_concepts = NULL,
+  unit_check = FALSE
 )
 }
 \arguments{
@@ -26,6 +27,8 @@ score_cohort(
 
 \item{check_concepts}{A DBI connection, a registry or a registry JSON file: first check the custom concept ids recorded in the bundle's
 feature spec against this site's (\code{\link[=validate_bundle_concepts]{validate_bundle_concepts()}}) and stop on a mismatch.}
+
+\item{unit_check}{If \code{TRUE}, warn when a lab's median is more than 3x off the reference median (\code{\link[=check_unit_sanity]{check_unit_sanity()}}).}
 }
 \value{
 A data.frame with the key columns, \code{prob} and \code{risk_tier}.

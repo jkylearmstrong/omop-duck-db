@@ -230,6 +230,7 @@ def score_cohort(
     return_validation: bool = False,
     X_seq: np.ndarray | None = None,
     check_concepts: Any = None,
+    unit_check: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, FeatureValidationReport]:
     """Scores a feature table (DataFrame, ``.parquet`` or ``.csv``) with a bundle.
 
@@ -240,6 +241,7 @@ def score_cohort(
 
     ``check_concepts`` (a DuckDB connection, a registry mapping or a registry JSON file) first checks the custom concept ids recorded in the
     bundle's feature spec against this site's (:func:`omop_etl.bundle_concepts.validate_bundle_concepts`) and raises on a mismatch.
+    ``unit_check=True`` warns when a lab's median is >3x off the reference median (:func:`omop_etl.unit_guard.check_unit_sanity`).
     """
     b = bundle if isinstance(bundle, ModelBundle) else load_model_bundle(bundle)
     if check_concepts is not None:
@@ -250,6 +252,9 @@ def score_cohort(
         df = pd.read_parquet(fp) if fp.suffix.lower() == ".parquet" else pd.read_csv(fp)
     else:
         df = features
+    if unit_check:  # before bounds clipping hides a mmol/L-vs-mg/dL feed
+        from omop_etl.unit_guard import check_unit_sanity
+        check_unit_sanity(df, warn=True)
     rep = validate_feature_frame(df, b.feature_spec, on_violation)
     X = rep.frame.copy()
     for f in b.feature_spec["features"]:
@@ -309,4 +314,31 @@ def write_model_bundle(
         "license": license, "intended_use": intended_use,
     }
     (out / "manifest.json").write_text(strict_dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return out
+
+
+def explain_rows(bundle: ModelBundle | str | Path, features: pd.DataFrame, *, top_k: int = 5) -> list[list[dict[str, Any]]]:
+    """Local, model-agnostic risk-driver attribution for each row of a feature table.
+
+    Each feature is swapped for its reference value (the feature spec's ``impute``, else 0) and the change in the
+    final calibrated probability is the feature's ``impact`` (positive = pushes risk up). It is exact for any
+    component kind (logistic, xgboost, onnx, torch) because it only calls ``predict_proba``; it is a one-at-a-time
+    occlusion, not interaction-aware TreeSHAP. Returns, per row, the ``top_k`` drivers by absolute impact.
+    """
+    b = bundle if isinstance(bundle, ModelBundle) else load_model_bundle(bundle)
+    names = b.feature_names
+    spec = {f["name"]: f for f in b.feature_spec["features"]}
+    ref = np.array([float(spec[n].get("impute") if spec[n].get("impute") is not None else 0.0) for n in names])
+    X = features[names].to_numpy(dtype="float64")
+    base = b.predict_proba(X)
+    deltas = np.zeros_like(X)
+    for j in range(len(names)):
+        Xo = X.copy()
+        Xo[:, j] = ref[j]
+        deltas[:, j] = base - b.predict_proba(Xo)
+    out = []
+    for i in range(X.shape[0]):
+        order = np.argsort(-np.abs(deltas[i]))[:top_k]
+        out.append([{"feature": spec[names[j]].get("label") or names[j], "name": names[j], "value": float(X[i, j]),
+                     "impact": float(deltas[i, j])} for j in order if deltas[i, j] != 0.0])
     return out

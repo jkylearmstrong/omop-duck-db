@@ -29,6 +29,14 @@ def import_or_skip(name: str):
     On Windows a PyTorch wheel without its VC++ / CUDA redistributables raises ``OSError: [WinError 1114] DLL
     initialization failed`` (not ``ImportError``), which ``importorskip`` would turn into a test error.
     """
+    if name == "torch" and sys.platform == "win32" and "torch" not in sys.modules:
+        # On CPU-only Windows hosts torch can die with a native access violation (SEH) while probing CUDA DLLs, which
+        # no ``except`` can catch and which kills the whole pytest process. Probe in a child process first.
+        import subprocess
+
+        probe = subprocess.run([sys.executable, "-c", "import torch"], capture_output=True)
+        if probe.returncode != 0:
+            pytest.skip(f"torch cannot be imported on this host (probe exit code {probe.returncode})")
     try:
         return __import__(name)
     except (ImportError, OSError) as exc:
