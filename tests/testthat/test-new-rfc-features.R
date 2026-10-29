@@ -265,6 +265,11 @@ test_that("Native CIRCE compiler compiles and executes cohort JSON", {
   ")
 
   DBI::dbExecute(con, "
+    INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, period_type_concept_id)
+    VALUES (1, 1, DATE '2015-01-01', DATE '2022-01-01', 32817);
+  ")
+
+  DBI::dbExecute(con, "
     INSERT INTO concept_ancestor (ancestor_concept_id, descendant_concept_id, min_levels_of_separation, max_levels_of_separation)
     VALUES (316139, 316139, 0, 0);
   ")
@@ -325,6 +330,11 @@ test_that("Native CIRCE compiler parses and applies InclusionRules correctly", {
       (1, 8507, 1950, 8527, 38003564),
       (2, 8532, 1940, 8527, 38003564),
       (3, 8507, 1980, 8527, 38003564);
+  ")
+
+  DBI::dbExecute(con, "
+    INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, period_type_concept_id)
+    VALUES (1, 1, DATE '2015-01-01', DATE '2022-01-01', 32817), (2, 2, DATE '2015-01-01', DATE '2022-01-01', 32817), (3, 3, DATE '2015-01-01', DATE '2022-01-01', 32817);
   ")
 
   DBI::dbExecute(con, "

@@ -239,37 +239,12 @@ write_geography_measurements <- function(con, geography, concept_ids = NULL, vis
   g <- geography
   g$sdi_quintile_n <- match(g$sdi_quintile, .sdi_labels)
   g$ruca_primary <- floor(suppressWarnings(as.numeric(g$ruca_code)))   # secondary digits (4.2) are not part of the primary code
-  parts <- list()
-  for (spec in list(c("sdi_score", "sdi_score"), c("sdi_quintile_n", "sdi_quintile"), c("ruca_primary", "ruca_code"))) {
-    keep <- !is.na(g[[spec[1]]])
-    if (any(keep)) {
-      parts[[length(parts) + 1L]] <- data.frame(person_id = g$person_id[keep], stay_id = g$stay_id[keep],
-                                                admit_date = as.Date(g$admit_date[keep]), value = as.numeric(g[[spec[1]]][keep]),
-                                                measurement_concept_id = as.numeric(ids[[spec[2]]]))
-    }
-  }
-  if (!length(parts)) return(0L)
-  rows <- do.call(rbind, parts)
-  duckdb::duckdb_register(con, "_geo_meas", rows)
-  on.exit(duckdb::duckdb_unregister(con, "_geo_meas"), add = TRUE)
-  DBI::dbExecute(con, sprintf("DELETE FROM measurement WHERE measurement_concept_id IN (%s) AND person_id IN (SELECT person_id FROM _geo_meas)",
-                              paste(sprintf("%.0f", ids), collapse = ", ")))
-  start <- DBI::dbGetQuery(con, "SELECT COALESCE(MAX(measurement_id), 0) AS m FROM measurement")$m[[1]]
-  DBI::dbExecute(con, sprintf("
-    INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_datetime,
-                             measurement_type_concept_id, value_as_number, unit_concept_id, visit_occurrence_id, measurement_source_value)
-    SELECT %.0f + row_number() OVER (ORDER BY person_id, stay_id, measurement_concept_id),
-           CAST(person_id AS BIGINT), CAST(measurement_concept_id AS INTEGER), admit_date, CAST(admit_date AS TIMESTAMP),
-           %.0f, CAST(value AS DOUBLE), 0, %s, 'omop_etl.geography'
-    FROM _geo_meas", start, type_concept_id, if (isTRUE(visit_ids)) "CAST(stay_id AS BIGINT)" else "NULL"))
-  if (isTRUE(register_concepts) && .geo_has_table(con, "concept")) {
-    for (key in names(ids)) {
-      cid <- ids[[key]]
-      if (DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM concept WHERE concept_id = %.0f", cid))$n[[1]] == 0) {
-        DBI::dbExecute(con, "INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, valid_start_date, valid_end_date) VALUES (?, ?, 'Measurement', 'omop-duck-db', 'Geography', 'S', ?, DATE '1970-01-01', DATE '2099-12-31')",
-                       params = list(cid, unname(.geo_concept_names[[key]]), key))
-      }
-    }
-  }
-  invisible(nrow(rows))
+  parts <- lapply(list(c("sdi_score", "sdi_score"), c("sdi_quintile_n", "sdi_quintile"), c("ruca_primary", "ruca_code")), function(spec) {
+    data.frame(person_id = g$person_id, visit_occurrence_id = g$stay_id, date = as.Date(g$admit_date),
+               value = as.numeric(g[[spec[1]]]), feature = spec[2], stringsAsFactors = FALSE)
+  })
+  concepts <- lapply(names(ids), function(k) c(ids[[k]], unname(.geo_concept_names[[k]])))
+  names(concepts) <- names(ids)
+  write_custom_covariates(con, do.call(rbind, parts), concepts, source = "omop_etl.geography", visit_ids = visit_ids,
+                          register_concepts = register_concepts, type_concept_id = type_concept_id)
 }

@@ -35,6 +35,7 @@ _C = {
     21600712: ("DRUGS USED IN DIABETES", "Drug", "ATC", "ATC 2nd", "C", "A10"),
     21600745: ("Biguanides", "Drug", "ATC", "ATC 4th", "C", "A10BA"),
     201820: ("Diabetes mellitus", "Condition", "SNOMED", "Disorder", "S", "73211009"),
+    4024659: ("Gestational diabetes mellitus", "Condition", "SNOMED", "Disorder", "S", "11687002"),
     3004410: ("Hemoglobin A1c/Hemoglobin.total in Blood", "Measurement", "LOINC", "Lab Test", "S", "4548-4"),
     3034639: ("Hemoglobin A1c [Mass/volume] in Blood", "Measurement", "LOINC", "Lab Test", "S", "41995-2"),
     40758583: ("Deprecated Hemoglobin A1c in Blood", "Measurement", "LOINC", "Lab Test", None, "55454-3"),
@@ -111,10 +112,16 @@ def metformin_only_prediabetes_pcos_circe(pcos: str = "icd10") -> dict[str, Any]
     return _definition(sets, [{"DrugExposure": {"CodesetId": 0}}], rules)
 
 
-def diabetes_phenotype_circe(drug_rule: str = "atc_a10", rxnorm_concept_ids: Sequence[int] | None = None) -> dict[str, Any]:
+def diabetes_phenotype_circe(drug_rule: str = "atc_a10", rxnorm_concept_ids: Sequence[int] | None = None,
+                             include_gestational: bool = False) -> dict[str, Any]:
     """The SAS extraction's diabetes phenotype: an adult (>= 18 at entry) with, at entry or earlier, a diabetes diagnosis, a
     diabetes drug, or HbA1c >= 6.5. The entry is the earliest of those events. ``drug_rule='atc_a10'`` uses ATC A10
-    descendants; ``'rxnorm_concepts'`` takes ``rxnorm_concept_ids`` (ingredient concepts resolved from the CUI list)."""
+    descendants; ``'rxnorm_concepts'`` takes ``rxnorm_concept_ids`` (ingredient concepts resolved from the CUI list).
+
+    SNOMED places "Gestational diabetes mellitus" (4024659) under "Diabetes mellitus" (201820), so a plain descendant set
+    would admit pregnancy-only diabetes, which the SAS extraction's ICD rule (249, 250, E08-E13; no O24) does not. The default
+    ``include_gestational=False`` subtracts it from the diagnosis arm; ``True`` keeps it. A person with gestational diabetes who
+    also has a diabetes drug or an HbA1c >= 6.5 still enters through those arms."""
     if drug_rule == "atc_a10":
         drug_items = [_item(21600712, descendants=True)]
     elif drug_rule == "rxnorm_concepts":
@@ -127,7 +134,8 @@ def diabetes_phenotype_circe(drug_rule: str = "atc_a10", rxnorm_concept_ids: Seq
     else:
         raise ValueError("drug_rule must be 'atc_a10' or 'rxnorm_concepts'.")
     sets = [
-        _concept_set(0, "Diabetes mellitus", [_item(201820, descendants=True)]),
+        _concept_set(0, "Diabetes mellitus", [_item(201820, descendants=True)]
+                     + ([] if include_gestational else [_item(4024659, descendants=True, excluded=True)])),
         _concept_set(1, "Diabetes drugs", drug_items),
         _concept_set(2, "Hemoglobin A1c", [_item(c) for c in _HBA1C]),
     ]

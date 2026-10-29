@@ -41,6 +41,28 @@ def test_clean_cdm_passes_structural_checks():
     assert _by(res, "measureValueCompleteness", "death", "death_date")["execution_status"] == "NOT_APPLICABLE"   # empty table
 
 
+def test_concept_checks_domain_and_standard_validity():
+    c = _con()
+    c.execute("INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, "
+              "valid_start_date, valid_end_date, invalid_reason) VALUES "
+              "(9201, 'Inpatient', 'Visit', 'Visit', 'Visit', 'S', 'IP', DATE '1970-01-01', DATE '2099-12-31', NULL), "
+              "(201820, 'Diabetes', 'Condition', 'SNOMED', 'Clinical Finding', 'S', 'x', DATE '1970-01-01', DATE '2099-12-31', NULL), "
+              "(1503297, 'metformin', 'Drug', 'RxNorm', 'Ingredient', 'S', 'y', DATE '1970-01-01', DATE '2099-12-31', NULL), "
+              "(4216643, 'old death', 'Condition', 'SNOMED', 'Clinical Finding', 'S', 'z', DATE '1970-01-01', DATE '2000-01-01', 'D'), "
+              "(8536, 'src visit', 'Visit', 'Visit', 'Visit', NULL, 'w', DATE '1970-01-01', DATE '2099-12-31', NULL)")
+    c.execute("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, "
+              "condition_type_concept_id) VALUES (1, 1, 201820, DATE '2020-01-01', 0), (2, 1, 1503297, DATE '2020-01-01', 0), "      # 2: drug concept in a condition field
+              "(3, 1, 4216643, DATE '2020-01-01', 0), (4, 1, 0, DATE '2020-01-01', 0)")                                              # 3: deprecated
+    c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, "
+              "visit_type_concept_id) VALUES (5, 1, 8536, DATE '2020-01-05', DATE '2020-01-09', 0)")                                # non-standard visit
+    res = run_dqd_catalog(c, today=TODAY)
+    assert _by(res, "fkDomain", "condition_occurrence", "condition_concept_id")["num_violated_rows"] == 1
+    assert _by(res, "isStandardValidConcept", "condition_occurrence", "condition_concept_id")["num_violated_rows"] == 1
+    assert _by(res, "isStandardValidConcept", "visit_occurrence", "visit_concept_id")["num_violated_rows"] == 1   # 8536 is not standard
+    assert _by(res, "fkDomain", "condition_occurrence", "condition_concept_id")["check_origin"] == "DQD"
+    assert not any(r["check_name"] in ("fkDomain", "isStandardValidConcept") for r in run_dqd_catalog(_con(), today=TODAY)["CheckResults"])
+
+
 def test_planted_defects_are_flagged():
     c = _con()
     c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, "
