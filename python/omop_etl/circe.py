@@ -8,6 +8,7 @@ rJava, or SqlRender dependencies.
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 import duckdb
@@ -19,19 +20,19 @@ DOMAIN_TABLE_MAP = {
         "table": "condition_occurrence",
         "concept_col": "condition_concept_id",
         "date_col": "condition_start_date",
-        "end_date_col": "COALESCE(condition_end_date, condition_start_date)",
+        "end_date_col": "COALESCE(condition_end_date, condition_start_date + INTERVAL '1' DAY)",
     },
     "DrugExposure": {
         "table": "drug_exposure",
         "concept_col": "drug_concept_id",
         "date_col": "drug_exposure_start_date",
-        "end_date_col": "COALESCE(drug_exposure_end_date, drug_exposure_start_date)",
+        "end_date_col": "COALESCE(drug_exposure_end_date, drug_exposure_start_date + INTERVAL '1' DAY)",
     },
     "ProcedureOccurrence": {
         "table": "procedure_occurrence",
         "concept_col": "procedure_concept_id",
         "date_col": "procedure_date",
-        "end_date_col": "procedure_date",
+        "end_date_col": "procedure_date + INTERVAL '1' DAY",
     },
     "VisitOccurrence": {
         "table": "visit_occurrence",
@@ -43,7 +44,20 @@ DOMAIN_TABLE_MAP = {
         "table": "measurement",
         "concept_col": "measurement_concept_id",
         "date_col": "measurement_date",
-        "end_date_col": "measurement_date",
+        "end_date_col": "measurement_date + INTERVAL '1' DAY",
+    },
+    # an event ends the day after it starts when the table has no end date (the ATLAS convention)
+    "Observation": {
+        "table": "observation",
+        "concept_col": "observation_concept_id",
+        "date_col": "observation_date",
+        "end_date_col": "observation_date + INTERVAL '1' DAY",
+    },
+    "DeviceExposure": {
+        "table": "device_exposure",
+        "concept_col": "device_concept_id",
+        "date_col": "device_exposure_start_date",
+        "end_date_col": "COALESCE(device_exposure_end_date, device_exposure_start_date + INTERVAL '1' DAY)",
     },
 }
 
@@ -64,8 +78,13 @@ def _parse_op(op_str: str) -> str:
         "==": "=",
         "neq": "!=",
         "!=": "!=",
+        "!eq": "!=",
+        "bt": "bt",
+        "!bt": "!bt",
     }
-    return mapping.get(op_clean, "=")
+    if op_clean not in mapping:
+        raise NotImplementedError(f"Circe numeric operator {op_str!r} is not supported by the native compiler.")
+    return mapping[op_clean]
 
 
 def _compile_numeric_filter(col_expr: str, filter_dict: dict | Any) -> str:
@@ -75,10 +94,10 @@ def _compile_numeric_filter(col_expr: str, filter_dict: dict | Any) -> str:
         except (ValueError, TypeError):
             return f"{col_expr} = '{str(filter_dict)}'"
     op = _parse_op(filter_dict.get("Op", "eq"))
-    if op == "between" or "Extent" in filter_dict:
+    if op in ("bt", "!bt"):
         val = filter_dict.get("Value", 0)
         ext = filter_dict.get("Extent", val)
-        return f"{col_expr} BETWEEN {float(val)} AND {float(ext)}"
+        return f"{col_expr} {'NOT ' if op == '!bt' else ''}BETWEEN {float(val)} AND {float(ext)}"
     val = filter_dict.get("Value")
     if val is not None:
         return f"{col_expr} {op} {float(val)}"
@@ -101,7 +120,44 @@ def _compile_window_bound(bound_dict: dict | None, index_date: str = "p.event_st
         return f"{index_date} - INTERVAL '{abs(offset)}' DAY"
 
 
+# attributes of a domain criterion the compiler evaluates; any other attribute that is set would narrow the official cohort
+_SUPPORTED_ATTRS = {"CodesetId", "ValueAsNumber", "First", "ConditionTypeExclude", "DrugTypeExclude", "MeasurementTypeExclude",
+                    "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude"}
+
+
+def _empty(v: Any) -> bool:
+    return v is None or v is False or v == [] or v == {} or v == ""
+
+
+def _check_criteria_supported(item: dict, where: str) -> None:
+    extra = [k for k, v in item.items() if k not in _SUPPORTED_ATTRS and not _empty(v)]
+    if extra:
+        raise NotImplementedError(f"{where}: criterion attribute(s) {sorted(extra)} are not supported by the native compiler; "
+                                  "run this definition with CirceR + CohortGenerator.")
+    if item.get("First"):
+        raise NotImplementedError(f"{where}: 'First' (earliest event only) is not supported by the native compiler.")
+
+
+def _check_wrapper_supported(w: dict, where: str) -> None:
+    if not isinstance(w, dict):
+        return
+    if w.get("RestrictVisit"):
+        raise NotImplementedError(f"{where}: RestrictVisit is not supported by the native compiler.")
+    if (w.get("Occurrence") or {}).get("IsDistinct"):
+        raise NotImplementedError(f"{where}: distinct-count occurrences are not supported by the native compiler.")
+    if not _empty(w.get("EndWindow")):
+        raise NotImplementedError(f"{where}: EndWindow is not supported by the native compiler.")
+    sw = w.get("StartWindow") or {}
+    if sw.get("UseIndexEnd") or sw.get("UseEventEnd"):
+        raise NotImplementedError(f"{where}: windows anchored on the index or event end are not supported by the native compiler.")
+    crit = w.get("Criteria", w)
+    for key, item in crit.items():
+        if key in DOMAIN_TABLE_MAP and isinstance(item, dict):
+            _check_criteria_supported(item, f"{where} {key}")
+
+
 def _compile_criteria(crit_wrapper: dict, cdm_schema: str = "main") -> str | None:
+    _check_wrapper_supported(crit_wrapper, "inclusion criterion")
     crit = crit_wrapper.get("Criteria", crit_wrapper)
     start_win = crit_wrapper.get("StartWindow", {})
     occ = crit_wrapper.get("Occurrence", {})
@@ -153,6 +209,11 @@ def _compile_criteria(crit_wrapper: dict, cdm_schema: str = "main") -> str | Non
             if codeset_id is not None:
                 conds.append(f"e.{c_col} IN (SELECT concept_id FROM _cs_resolved WHERE codeset_id = {int(codeset_id)})")
 
+            if not crit_wrapper.get("IgnoreObservationPeriod", False):
+                conds.append(f"EXISTS (SELECT 1 FROM {cdm_schema}.observation_period o WHERE o.person_id = p.subject_id "
+                             f"AND o.observation_period_start_date <= p.event_start_date "
+                             f"AND o.observation_period_end_date >= p.event_start_date "
+                             f"AND CAST(e.{d_col} AS DATE) BETWEEN o.observation_period_start_date AND o.observation_period_end_date)")
             start_bound = _compile_window_bound(start_win.get("Start"))
             end_bound = _compile_window_bound(start_win.get("End"))
             if start_bound:
@@ -177,7 +238,44 @@ def _compile_criteria(crit_wrapper: dict, cdm_schema: str = "main") -> str | Non
             elif occ_type == 1:
                 return f"(SELECT COUNT(*) FROM {cdm_schema}.{tbl} e WHERE {where_clause}) <= {occ_count}"
 
-    return None
+    raise NotImplementedError(f"criterion type {sorted(crit)} is not supported by the native compiler; "
+                              f"supported: {sorted(DOMAIN_TABLE_MAP)} and DemographicCriteria.")
+
+
+def _check_definition_supported(data: dict) -> None:
+    """Raises for constructs that change WHO is in the cohort and that this compiler does not evaluate (silently dropping
+    them gave larger cohorts than ATLAS); warns for constructs that only change the end dates."""
+    if not _empty(data.get("AdditionalCriteria")):
+        raise NotImplementedError("AdditionalCriteria is not supported by the native compiler; run this definition with CirceR + CohortGenerator.")
+    for i, cs in enumerate(data.get("ConceptSets", [])):
+        for item in cs.get("expression", {}).get("items", []):
+            if item.get("includeMapped"):
+                raise NotImplementedError(f"concept set {cs.get('name', i)!r}: includeMapped is not supported by the native compiler.")
+    for rule in data.get("InclusionRules", []):
+        expr = rule.get("expression", {})
+        if expr.get("Groups"):
+            raise NotImplementedError(f"inclusion rule {rule.get('name')!r}: nested criteria groups are not supported by the native compiler.")
+        if str(expr.get("Type", "ALL")).upper() not in ("ALL", "ANY"):
+            raise NotImplementedError(f"inclusion rule {rule.get('name')!r}: group type {expr.get('Type')!r} is not supported.")
+    for crit in data.get("PrimaryCriteria", {}).get("CriteriaList", []):
+        if not set(crit) & set(DOMAIN_TABLE_MAP):
+            raise NotImplementedError(f"primary criterion type {sorted(crit)} is not supported by the native compiler; "
+                                      f"supported: {sorted(DOMAIN_TABLE_MAP)}.")
+        for key, item in crit.items():
+            if key in DOMAIN_TABLE_MAP and isinstance(item, dict):
+                _check_criteria_supported(item, f"primary criterion {key}")
+    notes = []
+    strat = data.get("EndStrategy") or {}
+    if strat and "DateOffset" not in strat:
+        notes.append("EndStrategy " + "/".join(strat))
+    if not _empty(data.get("CensoringCriteria")):
+        notes.append("CensoringCriteria")
+    if (data.get("ExpressionLimit") or {}).get("Type", "All") not in ("All", "First"):
+        notes.append("ExpressionLimit Last")
+    if notes:
+        warnings.warn("native Circe compiler: " + ", ".join(notes) + " not applied; subject_id follows the definition but "
+                      "cohort_end_date (and so the era collapse and cohort_start_date of repeated entries) is the entry event's end date.",
+                      stacklevel=3)
 
 
 def compile_circe_to_duckdb(
@@ -186,6 +284,13 @@ def compile_circe_to_duckdb(
     cdm_schema: str = "main",
 ) -> str:
     """Compiles an OHDSI Atlas CIRCE JSON cohort definition into vectorized DuckDB SQL.
+
+    A SUBSET of Circe is evaluated, in the ATLAS order: entry events of the Condition, Drug, Procedure, Visit, Measurement,
+    Observation and Device domains (concept sets with descendants and exclusions, ``ValueAsNumber``), the observation
+    window, the primary limit, inclusion rules (windows, occurrence counts, age and gender), ``DateOffset`` or default end,
+    era collapse and ``ExpressionLimit``. Constructs that would change who is in the cohort (``AdditionalCriteria``,
+    ``includeMapped``, nested groups, unevaluated criterion attributes, unknown operators) raise ``NotImplementedError``;
+    ``CustomEra`` and censoring criteria only change end dates and warn. For other definitions use CirceR + CohortGenerator.
 
     Args:
         circe_json: CIRCE JSON string, dictionary, or Path to JSON file.
@@ -204,6 +309,8 @@ def compile_circe_to_duckdb(
         data = circe_json
     else:
         raise TypeError(f"Expected str, dict, or Path, got {type(circe_json)}")
+
+    _check_definition_supported(data)
 
     # 1. Parse ConceptSets
     concept_sets = data.get("ConceptSets", [])
@@ -284,9 +391,8 @@ def compile_circe_to_duckdb(
     primary_union = " UNION ALL\n".join(primary_selects)
 
     # 3. Observation window filter
-    obs_filter = ""
-    if prior_days > 0 or post_days > 0:
-        obs_filter = f"""
+    # an entry event must fall in an observation period (with the required days before and after), as in ATLAS
+    obs_filter = f"""
         JOIN {cdm_schema}.observation_period op
           ON op.person_id = p.subject_id
          AND op.observation_period_start_date <= p.event_start_date - INTERVAL '{prior_days}' DAY
@@ -323,6 +429,19 @@ def compile_circe_to_duckdb(
     inc_filter = ""
     if rule_clauses:
         inc_filter = "WHERE " + " AND\n          ".join(rule_clauses)
+    # ATLAS order: observation window, then the primary-criteria limit, then the inclusion rules, then the end strategy, the
+    # era collapse and the expression limit (QualifiedLimit is a legacy field that CirceR does not apply)
+    expression_first = (data.get("ExpressionLimit") or {}).get("Type", "All") == "First"
+    era_pad = int((data.get("CollapseSettings") or {}).get("EraPad", 0) or 0)
+
+    # EndStrategy DateOffset: the end is the start (or end) date of the entry event plus the offset
+    offset = (data.get("EndStrategy") or {}).get("DateOffset")
+    end_expr = "event_end_date"                                      # CustomEra and other strategies: not applied (warned)
+    if offset:
+        base = "event_start_date" if str(offset.get("DateField", "StartDate")).lower() == "startdate" else "event_end_date"
+        end_expr = f"LEAST(CAST({base} + INTERVAL '{int(offset.get('Offset', 0))}' DAY AS DATE), op_end)"
+    elif not (data.get("EndStrategy") or {}):
+        end_expr = "op_end"                                          # ATLAS default: the end of the observation period
 
     # Assemble complete SQL
     sql = f"""
@@ -332,22 +451,47 @@ def compile_circe_to_duckdb(
     _primary_events_raw AS (
         {primary_union}
     ),
+    _primary_limited AS (
+        SELECT 
+            p.subject_id,
+            p.event_start_date,
+            p.event_end_date,
+            op.observation_period_end_date AS op_end
+        FROM _primary_events_raw p
+        {obs_filter}
+        {order_clause}
+    ),
     _primary_qualified AS (
         SELECT 
             p.subject_id,
             p.event_start_date,
-            p.event_end_date
-        FROM _primary_events_raw p
-        {obs_filter}
+            p.event_end_date,
+            p.op_end
+        FROM _primary_limited p
         {inc_filter}
-        {order_clause}
+    ),
+    _events_ended AS (
+        SELECT subject_id, event_start_date AS s, {end_expr} AS e FROM _primary_qualified
+    ),
+    _era_flagged AS (
+        SELECT subject_id, s, e,
+               CASE WHEN MAX(e) OVER (PARTITION BY subject_id ORDER BY s, e ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) IS NULL
+                      OR s > MAX(e) OVER (PARTITION BY subject_id ORDER BY s, e ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) + INTERVAL '{era_pad}' DAY
+                    THEN 1 ELSE 0 END AS new_era
+        FROM _events_ended
+    ),
+    _eras AS (
+        SELECT subject_id, MIN(s) AS cohort_start_date, MAX(e) AS cohort_end_date
+        FROM (SELECT *, SUM(new_era) OVER (PARTITION BY subject_id ORDER BY s, e) AS era FROM _era_flagged)
+        GROUP BY subject_id, era
     )
-    SELECT 
+    SELECT
         {int(target_cohort_id)} AS cohort_definition_id,
         subject_id,
-        event_start_date AS cohort_start_date,
-        event_end_date AS cohort_end_date
-    FROM _primary_qualified
+        cohort_start_date,
+        cohort_end_date
+    FROM _eras
+    {"QUALIFY ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY cohort_start_date) = 1" if expression_first else ""}
     ORDER BY subject_id, cohort_start_date;
     """
     return sql.strip()

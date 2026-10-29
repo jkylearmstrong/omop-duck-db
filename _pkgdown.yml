@@ -206,6 +206,8 @@ reference:
   contents:
   - derive_geography_features
   - write_geography_measurements
+  - write_custom_covariates
+  - custom_covariate_settings
   - GEOGRAPHY_CONCEPT_IDS
   - ruca_category
   - validate_sdi_cut_points

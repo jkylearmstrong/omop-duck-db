@@ -368,6 +368,9 @@ def test_prior_utilization_counts_ei_as_inpatient_only_and_observation_as_prior_
     v = extract_velocity_features(_prior_visits_cdm(), engineer=False).iloc[0]
     assert (v.prior_ip_count, v.prior_ed_count) == (2, 1)
     assert v.prior_ip_os_ed_count == 5                                  # EI, ED, observation, outpatient, IP: each visit once
+    # the outpatient visit (9202) is a choice of the study: leave it out and only the observation stay is the "os" part
+    narrow = extract_velocity_features(_prior_visits_cdm(), engineer=False, os_concepts=(581385,)).iloc[0]
+    assert narrow.prior_ip_os_ed_count == 4
 
 
 def test_address_repair_leaves_parquet_sources_alone(tmp_path):

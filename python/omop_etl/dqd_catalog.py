@@ -39,19 +39,31 @@ __all__ = ["run_dqd_catalog", "run_dqd_full", "DQD_CATALOG_CHECKS"]
 # (plausibleFutureDate, visitPersonMatch) are extensions of this package and are labelled so in ``check_origin``
 _OFFICIAL_DQD_CHECKS = frozenset({"cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "measureValueCompleteness",
                                   "standardConceptRecordCompleteness", "plausibleStartBeforeEnd", "plausibleAfterBirth",
-                                  "plausibleBeforeDeath"})
+                                  "plausibleBeforeDeath", "fkDomain", "isStandardValidConcept"})
 DQD_CATALOG_CHECKS = ("cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "visitPersonMatch", "measureValueCompleteness",
-                      "standardConceptRecordCompleteness", "plausibleStartBeforeEnd", "plausibleAfterBirth",
-                      "plausibleBeforeDeath", "plausibleFutureDate")
+                      "standardConceptRecordCompleteness", "fkDomain", "isStandardValidConcept", "plausibleStartBeforeEnd",
+                      "plausibleAfterBirth", "plausibleBeforeDeath", "plausibleFutureDate")
 _KAHN = {"cdmTable": ("Conformance", "Verification"), "cdmField": ("Conformance", "Verification"),
          "isRequired": ("Conformance", "Verification"), "isPrimaryKey": ("Conformance", "Verification"),
          "isForeignKey": ("Conformance", "Verification"), "visitPersonMatch": ("Conformance", "Verification"),
          "measureValueCompleteness": ("Completeness", "Verification"),
          "standardConceptRecordCompleteness": ("Completeness", "Verification"),
+         "fkDomain": ("Conformance", "Verification"), "isStandardValidConcept": ("Conformance", "Verification"),
          "plausibleStartBeforeEnd": ("Plausibility", "Validation"), "plausibleAfterBirth": ("Plausibility", "Validation"),
          "plausibleBeforeDeath": ("Plausibility", "Validation"), "plausibleFutureDate": ("Plausibility", "Validation")}
 _FK = {"person_id": "person", "visit_occurrence_id": "visit_occurrence", "preceding_visit_occurrence_id": "visit_occurrence",
        "visit_detail_id": "visit_detail", "provider_id": "provider", "care_site_id": "care_site", "location_id": "location"}
+# the domain the concept of a clinical field must belong to (the official fkDomain check); a field is checked only when the
+# concept table carries domain_id. Observation facts may also be carried by a Measurement-domain concept in some ETLs, so the
+# measurement and observation fields accept both unless ``strict_domains`` is set.
+_DOMAIN = {"condition_concept_id": ("Condition",), "drug_concept_id": ("Drug",), "procedure_concept_id": ("Procedure",),
+           "device_concept_id": ("Device",), "visit_concept_id": ("Visit",), "specimen_concept_id": ("Specimen",),
+           "measurement_concept_id": ("Measurement",), "observation_concept_id": ("Observation",),
+           "gender_concept_id": ("Gender",), "race_concept_id": ("Race",), "ethnicity_concept_id": ("Ethnicity",),
+           "unit_concept_id": ("Unit",)}
+# fields whose concept must also be standard and valid (the official isStandardValidConcept)
+_STANDARD = ("condition_concept_id", "drug_concept_id", "procedure_concept_id", "device_concept_id", "visit_concept_id",
+             "specimen_concept_id", "measurement_concept_id", "observation_concept_id")
 # CDM keys that are not ``<table>_id``
 _PK = {"death": "person_id", "concept_class": "concept_class_id", "vocabulary": "vocabulary_id", "domain": "domain_id",
        "relationship": "relationship_id", "concept": "concept_id", "cohort_definition": "cohort_definition_id"}
@@ -66,10 +78,16 @@ def _q(name: str) -> str:
 def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | None = None, *, cdm_version: str = "5.4",
                     tables: Sequence[str] | None = None, threshold_pct: float = 0.0,
                     value_completeness_threshold_pct: float = 100.0, zero_concept_threshold_pct: float = 10.0,
-                    death_grace_days: int = 60, today: datetime.date | None = None) -> dict[str, Any]:
+                    death_grace_days: int = 60, today: datetime.date | None = None,
+                    strict_domains: bool = False) -> dict[str, Any]:
     """Generates and runs the catalog checks. A check fails when its violating share exceeds its threshold
     (``threshold_pct`` for conformance and plausibility; ``value_completeness_threshold_pct`` fails a field at or above
-    that NULL share, so the default flags fully-empty fields; ``zero_concept_threshold_pct`` for unmapped concepts)."""
+    that NULL share, so the default flags fully-empty fields; ``zero_concept_threshold_pct`` for unmapped concepts).
+
+    ``fkDomain`` and ``isStandardValidConcept`` need a populated ``concept`` table with ``domain_id`` (and
+    ``standard_concept`` / ``invalid_reason``); without them those checks are not generated. Not run (present in the official
+    DQD): fkClass, the plausible-value and gap checks, sourceConceptRecordCompleteness and the table-level checks other than
+    cdmTable; report the subset when you cite the result."""
     schema = load_cdm_schema()
     want = {t.lower() for t in tables} if tables else None
     today = today or datetime.date.today()
@@ -143,6 +161,17 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
                 v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t WHERE t.{_q(c.name)} IS NOT NULL AND t.{_q(c.name)} <> 0 AND NOT EXISTS "
                                 f"(SELECT 1 FROM concept r WHERE r.concept_id = t.{_q(c.name)})").fetchone()[0]
                 add("isForeignKey", tbl, c.name, f"{tbl}.{c.name} resolves in concept.concept_id.", v, n, threshold_pct)
+            if concept_rows and tbl != "concept" and n and c.name in _DOMAIN and "domain_id" in present.get("concept", {}):
+                allowed = _DOMAIN[c.name] + (("Observation", "Measurement") if (c.name in ("measurement_concept_id", "observation_concept_id") and not strict_domains) else ())
+                lst = ", ".join("'" + a + "'" for a in allowed)
+                v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t JOIN concept r ON r.concept_id = t.{_q(c.name)} "
+                                f"WHERE t.{_q(c.name)} <> 0 AND r.domain_id NOT IN ({lst})").fetchone()[0]
+                add("fkDomain", tbl, c.name, f"The concept of {tbl}.{c.name} is in the {'/'.join(allowed)} domain.", v, n, threshold_pct)
+            if (concept_rows and tbl != "concept" and n and c.name in _STANDARD
+                    and {"standard_concept", "invalid_reason"} <= set(present.get("concept", {}))):
+                v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t JOIN concept r ON r.concept_id = t.{_q(c.name)} "
+                                f"WHERE t.{_q(c.name)} <> 0 AND (r.standard_concept IS DISTINCT FROM 'S' OR r.invalid_reason IS NOT NULL)").fetchone()[0]
+                add("isStandardValidConcept", tbl, c.name, f"The concept of {tbl}.{c.name} is standard and valid.", v, n, threshold_pct)
 
         if tbl in _VOCAB or tbl in ("cohort", "person") or "person_id" not in have or not n:
             continue

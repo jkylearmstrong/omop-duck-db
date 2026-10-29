@@ -202,6 +202,8 @@ test_that("prior utilization counts EI (262) as inpatient only and observation a
   expect_equal(c(u$prior_ip_count, u$prior_ed_count, u$prior_os_count), c(2, 1, 2))
   w <- extract_velocity_features(con, engineer = FALSE)
   expect_equal(c(w$prior_ip_count, w$prior_ed_count, w$prior_ip_os_ed_count), c(2, 1, 5))
+  # the outpatient visit (9202) is a choice of the study: leave it out and only the observation stay is the "os" part
+  expect_equal(extract_velocity_features(con, engineer = FALSE, os_concepts = 581385L)$prior_ip_os_ed_count, 4)
 })
 
 geo_measurement_cdm <- function(env = parent.frame()) {
@@ -245,8 +247,7 @@ test_that("FeatureExtraction reads RUCA and SDI as measurement-value covariates"
   conn <- tryCatch(DatabaseConnector::connect(DatabaseConnector::createConnectionDetails(dbms = "duckdb", server = fx$db_path)),
                    error = function(e) skip(paste("cannot connect:", conditionMessage(e))))
   on.exit(DatabaseConnector::disconnect(conn), add = TRUE, after = FALSE)
-  cs <- FeatureExtraction::createCovariateSettings(useMeasurementValueLongTerm = TRUE, longTermStartDays = -365, endDays = 0,
-                                                   includedCovariateConceptIds = unname(GEOGRAPHY_CONCEPT_IDS))
+  cs <- custom_covariate_settings(unname(GEOGRAPHY_CONCEPT_IDS))
   cov <- tryCatch(FeatureExtraction::getDbCovariateData(connection = conn, cdmDatabaseSchema = "main", cohortTable = "cohort",
                     cohortDatabaseSchema = "main", cohortIds = 1, rowIdField = "subject_id", covariateSettings = cs, aggregated = FALSE),
                   error = function(e) skip(paste("FeatureExtraction cannot run here:", conditionMessage(e))))

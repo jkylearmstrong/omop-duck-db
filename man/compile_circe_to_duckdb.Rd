@@ -17,5 +17,10 @@ compile_circe_to_duckdb(circe_json, target_cohort_id = 1L, cdm_schema = "main")
 SQL character string.
 }
 \description{
-Compile CIRCE JSON to Vectorized DuckDB SQL
+Evaluates a SUBSET of Circe, in the ATLAS order: entry events of the Condition, Drug, Procedure, Visit, Measurement,
+Observation and Device domains (concept sets with descendants and exclusions, \code{ValueAsNumber}), the observation window,
+the primary limit, inclusion rules (windows, occurrence counts, age and gender), \code{DateOffset} or default end, era
+collapse and \code{ExpressionLimit}. Constructs that would change who is in the cohort (\code{AdditionalCriteria}, \code{includeMapped},
+nested groups, unevaluated criterion attributes, unknown operators) are an error; \code{CustomEra} and censoring criteria
+only change end dates and warn. For other definitions use CirceR + CohortGenerator.
 }

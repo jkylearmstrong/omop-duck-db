@@ -9,6 +9,13 @@ circe_file <- function(name) {
   hit[[1]]
 }
 
+# every person observed 2015-2022, which the official engine (and now the native compiler) requires of an index event
+circe_observed <- function(con) {
+  DBI::dbExecute(con, "DELETE FROM observation_period")
+  DBI::dbExecute(con, "INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, period_type_concept_id) SELECT person_id, person_id, DATE '2015-01-01', DATE '2022-01-01', 0 FROM person")
+  con
+}
+
 circe_mapped_fixture <- function(env = parent.frame()) {
   con <- excl_con(env = env); excl_populate(con)
   DBI::dbExecute(con, sprintf("UPDATE condition_occurrence SET condition_concept_id = %.0f WHERE person_id = 2", PCOS_ICD))
@@ -16,7 +23,7 @@ circe_mapped_fixture <- function(env = parent.frame()) {
   DBI::dbExecute(con, sprintf("UPDATE drug_exposure SET drug_concept_id = %.0f WHERE person_id = 9", MET))
   DBI::dbExecute(con, sprintf("UPDATE condition_occurrence SET condition_concept_id = %.0f WHERE person_id = 10", DM))
   DBI::dbExecute(con, sprintf("UPDATE drug_exposure SET drug_concept_id = %.0f WHERE person_id = 11 AND drug_concept_id = 0", INSULIN))
-  con
+  circe_observed(con)
 }
 
 test_that("excluded concept-set items are subtracted by the compiler", {
@@ -30,6 +37,8 @@ test_that("excluded concept-set items are subtracted by the compiler", {
   DBI::dbExecute(con, "CREATE TABLE concept_ancestor (ancestor_concept_id BIGINT, descendant_concept_id BIGINT)")
   DBI::dbExecute(con, "INSERT INTO concept_ancestor VALUES (10,10),(10,11),(10,12),(11,11),(11,13),(10,13)")
   DBI::dbExecute(con, "CREATE TABLE drug_exposure (person_id BIGINT, drug_concept_id BIGINT, drug_exposure_start_date DATE, drug_exposure_end_date DATE)")
+  DBI::dbExecute(con, "CREATE TABLE observation_period (person_id BIGINT, observation_period_start_date DATE, observation_period_end_date DATE)")
+  DBI::dbExecute(con, "INSERT INTO observation_period SELECT unnest([1,2,3,4,5]), DATE '2015-01-01', DATE '2022-01-01'")
   for (x in list(c(1, 10), c(2, 11), c(3, 12), c(4, 13), c(5, 99))) {
     DBI::dbExecute(con, sprintf("INSERT INTO drug_exposure VALUES (%d, %d, DATE '2020-01-01', DATE '2020-01-02')", x[1], x[2]))
   }
@@ -57,6 +66,7 @@ test_that("the diabetes phenotype Circe cohort covers diagnosis, drug and HbA1c 
   for (x in list(c(3, 3, 3004410, 7.2), c(4, 4, 3004410, 5.4), c(5, 5, 40758583, 6.5), c(6, 6, 3004410, 9))) {
     DBI::dbExecute(con, sprintf("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, value_as_number) VALUES (%d, %d, %.0f, DATE '2019-01-01', 0, %s)", x[1], x[2], x[3], format(x[4])))
   }
+  circe_observed(con)
   out <- execute_circe_cohort(con, circe_file("diabetes_phenotype.circe.json"))
   expect_equal(sort(out$subject_id), c(1, 2, 3, 5))
 })
@@ -111,4 +121,90 @@ test_that("CirceR + CohortGenerator give the same people as the native compiler 
     expect_equal(sort(official$subject_id[official$cohort_definition_id == i]), native[[i]], info = files[[i]])
   }
   expect_equal(sort(official$subject_id[official$cohort_definition_id == 3]), c(1, 2, 7, 9))
+})
+
+
+# --- ATLAS semantics the native compiler must follow (found by running PhenotypeLibrary definitions through CirceR) -------
+
+atlas_con <- function(env = parent.frame()) {
+  con <- DBI::dbConnect(duckdb::duckdb())
+  withr::defer(DBI::dbDisconnect(con, shutdown = TRUE), envir = env)
+  DBI::dbExecute(con, "CREATE TABLE concept_ancestor (ancestor_concept_id BIGINT, descendant_concept_id BIGINT)")
+  DBI::dbExecute(con, "CREATE TABLE condition_occurrence (person_id BIGINT, condition_concept_id BIGINT, condition_start_date DATE, condition_end_date DATE)")
+  DBI::dbExecute(con, "CREATE TABLE observation (person_id BIGINT, observation_concept_id BIGINT, observation_date DATE)")
+  DBI::dbExecute(con, "CREATE TABLE observation_period (person_id BIGINT, observation_period_start_date DATE, observation_period_end_date DATE)")
+  DBI::dbExecute(con, "CREATE TABLE person (person_id BIGINT, gender_concept_id INT, year_of_birth INT, month_of_birth INT, day_of_birth INT)")
+  for (pid in 1:3) {
+    DBI::dbExecute(con, sprintf("INSERT INTO person VALUES (%d, 8507, 1960, 1, 1)", pid))
+    DBI::dbExecute(con, sprintf("INSERT INTO observation_period VALUES (%d, DATE '2010-01-01', DATE '2023-01-01')", pid))
+  }
+  con
+}
+
+atlas_def <- function(rules = list(), primary_limit = "All", expression_limit = "All", end = list(DateOffset = list(DateField = "StartDate", Offset = 0)),
+                      pad = 0, primary = list(list(ConditionOccurrence = list(CodesetId = 0)))) {
+  list(ConceptSets = list(list(id = 0, name = "a", expression = list(items = list(list(concept = list(CONCEPT_ID = 100))))),
+                          list(id = 1, name = "b", expression = list(items = list(list(concept = list(CONCEPT_ID = 200)))))),
+       PrimaryCriteria = list(CriteriaList = primary, ObservationWindow = list(PriorDays = 0, PostDays = 0),
+                              PrimaryCriteriaLimit = list(Type = primary_limit)),
+       ExpressionLimit = list(Type = expression_limit), InclusionRules = rules, EndStrategy = end,
+       CollapseSettings = list(CollapseType = "ERA", EraPad = pad))
+}
+
+atlas_b_within_year <- list(name = "b within 365 days", expression = list(Type = "ALL", Groups = list(), CriteriaList = list(list(
+  Criteria = list(ConditionOccurrence = list(CodesetId = 1)),
+  StartWindow = list(Start = list(Days = 0, Coeff = -1), End = list(Days = 365, Coeff = 1)),
+  Occurrence = list(Type = 2, Count = 1)))))
+
+atlas_run <- function(con, d) DBI::dbGetQuery(con, compile_circe_to_duckdb(d, cdm_schema = "main"))
+
+test_that("the primary limit comes before the inclusion rules, as in ATLAS", {
+  con <- atlas_con()
+  DBI::dbExecute(con, "INSERT INTO condition_occurrence VALUES (1, 100, DATE '2015-01-01', NULL), (1, 100, DATE '2016-01-01', NULL), (1, 200, DATE '2016-06-01', NULL), (2, 100, DATE '2015-01-01', NULL), (2, 200, DATE '2015-03-01', NULL)")
+  expect_equal(sort(atlas_run(con, atlas_def(list(atlas_b_within_year), primary_limit = "First"))$subject_id), 2)
+  expect_equal(sort(atlas_run(con, atlas_def(list(atlas_b_within_year), primary_limit = "All"))$subject_id), c(1, 2))
+})
+
+test_that("end strategy, era collapse and expression limit follow ATLAS", {
+  con <- atlas_con()
+  DBI::dbExecute(con, "INSERT INTO condition_occurrence VALUES (1, 100, DATE '2015-01-01', NULL), (1, 100, DATE '2015-01-20', NULL), (1, 100, DATE '2016-01-01', NULL)")
+  plus30 <- list(DateOffset = list(DateField = "EndDate", Offset = 30))
+  out <- atlas_run(con, atlas_def(end = plus30))
+  expect_equal(format(as.Date(out$cohort_start_date)), c("2015-01-01", "2016-01-01"))
+  expect_equal(format(as.Date(out$cohort_end_date)), c("2015-02-20", "2016-02-01"))
+  expect_equal(nrow(atlas_run(con, atlas_def(end = plus30, expression_limit = "First"))), 1)
+  expect_equal(nrow(atlas_run(con, atlas_def(end = plus30, pad = 400))), 1)
+  default_end <- atlas_run(con, atlas_def(end = list()))
+  expect_equal(nrow(default_end), 1)
+  expect_equal(format(as.Date(default_end$cohort_end_date)), "2023-01-01")
+})
+
+test_that("the Observation domain is supported and events need an observation period", {
+  con <- atlas_con()
+  DBI::dbExecute(con, "INSERT INTO observation VALUES (1, 100, DATE '2015-01-01'), (3, 100, DATE '2005-01-01')")
+  expect_equal(sort(atlas_run(con, atlas_def(primary = list(list(Observation = list(CodesetId = 0)))))$subject_id), 1)
+})
+
+test_that("constructs that would change the cohort are refused, not ignored", {
+  d <- atlas_def(); d$AdditionalCriteria <- list(Type = "ALL", CriteriaList = list(list(a = 1)))
+  expect_error(compile_circe_to_duckdb(d), "AdditionalCriteria")
+  d <- atlas_def(primary = list(list(ConditionOccurrence = list(CodesetId = 0, First = TRUE))))
+  expect_error(compile_circe_to_duckdb(d), "First")
+  d <- atlas_def(primary = list(list(ConditionOccurrence = list(CodesetId = 0, Unit = list(list(CONCEPT_ID = 1))))))
+  expect_error(compile_circe_to_duckdb(d), "Unit")
+  d <- atlas_def(primary = list(list(Death = list())))
+  expect_error(compile_circe_to_duckdb(d), "Death")
+  d <- atlas_def(); d$ConceptSets[[1]]$expression$items[[1]]$includeMapped <- TRUE
+  expect_error(compile_circe_to_duckdb(d), "includeMapped")
+  expect_warning(compile_circe_to_duckdb(atlas_def(end = list(CustomEra = list(DrugCodesetId = 1, GapDays = 0, Offset = 0)))), "CustomEra")
+})
+
+test_that("between operators are supported and unknown operators are refused", {
+  con <- atlas_con()
+  DBI::dbExecute(con, "CREATE TABLE measurement (person_id BIGINT, measurement_concept_id BIGINT, measurement_date DATE, value_as_number DOUBLE)")
+  DBI::dbExecute(con, "INSERT INTO measurement VALUES (1, 100, DATE '2015-01-01', 5.0), (2, 100, DATE '2015-01-01', 9.0)")
+  mdef <- function(op) atlas_def(primary = list(list(Measurement = list(CodesetId = 0, ValueAsNumber = list(Value = 4, Extent = 6, Op = op)))))
+  expect_equal(sort(atlas_run(con, mdef("bt"))$subject_id), 1)
+  expect_equal(sort(atlas_run(con, mdef("!bt"))$subject_id), 2)
+  expect_error(compile_circe_to_duckdb(mdef("between-ish")), "operator")
 })

@@ -12,19 +12,19 @@ NULL
     table = "condition_occurrence",
     concept_col = "condition_concept_id",
     date_col = "condition_start_date",
-    end_date_col = "COALESCE(condition_end_date, condition_start_date)"
+    end_date_col = "COALESCE(condition_end_date, condition_start_date + INTERVAL '1' DAY)"
   ),
   DrugExposure = list(
     table = "drug_exposure",
     concept_col = "drug_concept_id",
     date_col = "drug_exposure_start_date",
-    end_date_col = "COALESCE(drug_exposure_end_date, drug_exposure_start_date)"
+    end_date_col = "COALESCE(drug_exposure_end_date, drug_exposure_start_date + INTERVAL '1' DAY)"
   ),
   ProcedureOccurrence = list(
     table = "procedure_occurrence",
     concept_col = "procedure_concept_id",
     date_col = "procedure_date",
-    end_date_col = "procedure_date"
+    end_date_col = "procedure_date + INTERVAL '1' DAY"
   ),
   VisitOccurrence = list(
     table = "visit_occurrence",
@@ -36,7 +36,20 @@ NULL
     table = "measurement",
     concept_col = "measurement_concept_id",
     date_col = "measurement_date",
-    end_date_col = "measurement_date"
+    end_date_col = "measurement_date + INTERVAL '1' DAY"
+  ),
+  # an event ends the day after it starts when the table has no end date (the ATLAS convention)
+  Observation = list(
+    table = "observation",
+    concept_col = "observation_concept_id",
+    date_col = "observation_date",
+    end_date_col = "observation_date + INTERVAL '1' DAY"
+  ),
+  DeviceExposure = list(
+    table = "device_exposure",
+    concept_col = "device_concept_id",
+    date_col = "device_exposure_start_date",
+    end_date_col = "COALESCE(device_exposure_end_date, device_exposure_start_date + INTERVAL '1' DAY)"
   )
 )
 
@@ -48,10 +61,12 @@ NULL
     "lte" = "<=", "<=" = "<=",
     "lt" = "<", "<" = "<",
     "eq" = "=", "=" = "=", "==" = "=",
-    "neq" = "!=", "!=" = "!="
+    "neq" = "!=", "!=" = "!=", "!eq" = "!=",
+    "bt" = "bt", "!bt" = "!bt"
   )
   res <- mapping[[op_clean]]
-  if (is.null(res)) "=" else res
+  if (is.null(res)) stop(sprintf("Circe numeric operator '%s' is not supported by the native compiler.", op_str), call. = FALSE)
+  res
 }
 
 .compile_numeric_filter <- function(col_expr, filter_dict) {
@@ -63,10 +78,10 @@ NULL
     return(sprintf("%s = '%s'", col_expr, as.character(filter_dict)))
   }
   op <- .parse_op(filter_dict$Op %||% "eq")
-  if (op == "between" || !is.null(filter_dict$Extent)) {
+  if (op %in% c("bt", "!bt")) {
     val <- as.numeric(filter_dict$Value %||% 0)
     ext <- as.numeric(filter_dict$Extent %||% val)
-    return(sprintf("%s BETWEEN %s AND %s", col_expr, val, ext))
+    return(sprintf("%s %sBETWEEN %s AND %s", col_expr, if (op == "!bt") "NOT " else "", val, ext))
   }
   if (!is.null(filter_dict$Value)) {
     val <- as.numeric(filter_dict$Value)
@@ -90,7 +105,74 @@ NULL
   }
 }
 
+# attributes of a domain criterion the compiler evaluates; any other attribute that is set would narrow the official cohort
+.SUPPORTED_ATTRS <- c("CodesetId", "ValueAsNumber", "First", "ConditionTypeExclude", "DrugTypeExclude", "MeasurementTypeExclude",
+                      "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude")
+
+.circe_empty <- function(v) is.null(v) || identical(v, FALSE) || identical(v, "") || (is.list(v) && length(v) == 0L)
+
+.check_criteria_supported <- function(item, where) {
+  set <- names(item)[!vapply(item, .circe_empty, logical(1))]
+  extra <- setdiff(set, .SUPPORTED_ATTRS)
+  if (length(extra)) {
+    stop(sprintf("%s: criterion attribute(s) %s are not supported by the native compiler; run this definition with CirceR + CohortGenerator.",
+                 where, paste(sort(extra), collapse = ", ")), call. = FALSE)
+  }
+  if (isTRUE(item$First)) stop(sprintf("%s: 'First' (earliest event only) is not supported by the native compiler.", where), call. = FALSE)
+}
+
+.check_wrapper_supported <- function(w, where) {
+  if (!is.list(w)) return(invisible())
+  if (isTRUE(w$RestrictVisit)) stop(sprintf("%s: RestrictVisit is not supported by the native compiler.", where), call. = FALSE)
+  if (isTRUE(w$Occurrence$IsDistinct)) stop(sprintf("%s: distinct-count occurrences are not supported by the native compiler.", where), call. = FALSE)
+  if (!.circe_empty(w$EndWindow)) stop(sprintf("%s: EndWindow is not supported by the native compiler.", where), call. = FALSE)
+  if (isTRUE(w$StartWindow$UseIndexEnd) || isTRUE(w$StartWindow$UseEventEnd)) {
+    stop(sprintf("%s: windows anchored on the index or event end are not supported by the native compiler.", where), call. = FALSE)
+  }
+  crit <- w$Criteria %||% w
+  for (key in intersect(names(crit), names(.DOMAIN_TABLE_MAP))) {
+    if (is.list(crit[[key]])) .check_criteria_supported(crit[[key]], paste(where, key))
+  }
+}
+
+# Raises for constructs that change WHO is in the cohort and that this compiler does not evaluate (silently dropping them gave
+# larger cohorts than ATLAS); warns for constructs that only change the end dates.
+.check_definition_supported <- function(data) {
+  if (!.circe_empty(data$AdditionalCriteria)) {
+    stop("AdditionalCriteria is not supported by the native compiler; run this definition with CirceR + CohortGenerator.", call. = FALSE)
+  }
+  for (cs in data$ConceptSets %||% list()) {
+    for (item in cs$expression$items %||% list()) {
+      if (isTRUE(item$includeMapped)) stop(sprintf("concept set '%s': includeMapped is not supported by the native compiler.", cs$name %||% ""), call. = FALSE)
+    }
+  }
+  for (rule in data$InclusionRules %||% list()) {
+    expr <- rule$expression %||% list()
+    if (length(expr$Groups %||% list())) stop(sprintf("inclusion rule '%s': nested criteria groups are not supported by the native compiler.", rule$name %||% ""), call. = FALSE)
+    if (!(toupper(expr$Type %||% "ALL") %in% c("ALL", "ANY"))) stop(sprintf("inclusion rule '%s': group type '%s' is not supported.", rule$name %||% "", expr$Type), call. = FALSE)
+  }
+  for (crit in data$PrimaryCriteria$CriteriaList %||% list()) {
+    if (!length(intersect(names(crit), names(.DOMAIN_TABLE_MAP)))) {
+      stop(sprintf("primary criterion type %s is not supported by the native compiler; supported: %s.",
+                   paste(sort(names(crit)), collapse = "/"), paste(sort(names(.DOMAIN_TABLE_MAP)), collapse = ", ")), call. = FALSE)
+    }
+    for (key in intersect(names(crit), names(.DOMAIN_TABLE_MAP))) {
+      if (is.list(crit[[key]])) .check_criteria_supported(crit[[key]], paste("primary criterion", key))
+    }
+  }
+  notes <- character(0)
+  strat <- data$EndStrategy %||% list()
+  if (length(strat) && is.null(strat$DateOffset)) notes <- c(notes, paste("EndStrategy", paste(names(strat), collapse = "/")))
+  if (!.circe_empty(data$CensoringCriteria)) notes <- c(notes, "CensoringCriteria")
+  if (!(data$ExpressionLimit$Type %||% "All") %in% c("All", "First")) notes <- c(notes, "ExpressionLimit Last")
+  if (length(notes)) {
+    warning("native Circe compiler: ", paste(notes, collapse = ", "), " not applied; subject_id follows the definition but cohort_end_date (and so the era collapse and cohort_start_date of repeated entries) is the entry event's end date.", call. = FALSE)
+  }
+  invisible()
+}
+
 .compile_criteria <- function(crit_wrapper, cdm_schema = "main") {
+  .check_wrapper_supported(crit_wrapper, "inclusion criterion")
   crit <- crit_wrapper$Criteria %||% crit_wrapper
   start_win <- crit_wrapper$StartWindow %||% list()
   occ <- crit_wrapper$Occurrence %||% list()
@@ -146,6 +228,9 @@ NULL
         conds <- c(conds, sprintf("e.%s IN (SELECT concept_id FROM _cs_resolved WHERE codeset_id = %d)", c_col, as.integer(codeset_id)))
       }
 
+      if (!isTRUE(crit_wrapper$IgnoreObservationPeriod)) {
+        conds <- c(conds, sprintf("EXISTS (SELECT 1 FROM %s.observation_period o WHERE o.person_id = p.subject_id AND o.observation_period_start_date <= p.event_start_date AND o.observation_period_end_date >= p.event_start_date AND CAST(e.%s AS DATE) BETWEEN o.observation_period_start_date AND o.observation_period_end_date)", cdm_schema, d_col))
+      }
       start_bound <- .compile_window_bound(start_win$Start)
       end_bound <- .compile_window_bound(start_win$End)
       if (!is.null(start_bound)) {
@@ -175,10 +260,18 @@ NULL
       }
     }
   }
-  NULL
+  stop(sprintf("criterion type %s is not supported by the native compiler; supported: %s and DemographicCriteria.",
+               paste(sort(names(crit)), collapse = "/"), paste(sort(names(.DOMAIN_TABLE_MAP)), collapse = ", ")), call. = FALSE)
 }
 
 #' Compile CIRCE JSON to Vectorized DuckDB SQL
+#'
+#' Evaluates a SUBSET of Circe, in the ATLAS order: entry events of the Condition, Drug, Procedure, Visit, Measurement,
+#' Observation and Device domains (concept sets with descendants and exclusions, `ValueAsNumber`), the observation window,
+#' the primary limit, inclusion rules (windows, occurrence counts, age and gender), `DateOffset` or default end, era
+#' collapse and `ExpressionLimit`. Constructs that would change who is in the cohort (`AdditionalCriteria`, `includeMapped`,
+#' nested groups, unevaluated criterion attributes, unknown operators) are an error; `CustomEra` and censoring criteria
+#' only change end dates and warn. For other definitions use CirceR + CohortGenerator.
 #'
 #' @param circe_json JSON character string, parsed list, or file path.
 #' @param target_cohort_id Target cohort definition id (default 1).
@@ -197,6 +290,8 @@ compile_circe_to_duckdb <- function(circe_json,
   } else {
     stop("`circe_json` must be a JSON string, list, or file path.", call. = FALSE)
   }
+
+  .check_definition_supported(data)
 
   # Concept Sets
   cs_list <- data$ConceptSets %||% list()
@@ -278,14 +373,13 @@ compile_circe_to_duckdb <- function(circe_json,
 
   primary_union <- paste(primary_selects, collapse = " UNION ALL\n")
 
-  obs_filter <- if (prior_days > 0 || post_days > 0) {
-    sprintf("
+  # an entry event must fall in an observation period (with the required days before and after), as in ATLAS
+  obs_filter <- sprintf("
       JOIN %s.observation_period op
         ON op.person_id = p.subject_id
        AND op.observation_period_start_date <= p.event_start_date - INTERVAL '%d' DAY
        AND op.observation_period_end_date >= p.event_start_date + INTERVAL '%d' DAY
     ", cdm_schema, prior_days, post_days)
-  } else ""
 
   limit_rule <- tolower(primary_crit$PrimaryCriteriaLimit$Type %||% "all")
   order_clause <- if (limit_rule == "first") {
@@ -322,6 +416,21 @@ compile_circe_to_duckdb <- function(circe_json,
   inc_filter <- if (length(rule_clauses) > 0) {
     paste0("WHERE ", paste(rule_clauses, collapse = " AND\n          "))
   } else ""
+  # ATLAS order: observation window, then the primary-criteria limit, then the inclusion rules, then the end strategy, the
+  # era collapse and the expression limit (QualifiedLimit is a legacy field that CirceR does not apply)
+  expression_clause <- if (identical(data$ExpressionLimit$Type %||% "All", "First")) {
+    "QUALIFY ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY cohort_start_date) = 1"
+  } else ""
+  era_pad <- as.integer(data$CollapseSettings$EraPad %||% 0L)
+  # EndStrategy DateOffset: the end is the start (or end) date of the entry event plus the offset
+  offset <- data$EndStrategy$DateOffset
+  end_expr <- "event_end_date"                                       # CustomEra and other strategies: not applied (warned)
+  if (!is.null(offset)) {
+    base <- if (tolower(offset$DateField %||% "StartDate") == "startdate") "event_start_date" else "event_end_date"
+    end_expr <- sprintf("LEAST(CAST(%s + INTERVAL '%d' DAY AS DATE), op_end)", base, as.integer(offset$Offset %||% 0L))
+  } else if (!length(data$EndStrategy %||% list())) {
+    end_expr <- "op_end"                                             # ATLAS default: the end of the observation period
+  }
 
   sql <- sprintf("
     WITH _cs_resolved AS (
@@ -330,24 +439,49 @@ compile_circe_to_duckdb <- function(circe_json,
     _primary_events_raw AS (
         %s
     ),
+    _primary_limited AS (
+        SELECT
+            p.subject_id,
+            p.event_start_date,
+            p.event_end_date,
+            op.observation_period_end_date AS op_end
+        FROM _primary_events_raw p
+        %s
+        %s
+    ),
     _primary_qualified AS (
         SELECT
             p.subject_id,
             p.event_start_date,
-            p.event_end_date
-        FROM _primary_events_raw p
+            p.event_end_date,
+            p.op_end
+        FROM _primary_limited p
         %s
-        %s
-        %s
+    ),
+    _events_ended AS (
+        SELECT subject_id, event_start_date AS s, %s AS e FROM _primary_qualified
+    ),
+    _era_flagged AS (
+        SELECT subject_id, s, e,
+               CASE WHEN MAX(e) OVER (PARTITION BY subject_id ORDER BY s, e ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) IS NULL
+                      OR s > MAX(e) OVER (PARTITION BY subject_id ORDER BY s, e ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) + INTERVAL '%d' DAY
+                    THEN 1 ELSE 0 END AS new_era
+        FROM _events_ended
+    ),
+    _eras AS (
+        SELECT subject_id, MIN(s) AS cohort_start_date, MAX(e) AS cohort_end_date
+        FROM (SELECT *, SUM(new_era) OVER (PARTITION BY subject_id ORDER BY s, e) AS era FROM _era_flagged)
+        GROUP BY subject_id, era
     )
     SELECT
         %d AS cohort_definition_id,
         subject_id,
-        event_start_date AS cohort_start_date,
-        event_end_date AS cohort_end_date
-    FROM _primary_qualified
+        cohort_start_date,
+        cohort_end_date
+    FROM _eras
+    %s
     ORDER BY subject_id, cohort_start_date;
-  ", cs_sql, primary_union, obs_filter, inc_filter, order_clause, as.integer(target_cohort_id))
+  ", cs_sql, primary_union, obs_filter, order_clause, inc_filter, end_expr, era_pad, as.integer(target_cohort_id), expression_clause)
 
   trimws(sql)
 }

@@ -31,6 +31,8 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from omop_etl.custom_covariates import DERIVED_VALUE_TYPE_CONCEPT_ID, write_custom_covariates
+
 __all__ = [
     "RUCA_MISSING", "SDI_MISSING", "SDI_LABELS", "SDI_PROBS",
     "ruca_category", "fit_sdi_cut_points", "assign_sdi_quintile", "validate_sdi_cut_points",
@@ -232,7 +234,6 @@ _GEOGRAPHY_CONCEPT_NAMES = {
     "sdi_quintile": "Social Deprivation Index quintile (1 least to 5 most deprived) of the residence ZIP at admission",
     "ruca_code": "Rural-Urban Commuting Area primary code of the residence ZIP at admission",
 }
-DERIVED_VALUE_TYPE_CONCEPT_ID = 45754907     # "Derived value" (Meas Type)
 
 
 def write_geography_measurements(
@@ -267,34 +268,10 @@ def write_geography_measurements(
     g["ruca_primary"] = np.floor(pd.to_numeric(g["ruca_code"], errors="coerce"))        # secondary digits (4.2) are not part of the primary code
     parts = []
     for col, key in (("sdi_score", "sdi_score"), ("sdi_quintile_n", "sdi_quintile"), ("ruca_primary", "ruca_code")):
-        p = g.loc[g[col].notna(), ["person_id", "stay_id", "admit_date", col]].rename(columns={col: "value"})
-        p["measurement_concept_id"] = int(ids[key])
+        p = g[["person_id", "stay_id", "admit_date", col]].rename(columns={col: "value", "admit_date": "date", "stay_id": "visit_occurrence_id"})
+        p["feature"] = key
         parts.append(p)
-    rows = pd.concat(parts, ignore_index=True)
-    if rows.empty:
-        return 0
-    rows["admit_date"] = pd.to_datetime(rows["admit_date"]).dt.date
-    con.register("_geo_meas", rows)
-    try:
-        cid_list = ", ".join(str(int(v)) for v in ids.values())
-        con.execute(f"DELETE FROM measurement WHERE measurement_concept_id IN ({cid_list}) "
-                    "AND person_id IN (SELECT person_id FROM _geo_meas)")
-        start = con.execute("SELECT COALESCE(MAX(measurement_id), 0) FROM measurement").fetchone()[0]
-        visit = "CAST(stay_id AS BIGINT)" if visit_ids else "NULL"
-        con.execute(f"""
-            INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_datetime,
-                                     measurement_type_concept_id, value_as_number, unit_concept_id, visit_occurrence_id, measurement_source_value)
-            SELECT {int(start)} + row_number() OVER (ORDER BY person_id, stay_id, measurement_concept_id),
-                   CAST(person_id AS BIGINT), measurement_concept_id, admit_date, CAST(admit_date AS TIMESTAMP),
-                   {int(type_concept_id)}, CAST(value AS DOUBLE), 0, {visit}, 'omop_etl.geography'
-            FROM _geo_meas""")
-    finally:
-        con.unregister("_geo_meas")
-    if register_concepts and _has_table(con, "concept"):
-        for key, cid in ids.items():
-            if not con.execute("SELECT count(*) FROM concept WHERE concept_id = ?", [int(cid)]).fetchone()[0]:
-                con.execute("INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, "
-                            "concept_code, valid_start_date, valid_end_date) VALUES (?, ?, 'Measurement', 'omop-duck-db', 'Geography', 'S', ?, "
-                            "DATE '1970-01-01', DATE '2099-12-31')", [int(cid), _GEOGRAPHY_CONCEPT_NAMES[key], key])
-    return len(rows)
-
+    return write_custom_covariates(con, pd.concat(parts, ignore_index=True),
+                                   {k: (int(ids[k]), _GEOGRAPHY_CONCEPT_NAMES[k]) for k in ids},
+                                   source="omop_etl.geography", visit_ids=visit_ids,
+                                   register_concepts=register_concepts, type_concept_id=type_concept_id)

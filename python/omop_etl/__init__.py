@@ -324,6 +324,7 @@ from omop_etl.geography import (
     validate_sdi_cut_points,
     write_geography_measurements,
 )
+from omop_etl.custom_covariates import write_custom_covariates
 from omop_etl.dqd_catalog import run_dqd_catalog, run_dqd_full
 from omop_etl.bigquery_sync import read_bigquery_table, sync_vocabulary_from_bigquery
 from omop_etl.federated_learning import FederatedFitResult, FederatedNode, federated_cox, federated_logistic_regression
@@ -629,6 +630,7 @@ __all__ = [
     "ruca_category",
     "validate_sdi_cut_points",
     "write_geography_measurements",
+    "write_custom_covariates",
     "run_dqd_catalog",
     "run_dqd_full",
     "read_bigquery_table",
