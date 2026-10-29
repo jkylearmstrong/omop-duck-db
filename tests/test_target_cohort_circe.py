@@ -125,8 +125,8 @@ def test_correlated_criteria_any_group_and_unsupported_forms():
     got = _pairs(execute_circe_cohort(c, d))
     assert {p for p, _ in got} == {7, 8, 9}               # a death 0-30 days after an admission: person 7 (15 days), 8 (2 days), 9 (10 days)
     nested = copy.deepcopy(item)
-    nested["CorrelatedCriteria"]["Groups"] = [{"Type": "ALL", "CriteriaList": []}]
-    with pytest.raises(NotImplementedError, match="nested criteria groups"):
+    nested["CorrelatedCriteria"]["Groups"] = [{"Type": "AT_LEAST", "CriteriaList": []}]                  # a subgroup is checked too
+    with pytest.raises(NotImplementedError, match="group 1: a AT_LEAST group needs a Count"):
         compile_circe_to_duckdb(_primary(nested))
     bad = {"CodesetId": 0, "DateAdjustment": {"StartWith": "CODE_DATE"}}
     with pytest.raises(NotImplementedError, match="DateAdjustment"):

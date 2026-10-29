@@ -187,6 +187,8 @@ test_that("duckdb_to_andromeda copies every row across chunks and keeps empty ta
 test_that("duckdb_to_andromeda survives a full copy, teardown and exit in its own R process", {
   skip_if_not_installed("Andromeda")
   skip_if_not_installed("callr")
+  # the child process loads the package with library(), so it needs an installed copy (R CMD check has one; devtools::load_all does not)
+  skip_if(!isTRUE(callr::r(function() requireNamespace("omopduckdb", quietly = TRUE))), "omopduckdb is not installed for a child R process")
   # Run in a child process: on the GitHub Windows runner the R process hosting the whole suite exited without a message
   # once the in-process Andromeda tests wrote tables (intermittent, cause unknown). A child that dies fails this test
   # with a message instead of ending the suite, and shows whether the adapter itself is at fault.

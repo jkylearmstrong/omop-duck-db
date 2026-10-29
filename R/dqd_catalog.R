@@ -65,6 +65,12 @@
 #' leaves it 0 gets `NOT_APPLICABLE` (use [sanitize_measurements()] there). Not run: the per-concept checks of the official list
 #' (`plausibleGender`, `plausibleUnitConceptIds`, ...); report the subset when you cite the result.
 #'
+#' Checked against the official DataQualityDashboard (2.9.1) on a planted fixture: the violated-row counts agree for every check both tools
+#' run on the same table and field. Differences by design: an empty clinical table is `NOT_APPLICABLE` for `measurePersonCompleteness` here
+#' (the official run counts all persons as missing, with a per-table threshold); the NULL-with-a-source-value cases the official
+#' concept-record check adds for a few fields are not counted; the official plausible-value checks have per-concept thresholds that this
+#' catalog does not.
+#'
 #' @param con A DBI connection to an OMOP DuckDB.
 #' @param output_json Optional path to write the result as JSON.
 #' @param cdm_version CDM version recorded in `Metadata`.
@@ -139,10 +145,11 @@ run_dqd_catalog <- function(con, output_json = NULL, cdm_version = "5.4", tables
       add("measureValueCompleteness", tbl, cn, sprintf("Share of NULL values in %s.%s.", tbl, cn), nulls, n,
           value_completeness_threshold_pct, cmp = "ge")
       if (endsWith(cn, "_concept_id") && !endsWith(cn, "source_concept_id")) {
-        add("standardConceptRecordCompleteness", tbl, cn, sprintf("Share of %s.%s = 0 (unmapped).", tbl, cn), zeros, n, zero_concept_threshold_pct)
+        # like the official DQD, the denominator is the rows where the concept field is not NULL
+        add("standardConceptRecordCompleteness", tbl, cn, sprintf("Share of %s.%s = 0 (unmapped).", tbl, cn), zeros, n - nulls, zero_concept_threshold_pct)
       } else if (endsWith(cn, "source_concept_id")) {
         add("sourceConceptRecordCompleteness", tbl, cn, sprintf("Share of %s.%s = 0 (source code not mapped to a concept).", tbl, cn),
-            zeros, n, source_concept_threshold_pct, cmp = "ge")
+            zeros, n - nulls, source_concept_threshold_pct, cmp = "ge")
       }
       key <- paste0(tbl, ".", cn)
       bounds <- .DQD_RANGE[[key]]
@@ -201,13 +208,13 @@ run_dqd_catalog <- function(con, output_json = NULL, cdm_version = "5.4", tables
     if (tbl %in% .DQD_PERSON_TABLES && n > 0 && "person_id" %in% names(have) && "person" %in% names(present) && "person_id" %in% names(present$person)) {
       people <- one("SELECT count(*) FROM person")
       miss <- one(sprintf("SELECT count(*) FROM person p WHERE NOT EXISTS (SELECT 1 FROM %s t WHERE t.person_id = p.person_id)", .dqd_q(tbl)))
-      add("measurePersonCompleteness", tbl, "person_id", sprintf("Share of persons with no row in %s.", tbl), miss, people,
+      add("measurePersonCompleteness", tbl, NULL, sprintf("Share of persons with no row in %s.", tbl), miss, people,
           person_completeness_threshold_pct, level = "TABLE", cmp = "ge")
     }
     if (tbl == "condition_era" && "condition_occurrence" %in% names(present) && "person_id" %in% names(have) && "person_id" %in% names(present$condition_occurrence)) {
       miss <- one("SELECT count(DISTINCT person_id) FROM condition_occurrence o WHERE NOT EXISTS (SELECT 1 FROM condition_era e WHERE e.person_id = o.person_id)")
       den <- one("SELECT count(DISTINCT person_id) FROM condition_occurrence")
-      add("measureConditionEraCompleteness", tbl, "person_id", "Share of persons with a condition_occurrence but no condition_era.", miss, den,
+      add("measureConditionEraCompleteness", tbl, NULL, "Share of persons with a condition_occurrence but no condition_era.", miss, den,
           threshold_pct, level = "TABLE")
     }
     if (tbl == "observation_period" && n > 0 && all(c("observation_period_id", "person_id", "observation_period_start_date", "observation_period_end_date") %in% names(have))) {

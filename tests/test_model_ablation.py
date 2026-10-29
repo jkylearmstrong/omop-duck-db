@@ -138,3 +138,23 @@ def test_compare_runs_validates_its_inputs():
         compare_model_runs(a, flipped)
     with pytest.raises(ValueError, match="in common"):
         compare_model_runs(a, a.assign(person_id=a["person_id"] + 1000))
+
+
+def test_weighted_bootstrap_metrics_equal_the_metrics_of_the_repeated_rows():
+    """A bootstrap draw is a count per row; the weighted formulas must equal the metrics on the rows repeated that many times,
+    ties in the scores included."""
+    from omop_etl.model_ablation import _WeightedMetrics, _auprc, _auroc, _brier
+    rng = np.random.default_rng(12)
+    for trial in range(30):
+        n = int(rng.integers(8, 60))
+        y = rng.integers(0, 2, n)
+        p = np.round(rng.uniform(size=n), 1 if trial % 2 else 3)                    # half the trials have many tied scores
+        w = rng.integers(0, 4, n)
+        if y[w > 0].min() == y[w > 0].max():
+            continue
+        got = _WeightedMetrics(y, p).metrics(w)
+        yy, pp = np.repeat(y, w), np.repeat(p, w)
+        assert got["auroc"] == pytest.approx(_auroc(yy, pp), abs=1e-12)
+        assert got["auprc"] == pytest.approx(_auprc(yy, pp), abs=1e-9)
+        assert got["brier"] == pytest.approx(_brier(yy, pp), abs=1e-12)
+    assert _WeightedMetrics(np.array([0, 1, 0]), np.array([.1, .9, .5])).metrics(np.array([1, 0, 1])) is None      # one class left

@@ -103,6 +103,12 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
     ``fkDomain``, ``fkClass`` and ``isStandardValidConcept`` need a populated ``concept`` table with ``domain_id`` /
     ``concept_class_id`` (and ``standard_concept`` / ``invalid_reason``); without them those checks are not generated.
 
+    Checked against the official DataQualityDashboard (2.9.1) on a planted fixture: the violated-row counts agree for every check both
+    tools run on the same table and field. Differences by design: an empty clinical table is ``NOT_APPLICABLE`` for
+    ``measurePersonCompleteness`` here (the official run counts all persons as missing, with a per-table threshold); the NULL-with-a-source-
+    value cases the official concept-record check adds for a few fields are not counted; the official plausible-value checks have
+    per-concept thresholds that this catalog does not.
+
     Completeness gaps: ``sourceConceptRecordCompleteness`` fails a ``*_source_concept_id`` that is 0 in at least
     ``source_concept_threshold_pct`` of rows (default 100, a field that is never mapped); ``measurePersonCompleteness`` fails a
     clinical table that has no row for at least ``person_completeness_threshold_pct`` of persons; ``measureConditionEraCompleteness``
@@ -164,11 +170,12 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
             add("measureValueCompleteness", tbl, c.name, f"Share of NULL values in {tbl}.{c.name}.", nulls, n,
                 value_completeness_threshold_pct, cmp="ge")
             if c.name.endswith("_concept_id") and not c.name.endswith("source_concept_id"):
-                add("standardConceptRecordCompleteness", tbl, c.name, f"Share of {tbl}.{c.name} = 0 (unmapped).", zeros, n,
+                # like the official DQD, the denominator is the rows where the concept field is not NULL
+                add("standardConceptRecordCompleteness", tbl, c.name, f"Share of {tbl}.{c.name} = 0 (unmapped).", zeros, n - nulls,
                     zero_concept_threshold_pct)
             elif c.name.endswith("source_concept_id"):
                 add("sourceConceptRecordCompleteness", tbl, c.name, f"Share of {tbl}.{c.name} = 0 (source code not mapped to a concept).",
-                    zeros, n, source_concept_threshold_pct, cmp="ge")
+                    zeros, n - nulls, source_concept_threshold_pct, cmp="ge")
             bounds = _RANGE.get((tbl, c.name))
             if bounds and n:
                 lo, hi = bounds[0], (today.year if bounds[1] == "year" else bounds[1])
@@ -218,13 +225,13 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
         if tbl in _PERSON_TABLES and n and "person_id" in have and "person" in present and "person_id" in present["person"]:
             people = con.execute("SELECT count(*) FROM person").fetchone()[0]
             miss = con.execute(f"SELECT count(*) FROM person p WHERE NOT EXISTS (SELECT 1 FROM {_q(tbl)} t WHERE t.person_id = p.person_id)").fetchone()[0]
-            add("measurePersonCompleteness", tbl, "person_id", f"Share of persons with no row in {tbl}.", miss, people,
+            add("measurePersonCompleteness", tbl, None, f"Share of persons with no row in {tbl}.", miss, people,
                 person_completeness_threshold_pct, level="TABLE", cmp="ge")
         if tbl == "condition_era" and "condition_occurrence" in present and "person_id" in have and "person_id" in present["condition_occurrence"]:
             miss = con.execute("SELECT count(DISTINCT person_id) FROM condition_occurrence o WHERE NOT EXISTS "
                                "(SELECT 1 FROM condition_era e WHERE e.person_id = o.person_id)").fetchone()[0]
             den = con.execute("SELECT count(DISTINCT person_id) FROM condition_occurrence").fetchone()[0]
-            add("measureConditionEraCompleteness", tbl, "person_id", "Share of persons with a condition_occurrence but no condition_era.",
+            add("measureConditionEraCompleteness", tbl, None, "Share of persons with a condition_occurrence but no condition_era.",
                 miss, den, threshold_pct, level="TABLE")
         if tbl == "observation_period" and n and {"observation_period_id", "person_id", "observation_period_start_date",
                                                   "observation_period_end_date"} <= set(have):

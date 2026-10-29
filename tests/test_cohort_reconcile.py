@@ -148,3 +148,10 @@ def test_is_file_ignores_paths_the_os_rejects(monkeypatch, tmp_path):
         raise OSError(36, "File name too long")
     monkeypatch.setattr(Path, "exists", boom)
     assert circe._is_file("a" * 400) is False
+
+
+def test_additional_criteria_is_named_when_it_is_the_reason():
+    d = target_cohort_circe()
+    d["AdditionalCriteria"] = {"Type": "ALL", "Groups": [], "DemographicCriteriaList": [{"Age": {"Value": 40, "Op": "gte"}}], "CriteriaList": []}
+    res = explain_cohort_gaps(_cdm(), pd.DataFrame({"person_source_value": ["P1", "P6"]}), definition=d)
+    assert _gaps(res) == {("in_cohort", ""): 1, ("failed_additional_criteria", ""): 1}          # P6 was born in 2002

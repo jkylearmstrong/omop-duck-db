@@ -197,9 +197,10 @@ def test_observation_domain_is_supported_and_events_need_an_observation_period()
 
 
 @pytest.mark.parametrize("bad, match", [
-    ({"AdditionalCriteria": {"Type": "ALL", "CriteriaList": [{}]}}, "AdditionalCriteria"),
-    ({"PrimaryCriteria": {"CriteriaList": [{"ConditionOccurrence": {"CodesetId": 0, "First": True}}], "ObservationWindow": {}}}, "First"),
-    ({"PrimaryCriteria": {"CriteriaList": [{"ConditionOccurrence": {"CodesetId": 0, "Unit": [{"CONCEPT_ID": 1}]}}], "ObservationWindow": {}}}, "Unit"),
+    ({"AdditionalCriteria": {"Type": "AT_LEAST", "CriteriaList": [{}]}}, "needs a Count"),
+    ({"InclusionRules": [{"name": "r", "expression": {"Type": "SOMETIMES", "CriteriaList": []}}]}, "group type"),
+    ({"PrimaryCriteria": {"CriteriaList": [{"ConditionOccurrence": {"CodesetId": 0, "ProviderSpecialty": [{"CONCEPT_ID": 1}]}}], "ObservationWindow": {}}}, "ProviderSpecialty"),
+    ({"PrimaryCriteria": {"CriteriaList": [{"Measurement": {"CodesetId": 0, "ValueAsConcept": [{"CONCEPT_ID": 1}]}}], "ObservationWindow": {}}}, "ValueAsConcept"),
     ({"PrimaryCriteria": {"CriteriaList": [{"Specimen": {}}], "ObservationWindow": {}}}, "Specimen"),
     ({"ConceptSets": [{"id": 0, "name": "m", "expression": {"items": [{"concept": {"CONCEPT_ID": 1}, "includeMapped": True}]}}]}, "includeMapped"),
 ])

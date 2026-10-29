@@ -3,7 +3,7 @@
 
 # the reasons, in the order they are checked
 GAP_REASONS <- c("in_cohort", "not_in_cdm", "no_observation_period", "no_entry_event", "failed_entry_correlated_criteria",
-                 "entry_outside_observation_window", "failed_inclusion_rule", "in_definition_not_in_cohort",
+                 "entry_outside_observation_window", "failed_additional_criteria", "failed_inclusion_rule", "in_definition_not_in_cohort",
                  "not_in_cohort_no_definition_given")
 
 .recon_table <- function(con, x) {
@@ -78,7 +78,7 @@ suppress_small_cells <- function(df, count_cols, min_cell, also = NULL) {
 #'
 #' Reasons, in the order they are checked: `in_cohort`; `not_in_cdm` (the identifier maps to no person); `no_observation_period`;
 #' `no_entry_event` (no event of the entry criteria, including their concept sets, age and values); `failed_entry_correlated_criteria`;
-#' `entry_outside_observation_window`; `failed_inclusion_rule` (one row per rule, named in `detail`); `in_definition_not_in_cohort` (the
+#' `entry_outside_observation_window`; `failed_additional_criteria`; `failed_inclusion_rule` (one row per rule, named in `detail`); `in_definition_not_in_cohort` (the
 #' definition keeps them but the cohort table does not); `not_in_cohort_no_definition_given`. The report is counts by reason; patient-level
 #' rows are returned only with `include_person_rows = TRUE` and stay on the machine that ran the function.
 #'
@@ -112,6 +112,7 @@ explain_cohort_gaps <- function(con, reference, definition = NULL, cohort = NULL
     steps[[1]] <- list("no_entry_event", "", .recon_persons(con, { x <- .recon_strip_correlated(data); x$InclusionRules <- list(); x }, "_primary_events_raw", cdm_schema))
     steps[[2]] <- list("failed_entry_correlated_criteria", "", .recon_persons(con, no_rules, "_primary_events_raw", cdm_schema))
     steps[[3]] <- list("entry_outside_observation_window", "", .recon_persons(con, no_rules, "_primary_limited", cdm_schema))
+    if (!.circe_empty(data$AdditionalCriteria)) steps[[length(steps) + 1L]] <- list("failed_additional_criteria", "", .recon_persons(con, no_rules, "_primary_qualified", cdm_schema))
     rules <- data$InclusionRules %||% list()
     for (k in seq_along(rules)) {
       upto <- data; upto$InclusionRules <- rules[seq_len(k)]

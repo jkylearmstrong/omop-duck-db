@@ -109,7 +109,8 @@ def test_agrees_with_the_official_dqd_on_a_planted_defect_fixture():
     assert origin["isPrimaryKey"] == "DQD" and origin["plausibleFutureDate"] == "omop-duck-db"
 
 
-def test_gap_class_and_value_checks():
+def _gap_cdm():
+    """Planted gaps: a clinical-drug era, a person without a condition era, overlapping observation periods, out-of-range values."""
     c = _con()
     c.execute("INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, "
               "valid_start_date, valid_end_date) VALUES "
@@ -135,7 +136,17 @@ def test_gap_class_and_value_checks():
     c.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, "
               "value_as_number, unit_concept_id) VALUES (1, 1, 3004249, DATE '2020-01-01', 0, 120, 8876), "
               "(2, 1, 3004249, DATE '2020-01-02', 0, 900, 8876), (3, 1, 3004249, DATE '2020-01-03', 0, 900, 0)")
+    return c
+
+
+def test_gap_class_and_value_checks():
+    c = _gap_cdm()
     res = run_dqd_catalog(c, today=TODAY)
+    # golden values from the official DataQualityDashboard 2.9.1 (R, DuckDB) run on this data: violated rows and denominator
+    gold = {('measurePersonCompleteness', 'visit_occurrence', ''): (1, 2), ('measurePersonCompleteness', 'condition_occurrence', ''): (0, 2), ('measurePersonCompleteness', 'drug_exposure', ''): (1, 2), ('measureConditionEraCompleteness', 'condition_era', ''): (1, 2), ('fkClass', 'drug_era', 'drug_concept_id'): (1, 2), ('sourceConceptRecordCompleteness', 'drug_exposure', 'drug_source_concept_id'): (2, 2), ('plausibleValueLow', 'drug_exposure', 'days_supply'): (0, 2), ('plausibleValueLow', 'drug_exposure', 'quantity'): (1, 2), ('plausibleValueLow', 'person', 'year_of_birth'): (1, 2), ('plausibleValueHigh', 'drug_exposure', 'days_supply'): (1, 2), ('plausibleValueHigh', 'person', 'year_of_birth'): (0, 2)}
+    for (name, tbl, fld), (viol, den) in gold.items():
+        row = next(r for r in res["CheckResults"] if r["check_name"] == name and r["cdm_table_name"] == tbl and (r["cdm_field_name"] or "") == fld)
+        assert (row["num_violated_rows"], row["num_denominator_rows"]) == (viol, den), (name, tbl, fld)
     assert _by(res, "fkClass", "drug_era", "drug_concept_id")["num_violated_rows"] == 1
     assert _by(res, "measureConditionEraCompleteness", "condition_era")["num_violated_rows"] == 1
     assert _by(res, "measureObservationPeriodOverlap", "observation_period")["num_violated_rows"] == 2

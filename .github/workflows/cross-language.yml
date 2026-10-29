@@ -1,0 +1,44 @@
+name: Cross-language parity
+
+# The Circe compiler, DQD catalog, cohort reconciliation, custom concept ids, bundle concept check and model metrics exist in both Python
+# and R. tests/test_cross_language.py feeds the same fixtures to both and compares the results, so a change to one side that the other
+# misses fails here. Not part of the required CI; runs on changes to the shared code or by hand.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "python/omop_etl/**"
+      - "R/**"
+      - "tests/test_cross_language.py"
+      - "tests/cross_language/**"
+      - ".github/workflows/cross-language.yml"
+
+jobs:
+  python-vs-r:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      RENV_CONFIG_AUTOLOADER_ENABLED: false
+      NOT_CRAN: "true"
+      OMOP_CROSS_LANGUAGE_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::devtools
+          needs: check
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Python package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Compare Python and R on the same databases
+        run: python -m pytest tests/test_cross_language.py -q

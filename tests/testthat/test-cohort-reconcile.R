@@ -76,3 +76,11 @@ test_that("small cells are suppressed for sharing", {
   expect_equal(out$suppressed, c(FALSE, TRUE, FALSE))
   expect_true(is.na(out$pct[2]))
 })
+
+test_that("AdditionalCriteria is named when it is the reason", {
+  con <- recon_cdm()
+  d <- recon_def()
+  d$AdditionalCriteria <- list(Type = "ALL", Groups = list(), CriteriaList = list(), DemographicCriteriaList = list(list(Age = list(Value = 40, Op = "gte"))))
+  res <- explain_cohort_gaps(con, data.frame(person_source_value = c("P1", "P6")), definition = d)
+  expect_equal(recon_gaps(res), c("in_cohort|" = 1, "failed_additional_criteria|" = 1))
+})
