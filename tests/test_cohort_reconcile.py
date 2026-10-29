@@ -128,3 +128,11 @@ def test_date_agreement_with_a_cohort_table_and_without_start_dates():
     empty = reconcile_cohort(_cdm(), pd.DataFrame({"person_source_value": ["P99"], "index_date": ["2020-01-01"]}),
                              cohort=cohort, index_date_col="index_date")
     assert empty["counts"]["both"] == 0 and empty["dates"]["n_compared"] == 0
+
+
+def test_compile_accepts_long_json_text_not_just_paths():
+    import json
+    from omop_etl.circe import _is_file, compile_circe_to_duckdb
+    text = json.dumps(target_cohort_circe())
+    assert len(text) > 300 and not _is_file(text) and not _is_file("[1]") and not _is_file("no/such/file.json")
+    assert compile_circe_to_duckdb(text) == compile_circe_to_duckdb(target_cohort_circe())
