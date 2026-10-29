@@ -135,7 +135,7 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
   gender <- c(female = 8532L, male = 8507L)[tolower(if (is.null(patient$gender)) "" else patient$gender)]
   cmap <- as.list(concept_map)
   unmapped <- character(); skipped <- 0L
-  factors <- list(lab_creatinine = c("umol/l" = 1 / 88.4, "µmol/l" = 1 / 88.4), lab_bun = c("mmol/l" = 2.801))
+  factors <- list(lab_creatinine = c("umol/l" = 1 / 88.4, "\u00b5mol/l" = 1 / 88.4), lab_bun = c("mmol/l" = 2.801))
   enc_class <- c(IMP = 9201L, ACUTE = 9201L, NONAC = 9201L, EMER = 9203L, AMB = 9202L, OBSENC = 581385L)
 
   db <- tempfile(fileext = ".duckdb"); build_schema(db)
