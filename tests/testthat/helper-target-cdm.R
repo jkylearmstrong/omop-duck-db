@@ -19,3 +19,25 @@ target_cdm <- function(env = parent.frame()) {
   DBI::dbExecute(con, "INSERT INTO death (person_id, death_date, death_type_concept_id) VALUES (7, DATE '2020-03-20', 0), (8, DATE '2020-03-03', 0), (9, DATE '2020-01-20', 0)")
   con
 }
+
+# The index-stay cohort (cohorts/target_cohort.circe.json, built in Python by target_cohort_circe()) as an R list. Built here, not read
+# from the file, because the tests run from an installed copy of the package where cohorts/ is not available; a test below checks that it
+# matches the committed file whenever the file can be found.
+target_definition <- function(min_age = 18, followup_days = 30) {
+  empty <- structure(list(), names = character(0))
+  item <- function(id, name, code) list(concept = list(CONCEPT_ID = id, CONCEPT_NAME = name, DOMAIN_ID = "Visit", VOCABULARY_ID = "Visit",
+                                                       CONCEPT_CLASS_ID = "Visit", STANDARD_CONCEPT = "S", CONCEPT_CODE = code),
+                                        isExcluded = FALSE, includeDescendants = FALSE, includeMapped = FALSE)
+  stay <- list(CodesetId = 0, Age = list(Value = min_age, Op = "gte"),
+               DateAdjustment = list(StartWith = "END_DATE", StartOffset = 0, EndWith = "END_DATE", EndOffset = 0),
+               CorrelatedCriteria = list(Type = "ALL", DemographicCriteriaList = list(), Groups = list(), CriteriaList = list(list(
+                 Criteria = list(Death = empty), StartWindow = list(Start = list(Coeff = -1), End = list(Days = 0, Coeff = 1)),
+                 Occurrence = list(Type = 0, Count = 0)))))
+  list(ConceptSets = list(list(id = 0, name = "Index stay visit types",
+                               expression = list(items = list(item(9201, "Inpatient Visit", "IP"), item(262, "Emergency Room and Inpatient Visit", "ERIP"))))),
+       PrimaryCriteria = list(CriteriaList = list(list(VisitOccurrence = stay)), ObservationWindow = list(PriorDays = 0, PostDays = followup_days),
+                              PrimaryCriteriaLimit = list(Type = "First")),
+       QualifiedLimit = list(Type = "First"), ExpressionLimit = list(Type = "First"), InclusionRules = list(),
+       EndStrategy = list(DateOffset = list(DateField = "StartDate", Offset = 0)), CensoringCriteria = list(),
+       CollapseSettings = list(CollapseType = "ERA", EraPad = 0), CensorWindow = empty, cdmVersionRange = ">=5.3.0")
+}

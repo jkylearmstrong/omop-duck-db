@@ -136,3 +136,15 @@ def test_compile_accepts_long_json_text_not_just_paths():
     text = json.dumps(target_cohort_circe())
     assert len(text) > 300 and not _is_file(text) and not _is_file("[1]") and not _is_file("no/such/file.json")
     assert compile_circe_to_duckdb(text) == compile_circe_to_duckdb(target_cohort_circe())
+
+
+def test_is_file_ignores_paths_the_os_rejects(monkeypatch, tmp_path):
+    from omop_etl import circe
+    real = tmp_path / "d.json"
+    real.write_text("{}", encoding="utf-8")
+    assert circe._is_file(real) and circe._is_file(str(real))
+
+    def boom(self):
+        raise OSError(36, "File name too long")
+    monkeypatch.setattr(Path, "exists", boom)
+    assert circe._is_file("a" * 400) is False
