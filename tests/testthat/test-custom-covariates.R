@@ -45,3 +45,42 @@ test_that("wide features get stable named concepts beside the standard one", {
   expect_equal(DBI::dbGetQuery(fx$con, "SELECT count(*) AS n FROM measurement")$n, 3)
   expect_equal(DBI::dbGetQuery(fx$con, "SELECT concept_name AS n FROM concept WHERE concept_id = 2001000000")$n, "Charlson index, site definition")
 })
+
+test_that("a custom id that another vocabulary uses is refused before anything is written", {
+  fx <- cc_cdm()
+  on.exit({ DBI::dbDisconnect(fx$con, shutdown = TRUE); unlink(fx$db_path) }, add = TRUE)
+  DBI::dbExecute(fx$con, "INSERT INTO concept VALUES (2000200001, 'x', 'Measurement', 'SNOMED', 'Clinical Finding', 'S', 'other', DATE '1970-01-01', DATE '2099-12-31', NULL)")
+  expect_error(write_custom_covariates(fx$con, cc_values(), cc_concepts), "already used by other")
+  expect_equal(DBI::dbGetQuery(fx$con, "SELECT count(*) AS n FROM measurement")$n, 0)
+  expect_error(write_custom_covariates(cc_cdm()$con, cc_values(), list(frailty = c(2000200001, "a"), frailty_alt = c(2000200001, "b"))), "share one concept id")
+})
+
+test_that("a shared registry pins ids across sites and conflicts are found", {
+  skip_if_not_installed("jsonlite")
+  a <- cc_cdm(); b <- cc_cdm(); d <- cc_cdm()
+  on.exit(for (f in list(a, b, d)) { DBI::dbDisconnect(f$con, shutdown = TRUE); unlink(f$db_path) }, add = TRUE)
+  wide <- data.frame(person_id = 1, date = as.Date("2020-01-01"), charlson_site = 3)
+  write_custom_features(a$con, wide)
+  path <- tempfile(fileext = ".json")
+  reg <- export_custom_concept_registry(a$con, path)
+  expect_equal(as.numeric(reg$charlson_site$concept_id), 2001000000)
+  write_custom_features(b$con, data.frame(person_id = 1, date = as.Date("2020-01-01"), elixhauser = 2))
+  write_custom_features(b$con, wide)
+  kinds <- check_custom_concepts(b$con, path)$kind
+  expect_setequal(kinds, c("name_different_id", "id_different_name"))
+  expect_error(check_custom_concepts(b$con, path, error = TRUE), "custom concept conflicts")
+  got <- register_custom_concepts(d$con, c("frailty", "charlson_site"), registry = path)
+  expect_equal(as.numeric(got$charlson_site[[1]]), 2001000000)
+  expect_gt(as.numeric(got$frailty[[1]]), 2001000000)
+  expect_equal(nrow(check_custom_concepts(d$con, path)), 0)
+})
+
+test_that("a registry id that this database uses for something else is an error", {
+  fx <- cc_cdm()
+  on.exit({ DBI::dbDisconnect(fx$con, shutdown = TRUE); unlink(fx$db_path) }, add = TRUE)
+  DBI::dbExecute(fx$con, "INSERT INTO concept VALUES (2001000005, 'frailty', 'Measurement', 'omop-duck-db', 'Custom covariate', 'S', 'frailty', DATE '1970-01-01', DATE '2099-12-31', NULL)")
+  DBI::dbExecute(fx$con, "INSERT INTO concept VALUES (2001000009, 'o', 'Measurement', 'omop-duck-db', 'Custom covariate', 'S', 'other', DATE '1970-01-01', DATE '2099-12-31', NULL)")
+  expect_error(register_custom_concepts(fx$con, "frailty", registry = c(frailty = 2001000007)), "in this database but")
+  expect_error(register_custom_concepts(fx$con, "charlson", registry = c(charlson = 2001000009)), "already used here by other")
+  expect_error(register_custom_concepts(fx$con, "charlson", registry = c(charlson = 1503297)), "under 2000000000")
+})

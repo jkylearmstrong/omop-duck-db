@@ -17,8 +17,8 @@ those as a known artefact of the build date, not a regression.
 
 Results use the OHDSI DQD JSON shape (Metadata / Overview / CheckResults) with ``category`` and ``context`` (Kahn
 framework) added. This is a generated structural/temporal catalog, not the full ~4000-check OHDSI list: concept-level
-checks that need a vocabulary (``plausibleGender``, ``sourceConceptRecordCompleteness`` by concept set, ``fkDomain``/``fkClass``,
-``plausibleValueLow/High`` by concept) are out of scope here; ``sanitize_measurements`` covers physiologic limits.
+checks that need per-concept reference data (``plausibleGender``, ``plausibleUnitConceptIds``, ``plausibleValueLow/High`` by concept;
+``sanitize_measurements`` covers physiologic limits) are out of scope here.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from typing import Any, Sequence
 
 import duckdb
 
-from omop_etl.dqd import run_dqd
+from omop_etl.dqd import _sanitize_bundled_limits, _sanitize_limits_cte, run_dqd
 from omop_etl.export_targets import load_cdm_schema
 from omop_etl.jsonio import strict_dumps
 
@@ -39,9 +39,13 @@ __all__ = ["run_dqd_catalog", "run_dqd_full", "DQD_CATALOG_CHECKS"]
 # (plausibleFutureDate, visitPersonMatch) are extensions of this package and are labelled so in ``check_origin``
 _OFFICIAL_DQD_CHECKS = frozenset({"cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "measureValueCompleteness",
                                   "standardConceptRecordCompleteness", "plausibleStartBeforeEnd", "plausibleAfterBirth",
-                                  "plausibleBeforeDeath", "fkDomain", "isStandardValidConcept"})
+                                  "plausibleBeforeDeath", "fkDomain", "isStandardValidConcept", "fkClass", "plausibleValueLow",
+                                  "plausibleValueHigh", "sourceConceptRecordCompleteness", "measurePersonCompleteness",
+                                  "measureConditionEraCompleteness", "measureObservationPeriodOverlap"})
 DQD_CATALOG_CHECKS = ("cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "visitPersonMatch", "measureValueCompleteness",
-                      "standardConceptRecordCompleteness", "fkDomain", "isStandardValidConcept", "plausibleStartBeforeEnd",
+                      "standardConceptRecordCompleteness", "sourceConceptRecordCompleteness", "fkDomain", "fkClass",
+                      "isStandardValidConcept", "measurePersonCompleteness", "measureConditionEraCompleteness",
+                      "measureObservationPeriodOverlap", "plausibleValueLow", "plausibleValueHigh", "plausibleStartBeforeEnd",
                       "plausibleAfterBirth", "plausibleBeforeDeath", "plausibleFutureDate")
 _KAHN = {"cdmTable": ("Conformance", "Verification"), "cdmField": ("Conformance", "Verification"),
          "isRequired": ("Conformance", "Verification"), "isPrimaryKey": ("Conformance", "Verification"),
@@ -49,6 +53,10 @@ _KAHN = {"cdmTable": ("Conformance", "Verification"), "cdmField": ("Conformance"
          "measureValueCompleteness": ("Completeness", "Verification"),
          "standardConceptRecordCompleteness": ("Completeness", "Verification"),
          "fkDomain": ("Conformance", "Verification"), "isStandardValidConcept": ("Conformance", "Verification"),
+         "fkClass": ("Conformance", "Verification"), "sourceConceptRecordCompleteness": ("Completeness", "Verification"),
+         "measurePersonCompleteness": ("Completeness", "Verification"), "measureConditionEraCompleteness": ("Completeness", "Verification"),
+         "measureObservationPeriodOverlap": ("Plausibility", "Validation"),
+         "plausibleValueLow": ("Plausibility", "Verification"), "plausibleValueHigh": ("Plausibility", "Verification"),
          "plausibleStartBeforeEnd": ("Plausibility", "Validation"), "plausibleAfterBirth": ("Plausibility", "Validation"),
          "plausibleBeforeDeath": ("Plausibility", "Validation"), "plausibleFutureDate": ("Plausibility", "Validation")}
 _FK = {"person_id": "person", "visit_occurrence_id": "visit_occurrence", "preceding_visit_occurrence_id": "visit_occurrence",
@@ -64,6 +72,13 @@ _DOMAIN = {"condition_concept_id": ("Condition",), "drug_concept_id": ("Drug",),
 # fields whose concept must also be standard and valid (the official isStandardValidConcept)
 _STANDARD = ("condition_concept_id", "drug_concept_id", "procedure_concept_id", "device_concept_id", "visit_concept_id",
              "specimen_concept_id", "measurement_concept_id", "observation_concept_id")
+# the concept class the concept of a field must have (the official fkClass)
+_CLASS = {("drug_era", "drug_concept_id"): ("Ingredient",), ("drug_strength", "ingredient_concept_id"): ("Ingredient",)}
+# fixed plausible bounds (low, high) of a field; None leaves that side open. year_of_birth's upper bound is the run year
+_RANGE = {("person", "year_of_birth"): (1850, "year"), ("drug_exposure", "days_supply"): (0, 365), ("drug_exposure", "quantity"): (0, None)}
+# a person with no row in these tables is a completeness gap (the official measurePersonCompleteness)
+_PERSON_TABLES = ("visit_occurrence", "condition_occurrence", "drug_exposure", "procedure_occurrence", "measurement", "observation",
+                  "device_exposure")
 # CDM keys that are not ``<table>_id``
 _PK = {"death": "person_id", "concept_class": "concept_class_id", "vocabulary": "vocabulary_id", "domain": "domain_id",
        "relationship": "relationship_id", "concept": "concept_id", "cohort_definition": "cohort_definition_id"}
@@ -79,15 +94,24 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
                     tables: Sequence[str] | None = None, threshold_pct: float = 0.0,
                     value_completeness_threshold_pct: float = 100.0, zero_concept_threshold_pct: float = 10.0,
                     death_grace_days: int = 60, today: datetime.date | None = None,
-                    strict_domains: bool = False) -> dict[str, Any]:
+                    strict_domains: bool = False, source_concept_threshold_pct: float = 100.0,
+                    person_completeness_threshold_pct: float = 100.0) -> dict[str, Any]:
     """Generates and runs the catalog checks. A check fails when its violating share exceeds its threshold
     (``threshold_pct`` for conformance and plausibility; ``value_completeness_threshold_pct`` fails a field at or above
     that NULL share, so the default flags fully-empty fields; ``zero_concept_threshold_pct`` for unmapped concepts).
 
-    ``fkDomain`` and ``isStandardValidConcept`` need a populated ``concept`` table with ``domain_id`` (and
-    ``standard_concept`` / ``invalid_reason``); without them those checks are not generated. Not run (present in the official
-    DQD): fkClass, the plausible-value and gap checks, sourceConceptRecordCompleteness and the table-level checks other than
-    cdmTable; report the subset when you cite the result."""
+    ``fkDomain``, ``fkClass`` and ``isStandardValidConcept`` need a populated ``concept`` table with ``domain_id`` /
+    ``concept_class_id`` (and ``standard_concept`` / ``invalid_reason``); without them those checks are not generated.
+
+    Completeness gaps: ``sourceConceptRecordCompleteness`` fails a ``*_source_concept_id`` that is 0 in at least
+    ``source_concept_threshold_pct`` of rows (default 100, a field that is never mapped); ``measurePersonCompleteness`` fails a
+    clinical table that has no row for at least ``person_completeness_threshold_pct`` of persons; ``measureConditionEraCompleteness``
+    flags persons with conditions but no ``condition_era``. ``measureObservationPeriodOverlap`` flags overlapping observation periods
+    of one person. ``plausibleValueLow`` / ``plausibleValueHigh`` check fixed bounds (birth year, days supply, quantity) and the
+    bundled physiologic limits of ``measurement.value_as_number``; the latter apply only to rows whose ``unit_concept_id`` matches a
+    limit, so an ETL that leaves it 0 gets ``NOT_APPLICABLE`` (use ``sanitize_measurements`` there). Not run: the per-concept
+    plausibility checks of the official list (``plausibleGender``, ``plausibleUnitConceptIds`` ...); report the subset when you
+    cite the result."""
     schema = load_cdm_schema()
     want = {t.lower() for t in tables} if tables else None
     today = today or datetime.date.today()
@@ -142,6 +166,24 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
             if c.name.endswith("_concept_id") and not c.name.endswith("source_concept_id"):
                 add("standardConceptRecordCompleteness", tbl, c.name, f"Share of {tbl}.{c.name} = 0 (unmapped).", zeros, n,
                     zero_concept_threshold_pct)
+            elif c.name.endswith("source_concept_id"):
+                add("sourceConceptRecordCompleteness", tbl, c.name, f"Share of {tbl}.{c.name} = 0 (source code not mapped to a concept).",
+                    zeros, n, source_concept_threshold_pct, cmp="ge")
+            bounds = _RANGE.get((tbl, c.name))
+            if bounds and n:
+                lo, hi = bounds[0], (today.year if bounds[1] == "year" else bounds[1])
+                nn = n - nulls
+                if lo is not None:
+                    v = con.execute(f"SELECT count(*) FROM {_q(tbl)} WHERE {_q(c.name)} < {lo}").fetchone()[0]
+                    add("plausibleValueLow", tbl, c.name, f"{tbl}.{c.name} is at least {lo}.", v, nn, threshold_pct)
+                if hi is not None:
+                    v = con.execute(f"SELECT count(*) FROM {_q(tbl)} WHERE {_q(c.name)} > {hi}").fetchone()[0]
+                    add("plausibleValueHigh", tbl, c.name, f"{tbl}.{c.name} is at most {hi}.", v, nn, threshold_pct)
+            if concept_rows and n and (tbl, c.name) in _CLASS and "concept_class_id" in present.get("concept", {}):
+                lst = ", ".join("'" + a + "'" for a in _CLASS[(tbl, c.name)])
+                v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t JOIN concept r ON r.concept_id = t.{_q(c.name)} "
+                                f"WHERE t.{_q(c.name)} <> 0 AND r.concept_class_id NOT IN ({lst})").fetchone()[0]
+                add("fkClass", tbl, c.name, f"The concept of {tbl}.{c.name} has class {'/'.join(_CLASS[(tbl, c.name)])}.", v, n, threshold_pct)
             if c.name == pk and n:
                 # like the official DQD: every row whose key occurs more than once (not only the surplus copies)
                 dup = con.execute(f"SELECT count(*) FROM (SELECT count(*) OVER (PARTITION BY {_q(pk)}) AS k FROM {_q(tbl)}) WHERE k > 1").fetchone()[0]
@@ -172,6 +214,37 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
                 v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t JOIN concept r ON r.concept_id = t.{_q(c.name)} "
                                 f"WHERE t.{_q(c.name)} <> 0 AND (r.standard_concept IS DISTINCT FROM 'S' OR r.invalid_reason IS NOT NULL)").fetchone()[0]
                 add("isStandardValidConcept", tbl, c.name, f"The concept of {tbl}.{c.name} is standard and valid.", v, n, threshold_pct)
+
+        if tbl in _PERSON_TABLES and n and "person_id" in have and "person" in present and "person_id" in present["person"]:
+            people = con.execute("SELECT count(*) FROM person").fetchone()[0]
+            miss = con.execute(f"SELECT count(*) FROM person p WHERE NOT EXISTS (SELECT 1 FROM {_q(tbl)} t WHERE t.person_id = p.person_id)").fetchone()[0]
+            add("measurePersonCompleteness", tbl, "person_id", f"Share of persons with no row in {tbl}.", miss, people,
+                person_completeness_threshold_pct, level="TABLE", cmp="ge")
+        if tbl == "condition_era" and "condition_occurrence" in present and "person_id" in have and "person_id" in present["condition_occurrence"]:
+            miss = con.execute("SELECT count(DISTINCT person_id) FROM condition_occurrence o WHERE NOT EXISTS "
+                               "(SELECT 1 FROM condition_era e WHERE e.person_id = o.person_id)").fetchone()[0]
+            den = con.execute("SELECT count(DISTINCT person_id) FROM condition_occurrence").fetchone()[0]
+            add("measureConditionEraCompleteness", tbl, "person_id", "Share of persons with a condition_occurrence but no condition_era.",
+                miss, den, threshold_pct, level="TABLE")
+        if tbl == "observation_period" and n and {"observation_period_id", "person_id", "observation_period_start_date",
+                                                  "observation_period_end_date"} <= set(have):
+            # a self-join, not a correlated EXISTS: DuckDB returned 0 for the EXISTS form on overlapping rows
+            v = con.execute("SELECT count(DISTINCT a.observation_period_id) FROM observation_period a JOIN observation_period b ON "
+                            "b.person_id = a.person_id AND b.observation_period_id <> a.observation_period_id AND "
+                            "b.observation_period_start_date <= a.observation_period_end_date AND "
+                            "b.observation_period_end_date >= a.observation_period_start_date").fetchone()[0]
+            add("measureObservationPeriodOverlap", tbl, "observation_period_start_date", "Observation periods of one person do not overlap.",
+                v, n, threshold_pct)
+        if tbl == "measurement" and n and {"measurement_concept_id", "unit_concept_id", "value_as_number"} <= set(have):
+            lim = _sanitize_limits_cte(_sanitize_bundled_limits())
+            lo, hi, den = con.execute(
+                f"WITH {lim} SELECT count(*) FILTER (WHERE m.value_as_number < l.min_value), count(*) FILTER (WHERE m.value_as_number > l.max_value), "
+                "count(*) FROM measurement m JOIN lim l ON l.concept_id = m.measurement_concept_id AND l.unit_concept_id = m.unit_concept_id "
+                "WHERE m.value_as_number IS NOT NULL").fetchone()
+            add("plausibleValueLow", tbl, "value_as_number", "measurement.value_as_number is not below the bundled physiologic minimum "
+                "(rows whose unit matches a limit).", lo, den, threshold_pct)
+            add("plausibleValueHigh", tbl, "value_as_number", "measurement.value_as_number is not above the bundled physiologic maximum "
+                "(rows whose unit matches a limit).", hi, den, threshold_pct)
 
         if tbl in _VOCAB or tbl in ("cohort", "person") or "person_id" not in have or not n:
             continue

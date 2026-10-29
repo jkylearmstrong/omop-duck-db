@@ -108,3 +108,45 @@ def test_agrees_with_the_official_dqd_on_a_planted_defect_fixture():
     origin = {r["check_name"]: r["check_origin"] for r in res["CheckResults"]}
     assert origin["isPrimaryKey"] == "DQD" and origin["plausibleFutureDate"] == "omop-duck-db"
 
+
+def test_gap_class_and_value_checks():
+    c = _con()
+    c.execute("INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, "
+              "valid_start_date, valid_end_date) VALUES "
+              "(1503297, 'metformin', 'Drug', 'RxNorm', 'Ingredient', 'S', 'a', DATE '1970-01-01', DATE '2099-12-31'), "
+              "(40000001, 'metformin 500 mg', 'Drug', 'RxNorm', 'Clinical Drug', 'S', 'b', DATE '1970-01-01', DATE '2099-12-31')")
+    # a drug era whose concept is not an ingredient
+    c.execute("INSERT INTO drug_era (drug_era_id, person_id, drug_concept_id, drug_era_start_date, drug_era_end_date) VALUES "
+              "(1, 1, 1503297, DATE '2020-01-01', DATE '2020-02-01'), (2, 1, 40000001, DATE '2020-01-01', DATE '2020-02-01')")
+    # person 2 has no condition_era; both people have conditions? only person 1 has a condition and a condition_era
+    c.execute("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, "
+              "condition_type_concept_id) VALUES (1, 1, 201820, DATE '2020-01-01', 0), (2, 2, 201820, DATE '2020-01-01', 0)")
+    c.execute("INSERT INTO condition_era (condition_era_id, person_id, condition_concept_id, condition_era_start_date, condition_era_end_date) "
+              "VALUES (1, 1, 201820, DATE '2020-01-01', DATE '2020-01-01')")
+    # two overlapping observation periods of person 1, one clean period of person 2
+    c.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, "
+              "period_type_concept_id) VALUES (1, 1, DATE '2019-01-01', DATE '2020-06-30', 0), (2, 1, DATE '2020-06-01', DATE '2021-01-01', 0), "
+              "(3, 2, DATE '2019-01-01', DATE '2021-01-01', 0)")
+    c.execute("INSERT INTO drug_exposure (drug_exposure_id, person_id, drug_concept_id, drug_exposure_start_date, drug_exposure_end_date, "
+              "drug_type_concept_id, days_supply, quantity, drug_source_concept_id) VALUES "
+              "(1, 1, 1503297, DATE '2020-01-01', DATE '2020-02-01', 0, 30, 60, 0), (2, 1, 1503297, DATE '2020-01-01', DATE '2020-02-01', 0, 900, -1, 0)")
+    c.execute("UPDATE person SET year_of_birth = 1700 WHERE person_id = 2")
+    # a systolic blood pressure of 900 mmHg and one of 120 (concept 3004249, unit 8876), and one with an unmatched unit
+    c.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, "
+              "value_as_number, unit_concept_id) VALUES (1, 1, 3004249, DATE '2020-01-01', 0, 120, 8876), "
+              "(2, 1, 3004249, DATE '2020-01-02', 0, 900, 8876), (3, 1, 3004249, DATE '2020-01-03', 0, 900, 0)")
+    res = run_dqd_catalog(c, today=TODAY)
+    assert _by(res, "fkClass", "drug_era", "drug_concept_id")["num_violated_rows"] == 1
+    assert _by(res, "measureConditionEraCompleteness", "condition_era")["num_violated_rows"] == 1
+    assert _by(res, "measureObservationPeriodOverlap", "observation_period")["num_violated_rows"] == 2
+    assert _by(res, "plausibleValueLow", "person", "year_of_birth")["num_violated_rows"] == 1
+    assert _by(res, "plausibleValueHigh", "drug_exposure", "days_supply")["num_violated_rows"] == 1
+    assert _by(res, "plausibleValueLow", "drug_exposure", "quantity")["num_violated_rows"] == 1
+    hi = _by(res, "plausibleValueHigh", "measurement", "value_as_number")
+    assert (hi["num_violated_rows"], hi["num_denominator_rows"]) == (1, 2)          # the unit-0 row is outside the limit table
+    # every drug_exposure_source_concept_id is 0, so it is flagged; all persons have a visit-less table so completeness is per table
+    assert _by(res, "sourceConceptRecordCompleteness", "drug_exposure", "drug_source_concept_id")["failed"]
+    assert _by(res, "measurePersonCompleteness", "condition_occurrence")["num_violated_rows"] == 0
+    assert _by(res, "measurePersonCompleteness", "drug_exposure")["num_violated_rows"] == 1      # person 2 has no drug
+    assert all(r["check_origin"] == "DQD" for r in res["CheckResults"] if r["check_name"] in (
+        "fkClass", "plausibleValueLow", "plausibleValueHigh", "sourceConceptRecordCompleteness", "measurePersonCompleteness"))

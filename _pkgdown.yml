@@ -214,6 +214,9 @@ reference:
   - write_custom_covariates
   - write_custom_features
   - register_custom_concepts
+  - custom_concept_registry
+  - export_custom_concept_registry
+  - check_custom_concepts
   - custom_covariate_settings
   - GEOGRAPHY_CONCEPT_IDS
   - ruca_category

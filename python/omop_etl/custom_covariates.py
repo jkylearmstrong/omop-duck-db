@@ -9,15 +9,19 @@ side by side (``compare_feature_tables``) before one is chosen.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Mapping
 
 import duckdb
 import pandas as pd
 
-__all__ = ["write_custom_covariates", "write_custom_features", "register_custom_concepts", "DERIVED_VALUE_TYPE_CONCEPT_ID", "LOCAL_CONCEPT_MIN"]
+__all__ = ["write_custom_covariates", "write_custom_features", "register_custom_concepts", "custom_concept_registry",
+           "export_custom_concept_registry", "check_custom_concepts", "DERIVED_VALUE_TYPE_CONCEPT_ID", "LOCAL_CONCEPT_MIN"]
 
 DERIVED_VALUE_TYPE_CONCEPT_ID = 45754907     # "Derived value" (Meas Type)
 LOCAL_CONCEPT_MIN = 2_000_000_000
+CUSTOM_VOCABULARY = "omop-duck-db"
 
 
 def _has_table(con: duckdb.DuckDBPyConnection, name: str) -> bool:
@@ -61,6 +65,15 @@ def write_custom_covariates(
         rows["visit_occurrence_id"] = None
     if rows.empty:
         return 0
+    ids = [int(v[0]) for v in concepts.values()]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"two features share one concept id: {dict(concepts)}")
+    if _has_table(con, "concept"):
+        for key, (cid, _) in concepts.items():
+            row = con.execute("SELECT concept_code, vocabulary_id FROM concept WHERE concept_id = ?", [int(cid)]).fetchone()
+            if row and (row[0], row[1]) != (key, CUSTOM_VOCABULARY):
+                raise ValueError(f"concept id {cid} for feature {key} is already used by {row[0]} ({row[1]}); "
+                                 "use register_custom_concepts() to pick ids that do not collide")
     con.register("_custom_cov", rows)
     try:
         ids = ", ".join(str(int(v[0])) for v in concepts.values())
@@ -85,21 +98,112 @@ def write_custom_covariates(
     return len(rows)
 
 
-def register_custom_concepts(con: duckdb.DuckDBPyConnection, names: Mapping[str, str] | list[str]) -> dict[str, tuple[int, str]]:
+def _load_registry(registry: Any) -> dict[str, int]:
+    """``{feature name: concept_id}`` from a mapping, a JSON file written by :func:`export_custom_concept_registry`, or a
+    ``{name: {"concept_id": ...}}`` mapping."""
+    if registry is None:
+        return {}
+    if isinstance(registry, (str, Path)):
+        registry = json.loads(Path(registry).read_text(encoding="utf-8"))
+    out: dict[str, int] = {}
+    for name, v in dict(registry).items():
+        cid = v.get("concept_id") if isinstance(v, Mapping) else v
+        if isinstance(v, (tuple, list)):
+            cid = v[0]
+        out[str(name)] = int(cid)
+    return out
+
+
+def custom_concept_registry(con: duckdb.DuckDBPyConnection) -> dict[str, dict[str, Any]]:
+    """The custom concepts registered in this database: ``{feature name: {"concept_id", "concept_name"}}``. Empty when there is no
+    ``concept`` table."""
+    if not _has_table(con, "concept"):
+        return {}
+    return {code: {"concept_id": int(cid), "concept_name": name} for cid, code, name in con.execute(
+        "SELECT concept_id, concept_code, concept_name FROM concept WHERE vocabulary_id = ? ORDER BY concept_id", [CUSTOM_VOCABULARY]).fetchall()}
+
+
+def export_custom_concept_registry(con: duckdb.DuckDBPyConnection, path: str | Path | None = None) -> dict[str, dict[str, Any]]:
+    """Writes (when ``path`` is given) and returns the custom concept registry. A consortium shares one registry file so every site
+    gives a feature the same concept id (:func:`register_custom_concepts` with ``registry=``), and :func:`check_custom_concepts` finds
+    sites whose ids drifted apart."""
+    reg = custom_concept_registry(con)
+    if path is not None:
+        Path(path).write_text(json.dumps(reg, indent=2, sort_keys=True), encoding="utf-8")
+    return reg
+
+
+def check_custom_concepts(con: duckdb.DuckDBPyConnection, *registries: Any, raise_on_conflict: bool = False) -> list[dict[str, Any]]:
+    """Finds problems with the custom concept ids of this database, alone and against other sites' registries.
+
+    Checks, each returned as ``{"kind", "feature", "detail"}``: ``below_local_range`` (an id under 2,000,000,000 in the custom
+    vocabulary, which can collide with an Athena concept), ``id_collision`` (a custom id also used by a concept of another
+    vocabulary), ``duplicate_id`` (two feature names on one id), and, for each registry passed (a mapping or a JSON file from
+    :func:`export_custom_concept_registry`), ``name_different_id`` (this site and the registry give a feature different ids) and
+    ``id_different_name`` (the same id means different features). Models trained on feature names are portable across sites; models
+    that store the id are not, so these conflicts break an external validation silently. ``raise_on_conflict`` raises ``ValueError``."""
+    problems: list[dict[str, Any]] = []
+    local = custom_concept_registry(con)
+    seen: dict[int, str] = {}
+    for name, v in local.items():
+        cid = v["concept_id"]
+        if cid < LOCAL_CONCEPT_MIN:
+            problems.append({"kind": "below_local_range", "feature": name, "detail": f"id {cid} is under {LOCAL_CONCEPT_MIN}"})
+        if cid in seen:
+            problems.append({"kind": "duplicate_id", "feature": name, "detail": f"id {cid} is also used by {seen[cid]}"})
+        seen[cid] = name
+    if local:
+        for cid, vocab in con.execute("SELECT concept_id, vocabulary_id FROM concept WHERE vocabulary_id <> ? AND concept_id IN ("
+                                      + ", ".join(str(v["concept_id"]) for v in local.values()) + ")", [CUSTOM_VOCABULARY]).fetchall():
+            problems.append({"kind": "id_collision", "feature": seen[int(cid)], "detail": f"id {cid} is also a {vocab} concept"})
+    for i, reg in enumerate(registries, start=1):
+        other = _load_registry(reg)
+        by_id = {cid: n for n, cid in other.items()}
+        for name, v in local.items():
+            if name in other and other[name] != v["concept_id"]:
+                problems.append({"kind": "name_different_id", "feature": name,
+                                 "detail": f"registry {i} has {name} = {other[name]}, this database {v['concept_id']}"})
+            elif name not in other and by_id.get(v["concept_id"], name) != name:
+                problems.append({"kind": "id_different_name", "feature": name,
+                                 "detail": f"id {v['concept_id']} is {by_id[v['concept_id']]} in registry {i}, {name} here"})
+    if problems and raise_on_conflict:
+        raise ValueError("custom concept conflicts: " + "; ".join(f"{p['kind']} {p['feature']} ({p['detail']})" for p in problems))
+    return problems
+
+
+def register_custom_concepts(con: duckdb.DuckDBPyConnection, names: Mapping[str, str] | list[str], *, registry: Any = None) -> dict[str, tuple[int, str]]:
     """Returns ``{feature: (concept_id, label)}`` for ``write_custom_covariates``, reusing the id already registered for a
     feature name in this database (``concept_code`` = the name, vocabulary ``omop-duck-db``) and otherwise taking the next free
-    id from 2,001,000,000 upwards (clear of the geography ids 2,000,100,001-3). ``names`` is a list of feature names or ``{name: label}``. Ids are per database, so a
-    downstream study refers to a feature by name, not by id."""
+    id from 2,001,000,000 upwards (clear of the geography ids 2,000,100,001-3). ``names`` is a list of feature names or ``{name: label}``.
+
+    Ids are per database unless sites agree on them. Pass ``registry`` (a mapping ``{name: id}`` or the JSON file from
+    :func:`export_custom_concept_registry`) to pin the ids a consortium shares: a name in the registry takes the registry's id, and
+    a name outside it gets an id above every registry id. A registry id that this database already gives to another feature, or
+    that belongs to a vocabulary concept, raises ``ValueError``, so a mismatch is caught before any covariate is written."""
     labels = dict(names) if isinstance(names, Mapping) else {n: n for n in names}
+    pinned = _load_registry(registry)
     have = _has_table(con, "concept")
     out: dict[str, tuple[int, str]] = {}
     used = set()
+    taken: dict[int, tuple[str, str]] = {}
     if have:
-        for cid, code in con.execute("SELECT concept_id, concept_code FROM concept WHERE vocabulary_id = 'omop-duck-db'").fetchall():
+        for cid, code, vocab in con.execute("SELECT concept_id, concept_code, vocabulary_id FROM concept WHERE concept_id >= 2000000000").fetchall():
+            taken[int(cid)] = (code, vocab)
+        for cid, code in con.execute("SELECT concept_id, concept_code FROM concept WHERE vocabulary_id = ?", [CUSTOM_VOCABULARY]).fetchall():
             if code in labels:
                 out[code] = (int(cid), labels[code])
         used = {int(r[0]) for r in con.execute("SELECT concept_id FROM concept WHERE concept_id >= 2001000000").fetchall()}
-    nxt = max([2_001_000_000 - 1, *used, *(v[0] for v in out.values())]) + 1
+    for name, cid in pinned.items():
+        if name not in labels:
+            continue
+        if cid < LOCAL_CONCEPT_MIN:
+            raise ValueError(f"registry id {cid} for {name} is under {LOCAL_CONCEPT_MIN} (site-defined range)")
+        if name in out and out[name][0] != cid:
+            raise ValueError(f"{name} is concept {out[name][0]} in this database but {cid} in the registry")
+        if cid in taken and taken[cid] != (name, CUSTOM_VOCABULARY):
+            raise ValueError(f"registry id {cid} for {name} is already used here by {taken[cid][0]} ({taken[cid][1]})")
+        out[name] = (cid, labels[name])
+    nxt = max([2_001_000_000 - 1, *used, *pinned.values(), *(v[0] for v in out.values())]) + 1
     for name, label in labels.items():
         if name not in out:
             out[name] = (nxt, label)
@@ -113,6 +217,7 @@ def write_custom_features(
     *,
     labels: Mapping[str, str] | None = None,
     date_col: str = "date",
+    registry: Any = None,
     **kwargs: Any,
 ) -> dict[str, tuple[int, str]]:
     """Writes a wide table of your own features (``person_id``, ``date_col`` and one numeric column per feature) so
@@ -121,10 +226,11 @@ def write_custom_features(
     This is how a study adds its own version of a feature that OMOP already defines (a Charlson index, an Elixhauser score, a
     frailty index) next to the standard one: give it its own name (``charlson_site``), and pull both through the same
     covariate settings. Returns the ``{feature: (concept_id, label)}`` mapping to pass to ``custom_covariate_settings``.
-    ``kwargs`` go to :func:`write_custom_covariates`.
+    ``registry`` pins the concept ids a consortium shares (see :func:`register_custom_concepts`). ``kwargs`` go to
+    :func:`write_custom_covariates`.
     """
     feats = [c for c in features.columns if c not in ("person_id", date_col, "visit_occurrence_id")]
-    concepts = register_custom_concepts(con, {f: (labels or {}).get(f, f) for f in feats})
+    concepts = register_custom_concepts(con, {f: (labels or {}).get(f, f) for f in feats}, registry=registry)
     long = features.melt(id_vars=[c for c in ("person_id", date_col, "visit_occurrence_id") if c in features.columns],
                          value_vars=feats, var_name="feature", value_name="value").rename(columns={date_col: "date"})
     write_custom_covariates(con, long, concepts, **kwargs)

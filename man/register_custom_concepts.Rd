@@ -4,12 +4,16 @@
 \alias{register_custom_concepts}
 \title{Concept ids for your own feature names}
 \usage{
-register_custom_concepts(con, names)
+register_custom_concepts(con, names, registry = NULL)
 }
 \arguments{
 \item{con}{A DBI connection to an OMOP DuckDB.}
 
 \item{names}{Character vector of feature names, or a named character vector \code{c(name = "label")}.}
+
+\item{registry}{Optional shared registry: a named vector or list \code{name = id}, or the path of the JSON file written by
+\code{\link[=export_custom_concept_registry]{export_custom_concept_registry()}}. A name in the registry takes its id; a name outside it gets an id above every registry id.
+A registry id this database already gives to another feature, a vocabulary concept, or that is below 2,000,000,000 is an error.}
 }
 \value{
 A named list; each element is \code{c(concept_id, label)}.
@@ -17,5 +21,5 @@ A named list; each element is \code{c(concept_id, label)}.
 \description{
 Returns the \code{concepts} list for \code{\link[=write_custom_covariates]{write_custom_covariates()}}, reusing the id already registered for a feature name in this
 database (\code{concept_code} = the name, vocabulary \code{omop-duck-db}) and otherwise taking the next free id from 2,001,000,000.
-Ids are per database, so a study refers to a feature by name, not by id.
+Ids are per database unless sites agree on them: pass \code{registry} to pin the ids a consortium shares.
 }
