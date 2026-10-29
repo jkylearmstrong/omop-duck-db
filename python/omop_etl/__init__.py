@@ -313,6 +313,7 @@ from omop_etl.trajectories import (
 )
 from omop_etl.achilles import ACHILLES_ANALYSES, achilles_analysis_catalog, run_achilles
 from omop_etl.categorical_encoding import encode_categoricals, encoded_column_names
+from omop_etl.exclusions import find_metformin_only_prediabetes_pcos
 from omop_etl.geography import (
     assign_sdi_quintile,
     derive_geography_features,
@@ -617,6 +618,7 @@ __all__ = [
     "achilles_analysis_catalog",
     "run_achilles",
     "encode_categoricals",
+    "find_metformin_only_prediabetes_pcos",
     "encoded_column_names",
     "assign_sdi_quintile",
     "derive_geography_features",

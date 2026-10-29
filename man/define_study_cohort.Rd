@@ -35,7 +35,10 @@ define_study_cohort(
   attrition = TRUE,
   one_per_patient = TRUE,
   persist_keys = NULL,
-  require_diabetes = FALSE
+  require_diabetes = FALSE,
+  diabetes_drug_rule = "names",
+  diabetes_rxnorm_cuis = NULL,
+  exclude_metformin_only_prediabetes_pcos = FALSE
 )
 }
 \arguments{
@@ -146,6 +149,17 @@ rewritten. It is only written when its content changes (byte-identical for ident
 
 \item{require_diabetes}{\code{TRUE} keeps only index stays with diabetes evidence (diagnosis, prescription or elevated
 HbA1c) in the wash-in window; used by \code{\link[=build_ederri_diabetes_cohort]{build_ederri_diabetes_cohort()}}. Default \code{FALSE}.}
+
+\item{diabetes_drug_rule}{Medication arm of \code{require_diabetes}: \code{"names"} (default, unchanged: ten drug names in
+\code{drug_source_value}), \code{"atc_a10"} (\code{drug_concept_id} descending from ATC A10 in \code{concept_ancestor}, branded drugs and
+combinations included) or \code{"rxnorm_cuis"} (descendants of the RxNorm concepts of \code{diabetes_rxnorm_cuis}). The last two
+need the vocabulary on the connection.}
+
+\item{diabetes_rxnorm_cuis}{RxNorm CUIs (vector, or a text/CSV file with one per line) for \code{diabetes_drug_rule = "rxnorm_cuis"}.}
+
+\item{exclude_metformin_only_prediabetes_pcos}{\code{FALSE} (default), \code{TRUE} (= \code{"icd10"}), \code{"icd10"}, \code{"snomed"} or \code{"both"}:
+drop patients whose only diabetes drug is metformin and who have prediabetes or PCOS and no diabetes diagnosis (see
+\code{\link[=find_metformin_only_prediabetes_pcos]{find_metformin_only_prediabetes_pcos()}}). Adds the attrition step "Not metformin-only prediabetes / PCOS (patient-level)".}
 }
 \value{
 A \code{data.frame}, one row per patient ordered by \code{subject_id}, with columns \code{cohort_definition_id},

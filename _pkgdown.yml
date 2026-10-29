@@ -213,6 +213,7 @@ reference:
   - read_sdi_table
   - encode_categoricals
   - encoded_column_names
+  - find_metformin_only_prediabetes_pcos
 - title: Data quality, Table 1, and Export
   desc: Run Data Quality Dashboard checks, build publication-grade Table 1s, and export datasets.
   contents:
