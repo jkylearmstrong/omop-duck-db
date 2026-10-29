@@ -215,7 +215,7 @@ target_pairs <- function(con, d) {
   sort(sprintf("%d@%s", out$subject_id, format(as.Date(out$cohort_start_date))))
 }
 
-target_json <- function() jsonlite::fromJSON(circe_file("target_cohort.circe.json"), simplifyVector = FALSE)
+target_json <- function() target_definition()
 
 # what CirceR + CohortGenerator return for this definition on this CDM (scripts/ohdsi_parity_target_cohort.R repeats the run)
 target_official <- c("1@2020-02-04", "2@2020-03-05", "5@2020-03-05", "6@2020-01-03")
@@ -263,4 +263,15 @@ test_that("Death is a domain for entry events", {
   d$PrimaryCriteria$ObservationWindow <- list(PriorDays = 0, PostDays = 0)
   d$PrimaryCriteria$CriteriaList <- list(list(Death = structure(list(), names = character(0))))
   expect_equal(sort(as.integer(sub("@.*", "", target_pairs(con, d)))), c(7L, 8L, 9L))
+})
+
+test_that("the target definition used by these tests is the committed Circe file", {
+  committed <- jsonlite::fromJSON(circe_file("target_cohort.circe.json"), simplifyVector = FALSE)
+  mine <- target_definition()
+  expect_equal(committed$ConceptSets[[1]]$expression$items[[1]]$concept$CONCEPT_ID, mine$ConceptSets[[1]]$expression$items[[1]]$concept$CONCEPT_ID)
+  expect_equal(committed$PrimaryCriteria$ObservationWindow, mine$PrimaryCriteria$ObservationWindow)
+  expect_equal(committed$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$DateAdjustment, mine$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$DateAdjustment)
+  expect_equal(committed$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$Age, mine$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$Age)
+  expect_equal(committed$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$CorrelatedCriteria$CriteriaList[[1]]$Occurrence,
+               mine$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$CorrelatedCriteria$CriteriaList[[1]]$Occurrence)
 })

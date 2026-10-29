@@ -6,14 +6,7 @@ recon_cdm <- function(env = parent.frame()) {
   con
 }
 
-recon_def <- function() {
-  candidates <- c(file.path(testthat::test_path(), "..", "..", "cohorts", "target_cohort.circe.json"),
-                  file.path(testthat::test_path(), "..", "..", "..", "cohorts", "target_cohort.circe.json"),
-                  system.file("cohorts", "target_cohort.circe.json", package = "omopduckdb"))
-  hit <- candidates[nzchar(candidates) & file.exists(candidates)]
-  if (!length(hit)) testthat::skip("cohorts/target_cohort.circe.json not available in this test environment")
-  jsonlite::fromJSON(hit[[1]], simplifyVector = FALSE)
-}
+recon_def <- function() target_definition()
 
 recon_gaps <- function(res) {
   g <- res$gaps
