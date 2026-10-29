@@ -120,3 +120,59 @@ def test_append_mode_adds_only_new_rows(tmp_path):
     con.close()
     with pytest.raises(ValueError, match="since"):
         etl_pcornet(src, db, mode="append")
+
+
+def test_cli_score_fhir_unit_check_and_explain(tmp_path, bundle, capsys):
+    import json
+    fp = tmp_path / "b.json"
+    fp.write_text(json.dumps(FHIR), encoding="utf-8")
+    cm = tmp_path / "cm.json"
+    cm.write_text("{}", encoding="utf-8")
+    assert main(["score-fhir", "--bundle", str(bundle), "--fhir", str(fp), "--concept-map", str(cm), "--explain"]) == 0
+    txt = capsys.readouterr().out
+    out = json.loads(txt[txt.index("{"):])
+    assert out["top_drivers"] and out["fhir"]["encounter_id"] == "e1"
+    bad = tmp_path / "bad.json"
+    bad.write_text("{\"resourceType\": \"Patient\"}", encoding="utf-8")
+    assert main(["score-fhir", "--bundle", str(bundle), "--fhir", str(bad)]) == 1
+
+    feats = tmp_path / "f.csv"
+    pd.DataFrame({"lab_creatinine": np.full(40, 88.0), "heart_rate": np.full(40, 80.0)}).to_csv(feats, index=False)
+    ref = tmp_path / "ref.json"
+    ref.write_text("{\"heart_rate\": 80}", encoding="utf-8")
+    assert main(["unit-check", "--features", str(feats), "--reference", str(ref)]) == 0
+    assert main(["unit-check", "--features", str(feats), "--fail-on-flag"]) == 2
+    empty = tmp_path / "e.csv"
+    pd.DataFrame({"x": [1, 2]}).to_csv(empty, index=False)
+    assert main(["unit-check", "--features", str(empty)]) == 0
+
+
+def test_cli_score_encounter_explain_and_report_errors(tmp_path, bundle, capsys):
+    import json
+    db = tmp_path / "c.duckdb"
+    con = duckdb.connect(str(db))
+    build_schema(con)
+    con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES (1, 8507, 1950, 0, 0)")
+    con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id) "
+                "VALUES (1, 1, 9201, DATE '2020-06-01', DATE '2020-06-04', 0)")
+    con.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, value_as_number, measurement_type_concept_id) "
+                "VALUES (1, 1, 3016723, DATE '2020-06-03', 3.0, 0)")
+    con.close()
+    assert main(["score-encounter", "--bundle", str(bundle), "--db", str(db), "--visit-id", "1", "--explain", "--top-k", "1"]) == 0
+    txt = capsys.readouterr().out
+    assert len(json.loads(txt[txt.index("{"):])["top_drivers"]) == 1
+    (tmp_path / "nolog.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    assert main(["report-drift", "--log", str(tmp_path / "nolog.csv"), "--out", str(tmp_path / "x.html")]) == 1
+
+
+def test_score_cohort_unit_check_warns_and_jsonl_log(tmp_path, bundle):
+    from omop_etl.model_bundle import score_cohort
+    df = pd.DataFrame({"visit_occurrence_id": range(30), "lab_creatinine": 88.0, "heart_rate": 80.0, "prior_ip_count": 0})
+    with pytest.warns(UserWarning, match="unit sanity"):
+        score_cohort(bundle, df, on_violation="clip", unit_check=True)
+    log = pd.DataFrame({"model_version": ["1", "1"], "month": ["2024-01", "2024-02"], "psi": [0.05, 0.3],
+                        "brier": [0.1, 0.12], "status": ["ok", "drift"]})
+    lp = tmp_path / "monitoring.jsonl"
+    log.to_json(lp, orient="records", lines=True)
+    page = write_drift_report(lp, tmp_path / "j.html").read_text(encoding="utf-8")
+    assert "2024-02" in page and "drift" in page
