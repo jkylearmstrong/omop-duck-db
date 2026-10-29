@@ -218,6 +218,8 @@ reference:
   - custom_concept_registry
   - export_custom_concept_registry
   - check_custom_concepts
+  - stamp_feature_spec_concepts
+  - validate_bundle_concepts
   - custom_covariate_settings
   - GEOGRAPHY_CONCEPT_IDS
   - ruca_category
