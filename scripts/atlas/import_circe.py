@@ -1,4 +1,4 @@
-"""Imports cohorts/*.circe.json into a live ATLAS WebAPI, reads them back and asks WebAPI to render SQL from them.
+"""Imports inst/cohorts/*.circe.json into a live ATLAS WebAPI, reads them back and asks WebAPI to render SQL from them.
 
     python scripts/atlas/import_circe.py --webapi http://localhost:18080/WebAPI
 
@@ -49,7 +49,7 @@ def wait_ready(base: str, seconds: int) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--webapi", default="http://localhost:18080/WebAPI")
-    ap.add_argument("--cohorts", default=str(ROOT / "cohorts"))
+    ap.add_argument("--cohorts", default=str(ROOT / "inst" / "cohorts"))
     ap.add_argument("--wait", type=int, default=300, help="seconds to wait for WebAPI to come up")
     ap.add_argument("--cleanup", action="store_true", help="delete the cohort definitions this run created, after checking them")
     a = ap.parse_args()

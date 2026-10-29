@@ -2,7 +2,7 @@
 
 Study logic belongs in standard OHDSI artifacts, not in package-specific SQL: a Circe definition imports into ATLAS, runs
 through CohortGenerator at any site and compiles to DuckDB here (:func:`omop_etl.circe.compile_circe_to_duckdb`).
-These builders produce the definitions that the eDERRI replication needs; ``cohorts/*.circe.json`` are their output
+These builders produce the definitions that the eDERRI replication needs; ``inst/cohorts/*.circe.json`` are their output
 (``tests/test_circe_definitions.py`` fails if the committed files drift from the builders).
 
 * :func:`metformin_only_prediabetes_pcos_circe` - patients with prediabetes or PCOS whose only diabetes drug is
@@ -150,7 +150,7 @@ def diabetes_phenotype_circe(drug_rule: str = "atc_a10", rxnorm_concept_ids: Seq
 
 
 def target_cohort_circe(min_age: int = 18, followup_days: int = 30) -> dict[str, Any]:
-    """The index-stay cohort of ``cohorts/target_cohort.sql`` (adult inpatient and ED-to-IP stays, one per patient, indexed on the
+    """The index-stay cohort of ``inst/cohorts/target_cohort.sql`` (adult inpatient and ED-to-IP stays, one per patient, indexed on the
     discharge date) as Circe JSON.
 
     The rules that decide whether a stay qualifies are correlated criteria of the entry event, not inclusion rules, because Circe
@@ -173,7 +173,7 @@ def target_cohort_circe(min_age: int = 18, followup_days: int = 30) -> dict[str,
 
 
 def write_circe_definitions(out_dir: str | Path) -> list[Path]:
-    """Writes the committed definitions (``cohorts/*.circe.json`` names) and returns their paths."""
+    """Writes the committed definitions (``inst/cohorts/*.circe.json`` names) and returns their paths."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     files = {f"metformin_only_prediabetes_pcos_{p}.circe.json": metformin_only_prediabetes_pcos_circe(p) for p in PCOS_SETS}

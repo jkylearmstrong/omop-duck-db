@@ -229,6 +229,7 @@ def score_cohort(
     on_violation: str = "raise",
     return_validation: bool = False,
     X_seq: np.ndarray | None = None,
+    check_concepts: Any = None,
 ) -> pd.DataFrame | tuple[pd.DataFrame, FeatureValidationReport]:
     """Scores a feature table (DataFrame, ``.parquet`` or ``.csv``) with a bundle.
 
@@ -236,8 +237,14 @@ def score_cohort(
     validated against the bundle's feature contract first (``on_violation`` raise|clip|nullify, see
     :func:`omop_etl.feature_contract.validate_feature_frame`); remaining NaN are filled with each feature's ``impute``
     value (error if a NaN has none).
+
+    ``check_concepts`` (a DuckDB connection, a registry mapping or a registry JSON file) first checks the custom concept ids recorded in the
+    bundle's feature spec against this site's (:func:`omop_etl.bundle_concepts.validate_bundle_concepts`) and raises on a mismatch.
     """
     b = bundle if isinstance(bundle, ModelBundle) else load_model_bundle(bundle)
+    if check_concepts is not None:
+        from omop_etl.bundle_concepts import validate_bundle_concepts
+        validate_bundle_concepts(b, check_concepts)
     if isinstance(features, (str, Path)):
         fp = Path(features)
         df = pd.read_parquet(fp) if fp.suffix.lower() == ".parquet" else pd.read_csv(fp)

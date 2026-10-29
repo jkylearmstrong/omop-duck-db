@@ -64,6 +64,7 @@ packages = ["python/omop_etl", "python/omop_duck_db"]
 "inst/sql/omop_learn" = "omop_etl/resources/sql/omop_learn"
 "inst/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql" = "omop_etl/resources/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql"
 "inst/extdata/comorbidity" = "omop_etl/resources/extdata/comorbidity"
+"inst/cohorts" = "omop_etl/resources/cohorts"
 "inst/extdata/code_lists" = "omop_etl/resources/extdata/code_lists"
 "inst/extdata/physiologic_limits.csv" = "omop_etl/resources/extdata/physiologic_limits.csv"
 "inst/extdata/telemetry_packet.schema.json" = "omop_etl/resources/extdata/telemetry_packet.schema.json"

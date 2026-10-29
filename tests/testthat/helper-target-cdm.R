@@ -20,9 +20,8 @@ target_cdm <- function(env = parent.frame()) {
   con
 }
 
-# The index-stay cohort (cohorts/target_cohort.circe.json, built in Python by target_cohort_circe()) as an R list. Built here, not read
-# from the file, because the tests run from an installed copy of the package where cohorts/ is not available; a test below checks that it
-# matches the committed file whenever the file can be found.
+# The index-stay cohort (inst/cohorts/target_cohort.circe.json, built in Python by target_cohort_circe()) as an R list. Built here, not read
+# from the file, so the tests do not depend on where they run from; a test checks that it matches the shipped file.
 target_definition <- function(min_age = 18, followup_days = 30) {
   empty <- structure(list(), names = character(0))
   item <- function(id, name, code) list(concept = list(CONCEPT_ID = id, CONCEPT_NAME = name, DOMAIN_ID = "Visit", VOCABULARY_ID = "Visit",

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "cohorts/**"
+      - "inst/cohorts/**"
       - "R/cohort_definition_set.R"
       - "tests/testthat/test-cohortgenerator-integration.R"
       - ".github/workflows/hades-integration.yml"

@@ -199,6 +199,7 @@ reference:
   - plp_database_details
   - cm_database_details
   - cohort_definition_set
+  - cohort_definitions_dir
   - as_plp_data
   - export_plp_study_package
   - duckdb_to_andromeda
@@ -217,6 +218,8 @@ reference:
   - custom_concept_registry
   - export_custom_concept_registry
   - check_custom_concepts
+  - stamp_feature_spec_concepts
+  - validate_bundle_concepts
   - custom_covariate_settings
   - GEOGRAPHY_CONCEPT_IDS
   - ruca_category

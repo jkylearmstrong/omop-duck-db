@@ -1,6 +1,6 @@
 # Runs the index-stay (target) cohort three ways on one small CDM and prints the people and index dates each returns:
-#   1. cohorts/target_cohort.sql  (the authoritative SQL) through CohortGenerator,
-#   2. cohorts/target_cohort.circe.json through CirceR + CohortGenerator (the official Circe engine),
+#   1. inst/cohorts/target_cohort.sql  (the authoritative SQL) through CohortGenerator,
+#   2. inst/cohorts/target_cohort.circe.json through CirceR + CohortGenerator (the official Circe engine),
 #   3. the same JSON through the package's native compiler.
 # The official engine and the native compiler must agree; the SQL differs in two documented cases (discharge disposition, and a
 # death within the follow-up window when the observation period ends at death). tests/test_target_cohort_circe.py and
@@ -30,7 +30,7 @@ DBI::dbExecute(con, "INSERT INTO concept (concept_id, concept_name, domain_id, v
   VALUES (9201,'Inpatient Visit','Visit','Visit','Visit','S','IP',DATE '1970-01-01',DATE '2099-12-31'),(262,'Emergency Room and Inpatient Visit','Visit','Visit','Visit','S','ERIP',DATE '1970-01-01',DATE '2099-12-31')")
 DBI::dbDisconnect(con, shutdown = TRUE)
 
-cohort_dir <- if (dir.exists("cohorts")) "cohorts" else system.file("cohorts", package = "omopduckdb")
+cohort_dir <- omopduckdb::cohort_definitions_dir()
 json <- paste(readLines(file.path(cohort_dir, "target_cohort.circe.json"), warn = FALSE), collapse = "\n")
 native <- {
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)

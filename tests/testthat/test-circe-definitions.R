@@ -1,11 +1,10 @@
 library(omopduckdb)
 
 circe_file <- function(name) {
-  candidates <- c(file.path(testthat::test_path(), "..", "..", "cohorts", name),
-                  file.path(testthat::test_path(), "..", "..", "..", "cohorts", name),
-                  system.file("cohorts", name, package = "omopduckdb"))
+  candidates <- c(file.path(cohort_definitions_dir(), name),
+                  file.path(testthat::test_path(), "..", "..", "inst", "cohorts", name))
   hit <- candidates[nzchar(candidates) & file.exists(candidates)]
-  if (!length(hit)) testthat::skip(paste("cohorts/", name, "not available in this test environment"))
+  if (!length(hit)) testthat::skip(paste("inst/cohorts/", name, "not available in this test environment"))
   hit[[1]]
 }
 

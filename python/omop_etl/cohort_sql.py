@@ -1,4 +1,4 @@
-"""Render and run the portable cohort SQL in ``cohorts/`` without SqlRender (FR-D7, FR-D8).
+"""Render and run the portable cohort SQL in ``inst/cohorts/`` without SqlRender (FR-D7, FR-D8).
 
 ``render_cohort_sql`` implements the small SqlRender subset the shipped files use: ``{DEFAULT @p = v}`` lines,
 ``{@p == 'v'}?{...}:{...}`` / ``{@p}?{...}`` conditionals and ``@p`` substitution. ``translate_to_duckdb`` turns the
@@ -16,6 +16,13 @@ import duckdb
 
 _DEFAULT = re.compile(r"\{DEFAULT\s+@(\w+)\s*=\s*([^}]*)\}\s*", re.IGNORECASE)
 _COND = re.compile(r"\{@(\w+)(?:\s*(==|!=)\s*([^}?]+?))?\}\s*\?\s*\{([^{}]*)\}(?:\s*:\s*\{([^{}]*)\})?", re.DOTALL)
+
+
+def cohort_definitions_dir() -> Path:
+    """The folder with the shipped cohort definitions (``target_cohort.sql``, ``*.circe.json``): ``omop_etl/resources/cohorts`` in an
+    installed wheel, ``inst/cohorts`` in a source checkout."""
+    from omop_etl.build_omop_cdm import _resource_path
+    return Path(_resource_path("cohorts"))
 
 
 def _unquote(v: str) -> str:

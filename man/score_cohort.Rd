@@ -9,7 +9,8 @@ score_cohort(
   features,
   key_columns = NULL,
   on_violation = "raise",
-  return_validation = FALSE
+  return_validation = FALSE,
+  check_concepts = NULL
 )
 }
 \arguments{
@@ -22,6 +23,9 @@ score_cohort(
 \item{on_violation}{\code{"raise"}, \code{"clip"} or \code{"nullify"}.}
 
 \item{return_validation}{If \code{TRUE}, return \code{list(scores =, validation =)}.}
+
+\item{check_concepts}{A DBI connection, a registry or a registry JSON file: first check the custom concept ids recorded in the bundle's
+feature spec against this site's (\code{\link[=validate_bundle_concepts]{validate_bundle_concepts()}}) and stop on a mismatch.}
 }
 \value{
 A data.frame with the key columns, \code{prob} and \code{risk_tier}.

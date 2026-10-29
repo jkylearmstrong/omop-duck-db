@@ -13,7 +13,7 @@ vocab <- Sys.getenv("OMOP_VOCAB_DUCKDB", "tasks/central_vocabulary.duckdb")
 stopifnot(file.exists(vocab))
 set.seed(20260428)
 
-target_json_path <- if (file.exists("cohorts/diabetes_phenotype.circe.json")) "cohorts/diabetes_phenotype.circe.json" else system.file("cohorts", "diabetes_phenotype.circe.json", package = "omopduckdb")
+target_json_path <- file.path(omopduckdb::cohort_definitions_dir(), "diabetes_phenotype.circe.json")
 target_json <- paste(readLines(target_json_path, warn = FALSE), collapse = "\n")
 outcome <- list(ConceptSets = list(list(id = 0, name = "Inpatient visit", expression = list(items = list(list(
                   concept = list(CONCEPT_ID = 9201, CONCEPT_NAME = "Inpatient Visit", DOMAIN_ID = "Visit", VOCABULARY_ID = "Visit",

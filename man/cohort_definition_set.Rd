@@ -5,7 +5,7 @@
 \title{Build a CohortGenerator-ready \code{cohortDefinitionSet} from the shipped eDERRI cohorts (FR-D3)}
 \usage{
 cohort_definition_set(
-  cohorts_dir = "cohorts",
+  cohorts_dir = cohort_definitions_dir(),
   target_cohort_id = 1L,
   outcome_cohort_id = 2L,
   followup_days = 30L,
@@ -29,7 +29,7 @@ measurement, condition or drug record also counts as verified follow-up (FR-D7).
 A data frame with columns \code{cohortId}, \code{cohortName}, \code{sql}, \code{json}.
 }
 \description{
-Reads \code{target_cohort.sql}, \code{outcome_cohort.sql} and their Circe JSON from the \verb{cohorts/} directory of the
+Reads \code{target_cohort.sql}, \code{outcome_cohort.sql} and their Circe JSON from the \verb{inst/cohorts/} directory of the
 omop-duck-db repository and returns the data frame that \code{CohortGenerator::generateCohortSet()} takes:
 one row per cohort with \code{cohortId}, \code{cohortName}, \code{sql} and \code{json}. The study parameters \verb{@followup_days} and
 \verb{@min_age} are rendered into the SQL here, so only the four parameters CohortGenerator itself fills in
@@ -40,5 +40,5 @@ The SQL is the authoritative definition. The Circe JSON is hand-written, has not
 cannot express the discharge-disposition exclusion; CohortGenerator uses the \code{sql} column to generate cohorts.
 
 The shipped SQL creates no inclusion-rule statistics tables (\verb{#InclusionRules} and friends), so call
-\verb{CohortGenerator::generateCohortSet(..., generateStats = FALSE)}; with the default it fails.
+\code{CohortGenerator::generateCohortSet(..., generateStats = FALSE)}; with the default it fails.
 }

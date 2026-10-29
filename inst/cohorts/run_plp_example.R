@@ -20,9 +20,9 @@ run_sql <- function(file, ...) {
   executeSql(connection, sql)
 }
 
-run_sql("cohorts/target_cohort.sql", cdm_database_schema = "main", target_database_schema = "main",
+run_sql("inst/cohorts/target_cohort.sql", cdm_database_schema = "main", target_database_schema = "main",
         target_cohort_table = "cohort", target_cohort_id = 1, followup_days = 30, min_age = 18)
-run_sql("cohorts/outcome_cohort.sql", cdm_database_schema = "main", target_database_schema = "main",
+run_sql("inst/cohorts/outcome_cohort.sql", cdm_database_schema = "main", target_database_schema = "main",
         target_cohort_table = "cohort", target_cohort_id = 2)
 
 databaseDetails <- createDatabaseDetails(

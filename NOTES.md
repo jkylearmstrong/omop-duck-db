@@ -100,7 +100,7 @@ ATTACH 'central_vocab.duckdb' AS central_vocab (READ_ONLY);   -- one line, on ev
 * Before distributing a file run `omop-duckdb checkpoint file.duckdb` (or `checkpoint_database()` in Python/R); a leftover `.wal` makes `ATTACH ... (READ_ONLY)` fail.
 * Python: `omop_etl.attach_read_only(con, "site.duckdb", "central_vocab.duckdb")` attaches both files read-only.
 * R / HADES: `omopduckdb::readonly_attach_sql("site.duckdb", "central_vocab.duckdb")` returns the statements; DatabaseConnector
-  cannot ATTACH on connect, so run them on each new connection (see `cohorts/run_plp_readonly_example.R`).
+  cannot ATTACH on connect, so run them on each new connection (see `inst/cohorts/run_plp_readonly_example.R`).
 * To make one file self-contained instead (and larger): `omop-duckdb materialize-vocab site.duckdb --vocab central_vocab.duckdb`
   copies the views into real tables, which needs a writable file.
 

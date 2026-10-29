@@ -132,10 +132,13 @@ bundle_predict_proba <- function(bundle, X) {
 #' @param key_columns Columns to return alongside the score (default: non-feature columns ending in `_id`).
 #' @param on_violation `"raise"`, `"clip"` or `"nullify"`.
 #' @param return_validation If `TRUE`, return `list(scores =, validation =)`.
+#' @param check_concepts A DBI connection, a registry or a registry JSON file: first check the custom concept ids recorded in the bundle's
+#'   feature spec against this site's ([validate_bundle_concepts()]) and stop on a mismatch.
 #' @return A data.frame with the key columns, `prob` and `risk_tier`.
 #' @export
-score_cohort <- function(bundle, features, key_columns = NULL, on_violation = "raise", return_validation = FALSE) {
+score_cohort <- function(bundle, features, key_columns = NULL, on_violation = "raise", return_validation = FALSE, check_concepts = NULL) {
   if (is.character(bundle)) bundle <- load_model_bundle(bundle)
+  if (!is.null(check_concepts)) validate_bundle_concepts(bundle, check_concepts)
   if (is.character(features)) {
     features <- if (grepl("\\.parquet$", features, ignore.case = TRUE)) {
       if (!requireNamespace("arrow", quietly = TRUE)) stop("The 'arrow' package is required to read parquet.", call. = FALSE)

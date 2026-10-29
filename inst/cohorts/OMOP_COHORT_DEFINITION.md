@@ -1,6 +1,6 @@
 # Portable eDERRI cohort definitions (FR-D1, FR-D2)
 
-Files in `cohorts/`:
+Files in `inst/cohorts/`:
 
 | File | Purpose |
 |---|---|

@@ -1,6 +1,6 @@
 test_that("compare_cohort_definitions reports counts, overlap and outcome rates", {
   skip_if_not_installed("SqlRender")
-  cohorts <- normalizePath(file.path(testthat::test_path(), "..", "..", "cohorts"), mustWork = FALSE)
+  cohorts <- cohort_definitions_dir()
   skip_if_not(file.exists(file.path(cohorts, "target_cohort.sql")))
   db <- tempfile(fileext = ".duckdb")
   on.exit(unlink(db))
