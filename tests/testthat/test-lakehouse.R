@@ -34,4 +34,8 @@ test_that("omop_connect_lakehouse registers views over mock lakehouse tables", {
 
   res_bare <- DBI::dbGetQuery(con, "SELECT count(*) AS n FROM person")
   expect_equal(res_bare$n, 2L)
+  # a plain parquet directory must not try to install or load the delta extension: a failed load crashes the R session
+  # (intermittent segfault on disconnect, reproduced on Windows), which is what this test used to risk
+  ext <- DBI::dbGetQuery(con, "SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'delta'")
+  expect_false(isTRUE(ext$loaded))
 })

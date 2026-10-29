@@ -16,7 +16,10 @@ omop_connect_lakehouse(
 \arguments{
 \item{lake_uri}{Root URI or filesystem path to the lakehouse storage directory.}
 
-\item{format}{Lakehouse table format: \code{"delta"}, \code{"iceberg"}, or \code{"parquet"}.}
+\item{format}{Lakehouse table format: \code{"delta"}, \code{"iceberg"}, or \code{"parquet"}. The DuckDB \code{delta} / \code{iceberg} extension is
+installed and loaded only when a table directory is a Delta (\verb{_delta_log}) or Iceberg (\code{metadata}) table or the URI is remote;
+a plain parquet directory is read with \code{read_parquet()} whatever \code{format} says. Install the extension beforehand
+(\verb{INSTALL delta}) on machines without internet access: a failed install or load can crash the R session.}
 
 \item{s3_options}{Optional named list of S3 configuration options (endpoint, access keys, region).}
 

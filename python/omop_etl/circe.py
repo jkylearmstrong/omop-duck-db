@@ -59,6 +59,12 @@ DOMAIN_TABLE_MAP = {
         "date_col": "device_exposure_start_date",
         "end_date_col": "COALESCE(device_exposure_end_date, device_exposure_start_date + INTERVAL '1' DAY)",
     },
+    "Death": {
+        "table": "death",
+        "concept_col": "cause_concept_id",
+        "date_col": "death_date",
+        "end_date_col": "death_date + INTERVAL '1' DAY",
+    },
 }
 
 
@@ -125,17 +131,38 @@ _SUPPORTED_ATTRS = {"CodesetId", "ValueAsNumber", "First", "ConditionTypeExclude
                     "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude"}
 
 
+# attributes the compiler evaluates on an entry event (primary criterion) but not on an inclusion-rule criterion
+_PRIMARY_ONLY_ATTRS = {"Age", "DateAdjustment", "CorrelatedCriteria"}
+_DATE_FIELDS = ("START_DATE", "END_DATE")
+
+
 def _empty(v: Any) -> bool:
     return v is None or v is False or v == [] or v == {} or v == ""
 
 
-def _check_criteria_supported(item: dict, where: str) -> None:
-    extra = [k for k, v in item.items() if k not in _SUPPORTED_ATTRS and not _empty(v)]
+def _check_criteria_supported(item: dict, where: str, primary: bool = False) -> None:
+    allowed = _SUPPORTED_ATTRS | _PRIMARY_ONLY_ATTRS if primary else _SUPPORTED_ATTRS
+    extra = [k for k, v in item.items() if k not in allowed and not _empty(v)]
     if extra:
         raise NotImplementedError(f"{where}: criterion attribute(s) {sorted(extra)} are not supported by the native compiler; "
                                   "run this definition with CirceR + CohortGenerator.")
     if item.get("First"):
         raise NotImplementedError(f"{where}: 'First' (earliest event only) is not supported by the native compiler.")
+    if primary:
+        adj = item.get("DateAdjustment") or {}
+        for key in ("StartWith", "EndWith"):
+            if adj.get(key) is not None and str(adj[key]).upper() not in _DATE_FIELDS:
+                raise NotImplementedError(f"{where}: DateAdjustment {key} {adj[key]!r} is not supported by the native compiler.")
+        if not _empty(item.get("CorrelatedCriteria")):
+            _check_group_supported(item["CorrelatedCriteria"], f"{where} CorrelatedCriteria")
+
+
+def _check_group_supported(expr: dict, where: str) -> None:
+    """A criteria group (an inclusion rule's expression, or the CorrelatedCriteria of an entry event)."""
+    if expr.get("Groups"):
+        raise NotImplementedError(f"{where}: nested criteria groups are not supported by the native compiler.")
+    if str(expr.get("Type", "ALL")).upper() not in ("ALL", "ANY"):
+        raise NotImplementedError(f"{where}: group type {expr.get('Type')!r} is not supported.")
 
 
 def _check_wrapper_supported(w: dict, where: str) -> None:
@@ -242,6 +269,25 @@ def _compile_criteria(crit_wrapper: dict, cdm_schema: str = "main") -> str | Non
                               f"supported: {sorted(DOMAIN_TABLE_MAP)} and DemographicCriteria.")
 
 
+def _compile_group(expr: dict, cdm_schema: str) -> str | None:
+    """SQL condition (on the alias ``p`` with ``subject_id`` and ``event_start_date``) of a criteria group, or None when it has none."""
+    group_type = str(expr.get("Type", "ALL")).upper()
+    clauses = []
+    for crit_wrapper in expr.get("CriteriaList", []):
+        c_sql = _compile_criteria(crit_wrapper, cdm_schema=cdm_schema)
+        if c_sql:
+            clauses.append(c_sql)
+    # ATLAS puts age / gender conditions of a rule in DemographicCriteriaList (evaluated on the entry date)
+    for demo in expr.get("DemographicCriteriaList", []) or []:
+        c_sql = _compile_criteria({"Criteria": {"DemographicCriteria": demo}}, cdm_schema=cdm_schema)
+        if c_sql:
+            clauses.append(c_sql)
+    if not clauses:
+        return None
+    join_op = " AND\n                " if group_type == "ALL" else " OR\n                "
+    return f"(\n                {join_op.join(clauses)}\n            )"
+
+
 def _check_definition_supported(data: dict) -> None:
     """Raises for constructs that change WHO is in the cohort and that this compiler does not evaluate (silently dropping
     them gave larger cohorts than ATLAS); warns for constructs that only change the end dates."""
@@ -252,18 +298,14 @@ def _check_definition_supported(data: dict) -> None:
             if item.get("includeMapped"):
                 raise NotImplementedError(f"concept set {cs.get('name', i)!r}: includeMapped is not supported by the native compiler.")
     for rule in data.get("InclusionRules", []):
-        expr = rule.get("expression", {})
-        if expr.get("Groups"):
-            raise NotImplementedError(f"inclusion rule {rule.get('name')!r}: nested criteria groups are not supported by the native compiler.")
-        if str(expr.get("Type", "ALL")).upper() not in ("ALL", "ANY"):
-            raise NotImplementedError(f"inclusion rule {rule.get('name')!r}: group type {expr.get('Type')!r} is not supported.")
+        _check_group_supported(rule.get("expression", {}), f"inclusion rule {rule.get('name')!r}")
     for crit in data.get("PrimaryCriteria", {}).get("CriteriaList", []):
         if not set(crit) & set(DOMAIN_TABLE_MAP):
             raise NotImplementedError(f"primary criterion type {sorted(crit)} is not supported by the native compiler; "
                                       f"supported: {sorted(DOMAIN_TABLE_MAP)}.")
         for key, item in crit.items():
             if key in DOMAIN_TABLE_MAP and isinstance(item, dict):
-                _check_criteria_supported(item, f"primary criterion {key}")
+                _check_criteria_supported(item, f"primary criterion {key}", primary=True)
     notes = []
     strat = data.get("EndStrategy") or {}
     if strat and "DateOffset" not in strat:
@@ -363,18 +405,42 @@ def compile_circe_to_duckdb(
                     else ""
                 )
 
-                # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5)
-                value_where = (f"WHERE {_compile_numeric_filter('e.value_as_number', c_item['ValueAsNumber'])}"
-                               if "ValueAsNumber" in c_item else "")
+                # DateAdjustment moves the event's start / end onto its start or end date plus an offset (ATLAS: an index on discharge)
+                adj = c_item.get("DateAdjustment") or {}
+                src = {"START_DATE": f"CAST(e.{d_col} AS DATE)", "END_DATE": f"CAST({end_col} AS DATE)"}
+                start_expr, end_expr_ev = src["START_DATE"], src["END_DATE"]
+                if not _empty(adj):
+                    start_expr = (f"CAST({src[str(adj.get('StartWith', 'START_DATE')).upper()]} + "
+                                  f"INTERVAL '{int(adj.get('StartOffset', 0))}' DAY AS DATE)")
+                    end_expr_ev = (f"CAST({src[str(adj.get('EndWith', 'END_DATE')).upper()]} + "
+                                   f"INTERVAL '{int(adj.get('EndOffset', 0))}' DAY AS DATE)")
+                # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5); Age is the year of the (adjusted)
+                # start date minus the year of birth, as in ATLAS
+                filters = []
+                person_join = ""
+                if "ValueAsNumber" in c_item:
+                    filters.append(_compile_numeric_filter("e.value_as_number", c_item["ValueAsNumber"]))
+                if not _empty(c_item.get("Age")):
+                    person_join = f"JOIN {cdm_schema}.person per ON per.person_id = e.person_id"
+                    filters.append(_compile_numeric_filter(f"(year({start_expr}) - per.year_of_birth)", c_item["Age"]))
+                value_where = f"WHERE {' AND '.join(filters)}" if filters else ""
+                # CorrelatedCriteria qualify the entry event itself, before the primary limit, so the limit picks the earliest event that qualifies
+                corr_sql = _compile_group(c_item["CorrelatedCriteria"], cdm_schema) if not _empty(c_item.get("CorrelatedCriteria")) else None
+                corr_where = f"WHERE {corr_sql}" if corr_sql else ""
                 primary_selects.append(f"""
-                SELECT 
-                    e.person_id AS subject_id,
-                    CAST(e.{d_col} AS DATE) AS event_start_date,
-                    CAST({end_col} AS DATE) AS event_end_date,
-                    '{domain_key}' AS criteria_type
-                FROM {cdm_schema}.{tbl} e
-                {cs_join}
-                {value_where}
+                SELECT p.subject_id, p.event_start_date, p.event_end_date, p.criteria_type
+                FROM (
+                    SELECT
+                        e.person_id AS subject_id,
+                        {start_expr} AS event_start_date,
+                        {end_expr_ev} AS event_end_date,
+                        '{domain_key}' AS criteria_type
+                    FROM {cdm_schema}.{tbl} e
+                    {cs_join}
+                    {person_join}
+                    {value_where}
+                ) p
+                {corr_where}
                 """)
 
     if not primary_selects:
@@ -409,22 +475,9 @@ def compile_circe_to_duckdb(
     inclusion_rules = data.get("InclusionRules", [])
     rule_clauses = []
     for rule in inclusion_rules:
-        expr = rule.get("expression", {})
-        rule_type = expr.get("Type", "ALL").upper()
-        crit_list = expr.get("CriteriaList", [])
-        crit_clauses = []
-        for crit_wrapper in crit_list:
-            c_sql = _compile_criteria(crit_wrapper, cdm_schema=cdm_schema)
-            if c_sql:
-                crit_clauses.append(c_sql)
-        # ATLAS puts age / gender conditions of a rule in DemographicCriteriaList (evaluated on the entry date)
-        for demo in expr.get("DemographicCriteriaList", []) or []:
-            c_sql = _compile_criteria({"Criteria": {"DemographicCriteria": demo}}, cdm_schema=cdm_schema)
-            if c_sql:
-                crit_clauses.append(c_sql)
-        if crit_clauses:
-            join_op = " AND\n                " if rule_type == "ALL" else " OR\n                "
-            rule_clauses.append(f"(\n                {join_op.join(crit_clauses)}\n            )")
+        rule_sql = _compile_group(rule.get("expression", {}), cdm_schema)
+        if rule_sql:
+            rule_clauses.append(rule_sql)
 
     inc_filter = ""
     if rule_clauses:

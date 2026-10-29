@@ -101,11 +101,20 @@ def omop_connect_lakehouse(
     if s3_options:
         _configure_s3(con, s3_options)
 
-    # Try loading format-specific extensions
+    # Load the delta / iceberg extension only for tables that are one (a `_delta_log` or `metadata` directory, or a remote URI that
+    # cannot be inspected). A plain parquet directory never needs it, and a failed INSTALL / LOAD crashes the R binding of DuckDB
+    # (intermittent segfault, reproduced on Windows), so both bindings behave the same way.
     delta_available = False
     iceberg_available = False
+    is_remote = uri_str.startswith(("s3://", "s3a://", "http://", "https://", "azure://", "abfs://", "gcs://"))
+    marker = {"delta": "_delta_log", "iceberg": "metadata"}.get(fmt)
 
-    if fmt == "delta":
+    def is_lake_table(tbl: str) -> bool:
+        return is_remote or (marker is not None and (Path(uri_str) / tbl / marker).is_dir())
+
+    needs_extension = marker is not None and any(is_lake_table(t) for t in target_tables)
+
+    if fmt == "delta" and needs_extension:
         try:
             con.execute("INSTALL delta; LOAD delta;")
             delta_available = True
@@ -115,7 +124,7 @@ def omop_connect_lakehouse(
                 delta_available = True
             except Exception:
                 delta_available = False
-    elif fmt == "iceberg":
+    elif fmt == "iceberg" and needs_extension:
         try:
             con.execute("INSTALL iceberg; LOAD iceberg;")
             iceberg_available = True
@@ -136,9 +145,9 @@ def omop_connect_lakehouse(
                 continue
 
         scan_expr = None
-        if fmt == "delta" and delta_available:
+        if fmt == "delta" and delta_available and is_lake_table(tbl):
             scan_expr = f"delta_scan('{table_path}')"
-        elif fmt == "iceberg" and iceberg_available:
+        elif fmt == "iceberg" and iceberg_available and is_lake_table(tbl):
             # Check for metadata folder or scan directly
             scan_expr = f"iceberg_scan('{table_path}')"
         else:

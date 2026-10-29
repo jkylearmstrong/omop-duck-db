@@ -337,7 +337,9 @@ def test_circe_json_is_consistent_with_the_authoritative_sql():
     target = json.loads((_COHORTS / "target_cohort.circe.json").read_text(encoding="utf-8"))
     visit = target["PrimaryCriteria"]["CriteriaList"][0]["VisitOccurrence"]
     assert visit["Age"]["Value"] == 18 and target["PrimaryCriteria"]["ObservationWindow"]["PostDays"] == 30
-    assert "discharged_to_concept_id" in target["InclusionRules"][0]["description"]   # the documented rule-3 gap
+    from omop_etl.circe_definitions import target_cohort_circe
+    assert "discharged_to_concept_id" in target_cohort_circe.__doc__                    # the documented rule-3 gap
+    assert target["PrimaryCriteria"]["CriteriaList"][0]["VisitOccurrence"]["DateAdjustment"]["StartWith"] == "END_DATE"
 
 
 def test_followup_evidence_option_counts_later_events(tmp_path):
