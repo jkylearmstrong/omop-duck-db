@@ -325,6 +325,7 @@ from omop_etl.geography import (
     write_geography_measurements,
 )
 from omop_etl.model_ablation import ablate_feature_groups, compare_model_runs, ridge_logistic_fit_predict
+from omop_etl.cohort_sql import cohort_definitions_dir
 from omop_etl.cohort_reconcile import explain_cohort_gaps, reconcile_cohort, suppress_small_cells
 from omop_etl.custom_covariates import (check_custom_concepts, custom_concept_registry, export_custom_concept_registry,
                                         register_custom_concepts, write_custom_covariates, write_custom_features)
@@ -637,6 +638,7 @@ __all__ = [
     "ablate_feature_groups",
     "compare_model_runs",
     "ridge_logistic_fit_predict",
+    "cohort_definitions_dir",
     "explain_cohort_gaps",
     "reconcile_cohort",
     "suppress_small_cells",

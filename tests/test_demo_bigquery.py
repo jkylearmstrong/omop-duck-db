@@ -15,7 +15,7 @@ VALUES = dict(cdm=CDM, scratch=SCRATCH, cohort_table="demo_cohort", features_tab
 
 
 def test_cohort_compiles_to_parseable_googlesql():
-    sql = compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
+    sql = compile_cohort_bigquery("inst/cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
     sqlglot.parse_one(sql, read="bigquery")  # raises on a syntax error
     assert sql.startswith("CREATE OR REPLACE TABLE `my-proj.scratch.demo_cohort` AS")
     assert f"`{CDM}.concept_ancestor`" in sql and "cdm_ph" not in sql
@@ -27,12 +27,12 @@ def test_cohort_compiles_to_parseable_googlesql():
 
 
 def test_gestational_exclusion_is_in_the_sql():
-    sql = compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
+    sql = compile_cohort_bigquery("inst/cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
     assert "4024659" in sql  # gestational diabetes subtracted from the diabetes concept set
 
 
 def test_vocabulary_dataset_is_used_for_concept_ancestor():
-    sql = compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH, vocabulary="my-proj.vocab")
+    sql = compile_cohort_bigquery("inst/cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH, vocabulary="my-proj.vocab")
     assert "`my-proj.vocab.concept_ancestor`" in sql and f"`{CDM}.concept_ancestor`" not in sql
 
 
@@ -47,9 +47,9 @@ def test_template_sql_is_googlesql(name):
 
 def test_bad_identifiers_rejected():
     with pytest.raises(ValueError):
-        compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", "nodataset", SCRATCH)
+        compile_cohort_bigquery("inst/cohorts/diabetes_phenotype.circe.json", "nodataset", SCRATCH)
     with pytest.raises(ValueError):
-        compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, "a.b; DROP", )
+        compile_cohort_bigquery("inst/cohorts/diabetes_phenotype.circe.json", CDM, "a.b; DROP", )
 
 
 def test_summary_survives_claims_data_without_labs():
@@ -105,7 +105,7 @@ ALL = ["person", "visit_occurrence", "observation_period", "concept_ancestor", "
 @pytest.mark.parametrize("fail_measurement", [False, True])
 def test_run_demo_end_to_end_with_fake_client(tmp_path, fail_measurement):
     client = _FakeClient(ALL, fail_measurement)
-    s = run_demo("my-proj", tmp_path, client=client, cohort_json="cohorts/diabetes_phenotype.circe.json")
+    s = run_demo("my-proj", tmp_path, client=client, cohort_json="inst/cohorts/diabetes_phenotype.circe.json")
     assert s["n_cohort"] == 3 and client.datasets == ["my-proj.omop_duckdb_demo"]
     assert all("unavailable" in v["status"] for v in s["clinical_telemetry"].values())
     report = (tmp_path / "demo_report.md").read_text(encoding="utf-8")
@@ -137,7 +137,7 @@ def test_cli_dry_run_reads_config_and_prints_disclaimer(tmp_path, monkeypatch, c
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "bigquery.yml").write_text("billing_project: cfg-proj\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    cohort = __import__("pathlib").Path(__file__).resolve().parents[1] / "cohorts" / "diabetes_phenotype.circe.json"
+    cohort = __import__("pathlib").Path(__file__).resolve().parents[1] / "inst" / "cohorts" / "diabetes_phenotype.circe.json"
     assert main(["--dry-run", "--output-dir", "o", "--cohort-json", str(cohort)]) == 0
     assert "SYNTHETIC" in capsys.readouterr().out
     assert "cfg-proj" in (tmp_path / "o" / "demo_summary.json").read_text(encoding="utf-8")
@@ -156,7 +156,7 @@ def test_runner_wraps_client_calls():
 def test_no_sqlglot_warnings_and_utilization_note(tmp_path, caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger="sqlglot"):
-        compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
+        compile_cohort_bigquery("inst/cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
     assert not [r for r in caplog.records if "NULLS LAST" in r.getMessage()]
-    run_demo("my-proj", tmp_path, client=_FakeClient(ALL), cohort_json="cohorts/diabetes_phenotype.circe.json")
+    run_demo("my-proj", tmp_path, client=_FakeClient(ALL), cohort_json="inst/cohorts/diabetes_phenotype.circe.json")
     assert "FIRST qualifying diabetes event" in (tmp_path / "demo_report.md").read_text(encoding="utf-8")

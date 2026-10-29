@@ -33,7 +33,7 @@ knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
 
 ## 1. Check the SQL without any credentials
 
-A dry run compiles `cohorts/diabetes_phenotype.circe.json` (including the gestational-diabetes exclusion) and the
+A dry run compiles `inst/cohorts/diabetes_phenotype.circe.json` (including the gestational-diabetes exclusion) and the
 feature queries, writes them to `output_dir`, and makes no BigQuery call. In R the cohort step needs CirceR; without it the dry run warns and writes only the feature SQL (Python's dry run always writes both):
 
 ```bash

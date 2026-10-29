@@ -55,7 +55,7 @@ apply_integer64_policy <- function(integer64, db_path, cdm_database_schema) {
 #' Site files often expose `concept` and the other vocabulary tables as views into a catalog named `central_vocab`.
 #' Those views only resolve when the vocabulary file is attached under exactly that name. HADES opens several
 #' connections per run and DatabaseConnector cannot ATTACH on connect, so run these statements on each new connection
-#' (see `cohorts/run_plp_readonly_example.R`). Nothing is written to either file.
+#' (see `inst/cohorts/run_plp_readonly_example.R`). Nothing is written to either file.
 #'
 #' @param cdm_db Path to the CDM DuckDB file.
 #' @param vocab_db Optional path to the vocabulary DuckDB file; `NULL` when the CDM holds real vocabulary tables.
@@ -82,7 +82,7 @@ readonly_attach_sql <- function(cdm_db, vocab_db = NULL, cdm_alias = "cdm", voca
 #'
 #' DatabaseConnector cannot `ATTACH` on connect, and HADES opens several connections per run. This returns a function
 #' with the same arguments as `connect` that opens the connection and then runs each statement of
-#' [readonly_attach_sql()] on it. `cohorts/run_plp_readonly_example.R` patches `DatabaseConnector::connect` with it for
+#' [readonly_attach_sql()] on it. `inst/cohorts/run_plp_readonly_example.R` patches `DatabaseConnector::connect` with it for
 #' one R session.
 #'
 #' @param connect The connect function to wrap, for example `DatabaseConnector::connect`.

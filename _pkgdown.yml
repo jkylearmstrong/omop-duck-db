@@ -199,6 +199,7 @@ reference:
   - plp_database_details
   - cm_database_details
   - cohort_definition_set
+  - cohort_definitions_dir
   - as_plp_data
   - export_plp_study_package
   - duckdb_to_andromeda

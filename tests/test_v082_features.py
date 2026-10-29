@@ -91,7 +91,7 @@ def test_standard_labs_ckd_epi_2021_and_anion_gap():
 # ---- FR-D1: portable cohort SQL (OHDSI SQL, translated with sqlglot as a stand-in for SqlRender) ----
 from pathlib import Path
 
-_COHORTS = Path(__file__).resolve().parent.parent / "cohorts"
+_COHORTS = Path(__file__).resolve().parent.parent / "inst" / "cohorts"
 
 
 def _render(name, **params):

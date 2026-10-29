@@ -8,8 +8,8 @@ test_that("CohortGenerator::generateCohortSet runs cohort_definition_set() on a 
   skip_if_not_installed("DatabaseConnector")
   skip_if_not_installed("duckdb")
   skip_if_not_installed("DBI")
-  d <- testthat::test_path("..", "..", "cohorts")
-  if (!file.exists(file.path(d, "target_cohort.sql"))) skip("cohorts/ is not part of the installed package")
+  d <- cohort_definitions_dir()
+  if (!file.exists(file.path(d, "target_cohort.sql"))) skip("the shipped cohort definitions are not available")
 
   db <- tempfile(fileext = ".duckdb")
   con <- DBI::dbConnect(duckdb::duckdb(), db)

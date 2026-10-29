@@ -1,4 +1,4 @@
-# Local ATLAS + WebAPI + PostgreSQL for importing cohorts/*.circe.json (ATLAS 2.13+ supports DateAdjustment; WebAPI 2.14 and 2.15 cannot generate cohorts on a DuckDB source ("Unsupported data source dialect: duckdb")).
+# Local ATLAS + WebAPI + PostgreSQL for importing inst/cohorts/*.circe.json (ATLAS 2.13+ supports DateAdjustment; WebAPI 2.14 and 2.15 cannot generate cohorts on a DuckDB source ("Unsupported data source dialect: duckdb")).
 #   docker compose -f scripts/atlas/docker-compose.yml up -d
 #   python scripts/atlas/import_circe.py --webapi http://localhost:18080/WebAPI
 # Ports are deliberately non-default (WebAPI 18080, ATLAS 18081, PostgreSQL 15432). Throwaway credentials; ports bind to 127.0.0.1 only because WebAPI runs with DisabledSecurity and open CORS.

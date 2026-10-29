@@ -16,7 +16,7 @@ from omop_etl.exclusions import find_metformin_only_prediabetes_pcos
 
 import test_exclusions as fx
 
-COHORTS = REPO_ROOT / "cohorts"
+COHORTS = REPO_ROOT / "inst" / "cohorts"
 GDM = 4024659
 
 

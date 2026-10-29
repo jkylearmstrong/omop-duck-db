@@ -1,6 +1,6 @@
 cohorts_dir <- function() {
-  d <- testthat::test_path("..", "..", "cohorts")
-  if (!file.exists(file.path(d, "target_cohort.sql"))) testthat::skip("cohorts/ is not part of the installed package")
+  d <- cohort_definitions_dir()
+  if (!file.exists(file.path(d, "target_cohort.sql"))) testthat::skip("the shipped cohort definitions are not available")
   d
 }
 
@@ -91,4 +91,12 @@ test_that("checkpoint_database leaves no .wal and the file then attaches READ_ON
   writeLines("", paste0(db, ".wal"))
   expect_warning(readonly_attach_sql(db), "checkpoint_database")
   unlink(c(db, paste0(db, ".wal")))
+})
+
+test_that("cohort_definitions_dir finds the shipped definitions, and cohort_definition_set uses it by default", {
+  d <- cohort_definitions_dir()
+  expect_true(dir.exists(d))
+  expect_true(all(c("target_cohort.sql", "outcome_cohort.sql", "target_cohort.circe.json", "diabetes_phenotype.circe.json") %in% list.files(d)))
+  skip_if_not_installed("SqlRender")
+  expect_equal(cohort_definition_set()$cohortId, cohort_definition_set(d)$cohortId)
 })

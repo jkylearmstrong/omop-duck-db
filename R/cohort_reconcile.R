@@ -168,7 +168,7 @@ explain_cohort_gaps <- function(con, reference, definition = NULL, cohort = NULL
 #' \dontrun{
 #' # a legacy extraction's patient list (one identifier per row, optionally its index date) against a Circe definition
 #' con <- DBI::dbConnect(duckdb::duckdb(), "cdm.duckdb", read_only = TRUE)
-#' out <- reconcile_cohort(con, "legacy_patients.csv", definition = "cohorts/target_cohort.circe.json",
+#' out <- reconcile_cohort(con, "legacy_patients.csv", definition = file.path(cohort_definitions_dir(), "target_cohort.circe.json"),
 #'                         id_col = "patient_id", index_date_col = "admit_date", min_cell = 11)
 #' out$counts   # both, reference_only, cohort_only, jaccard
 #' out$gaps     # why the reference patients we miss are missing, as counts by step

@@ -154,7 +154,7 @@ summarize_bigquery_demo <- function(features, availability = NULL) {
 
 #' Build the diabetes cohort on the public CMS SynPUF OMOP dataset in BigQuery
 #'
-#' A software demonstration and smoke test: compiles `cohorts/diabetes_phenotype.circe.json` to GoogleSQL
+#' A software demonstration and smoke test: compiles `inst/cohorts/diabetes_phenotype.circe.json` to GoogleSQL
 #' (CirceR + SqlRender), builds the cohort and baseline features (age, sex, race, prior-year utilization) in a scratch
 #' dataset of **your** project, and writes `demo_report.md`, `demo_summary.json`, `demo_features.csv` and the SQL to
 #' `output_dir`. The data are synthetic claims with no labs or vital signs; those features are reported as 100%
@@ -169,7 +169,7 @@ summarize_bigquery_demo <- function(features, availability = NULL) {
 #' @param dataset Source CDM, `"project.dataset"`.
 #' @param scratch_dataset A writable `"project.dataset"` (default `<billing_project>.omop_duckdb_demo`).
 #' @param vocabulary_dataset Where `concept_ancestor` lives if not in `dataset`.
-#' @param cohort_json Circe JSON; defaults to `cohorts/diabetes_phenotype.circe.json` relative to the working directory (run from the repository root).
+#' @param cohort_json Circe JSON; defaults to `inst/cohorts/diabetes_phenotype.circe.json` relative to the working directory (run from the repository root).
 #' @param cohort_id Cohort definition id.
 #' @param dry_run `TRUE` compiles and writes the SQL only (no BigQuery call, no credentials).
 #' @param runner For tests: a list with `execute(sql)`, `fetch(sql)` and `ensure_dataset(dataset)`.
@@ -185,7 +185,7 @@ run_bigquery_demo <- function(billing_project = NULL, output_dir = "bigquery_dem
       billing_project == "REPLACE_WITH_YOUR_GCP_PROJECT_ID") {
     stop("Provide billing_project (your GCP project id) or set it in config/bigquery.yml", call. = FALSE)
   }
-  cohort_json <- cohort_json %||% file.path("cohorts", "diabetes_phenotype.circe.json")
+  cohort_json <- cohort_json %||% file.path(cohort_definitions_dir(), "diabetes_phenotype.circe.json")
   if (!file.exists(cohort_json)) stop("cohort definition not found: ", cohort_json, call. = FALSE)
   scratch <- scratch_dataset %||% paste0(billing_project, ".omop_duckdb_demo")
   dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)

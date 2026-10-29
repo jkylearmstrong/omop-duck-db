@@ -263,9 +263,9 @@ def test_portable_cohort_sql_gives_the_same_cohorts_on_every_server(backend):
                   followup_days=30, min_age=18)
     try:
         with eng.begin() as c:
-            for stmt in _statements(render_cohort_sql(REPO_ROOT / "cohorts" / "target_cohort.sql", target_cohort_id=1, **common), backend):
+            for stmt in _statements(render_cohort_sql(REPO_ROOT / "inst" / "cohorts" / "target_cohort.sql", target_cohort_id=1, **common), backend):
                 c.execute(sa.text(stmt))
-            for stmt in _statements(render_cohort_sql(REPO_ROOT / "cohorts" / "outcome_cohort.sql", target_cohort_id=2, **common), backend):
+            for stmt in _statements(render_cohort_sql(REPO_ROOT / "inst" / "cohorts" / "outcome_cohort.sql", target_cohort_id=2, **common), backend):
                 c.execute(sa.text(stmt))
         with eng.connect() as c:
             target = c.execute(sa.text(

@@ -27,7 +27,7 @@ run_bigquery_demo(
 
 \item{vocabulary_dataset}{Where \code{concept_ancestor} lives if not in \code{dataset}.}
 
-\item{cohort_json}{Circe JSON; defaults to \code{cohorts/diabetes_phenotype.circe.json} relative to the working directory (run from the repository root).}
+\item{cohort_json}{Circe JSON; defaults to \code{inst/cohorts/diabetes_phenotype.circe.json} relative to the working directory (run from the repository root).}
 
 \item{cohort_id}{Cohort definition id.}
 
@@ -39,7 +39,7 @@ run_bigquery_demo(
 Invisibly, the summary list.
 }
 \description{
-A software demonstration and smoke test: compiles \code{cohorts/diabetes_phenotype.circe.json} to GoogleSQL
+A software demonstration and smoke test: compiles \code{inst/cohorts/diabetes_phenotype.circe.json} to GoogleSQL
 (CirceR + SqlRender), builds the cohort and baseline features (age, sex, race, prior-year utilization) in a scratch
 dataset of \strong{your} project, and writes \code{demo_report.md}, \code{demo_summary.json}, \code{demo_features.csv} and the SQL to
 \code{output_dir}. The data are synthetic claims with no labs or vital signs; those features are reported as 100\%

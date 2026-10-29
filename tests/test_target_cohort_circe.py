@@ -1,5 +1,5 @@
 """The index-stay cohort as Circe JSON: committed file, native compiler agreement with the official engine, and what stays different
-from the authoritative SQL (cohorts/target_cohort.sql)."""
+from the authoritative SQL (inst/cohorts/target_cohort.sql)."""
 import copy
 import json
 import sys
@@ -15,7 +15,7 @@ from omop_etl.build_omop_cdm import build_schema
 from omop_etl.circe import compile_circe_to_duckdb, execute_circe_cohort
 from omop_etl.circe_definitions import target_cohort_circe
 
-COHORTS = REPO_ROOT / "cohorts"
+COHORTS = REPO_ROOT / "inst" / "cohorts"
 
 # person -> (year of birth, end of observation)
 PEOPLE = {1: (1980, "2020-12-31"), 2: (1980, "2020-12-31"), 3: (2015, "2020-12-31"), 4: (1980, "2020-02-01"), 5: (1980, "2020-12-31"),
@@ -145,3 +145,10 @@ def test_death_is_a_domain_for_entry_events():
     d = _primary({})
     d["PrimaryCriteria"]["CriteriaList"] = [{"Death": {}}]
     assert sorted(execute_circe_cohort(c, d)["subject_id"]) == [7, 8, 9]
+
+
+def test_shipped_cohort_definitions_are_found_by_the_helper():
+    from omop_etl import cohort_definitions_dir
+    d = cohort_definitions_dir()
+    assert d.is_dir() and (d / "target_cohort.sql").exists() and (d / "target_cohort.circe.json").exists()
+    assert d.resolve() == COHORTS.resolve()                      # a source checkout: inst/cohorts

@@ -12,7 +12,7 @@ on:
       - "python/omop_etl/extract.py"
       - "python/omop_etl/export*.py"
       - "python/omop_etl/cohort_sql.py"
-      - "cohorts/**"
+      - "inst/cohorts/**"
       - "inst/extdata/5.4/duckdb/**"
       - "tests/test_live_databases.py"
       - ".github/workflows/live-db.yml"

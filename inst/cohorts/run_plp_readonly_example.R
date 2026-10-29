@@ -48,9 +48,9 @@ run_sql <- function(file, ...) {
   sql <- translate(render(readChar(file, file.info(file)$size), ...), targetDialect = "duckdb")
   executeSql(connection, sql)
 }
-run_sql("cohorts/target_cohort.sql", cdm_database_schema = "cdm.main", target_database_schema = "main",
+run_sql("inst/cohorts/target_cohort.sql", cdm_database_schema = "cdm.main", target_database_schema = "main",
         target_cohort_table = "cohort", target_cohort_id = 1, followup_days = 30, min_age = 18)
-run_sql("cohorts/outcome_cohort.sql", cdm_database_schema = "cdm.main", target_database_schema = "main",
+run_sql("inst/cohorts/outcome_cohort.sql", cdm_database_schema = "cdm.main", target_database_schema = "main",
         target_cohort_table = "cohort", target_cohort_id = 2)
 
 # --- prediction -------------------------------------------------------------------------------------------
@@ -72,7 +72,7 @@ runPlp(plpData = plpData, outcomeId = 2,
        modelSettings = setLassoLogisticRegression(), saveDirectory = "plp_results")
 
 # --- CohortGenerator alternative to run_sql() above ----------------------------------------------------------
-# cds <- omopduckdb::cohort_definition_set("cohorts")
+# cds <- omopduckdb::cohort_definition_set()
 # CohortGenerator::createCohortTables(connectionDetails = connectionDetails, cohortDatabaseSchema = "main",
 #                                     cohortTableNames = CohortGenerator::getCohortTableNames("cohort"))
 # CohortGenerator::generateCohortSet(connectionDetails = connectionDetails, cdmDatabaseSchema = "cdm.main",

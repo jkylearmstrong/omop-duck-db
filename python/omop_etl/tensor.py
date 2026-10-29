@@ -48,7 +48,7 @@ def extract_longitudinal_tensors(
         Lookback window in days prior to index admission.
     include_index_stay : bool, default False
         Also tokenize a stay that starts ON ``cohort_start_date`` (FR-A7): the default window uses
-        ``visit_start_date < cohort_start_date``. For cohorts anchored at discharge (``cohorts/target_cohort.sql``) the
+        ``visit_start_date < cohort_start_date``. For cohorts anchored at discharge (``inst/cohorts/target_cohort.sql``) the
         index stay started earlier and is already included, so this changes nothing; for cohorts anchored at admission
         it adds the index stay, whose records dated after admission may not be known at prediction time (leakage risk).
     include_labs : bool, default False

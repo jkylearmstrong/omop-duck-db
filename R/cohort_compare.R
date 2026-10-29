@@ -1,7 +1,7 @@
 #' Render, translate and run one portable cohort SQL file on DuckDB
 #'
 #' Uses OHDSI's SqlRender (`render()` -> `translate(targetDialect = "duckdb")` -> `splitSql()`), the reference
-#' implementation for the OHDSI SQL in `cohorts/`.
+#' implementation for the OHDSI SQL in `inst/cohorts/`.
 #'
 #' @param con A DuckDB DBI connection.
 #' @param sql_or_path Path to a `.sql` file, or the SQL text itself.

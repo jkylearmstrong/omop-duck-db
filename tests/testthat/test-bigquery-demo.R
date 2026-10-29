@@ -1,7 +1,7 @@
 demo_values <- list(cdm = "bigquery-public-data.cms_synthetic_patient_data_omop", scratch = "my-proj.scratch",
                     cohort_table = "demo_cohort", features_table = "demo_features", cohort_id = 1L)
-# the repository definition is not in the built package; tests that mock the compiler only need a file that exists
-demo_repo_cohort_json <- testthat::test_path("..", "..", "cohorts", "diabetes_phenotype.circe.json")
+# the shipped definition (inst/cohorts); tests that mock the compiler only need a file that exists
+demo_repo_cohort_json <- file.path(cohort_definitions_dir(), "diabetes_phenotype.circe.json")
 demo_cohort_json <- local({
   f <- tempfile(fileext = ".circe.json")
   writeLines("{}", f)

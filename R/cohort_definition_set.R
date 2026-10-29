@@ -1,6 +1,6 @@
 #' Build a CohortGenerator-ready `cohortDefinitionSet` from the shipped eDERRI cohorts (FR-D3)
 #'
-#' Reads `target_cohort.sql`, `outcome_cohort.sql` and their Circe JSON from the `cohorts/` directory of the
+#' Reads `target_cohort.sql`, `outcome_cohort.sql` and their Circe JSON from the `inst/cohorts/` directory of the
 #' omop-duck-db repository and returns the data frame that `CohortGenerator::generateCohortSet()` takes:
 #' one row per cohort with `cohortId`, `cohortName`, `sql` and `json`. The study parameters `@followup_days` and
 #' `@min_age` are rendered into the SQL here, so only the four parameters CohortGenerator itself fills in
@@ -20,7 +20,7 @@
 #'   measurement, condition or drug record also counts as verified follow-up (FR-D7).
 #' @return A data frame with columns `cohortId`, `cohortName`, `sql`, `json`.
 #' @export
-cohort_definition_set <- function(cohorts_dir = "cohorts",
+cohort_definition_set <- function(cohorts_dir = cohort_definitions_dir(),
                                   target_cohort_id = 1L,
                                   outcome_cohort_id = 2L,
                                   followup_days = 30L,

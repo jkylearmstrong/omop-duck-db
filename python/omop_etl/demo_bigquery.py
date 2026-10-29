@@ -1,6 +1,6 @@
 """Public BigQuery demonstration / smoke test on the CMS SynPUF OMOP dataset.
 
-Builds ``cohorts/diabetes_phenotype.circe.json`` and the baseline features on
+Builds ``inst/cohorts/diabetes_phenotype.circe.json`` and the baseline features on
 ``bigquery-public-data.cms_synthetic_patient_data_omop`` and writes a summary report. The data are SYNTHETIC CLAIMS:
 the run is a software check (the cohort compiles to GoogleSQL, executes, and the feature step survives a CDM without
 labs or vital signs), not a clinical result.
@@ -228,7 +228,7 @@ def run_demo(billing_project: str, output_dir: str | Path = "bigquery_demo_out",
     if not isinstance(billing_project, str) or not _PROJECT.match(billing_project or "") \
             or billing_project == "REPLACE_WITH_YOUR_GCP_PROJECT_ID":
         raise ValueError("billing_project must be your GCP project id (BigQuery bills the query to it)")
-    cohort_json = Path(cohort_json) if cohort_json else REPO_ROOT / "cohorts" / "diabetes_phenotype.circe.json"
+    cohort_json = Path(cohort_json) if cohort_json else REPO_ROOT / "inst" / "cohorts" / "diabetes_phenotype.circe.json"
     if not cohort_json.exists():
         raise FileNotFoundError(f"cohort definition not found: {cohort_json} (pass cohort_json=)")
     scratch = scratch_dataset or f"{billing_project}.omop_duckdb_demo"
