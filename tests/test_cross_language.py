@@ -27,6 +27,8 @@ from omop_etl.circe_definitions import target_cohort_circe
 from omop_etl.cohort_reconcile import reconcile_cohort
 from omop_etl.custom_covariates import write_custom_features
 from omop_etl.dqd_catalog import run_dqd_catalog
+from omop_etl.monitoring import calibration_summary, population_stability_index
+from omop_etl.risk_tiers import fit_capacity_thresholds, map_risk_tiers
 from omop_etl.model_ablation import _auprc, _auroc, _brier, ridge_logistic_fit_predict
 from omop_etl.model_ablation import _WeightedMetrics as WeightedMetrics
 
@@ -84,7 +86,8 @@ def test_python_and_r_agree(tmp_path):
     p_tied = np.round(p, 1)                                       # many tied scores
     weights = rng.integers(0, 4, 60)
     inputs = {"p_tied": p_tied.tolist(), "weights": weights.tolist(), "definitions": definitions, "today": dq.TODAY.isoformat(), "target_definition": target_cohort_circe(), "reference": reference,
-              "y": y.tolist(), "p": p.tolist(), "x": x.tolist(), "y_train": y_train.tolist(), "cut": 30}
+              "y": y.tolist(), "p": p.tolist(), "x": x.tolist(), "y_train": y_train.tolist(), "cut": 30,
+              "baseline": rng.beta(2, 8, 300).tolist()}
     (work / "inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
 
     # Python side, on its own copies
@@ -114,6 +117,12 @@ def test_python_and_r_agree(tmp_path):
     out["metrics"] = {"auroc": _auroc(y, p), "auprc": _auprc(y, p), "brier": _brier(y, p)}
     out["ridge"] = ridge_logistic_fit_predict(x[:30], y_train, x[30:]).tolist()
     out["weighted"] = WeightedMetrics(y, p_tied).metrics(weights)
+    base = np.array(inputs["baseline"])
+    tiers = [{"name": "high", "top_fraction": 0.10}, {"name": "elevated", "top_fraction": 0.30}, {"name": "standard"}]
+    out["monitoring"] = {"psi": population_stability_index(base, p), "psi_tied": population_stability_index(base, p_tied),
+                         "calibration": calibration_summary(y, p, min_events=5),
+                         "thresholds": [[t["name"], t["min"]] for t in fit_capacity_thresholds(base, tiers)],
+                         "tiers": map_risk_tiers(p, fit_capacity_thresholds(base, tiers)).tolist()}
 
     # R side
     env = dict(os.environ, R_PROFILE_USER="", R_ENVIRON_USER="")
@@ -145,3 +154,10 @@ def test_python_and_r_agree(tmp_path):
     assert all(_close(a, b, 1e-5) for a, b in zip(out["ridge"], rr["ridge"])) and len(out["ridge"]) == len(rr["ridge"])
     for m in ("auroc", "auprc", "brier"):
         assert _close(out["weighted"][m], rr["weighted"][m], 1e-9), ("weighted", m)
+    mon_r, mon_p = rr["monitoring"], out["monitoring"]
+    assert _close(mon_p["psi"], mon_r["psi"], 1e-9) and _close(mon_p["psi_tied"], mon_r["psi_tied"], 1e-9)
+    for k, v in mon_p["calibration"].items():
+        assert v is None and mon_r["calibration"][k] is None or _close(v, mon_r["calibration"][k], 1e-5), ("calibration", k)
+    assert [t[0] for t in mon_p["thresholds"]] == [t[0] for t in mon_r["thresholds"]]
+    assert all(_close(a[1], b[1], 1e-12) for a, b in zip(mon_p["thresholds"], mon_r["thresholds"]))
+    assert mon_p["tiers"] == mon_r["tiers"]
