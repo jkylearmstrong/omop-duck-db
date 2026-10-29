@@ -1,9 +1,5 @@
 ---
 title: "Run the diabetes cohort on public BigQuery data (CMS SynPUF)"
-vignette: >
-  %\VignetteIndexEntry{Run the diabetes cohort on public BigQuery data (CMS SynPUF)}
-  %\VignetteEngine{quarto::html}
-  %\VignetteEncoding{UTF-8}
 format: html
 execute:
   eval: false
