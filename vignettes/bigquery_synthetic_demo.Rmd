@@ -1,22 +1,23 @@
 ---
 title: "Run the diabetes cohort on public BigQuery data (CMS SynPUF)"
+output: rmarkdown::html_vignette
 vignette: >
   %\VignetteIndexEntry{Run the diabetes cohort on public BigQuery data (CMS SynPUF)}
-  %\VignetteEngine{quarto::html}
+  %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
-format: html
-execute:
-  eval: false
 ---
 
-::: {.callout-warning}
-## Software demonstration only
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
 
-`bigquery-public-data.cms_synthetic_patient_data_omop` is **synthetic claims data** (CMS DE-SynPUF). This
-walk-through checks that the cohort SQL compiles to GoogleSQL, executes, and that feature extraction survives a CDM
-with no laboratory values or vital signs. It says nothing about real-world clinical performance or human
-epidemiology, and the data are not an EHR site. Do not cite results from it as findings.
-:::
+
+> **Software demonstration only.**
+>
+> `bigquery-public-data.cms_synthetic_patient_data_omop` is **synthetic claims data** (CMS DE-SynPUF). This
+> walk-through checks that the cohort SQL compiles to GoogleSQL, executes, and that feature extraction survives a CDM
+> with no laboratory values or vital signs. It says nothing about real-world clinical performance or human
+> epidemiology, and the data are not an EHR site. Do not cite results from it as findings.
 
 ## What you need
 
@@ -49,7 +50,7 @@ python -m omop_etl.demo_bigquery --billing-project my-gcp-project --output-dir b
 
 or from R:
 
-```{r}
+```{r, eval = FALSE}
 library(omopduckdb)
 res <- run_bigquery_demo(billing_project = "my-gcp-project", output_dir = "bigquery_demo_out")
 res$n_cohort
