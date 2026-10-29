@@ -1,0 +1,18 @@
+# The worked example (inst/examples/study_walkthrough.R) runs end to end, so it cannot rot.
+test_that("the walkthrough runs and every step gives a meaningful result", {
+  f <- system.file("examples", "study_walkthrough.R", package = "omopduckdb")
+  if (!nzchar(f)) f <- file.path(testthat::test_path(), "..", "..", "inst", "examples", "study_walkthrough.R")
+  skip_if(!file.exists(f), "walkthrough script not available")
+  env <- new.env(parent = asNamespace("omopduckdb"))
+  sys.source(f, envir = env)
+  r <- env$study_walkthrough(out_dir = tempfile("wt_"), verbose = FALSE)
+  expect_gt(r$cohort_n, 200)
+  expect_equal(r$reconcile$n_reference, r$reconcile$both + r$reconcile$reference_only)
+  expect_gt(r$reconcile$both, 0.8 * r$reconcile$n_reference)
+  expect_true(all(c("in_cohort", "not_in_cdm", "no_entry_event") %in% r$gaps$reason))
+  expect_equal(r$concept_id, 2001000000)
+  expect_lt(r$ablation$auroc_delta_hi[r$ablation$group == "charlson_site"], 0)
+  expect_lte(r$ablation$auroc_delta_lo[r$ablation$group == "noise"], 0.01)
+  expect_equal(r$scored, r$cohort_n)
+  expect_match(r$refused, "different_id")
+})
