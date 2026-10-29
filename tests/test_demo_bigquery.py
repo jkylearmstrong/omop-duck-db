@@ -128,3 +128,24 @@ def test_live_bigquery_synpuf_smoke(tmp_path):
     s = run_demo(os.environ["OMOP_BQ_BILLING_PROJECT"], tmp_path)
     assert s["n_cohort"] > 0
     assert all("unavailable" in v["status"] for v in s["clinical_telemetry"].values())
+
+
+def test_cli_dry_run_reads_config_and_prints_disclaimer(tmp_path, monkeypatch, capsys):
+    from omop_etl.demo_bigquery import main
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "bigquery.yml").write_text("billing_project: cfg-proj\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    cohort = __import__("pathlib").Path(__file__).resolve().parents[1] / "cohorts" / "diabetes_phenotype.circe.json"
+    assert main(["--dry-run", "--output-dir", "o", "--cohort-json", str(cohort)]) == 0
+    assert "SYNTHETIC" in capsys.readouterr().out
+    assert "cfg-proj" in (tmp_path / "o" / "demo_summary.json").read_text(encoding="utf-8")
+
+
+def test_runner_wraps_client_calls():
+    from omop_etl.demo_bigquery import _Runner
+    client = _FakeClient(ALL)
+    r = _Runner("my-proj", client)
+    r.execute("SELECT 1")
+    r.ensure_dataset("my-proj.d")
+    assert list(r.fetch("SELECT x FROM INFORMATION_SCHEMA.TABLES")["table_name"]) == ALL
+    assert client.sql[0] == "SELECT 1" and client.datasets == ["my-proj.d"]
