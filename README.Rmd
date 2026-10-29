@@ -834,6 +834,40 @@ gdrive_download_latest()    # pull the latest snapshot instead of rebuilding
 Configure the target Drive folder in `config/gdrive.yml` (copy from
 `config/gdrive.yml.example`).
 
+## Tools for a downstream study
+
+The package supports studies that use the validated OHDSI tools (FeatureExtraction, PatientLevelPrediction, CohortGenerator) on DuckDB
+and adds what they lack. `inst/examples/study_walkthrough.R` / `.py` run all of the following on a small synthetic CDM; each step is a
+few lines to copy.
+
+```r
+# 1. Cohorts as Circe JSON, evaluated without Java or a WebAPI (the definitions ship in cohort_definitions_dir())
+cohort <- execute_circe_cohort(con, file.path(cohort_definitions_dir(), "target_cohort.circe.json"))
+
+# 2. A legacy patient list against that cohort: who is found, and the first step that excludes everyone else
+rec <- reconcile_cohort(con, "legacy_patients.csv", definition = file.path(cohort_definitions_dir(), "target_cohort.circe.json"),
+                        id_col = "patient_id", index_date_col = "admit_date", min_cell = 11)
+
+# 3. Your own version of a feature (a Charlson index, RUCA/SDI) next to the standard one, readable by FeatureExtraction / PLP;
+#    concept ids are per database, so share a registry across sites and check it
+ids <- write_custom_features(con, features)               # person_id, date, one numeric column per feature
+export_custom_concept_registry(con, "custom_concepts.json")
+check_custom_concepts(con, "other_site_registry.json")
+
+# 4. Is the feature worth keeping? Are two model runs really different? (aggregate output only)
+ablate_feature_groups(x, y, list(charlson_site = "charlson_site"))
+compare_model_runs(run_a, run_b)
+
+# 5. A bundle that records the concept ids it was trained with and refuses a site where they differ
+score_cohort(bundle, new_patients, check_concepts = con)
+
+# data quality: the schema-driven DQD catalog (checked against the official DataQualityDashboard)
+run_dqd_catalog(con)
+```
+
+The same functions exist in Python (`from omop_etl import ...`). The native Circe compiler evaluates a subset of Circe and refuses the
+rest with an error naming the construct; see `OHDSI_INTEGRATION.md` for what was checked against the official engines.
+
 ## Known limitations
 
 - Athena vocabulary downloads do not include CPT4 concept names (AMA

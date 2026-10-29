@@ -27,7 +27,7 @@ __all__ = ["explain_cohort_gaps", "reconcile_cohort", "suppress_small_cells", "G
 
 # the reasons, in the order they are checked
 GAP_REASONS = ("in_cohort", "not_in_cdm", "no_observation_period", "no_entry_event", "failed_entry_correlated_criteria",
-               "entry_outside_observation_window", "failed_inclusion_rule", "in_definition_not_in_cohort",
+               "entry_outside_observation_window", "failed_additional_criteria", "failed_inclusion_rule", "in_definition_not_in_cohort",
                "not_in_cohort_no_definition_given")
 
 
@@ -129,7 +129,7 @@ def explain_cohort_gaps(
 
     Reasons, in the order they are checked: ``in_cohort``; ``not_in_cdm`` (the identifier maps to no person);
     ``no_observation_period``; ``no_entry_event`` (no event of the entry criteria, including their concept sets, age and values);
-    ``failed_entry_correlated_criteria``; ``entry_outside_observation_window``; ``failed_inclusion_rule`` (one row per rule, named in
+    ``failed_entry_correlated_criteria``; ``entry_outside_observation_window``; ``failed_additional_criteria``; ``failed_inclusion_rule`` (one row per rule, named in
     ``detail``); ``in_definition_not_in_cohort`` (the definition keeps them but the cohort table does not, e.g. it was built another way).
 
     Returns ``{"gaps": DataFrame[reason, detail, n, pct, suppressed], "n_reference": int, "persons": DataFrame | None}``. ``persons``
@@ -144,6 +144,8 @@ def explain_cohort_gaps(
         steps.append(("no_entry_event", "", _persons(con, {**_strip_correlated(data), "InclusionRules": []}, "_primary_events_raw", cdm_schema)))
         steps.append(("failed_entry_correlated_criteria", "", _persons(con, {**data, "InclusionRules": []}, "_primary_events_raw", cdm_schema)))
         steps.append(("entry_outside_observation_window", "", _persons(con, {**data, "InclusionRules": []}, "_primary_limited", cdm_schema)))
+        if data.get("AdditionalCriteria"):
+            steps.append(("failed_additional_criteria", "", _persons(con, {**data, "InclusionRules": []}, "_primary_qualified", cdm_schema)))
         rules = data.get("InclusionRules") or []
         for k, rule in enumerate(rules, start=1):
             steps.append(("failed_inclusion_rule", str(rule.get("name") or f"rule {k}"),

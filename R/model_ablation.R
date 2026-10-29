@@ -38,7 +38,8 @@ ridge_logistic_fit_predict <- function(x_train, y_train, x_test, l2 = 1, max_ite
   mu <- colMeans(xtr, na.rm = TRUE); mu[is.nan(mu)] <- 0
   fill <- function(m) { idx <- which(is.na(m), arr.ind = TRUE); if (nrow(idx)) m[idx] <- mu[idx[, 2]]; m }
   xtr <- fill(xtr); xte <- fill(xte)
-  sdv <- apply(xtr, 2, stats::sd); sdv[is.na(sdv) | sdv == 0] <- 1
+  # population standard deviation, as in the Python twin, so both languages give the same fit
+  sdv <- apply(xtr, 2, function(v) sqrt(mean((v - mean(v))^2))); sdv[is.na(sdv) | sdv == 0] <- 1
   xtr <- sweep(sweep(xtr, 2, mu), 2, sdv, "/"); xte <- sweep(sweep(xte, 2, mu), 2, sdv, "/")
   a <- cbind(1, xtr)
   b <- numeric(ncol(a))
@@ -77,15 +78,52 @@ ridge_logistic_fit_predict <- function(x_train, y_train, x_test, l2 = 1, max_ite
   out
 }
 
+# H[m + 1] = 1 + 1/2 + ... + 1/m (H[1] = 0), cached for the last size used
+.harmonic_env <- new.env(parent = emptyenv())
+.harmonic <- function(n) {
+  if (is.null(.harmonic_env$n) || .harmonic_env$n != n) { .harmonic_env$h <- c(0, cumsum(1 / seq_len(n))); .harmonic_env$n <- n }
+  .harmonic_env$h
+}
+
+# Sort order and tie groups of one score vector, fixed once, for AUROC / AUPRC / Brier under integer row weights. A bootstrap draw is the
+# number of times each row appears; metrics from those counts equal the metrics on the rows repeated that many times (ties and average
+# precision included, which a test checks) without a sort per resample.
+.weighted_prepare <- function(y, p) {
+  ord <- order(-p)
+  ps <- p[ord]; ys <- as.numeric(y[ord])
+  list(order = ord, y = ys, sq = (ps - ys)^2, starts = which(c(TRUE, ps[-1] != ps[-length(ps)])))
+}
+
+.weighted_metrics <- function(prep, weights) {
+  w <- as.numeric(weights[prep$order])
+  pos <- w * prep$y; neg <- w * (1 - prep$y)
+  wp <- sum(pos); wn <- sum(neg)
+  if (wp == 0 || wn == 0) return(NULL)
+  n <- length(w)
+  ends <- c(prep$starts[-1] - 1L, n)
+  gp <- diff(c(0, cumsum(pos)[ends])); gn <- diff(c(0, cumsum(neg)[ends]))
+  below <- wn - cumsum(gn)                                   # negatives with a lower score than each tie group
+  auroc <- sum(gp * (below + 0.5 * gn)) / (wp * wn)
+  # average precision of the repeated rows: a block of k copies of a positive row adds k - (T - P) * (H[T + k] - H[T])
+  before_all <- cumsum(w) - w; before_pos <- cumsum(pos) - pos
+  h <- .harmonic(as.integer(sum(w)))
+  has <- pos > 0
+  t0 <- before_all[has]; t1 <- t0 + w[has]
+  auprc <- sum(w[has] - (t0 - before_pos[has]) * (h[t1 + 1] - h[t0 + 1])) / wp
+  list(auroc = auroc, auprc = auprc, brier = sum(w * prep$sq) / sum(w))
+}
+
 # differences b - a of each metric over n_boot resamples of the patients (the same resample for both)
 .paired_bootstrap <- function(y, p_a, p_b, metrics, n_boot) {
   out <- stats::setNames(lapply(metrics, function(m) numeric(0)), metrics)
   n <- length(y)
-  for (b in seq_len(n_boot)) {
-    i <- sample.int(n, n, replace = TRUE)
-    yy <- y[i]
-    if (min(yy) == max(yy)) next
-    for (m in metrics) out[[m]] <- c(out[[m]], .METRIC_FN[[m]](yy, p_b[i]) - .METRIC_FN[[m]](yy, p_a[i]))
+  a <- .weighted_prepare(y, p_a); b <- .weighted_prepare(y, p_b)
+  for (i in seq_len(n_boot)) {
+    counts <- tabulate(sample.int(n, n, replace = TRUE), nbins = n)
+    ma <- .weighted_metrics(a, counts)
+    if (is.null(ma)) next
+    mb <- .weighted_metrics(b, counts)
+    for (m in metrics) out[[m]] <- c(out[[m]], mb[[m]] - ma[[m]])
   }
   out
 }

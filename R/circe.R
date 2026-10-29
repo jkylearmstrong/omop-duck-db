@@ -113,17 +113,59 @@ NULL
 
 # attributes of a domain criterion the compiler evaluates; any other attribute that is set would narrow the official cohort
 .SUPPORTED_ATTRS <- c("CodesetId", "ValueAsNumber", "First", "ConditionTypeExclude", "DrugTypeExclude", "MeasurementTypeExclude",
-                      "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude")
+                      "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude", "Unit",
+                      "ConditionSourceConcept", "DrugSourceConcept", "ProcedureSourceConcept", "VisitSourceConcept", "MeasurementSourceConcept",
+                      "ObservationSourceConcept", "DeviceSourceConcept")
+# per domain: the key column (to order events), the source-concept column and the attribute that filters on it
+.DOMAIN_EXTRA <- list(
+  ConditionOccurrence = c("condition_occurrence_id", "condition_source_concept_id", "ConditionSourceConcept"),
+  DrugExposure = c("drug_exposure_id", "drug_source_concept_id", "DrugSourceConcept"),
+  ProcedureOccurrence = c("procedure_occurrence_id", "procedure_source_concept_id", "ProcedureSourceConcept"),
+  VisitOccurrence = c("visit_occurrence_id", "visit_source_concept_id", "VisitSourceConcept"),
+  Measurement = c("measurement_id", "measurement_source_concept_id", "MeasurementSourceConcept"),
+  Observation = c("observation_id", "observation_source_concept_id", "ObservationSourceConcept"),
+  DeviceExposure = c("device_exposure_id", "device_source_concept_id", "DeviceSourceConcept"),
+  Death = c(NA_character_, NA_character_, NA_character_)
+)
+.GROUP_TYPES <- c("ALL", "ANY", "AT_LEAST", "AT_MOST")
 
 # attributes the compiler evaluates on an entry event (primary criterion) but not on an inclusion-rule criterion
 .PRIMARY_ONLY_ATTRS <- c("Age", "DateAdjustment", "CorrelatedCriteria")
 
 .circe_empty <- function(v) is.null(v) || identical(v, FALSE) || identical(v, "") || (is.list(v) && length(v) == 0L)
 
-# A criteria group: an inclusion rule's expression or the CorrelatedCriteria of an entry event.
+# The table, or with `First` the earliest event of the person among those in the criterion's concept set (ATLAS takes the first event
+# before the window and before the other attributes: a person whose first measurement has the wrong unit does not qualify).
+.event_relation <- function(domain_key, cfg, c_item, cdm_schema) {
+  tbl <- sprintf("%s.%s", cdm_schema, cfg$table)
+  if (!isTRUE(c_item$First)) return(tbl)
+  pk <- .DOMAIN_EXTRA[[domain_key]][[1]]
+  ord <- paste0("t.", cfg$date_col, if (!is.na(pk)) paste0(", t.", pk) else "")
+  where <- if (!is.null(c_item$CodesetId)) {
+    sprintf("WHERE t.%s IN (SELECT concept_id FROM _cs_resolved WHERE codeset_id = %d) ", cfg$concept_col, as.integer(c_item$CodesetId))
+  } else ""
+  sprintf("(SELECT t.* FROM %s t %sQUALIFY ROW_NUMBER() OVER (PARTITION BY t.person_id ORDER BY %s) = 1)", tbl, where, ord)
+}
+
+# SQL conditions on the event alias e for the value, unit and source-concept attributes.
+.attr_conditions <- function(domain_key, c_item) {
+  conds <- character(0)
+  if (!is.null(c_item$ValueAsNumber) && !.circe_empty(c_item$ValueAsNumber)) conds <- c(conds, .compile_numeric_filter("e.value_as_number", c_item$ValueAsNumber))
+  units <- unlist(lapply(c_item$Unit %||% list(), function(u) if (is.list(u)) (u$CONCEPT_ID %||% u$concept_id) else NULL))
+  if (length(units)) conds <- c(conds, sprintf("e.unit_concept_id IN (%s)", paste(sprintf("%.0f", as.numeric(units)), collapse = ", ")))
+  ex <- .DOMAIN_EXTRA[[domain_key]]
+  if (!is.null(ex) && !is.na(ex[[3]]) && !is.null(c_item[[ex[[3]]]])) {
+    conds <- c(conds, sprintf("e.%s IN (SELECT concept_id FROM _cs_resolved WHERE codeset_id = %d)", ex[[2]], as.integer(c_item[[ex[[3]]]])))
+  }
+  conds
+}
+
+# A criteria group (an inclusion rule's expression, the CorrelatedCriteria of an entry event, AdditionalCriteria), with its subgroups.
 .check_group_supported <- function(expr, where) {
-  if (length(expr$Groups %||% list())) stop(sprintf("%s: nested criteria groups are not supported by the native compiler.", where), call. = FALSE)
-  if (!(toupper(expr$Type %||% "ALL") %in% c("ALL", "ANY"))) stop(sprintf("%s: group type '%s' is not supported.", where, expr$Type), call. = FALSE)
+  gtype <- toupper(expr$Type %||% "ALL")
+  if (!(gtype %in% .GROUP_TYPES)) stop(sprintf("%s: group type '%s' is not supported.", where, expr$Type), call. = FALSE)
+  if (gtype %in% c("AT_LEAST", "AT_MOST") && is.null(expr$Count)) stop(sprintf("%s: a %s group needs a Count.", where, gtype), call. = FALSE)
+  for (k in seq_along(expr$Groups %||% list())) .check_group_supported(expr$Groups[[k]], sprintf("%s group %d", where, k))
 }
 
 .check_criteria_supported <- function(item, where, primary = FALSE) {
@@ -133,7 +175,6 @@ NULL
     stop(sprintf("%s: criterion attribute(s) %s are not supported by the native compiler; run this definition with CirceR + CohortGenerator.",
                  where, paste(sort(extra), collapse = ", ")), call. = FALSE)
   }
-  if (isTRUE(item$First)) stop(sprintf("%s: 'First' (earliest event only) is not supported by the native compiler.", where), call. = FALSE)
   if (primary) {
     adj <- item$DateAdjustment %||% list()
     for (key in c("StartWith", "EndWith")) {
@@ -158,7 +199,8 @@ NULL
   }
 }
 
-# SQL condition (on the alias p with subject_id and event_start_date) of a criteria group, or NULL when it has none.
+# SQL condition (on the alias p with subject_id and event_start_date) of a criteria group, or NULL when it has none. ALL / ANY combine the
+# criteria and the subgroups with AND / OR; AT_LEAST / AT_MOST count how many hold.
 .compile_group <- function(expr, cdm_schema) {
   group_type <- toupper(expr$Type %||% "ALL")
   clauses <- character(0)
@@ -171,7 +213,15 @@ NULL
     c_sql <- .compile_criteria(list(Criteria = list(DemographicCriteria = demo)), cdm_schema = cdm_schema)
     if (!is.null(c_sql) && nzchar(c_sql)) clauses <- c(clauses, c_sql)
   }
+  for (sub in expr$Groups %||% list()) {
+    g_sql <- .compile_group(sub, cdm_schema)
+    if (!is.null(g_sql)) clauses <- c(clauses, g_sql)
+  }
   if (!length(clauses)) return(NULL)
+  if (group_type %in% c("AT_LEAST", "AT_MOST")) {
+    total <- paste(sprintf("(CASE WHEN %s THEN 1 ELSE 0 END)", clauses), collapse = " + ")
+    return(sprintf("(\n                (%s) %s %d\n            )", total, if (group_type == "AT_LEAST") ">=" else "<=", as.integer(expr$Count)))
+  }
   join_op <- if (group_type == "ALL") " AND\n                " else " OR\n                "
   sprintf("(\n                %s\n            )", paste(clauses, collapse = join_op))
 }
@@ -179,9 +229,7 @@ NULL
 # Raises for constructs that change WHO is in the cohort and that this compiler does not evaluate (silently dropping them gave
 # larger cohorts than ATLAS); warns for constructs that only change the end dates.
 .check_definition_supported <- function(data) {
-  if (!.circe_empty(data$AdditionalCriteria)) {
-    stop("AdditionalCriteria is not supported by the native compiler; run this definition with CirceR + CohortGenerator.", call. = FALSE)
-  }
+  if (!.circe_empty(data$AdditionalCriteria)) .check_group_supported(data$AdditionalCriteria, "AdditionalCriteria")
   for (cs in data$ConceptSets %||% list()) {
     for (item in cs$expression$items %||% list()) {
       if (isTRUE(item$includeMapped)) stop(sprintf("concept set '%s': includeMapped is not supported by the native compiler.", cs$name %||% ""), call. = FALSE)
@@ -279,23 +327,22 @@ NULL
         conds <- c(conds, sprintf("CAST(e.%s AS DATE) <= %s", d_col, end_bound))
       }
 
-      if (!is.null(c_item$ValueAsNumber)) {
-        conds <- c(conds, .compile_numeric_filter("e.value_as_number", c_item$ValueAsNumber))
-      }
+      conds <- c(conds, .attr_conditions(domain_key, c_item))
+      rel <- .event_relation(domain_key, cfg, c_item, cdm_schema)
 
       where_clause <- paste(conds, collapse = " AND ")
-      subquery <- sprintf("SELECT 1 FROM %s.%s e WHERE %s", cdm_schema, tbl, where_clause)
+      subquery <- sprintf("SELECT 1 FROM %s e WHERE %s", rel, where_clause)
 
       if ((occ_type == 0L && occ_count == 0L) || (occ_type == 1L && occ_count == 0L)) {
         return(sprintf("NOT EXISTS (%s)", subquery))
       } else if (occ_type == 2L && occ_count <= 1L) {
         return(sprintf("EXISTS (%s)", subquery))
       } else if (occ_type == 2L) {
-        return(sprintf("(SELECT COUNT(*) FROM %s.%s e WHERE %s) >= %d", cdm_schema, tbl, where_clause, occ_count))
+        return(sprintf("(SELECT COUNT(*) FROM %s e WHERE %s) >= %d", rel, where_clause, occ_count))
       } else if (occ_type == 0L) {
-        return(sprintf("(SELECT COUNT(*) FROM %s.%s e WHERE %s) = %d", cdm_schema, tbl, where_clause, occ_count))
+        return(sprintf("(SELECT COUNT(*) FROM %s e WHERE %s) = %d", rel, where_clause, occ_count))
       } else if (occ_type == 1L) {
-        return(sprintf("(SELECT COUNT(*) FROM %s.%s e WHERE %s) <= %d", cdm_schema, tbl, where_clause, occ_count))
+        return(sprintf("(SELECT COUNT(*) FROM %s e WHERE %s) <= %d", rel, where_clause, occ_count))
       }
     }
   }
@@ -397,9 +444,8 @@ compile_circe_to_duckdb <- function(circe_json,
         }
         # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5); Age is the year of the (adjusted) start date
         # minus the year of birth, as in ATLAS
-        filters <- character(0)
+        filters <- .attr_conditions(dom_key, c_item)
         person_join <- ""
-        if (!is.null(c_item$ValueAsNumber)) filters <- c(filters, .compile_numeric_filter("e.value_as_number", c_item$ValueAsNumber))
         if (!.circe_empty(c_item$Age)) {
           person_join <- sprintf("JOIN %s.person per ON per.person_id = e.person_id", cdm_schema)
           filters <- c(filters, .compile_numeric_filter(sprintf("(year(%s) - per.year_of_birth)", start_expr), c_item$Age))
@@ -417,13 +463,13 @@ compile_circe_to_duckdb <- function(circe_json,
               %s AS event_start_date,
               %s AS event_end_date,
               '%s' AS criteria_type
-            FROM %s.%s e
+            FROM %s e
             %s
             %s
             %s
           ) p
           %s
-        ", start_expr, end_expr_ev, dom_key, cdm_schema, cfg$table, cs_join, person_join, value_where, corr_where))
+        ", start_expr, end_expr_ev, dom_key, .event_relation(dom_key, cfg, c_item, cdm_schema), cs_join, person_join, value_where, corr_where))
       }
     }
   }
@@ -457,6 +503,11 @@ compile_circe_to_duckdb <- function(circe_json,
   # 5. Inclusion Rules
   inclusion_rules <- data$InclusionRules %||% list()
   rule_clauses <- character(0)
+  # AdditionalCriteria filter the entry events after the primary limit (verified against CirceR), before the inclusion rules
+  if (!.circe_empty(data$AdditionalCriteria)) {
+    add_sql <- .compile_group(data$AdditionalCriteria, cdm_schema)
+    if (!is.null(add_sql)) rule_clauses <- c(rule_clauses, add_sql)
+  }
   for (rule in inclusion_rules) {
     rule_sql <- .compile_group(rule$expression %||% list(), cdm_schema)
     if (!is.null(rule_sql)) rule_clauses <- c(rule_clauses, rule_sql)

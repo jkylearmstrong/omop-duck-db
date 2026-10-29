@@ -101,3 +101,20 @@ test_that("compare_model_runs validates its inputs", {
   expect_error(compare_model_runs(a, transform(a, outcome = 1 - outcome)), "disagree")
   expect_error(compare_model_runs(a, transform(a, person_id = person_id + 1000)), "in common")
 })
+
+test_that("weighted bootstrap metrics equal the metrics of the repeated rows, ties included", {
+  set.seed(12)
+  for (trial in 1:30) {
+    n <- sample(8:60, 1)
+    y <- sample(0:1, n, TRUE)
+    p <- round(runif(n), if (trial %% 2) 1 else 3)                    # half the trials have many tied scores
+    w <- sample(0:3, n, TRUE)
+    if (length(unique(y[w > 0])) < 2) next
+    got <- .weighted_metrics(.weighted_prepare(y, p), w)
+    yy <- rep(y, w); pp <- rep(p, w)
+    expect_equal(got$auroc, .m_auroc(yy, pp), tolerance = 1e-10)
+    expect_equal(got$auprc, .m_auprc(yy, pp), tolerance = 1e-9)
+    expect_equal(got$brier, .m_brier(yy, pp), tolerance = 1e-10)
+  }
+  expect_null(.weighted_metrics(.weighted_prepare(c(0, 1, 0), c(.1, .9, .5)), c(1, 0, 1)))
+})

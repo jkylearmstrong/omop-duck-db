@@ -185,12 +185,10 @@ test_that("the Observation domain is supported and events need an observation pe
 })
 
 test_that("constructs that would change the cohort are refused, not ignored", {
-  d <- atlas_def(); d$AdditionalCriteria <- list(Type = "ALL", CriteriaList = list(list(a = 1)))
-  expect_error(compile_circe_to_duckdb(d), "AdditionalCriteria")
-  d <- atlas_def(primary = list(list(ConditionOccurrence = list(CodesetId = 0, First = TRUE))))
-  expect_error(compile_circe_to_duckdb(d), "First")
-  d <- atlas_def(primary = list(list(ConditionOccurrence = list(CodesetId = 0, Unit = list(list(CONCEPT_ID = 1))))))
-  expect_error(compile_circe_to_duckdb(d), "Unit")
+  d <- atlas_def(primary = list(list(ConditionOccurrence = list(CodesetId = 0, ProviderSpecialty = list(list(CONCEPT_ID = 1))))))
+  expect_error(compile_circe_to_duckdb(d), "ProviderSpecialty")
+  d <- atlas_def(primary = list(list(Measurement = list(CodesetId = 0, ValueAsConcept = list(list(CONCEPT_ID = 1))))))
+  expect_error(compile_circe_to_duckdb(d), "ValueAsConcept")
   d <- atlas_def(primary = list(list(Specimen = list())))
   expect_error(compile_circe_to_duckdb(d), "Specimen")
   d <- atlas_def(); d$ConceptSets[[1]]$expression$items[[1]]$includeMapped <- TRUE
@@ -249,9 +247,9 @@ test_that("date adjustment, age at the adjusted date and correlated criteria on 
     StartWindow = list(Start = list(Days = 0, Coeff = 1), End = list(Days = 30, Coeff = 1)), Occurrence = list(Type = 2, Count = 1))))
   d$PrimaryCriteria$CriteriaList <- list(list(VisitOccurrence = list(CodesetId = 0, CorrelatedCriteria = any_death)))
   expect_equal(sort(unique(as.integer(sub("@.*", "", target_pairs(con, d))))), c(7L, 8L, 9L))
-  nested <- any_death; nested$Groups <- list(list(Type = "ALL", CriteriaList = list()))
+  nested <- any_death; nested$Groups <- list(list(Type = "AT_LEAST", CriteriaList = list()))
   d$PrimaryCriteria$CriteriaList <- list(list(VisitOccurrence = list(CodesetId = 0, CorrelatedCriteria = nested)))
-  expect_error(compile_circe_to_duckdb(d), "nested criteria groups")
+  expect_error(compile_circe_to_duckdb(d), "group 1: a AT_LEAST group needs a Count")
   d$PrimaryCriteria$CriteriaList <- list(list(VisitOccurrence = list(CodesetId = 0, DateAdjustment = list(StartWith = "CODE_DATE"))))
   expect_error(compile_circe_to_duckdb(d), "DateAdjustment")
 })
@@ -273,4 +271,88 @@ test_that("the target definition used by these tests is the committed Circe file
   expect_equal(committed$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$Age, mine$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$Age)
   expect_equal(committed$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$CorrelatedCriteria$CriteriaList[[1]]$Occurrence,
                mine$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$CorrelatedCriteria$CriteriaList[[1]]$Occurrence)
+})
+
+# ---- constructs evaluated natively: First, AdditionalCriteria, source-concept and Unit attributes, AT_LEAST / AT_MOST, nested groups ----
+# The expected cohorts are what CirceR + CohortGenerator returned for these definitions on this CDM (scripts/ohdsi_parity_constructs.R).
+cons_cdm <- function(env = parent.frame()) {
+  db <- tempfile(fileext = ".duckdb")
+  build_schema(db)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
+  withr::defer({ DBI::dbDisconnect(con, shutdown = TRUE); unlink(db) }, envir = env)
+  x <- function(sql) DBI::dbExecute(con, sql)
+  x("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) SELECT i, 8507, 1970, 0, 0 FROM range(1, 11) t(i)")
+  x("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, period_type_concept_id) SELECT person_id, person_id, DATE '2015-01-01', DATE '2022-12-31', 0 FROM person")
+  n <- c(cond = 0, proc = 0, meas = 0)
+  cond <- function(pid, cid, d) { n[["cond"]] <<- n[["cond"]] + 1; x(sprintf("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, condition_type_concept_id) VALUES (%d, %d, %d, DATE '%s', 0)", n[["cond"]], pid, cid, d)) }
+  proc <- function(pid, cid, src, d) { n[["proc"]] <<- n[["proc"]] + 1; x(sprintf("INSERT INTO procedure_occurrence (procedure_occurrence_id, person_id, procedure_concept_id, procedure_date, procedure_type_concept_id, procedure_source_concept_id) VALUES (%d, %d, %d, DATE '%s', 0, %d)", n[["proc"]], pid, cid, d, src)) }
+  meas <- function(pid, unit, d) { n[["meas"]] <<- n[["meas"]] + 1; x(sprintf("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, value_as_number, unit_concept_id) VALUES (%d, %d, 3004410, DATE '%s', 0, 7.0, %d)", n[["meas"]], pid, d, unit)) }
+  # 201820 = diabetes (A), 4024659 = gestational (B), procedure 4000001 with source concept 4000002 (S) or 0
+  cond(1, 201820, "2019-01-01"); cond(1, 201820, "2020-01-01"); proc(1, 4000001, 4000002, "2019-06-01")
+  cond(2, 201820, "2020-01-01"); meas(2, 8554, "2019-12-01")
+  cond(3, 4024659, "2019-01-01"); cond(3, 201820, "2020-06-01")
+  cond(4, 201820, "2018-01-01"); cond(4, 201820, "2018-02-01"); cond(4, 201820, "2021-01-01"); meas(4, 8753, "2018-01-15")
+  proc(5, 4000001, 0, "2019-01-01")
+  cond(6, 201820, "2019-03-01"); cond(6, 4024659, "2019-03-10"); proc(6, 4000001, 4000002, "2019-03-05")
+  cond(7, 201820, "2019-05-01"); proc(7, 4000001, 0, "2019-05-20"); meas(7, 8554, "2019-05-02")
+  cond(8, 4024659, "2019-02-01"); proc(8, 4000001, 4000002, "2019-02-10")
+  cond(9, 201820, "2018-01-01"); cond(9, 201820, "2019-08-05"); cond(9, 4024659, "2019-08-01"); proc(9, 4000001, 0, "2019-08-20")
+  meas(10, 8753, "2019-01-01"); meas(10, 8554, "2019-02-01")
+  con
+}
+
+cons_cs <- function(id, cid) list(id = id, name = paste0("cs", id), expression = list(items = list(list(
+  concept = list(CONCEPT_ID = cid), isExcluded = FALSE, includeDescendants = FALSE, includeMapped = FALSE))))
+cons_win <- function(s, e) list(Start = list(Days = abs(s), Coeff = if (s < 0) -1 else 1), End = list(Days = abs(e), Coeff = if (e < 0) -1 else 1))
+cons_wrap <- function(crit, s, e) list(Criteria = crit, StartWindow = cons_win(s, e), Occurrence = list(Type = 2, Count = 1))
+cons_grp <- function(type, crit, groups = list(), count = NULL) {
+  g <- list(Type = type, CriteriaList = crit, Groups = groups, DemographicCriteriaList = list())
+  if (!is.null(count)) g$Count <- count
+  g
+}
+cons_base <- function(primary, rules = list(), limit = "All", additional = NULL) {
+  d <- list(ConceptSets = list(cons_cs(0, 201820), cons_cs(1, 4024659), cons_cs(2, 4000001), cons_cs(3, 4000002), cons_cs(4, 3004410)),
+            PrimaryCriteria = list(CriteriaList = list(primary), ObservationWindow = list(PriorDays = 0, PostDays = 0), PrimaryCriteriaLimit = list(Type = limit)),
+            InclusionRules = lapply(rules, function(r) list(name = "r", expression = r)),
+            EndStrategy = list(DateOffset = list(DateField = "StartDate", Offset = 0)), CollapseSettings = list(CollapseType = "ERA", EraPad = 0))
+  if (!is.null(additional)) d$AdditionalCriteria <- additional
+  d
+}
+cons_A <- list(ConditionOccurrence = list(CodesetId = 0)); cons_B <- list(ConditionOccurrence = list(CodesetId = 1))
+cons_P <- list(ProcedureOccurrence = list(CodesetId = 2)); cons_M <- list(Measurement = list(CodesetId = 4))
+cons_unit <- list(list(CONCEPT_ID = 8554, CONCEPT_NAME = "percent"))
+cons_cases <- list(
+  first_primary = list(cons_base(list(ConditionOccurrence = list(CodesetId = 0, First = TRUE))), "1@19-01-01 2@20-01-01 3@20-06-01 4@18-01-01 6@19-03-01 7@19-05-01 9@18-01-01"),
+  first_in_rule = list(cons_base(cons_A, list(cons_grp("ALL", list(cons_wrap(list(ConditionOccurrence = list(CodesetId = 1, First = TRUE)), -365, 365))))), "6@19-03-01 9@19-08-05"),
+  first_window = list(cons_base(cons_B, list(cons_grp("ALL", list(cons_wrap(list(ConditionOccurrence = list(CodesetId = 0, First = TRUE)), -30, 30))))), "6@19-03-10"),
+  first_attr = list(cons_base(list(Measurement = list(CodesetId = 4, Unit = cons_unit, First = TRUE))), "2@19-12-01 7@19-05-02"),
+  unit = list(cons_base(list(Measurement = list(CodesetId = 4, Unit = cons_unit))), "2@19-12-01 7@19-05-02 10@19-02-01"),
+  additional = list(cons_base(cons_A, additional = cons_grp("ALL", list(cons_wrap(cons_P, 0, 60)))), "6@19-03-01 7@19-05-01 9@19-08-05"),
+  additional_limit = list(cons_base(cons_A, limit = "First", additional = cons_grp("ALL", list(cons_wrap(cons_P, 0, 60)))), "6@19-03-01 7@19-05-01"),
+  src_concept = list(cons_base(list(ProcedureOccurrence = list(CodesetId = 2, ProcedureSourceConcept = 3))), "1@19-06-01 6@19-03-05 8@19-02-10"),
+  src_concept_only = list(cons_base(list(ProcedureOccurrence = list(ProcedureSourceConcept = 3))), "1@19-06-01 6@19-03-05 8@19-02-10"),
+  any_group = list(cons_base(cons_A, list(cons_grp("ANY", list(cons_wrap(cons_B, -30, 30), cons_wrap(cons_P, -30, 30))))), "6@19-03-01 7@19-05-01 9@19-08-05"),
+  at_least_2 = list(cons_base(cons_A, list(cons_grp("AT_LEAST", list(cons_wrap(cons_B, -30, 30), cons_wrap(cons_P, -30, 30), cons_wrap(cons_M, -30, 30)), count = 2))), "6@19-03-01 7@19-05-01 9@19-08-05"),
+  at_most_1 = list(cons_base(cons_A, list(cons_grp("AT_MOST", list(cons_wrap(cons_B, -30, 30), cons_wrap(cons_P, -30, 30), cons_wrap(cons_M, -30, 30)), count = 1))),
+                   "1@19-01-01 1@20-01-01 2@20-01-01 3@20-06-01 4@18-01-01 4@18-02-01 4@21-01-01 9@18-01-01"),
+  nested = list(cons_base(cons_A, list(cons_grp("ALL", list(cons_wrap(cons_P, -60, 60)), groups = list(cons_grp("ANY", list(cons_wrap(cons_B, -30, 30), cons_wrap(cons_M, -30, 30))))))), "6@19-03-01 7@19-05-01 9@19-08-05"),
+  nested_at_least = list(cons_base(cons_A, list(cons_grp("ANY", list(cons_wrap(cons_B, -30, 30)), groups = list(cons_grp("AT_LEAST", list(cons_wrap(cons_P, -60, 60), cons_wrap(cons_M, -60, 60)), count = 2))))), "6@19-03-01 7@19-05-01 9@19-08-05")
+)
+
+test_that("the native compiler returns what the official engine returns for First, AdditionalCriteria, Unit, source concepts and groups", {
+  con <- cons_cdm()
+  for (nm in names(cons_cases)) {
+    out <- DBI::dbGetQuery(con, compile_circe_to_duckdb(cons_cases[[nm]][[1]], cdm_schema = "main"))
+    got <- sort(sprintf("%d@%s", out$subject_id, substr(format(as.Date(out$cohort_start_date)), 3, 10)))
+    expect_equal(got, sort(strsplit(cons_cases[[nm]][[2]], " ", fixed = TRUE)[[1]]), info = nm)
+  }
+})
+
+test_that("group types are validated, subgroups included", {
+  d <- cons_base(cons_A, list(cons_grp("SOMETIMES", list())))
+  expect_error(compile_circe_to_duckdb(d), "group type")
+  d <- cons_base(cons_A, list(cons_grp("ALL", list(), groups = list(cons_grp("AT_LEAST", list())))))
+  expect_error(compile_circe_to_duckdb(d), "group 1: a AT_LEAST group needs a Count")
+  d <- cons_base(cons_A, additional = cons_grp("AT_MOST", list(cons_wrap(cons_P, 0, 60))))
+  expect_error(compile_circe_to_duckdb(d), "needs a Count")
 })

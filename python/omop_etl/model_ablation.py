@@ -15,6 +15,7 @@ ridge-regularised logistic regression that needs nothing beyond numpy.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
@@ -101,18 +102,59 @@ def _oof(x: np.ndarray, y: np.ndarray, fold: np.ndarray, fit_predict: Callable) 
     return out
 
 
+@lru_cache(maxsize=4)
+def _harmonic(n: int) -> np.ndarray:
+    """H[m] = 1 + 1/2 + ... + 1/m, with H[0] = 0."""
+    return np.concatenate([[0.0], np.cumsum(1.0 / np.arange(1, n + 1))])
+
+
+class _WeightedMetrics:
+    """AUROC, AUPRC and Brier score of one score vector under integer row weights.
+
+    A bootstrap draw is the number of times each row appears. Computing the metrics from those counts with the sort order fixed once is
+    identical to computing them on the rows repeated that many times (ties and average precision included, which a test checks) but needs
+    no sort per resample, so a bootstrap on hundreds of thousands of patients takes seconds rather than minutes."""
+
+    def __init__(self, y: np.ndarray, p: np.ndarray):
+        self.order = np.argsort(-p, kind="stable")
+        self.y = y[self.order].astype(float)
+        ps = p[self.order]
+        self.sq = (ps - self.y) ** 2
+        self.starts = np.flatnonzero(np.concatenate([[True], ps[1:] != ps[:-1]]))        # first row of each group of tied scores
+
+    def metrics(self, weights: np.ndarray) -> dict[str, float] | None:
+        w = weights[self.order].astype(float)
+        pos, neg = w * self.y, w * (1.0 - self.y)
+        wp, wn = pos.sum(), neg.sum()
+        if wp == 0 or wn == 0:
+            return None
+        gp, gn = np.add.reduceat(pos, self.starts), np.add.reduceat(neg, self.starts)
+        below = wn - np.cumsum(gn)                                                  # negatives with a lower score than each tie group
+        auroc = float((gp * (below + 0.5 * gn)).sum() / (wp * wn))
+        # average precision of the repeated rows: a block of k copies of a positive row adds sum_k (P+k)/(T+k) = k - (T-P)(H[T+k]-H[T])
+        before_all = np.cumsum(w) - w
+        before_pos = np.cumsum(pos) - pos
+        h = _harmonic(int(w.sum()))
+        t0 = before_all.astype(np.int64)
+        t1 = t0 + w.astype(np.int64)
+        has = pos > 0
+        auprc = float((w[has] - (before_all[has] - before_pos[has]) * (h[t1[has]] - h[t0[has]])).sum() / wp)
+        return {"auroc": auroc, "auprc": auprc, "brier": float((w * self.sq).sum() / w.sum())}
+
+
 def _paired_bootstrap(y: np.ndarray, p_a: np.ndarray, p_b: np.ndarray, metrics: Sequence[str], n_boot: int,
                       rng: np.random.Generator) -> dict[str, np.ndarray]:
     """Differences ``b - a`` of each metric over ``n_boot`` resamples of the patients (the same resample for both)."""
     out = {m: [] for m in metrics}
     n = len(y)
+    a, b = _WeightedMetrics(y, p_a), _WeightedMetrics(y, p_b)
     for _ in range(n_boot):
-        i = rng.integers(0, n, n)
-        yy = y[i]
-        if yy.min() == yy.max():
+        counts = np.bincount(rng.integers(0, n, n), minlength=n)
+        ma, mb = a.metrics(counts), b.metrics(counts)
+        if ma is None:
             continue
         for m in metrics:
-            out[m].append(_METRIC_FN[m](yy, p_b[i]) - _METRIC_FN[m](yy, p_a[i]))
+            out[m].append(mb[m] - ma[m])
     return {m: np.asarray(v, dtype=float) for m, v in out.items()}
 
 

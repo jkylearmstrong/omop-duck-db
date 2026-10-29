@@ -128,7 +128,49 @@ def _compile_window_bound(bound_dict: dict | None, index_date: str = "p.event_st
 
 # attributes of a domain criterion the compiler evaluates; any other attribute that is set would narrow the official cohort
 _SUPPORTED_ATTRS = {"CodesetId", "ValueAsNumber", "First", "ConditionTypeExclude", "DrugTypeExclude", "MeasurementTypeExclude",
-                    "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude"}
+                    "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude", "Unit",
+                    "ConditionSourceConcept", "DrugSourceConcept", "ProcedureSourceConcept", "VisitSourceConcept", "MeasurementSourceConcept",
+                    "ObservationSourceConcept", "DeviceSourceConcept"}
+# per domain: the key column (to order events), the source-concept column and the attribute that filters on it
+_DOMAIN_EXTRA = {
+    "ConditionOccurrence": ("condition_occurrence_id", "condition_source_concept_id", "ConditionSourceConcept"),
+    "DrugExposure": ("drug_exposure_id", "drug_source_concept_id", "DrugSourceConcept"),
+    "ProcedureOccurrence": ("procedure_occurrence_id", "procedure_source_concept_id", "ProcedureSourceConcept"),
+    "VisitOccurrence": ("visit_occurrence_id", "visit_source_concept_id", "VisitSourceConcept"),
+    "Measurement": ("measurement_id", "measurement_source_concept_id", "MeasurementSourceConcept"),
+    "Observation": ("observation_id", "observation_source_concept_id", "ObservationSourceConcept"),
+    "DeviceExposure": ("device_exposure_id", "device_source_concept_id", "DeviceSourceConcept"),
+    "Death": (None, None, None),
+}
+_GROUP_TYPES = ("ALL", "ANY", "AT_LEAST", "AT_MOST")
+
+
+def _event_relation(domain_key: str, cfg: dict, c_item: dict, cdm_schema: str) -> str:
+    """The table, or with ``First`` the earliest event of the person among those in the criterion's concept set (ATLAS takes the first
+    event before the window and before the other attributes: a person whose first measurement has the wrong unit does not qualify)."""
+    tbl = f"{cdm_schema}.{cfg['table']}"
+    if not c_item.get("First"):
+        return tbl
+    pk = _DOMAIN_EXTRA[domain_key][0]
+    order = f"t.{cfg['date_col']}" + (f", t.{pk}" if pk else "")
+    where = ""
+    if c_item.get("CodesetId") is not None:
+        where = f"WHERE t.{cfg['concept_col']} IN (SELECT concept_id FROM _cs_resolved WHERE codeset_id = {int(c_item['CodesetId'])}) "
+    return f"(SELECT t.* FROM {tbl} t {where}QUALIFY ROW_NUMBER() OVER (PARTITION BY t.person_id ORDER BY {order}) = 1)"
+
+
+def _attr_conditions(domain_key: str, c_item: dict) -> list[str]:
+    """SQL conditions on the event alias ``e`` for the value, unit and source-concept attributes."""
+    conds = []
+    if "ValueAsNumber" in c_item and not _empty(c_item["ValueAsNumber"]):
+        conds.append(_compile_numeric_filter("e.value_as_number", c_item["ValueAsNumber"]))
+    units = [u.get("CONCEPT_ID", u.get("concept_id")) for u in (c_item.get("Unit") or []) if isinstance(u, dict)]
+    if units:
+        conds.append("e.unit_concept_id IN (" + ", ".join(str(int(u)) for u in units if u is not None) + ")")
+    _, src_col, src_attr = _DOMAIN_EXTRA.get(domain_key, (None, None, None))
+    if src_attr and c_item.get(src_attr) is not None:
+        conds.append(f"e.{src_col} IN (SELECT concept_id FROM _cs_resolved WHERE codeset_id = {int(c_item[src_attr])})")
+    return conds
 
 
 # attributes the compiler evaluates on an entry event (primary criterion) but not on an inclusion-rule criterion
@@ -146,8 +188,6 @@ def _check_criteria_supported(item: dict, where: str, primary: bool = False) -> 
     if extra:
         raise NotImplementedError(f"{where}: criterion attribute(s) {sorted(extra)} are not supported by the native compiler; "
                                   "run this definition with CirceR + CohortGenerator.")
-    if item.get("First"):
-        raise NotImplementedError(f"{where}: 'First' (earliest event only) is not supported by the native compiler.")
     if primary:
         adj = item.get("DateAdjustment") or {}
         for key in ("StartWith", "EndWith"):
@@ -158,11 +198,14 @@ def _check_criteria_supported(item: dict, where: str, primary: bool = False) -> 
 
 
 def _check_group_supported(expr: dict, where: str) -> None:
-    """A criteria group (an inclusion rule's expression, or the CorrelatedCriteria of an entry event)."""
-    if expr.get("Groups"):
-        raise NotImplementedError(f"{where}: nested criteria groups are not supported by the native compiler.")
-    if str(expr.get("Type", "ALL")).upper() not in ("ALL", "ANY"):
+    """A criteria group (an inclusion rule's expression, the CorrelatedCriteria of an entry event, AdditionalCriteria), with its subgroups."""
+    gtype = str(expr.get("Type", "ALL")).upper()
+    if gtype not in _GROUP_TYPES:
         raise NotImplementedError(f"{where}: group type {expr.get('Type')!r} is not supported.")
+    if gtype in ("AT_LEAST", "AT_MOST") and expr.get("Count") is None:
+        raise NotImplementedError(f"{where}: a {gtype} group needs a Count.")
+    for k, sub in enumerate(expr.get("Groups") or []):
+        _check_group_supported(sub, f"{where} group {k + 1}")
 
 
 def _check_wrapper_supported(w: dict, where: str) -> None:
@@ -248,29 +291,30 @@ def _compile_criteria(crit_wrapper: dict, cdm_schema: str = "main") -> str | Non
             if end_bound:
                 conds.append(f"CAST(e.{d_col} AS DATE) <= {end_bound}")
 
-            if "ValueAsNumber" in c_item:
-                conds.append(_compile_numeric_filter("e.value_as_number", c_item["ValueAsNumber"]))
+            conds.extend(_attr_conditions(domain_key, c_item))
+            rel = _event_relation(domain_key, domain_cfg, c_item, cdm_schema)
 
             where_clause = " AND ".join(conds)
-            subquery = f"SELECT 1 FROM {cdm_schema}.{tbl} e WHERE {where_clause}"
+            subquery = f"SELECT 1 FROM {rel} e WHERE {where_clause}"
 
             if (occ_type == 0 and occ_count == 0) or (occ_type == 1 and occ_count == 0):
                 return f"NOT EXISTS ({subquery})"
             elif occ_type == 2 and occ_count <= 1:
                 return f"EXISTS ({subquery})"
             elif occ_type == 2:
-                return f"(SELECT COUNT(*) FROM {cdm_schema}.{tbl} e WHERE {where_clause}) >= {occ_count}"
+                return f"(SELECT COUNT(*) FROM {rel} e WHERE {where_clause}) >= {occ_count}"
             elif occ_type == 0:
-                return f"(SELECT COUNT(*) FROM {cdm_schema}.{tbl} e WHERE {where_clause}) = {occ_count}"
+                return f"(SELECT COUNT(*) FROM {rel} e WHERE {where_clause}) = {occ_count}"
             elif occ_type == 1:
-                return f"(SELECT COUNT(*) FROM {cdm_schema}.{tbl} e WHERE {where_clause}) <= {occ_count}"
+                return f"(SELECT COUNT(*) FROM {rel} e WHERE {where_clause}) <= {occ_count}"
 
     raise NotImplementedError(f"criterion type {sorted(crit)} is not supported by the native compiler; "
                               f"supported: {sorted(DOMAIN_TABLE_MAP)} and DemographicCriteria.")
 
 
 def _compile_group(expr: dict, cdm_schema: str) -> str | None:
-    """SQL condition (on the alias ``p`` with ``subject_id`` and ``event_start_date``) of a criteria group, or None when it has none."""
+    """SQL condition (on the alias ``p`` with ``subject_id`` and ``event_start_date``) of a criteria group, or None when it has none.
+    ``ALL`` / ``ANY`` combine the criteria and the subgroups with AND / OR; ``AT_LEAST`` / ``AT_MOST`` count how many hold."""
     group_type = str(expr.get("Type", "ALL")).upper()
     clauses = []
     for crit_wrapper in expr.get("CriteriaList", []):
@@ -282,8 +326,15 @@ def _compile_group(expr: dict, cdm_schema: str) -> str | None:
         c_sql = _compile_criteria({"Criteria": {"DemographicCriteria": demo}}, cdm_schema=cdm_schema)
         if c_sql:
             clauses.append(c_sql)
+    for sub in expr.get("Groups") or []:
+        g_sql = _compile_group(sub, cdm_schema)
+        if g_sql:
+            clauses.append(g_sql)
     if not clauses:
         return None
+    if group_type in ("AT_LEAST", "AT_MOST"):
+        total = " + ".join(f"(CASE WHEN {c} THEN 1 ELSE 0 END)" for c in clauses)
+        return f"(\n                ({total}) {'>=' if group_type == 'AT_LEAST' else '<='} {int(expr['Count'])}\n            )"
     join_op = " AND\n                " if group_type == "ALL" else " OR\n                "
     return f"(\n                {join_op.join(clauses)}\n            )"
 
@@ -292,7 +343,7 @@ def _check_definition_supported(data: dict) -> None:
     """Raises for constructs that change WHO is in the cohort and that this compiler does not evaluate (silently dropping
     them gave larger cohorts than ATLAS); warns for constructs that only change the end dates."""
     if not _empty(data.get("AdditionalCriteria")):
-        raise NotImplementedError("AdditionalCriteria is not supported by the native compiler; run this definition with CirceR + CohortGenerator.")
+        _check_group_supported(data["AdditionalCriteria"], "AdditionalCriteria")
     for i, cs in enumerate(data.get("ConceptSets", [])):
         for item in cs.get("expression", {}).get("items", []):
             if item.get("includeMapped"):
@@ -434,10 +485,8 @@ def compile_circe_to_duckdb(
                                    f"INTERVAL '{int(adj.get('EndOffset', 0))}' DAY AS DATE)")
                 # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5); Age is the year of the (adjusted)
                 # start date minus the year of birth, as in ATLAS
-                filters = []
+                filters = _attr_conditions(domain_key, c_item)
                 person_join = ""
-                if "ValueAsNumber" in c_item:
-                    filters.append(_compile_numeric_filter("e.value_as_number", c_item["ValueAsNumber"]))
                 if not _empty(c_item.get("Age")):
                     person_join = f"JOIN {cdm_schema}.person per ON per.person_id = e.person_id"
                     filters.append(_compile_numeric_filter(f"(year({start_expr}) - per.year_of_birth)", c_item["Age"]))
@@ -453,7 +502,7 @@ def compile_circe_to_duckdb(
                         {start_expr} AS event_start_date,
                         {end_expr_ev} AS event_end_date,
                         '{domain_key}' AS criteria_type
-                    FROM {cdm_schema}.{tbl} e
+                    FROM {_event_relation(domain_key, domain_cfg, c_item, cdm_schema)} e
                     {cs_join}
                     {person_join}
                     {value_where}
@@ -492,6 +541,11 @@ def compile_circe_to_duckdb(
     # 5. Parse InclusionRules
     inclusion_rules = data.get("InclusionRules", [])
     rule_clauses = []
+    # AdditionalCriteria filter the entry events after the primary limit (verified against CirceR), before the inclusion rules
+    if not _empty(data.get("AdditionalCriteria")):
+        add_sql = _compile_group(data["AdditionalCriteria"], cdm_schema)
+        if add_sql:
+            rule_clauses.append(add_sql)
     for rule in inclusion_rules:
         rule_sql = _compile_group(rule.get("expression", {}), cdm_schema)
         if rule_sql:
