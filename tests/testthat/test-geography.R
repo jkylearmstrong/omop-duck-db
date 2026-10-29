@@ -183,3 +183,23 @@ test_that("comorbidity window can end on discharge, inclusive, for legacy parity
   expect_equal(guarded$elix_htn_uncomp, 0)
   expect_error(do.call(extract_elixhauser_comorbidities, c(kw, end_inclusive = "yes")), "end_inclusive")
 })
+
+test_that("prior utilization counts EI (262) as inpatient only and observation as a prior stay", {
+  db_path <- tempfile(fileext = ".duckdb")
+  build_schema(db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  on.exit({ DBI::dbDisconnect(con, shutdown = TRUE); unlink(db_path) }, add = TRUE)
+  DBI::dbExecute(con, "INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES (1, 8507, 1960, 0, 0)")
+  DBI::dbExecute(con, "DROP TABLE cohort")
+  DBI::dbExecute(con, "CREATE TABLE cohort (subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)")
+  DBI::dbExecute(con, "INSERT INTO cohort VALUES (1, DATE '2020-06-01', DATE '2020-06-05')")
+  v <- list(list(1, 262, "2020-01-10"), list(2, 9203, "2020-02-10"), list(3, 581385, "2020-03-10"),
+            list(4, 9202, "2020-04-10"), list(5, 9201, "2020-05-10"))
+  for (x in v) {
+    DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id) VALUES (%d, 1, %d, DATE '%s', DATE '%s', 0)", x[[1]], x[[2]], x[[3]], x[[3]]))
+  }
+  u <- extract_prior_utilization(con)
+  expect_equal(c(u$prior_ip_count, u$prior_ed_count, u$prior_os_count), c(2, 1, 2))
+  w <- extract_velocity_features(con, engineer = FALSE)
+  expect_equal(c(w$prior_ip_count, w$prior_ed_count, w$prior_ip_os_ed_count), c(2, 1, 5))
+})

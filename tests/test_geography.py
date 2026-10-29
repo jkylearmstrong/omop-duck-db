@@ -341,3 +341,30 @@ def test_comorbidity_window_can_end_on_discharge_inclusive_for_legacy_parity():
     assert extract_charlson_index(c, exclude_index_diagnoses=False, end_inclusive=True, **kw).iloc[0].cci_chf == 1
     with pytest.raises(ValueError, match="end_inclusive"):
         extract_elixhauser_comorbidities(c, end_inclusive="yes", **kw)
+
+
+def _prior_visits_cdm():
+    c = duckdb.connect()
+    build_schema(c)
+    c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) "
+              "VALUES (1, 8507, 1960, 0, 0)")
+    c.execute("DROP TABLE cohort")
+    c.execute("CREATE TABLE cohort (subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)")
+    c.execute("INSERT INTO cohort VALUES (1, DATE '2020-06-01', DATE '2020-06-05')")
+    # prior year: one EI (262), one ED (9203), one observation (581385), one outpatient (9202), one inpatient (9201)
+    for vid, vc, d in ((1, 262, "2020-01-10"), (2, 9203, "2020-02-10"), (3, 581385, "2020-03-10"), (4, 9202, "2020-04-10"),
+                       (5, 9201, "2020-05-10")):
+        c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, "
+                  f"visit_type_concept_id) VALUES ({vid}, 1, {vc}, DATE '{d}', DATE '{d}', 0)")
+    return c
+
+
+def test_prior_utilization_counts_ei_as_inpatient_only_and_observation_as_prior_stay():
+    from omop_etl import extract_prior_utilization, extract_velocity_features
+
+    row = extract_prior_utilization(_prior_visits_cdm()).iloc[0]
+    assert (row.prior_ip_count, row.prior_ed_count) == (2, 1)           # EI + IP are inpatient; only the true ED visit is ED
+    assert row.prior_os_count == 2                                      # observation (581385) is counted with outpatient
+    v = extract_velocity_features(_prior_visits_cdm(), engineer=False).iloc[0]
+    assert (v.prior_ip_count, v.prior_ed_count) == (2, 1)
+    assert v.prior_ip_os_ed_count == 5                                  # EI, ED, observation, outpatient, IP: each visit once

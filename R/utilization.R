@@ -1,12 +1,13 @@
 #' Default visit-concept groups for `extract_prior_utilization()`
 #'
-#' 9201 inpatient, 9203 emergency room, 9202 outpatient, 581385 observation (the "os" group), 262 emergency room + inpatient (counts as both IP and ED).
+#' 9201 inpatient, 9203 emergency room, 9202 outpatient, 581385 observation (the "os" group), 262 emergency room + inpatient.
+#' 262 (PCORnet EI, relabelled IP by the legacy study) counts as inpatient only, never as an ED visit.
 #'
 #' @format A named list of integer vectors (`ip`, `ed`, `os`).
 #' @export
 DEFAULT_VISIT_CONCEPT_GROUPS <- list(
   ip = c(9201L, 262L),
-  ed = c(9203L, 262L),
+  ed = 9203L,
   os = c(9202L, 581385L)
 )
 

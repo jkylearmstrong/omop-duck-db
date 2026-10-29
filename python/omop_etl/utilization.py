@@ -16,10 +16,11 @@ import pandas as pd
 
 __all__ = ["DEFAULT_VISIT_CONCEPT_GROUPS", "extract_prior_utilization"]
 
-# 9201 inpatient, 9203 emergency room, 9202 outpatient, 581385 observation (the "os" group), 262 emergency room + inpatient (counts as both IP and ED).
+# 9201 inpatient, 9203 emergency room, 9202 outpatient, 581385 observation (the "os" group), 262 emergency room + inpatient.
+# 262 (PCORnet EI, relabelled IP by the legacy study) counts as inpatient only, never as an ED visit.
 DEFAULT_VISIT_CONCEPT_GROUPS: dict[str, tuple[int, ...]] = {
     "ip": (9201, 262),
-    "ed": (9203, 262),
+    "ed": (9203,),
     "os": (9202, 581385),
 }
 
