@@ -187,12 +187,89 @@ derive_geography_features <- function(con, ruca_crosswalk, sdi_table, sdi_cut_po
                  st DESC NULLS LAST) = 1", tbl))
   }
   g <- merge(merge(picked, ruca, by = "zip5", all.x = TRUE, sort = FALSE), sdi, by = "zip5", all.x = TRUE, sort = FALSE)
+  g <- merge(g, stays[, c("stay_id", "admit_date")], by = "stay_id", all.x = TRUE, sort = FALSE)
   g <- g[order(g$stay_id), , drop = FALSE]
   g$ruca_category <- ruca_category(g$ruca_code, code_99_missing = code_99_missing)
   if (is.null(cuts)) cuts <- fit_sdi_cut_points(g$sdi_score)
   g$sdi_quintile <- assign_sdi_quintile(g$sdi_score, cuts)
-  g <- g[, c("person_id", "stay_id", "zip5", "rule", "ruca_code", "ruca_category", "sdi_score", "sdi_quintile")]
+  g <- g[, c("person_id", "stay_id", "zip5", "rule", "ruca_code", "ruca_category", "sdi_score", "sdi_quintile", "admit_date")]
   rownames(g) <- NULL
   attr(g, "sdi_cut_points") <- cuts
   g
+}
+
+
+#' Local concept ids of the geography measurements
+#'
+#' Area-level values are stored as `measurement` rows so OHDSI tools (FeatureExtraction, PatientLevelPrediction, ATLAS)
+#' see them as ordinary covariates. Concept ids from 2,000,000,000 up are the OMOP convention for site-defined concepts.
+#'
+#' @format A named numeric vector: `sdi_score`, `sdi_quintile`, `ruca_code`.
+#' @export
+GEOGRAPHY_CONCEPT_IDS <- c(sdi_score = 2000100001, sdi_quintile = 2000100002, ruca_code = 2000100003)
+.geo_concept_names <- c(
+  sdi_score = "Social Deprivation Index score of the residence ZIP at admission",
+  sdi_quintile = "Social Deprivation Index quintile (1 least to 5 most deprived) of the residence ZIP at admission",
+  ruca_code = "Rural-Urban Commuting Area primary code of the residence ZIP at admission")
+
+#' Write derived area-level values as `measurement` rows
+#'
+#' Writes the result of [derive_geography_features()] as `measurement` rows so OHDSI tools see RUCA and SDI as ordinary
+#' covariates: one row per stay and value, dated the admission date. SDI score and RUCA code as they are, SDI quintile as 1-5
+#' (from the fixed cut points). Missing values write no row. Re-running replaces the rows of the same concepts for the same
+#' persons. `unit_concept_id` is 0 (the values have no unit): FeatureExtraction joins measurement covariates on the unit and
+#' skips rows where it is NULL. FeatureExtraction reads them with `createCovariateSettings(useMeasurementValueLongTerm = TRUE,
+#' includedCovariateConceptIds = GEOGRAPHY_CONCEPT_IDS)`.
+#'
+#' @param con A DBI connection to an OMOP DuckDB.
+#' @param geography The result of [derive_geography_features()].
+#' @param concept_ids Named numeric vector overriding `GEOGRAPHY_CONCEPT_IDS` (`sdi_score`, `sdi_quintile`, `ruca_code`).
+#' @param visit_ids Link each row to `visit_occurrence_id = stay_id` (right when the stays are `visit_occurrence` rows).
+#' @param register_concepts Add the local concepts to `concept` (Measurement domain) so covariate names resolve.
+#' @param type_concept_id Measurement type concept; default 45754907 ("Derived value").
+#' @return The number of rows written.
+#' @export
+write_geography_measurements <- function(con, geography, concept_ids = NULL, visit_ids = TRUE, register_concepts = TRUE,
+                                         type_concept_id = 45754907) {
+  ids <- GEOGRAPHY_CONCEPT_IDS
+  ids[names(concept_ids)] <- concept_ids
+  need <- c("person_id", "stay_id", "admit_date", "sdi_score", "sdi_quintile", "ruca_code")
+  miss <- setdiff(need, names(geography))
+  if (length(miss)) stop("geography is missing column(s) ", paste(miss, collapse = ", "), "; pass the result of derive_geography_features().", call. = FALSE)
+  g <- geography
+  g$sdi_quintile_n <- match(g$sdi_quintile, .sdi_labels)
+  g$ruca_primary <- floor(suppressWarnings(as.numeric(g$ruca_code)))   # secondary digits (4.2) are not part of the primary code
+  parts <- list()
+  for (spec in list(c("sdi_score", "sdi_score"), c("sdi_quintile_n", "sdi_quintile"), c("ruca_primary", "ruca_code"))) {
+    keep <- !is.na(g[[spec[1]]])
+    if (any(keep)) {
+      parts[[length(parts) + 1L]] <- data.frame(person_id = g$person_id[keep], stay_id = g$stay_id[keep],
+                                                admit_date = as.Date(g$admit_date[keep]), value = as.numeric(g[[spec[1]]][keep]),
+                                                measurement_concept_id = as.numeric(ids[[spec[2]]]))
+    }
+  }
+  if (!length(parts)) return(0L)
+  rows <- do.call(rbind, parts)
+  duckdb::duckdb_register(con, "_geo_meas", rows)
+  on.exit(duckdb::duckdb_unregister(con, "_geo_meas"), add = TRUE)
+  DBI::dbExecute(con, sprintf("DELETE FROM measurement WHERE measurement_concept_id IN (%s) AND person_id IN (SELECT person_id FROM _geo_meas)",
+                              paste(sprintf("%.0f", ids), collapse = ", ")))
+  start <- DBI::dbGetQuery(con, "SELECT COALESCE(MAX(measurement_id), 0) AS m FROM measurement")$m[[1]]
+  DBI::dbExecute(con, sprintf("
+    INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_datetime,
+                             measurement_type_concept_id, value_as_number, unit_concept_id, visit_occurrence_id, measurement_source_value)
+    SELECT %.0f + row_number() OVER (ORDER BY person_id, stay_id, measurement_concept_id),
+           CAST(person_id AS BIGINT), CAST(measurement_concept_id AS INTEGER), admit_date, CAST(admit_date AS TIMESTAMP),
+           %.0f, CAST(value AS DOUBLE), 0, %s, 'omop_etl.geography'
+    FROM _geo_meas", start, type_concept_id, if (isTRUE(visit_ids)) "CAST(stay_id AS BIGINT)" else "NULL"))
+  if (isTRUE(register_concepts) && .geo_has_table(con, "concept")) {
+    for (key in names(ids)) {
+      cid <- ids[[key]]
+      if (DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM concept WHERE concept_id = %.0f", cid))$n[[1]] == 0) {
+        DBI::dbExecute(con, "INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, valid_start_date, valid_end_date) VALUES (?, ?, 'Measurement', 'omop-duck-db', 'Geography', 'S', ?, DATE '1970-01-01', DATE '2099-12-31')",
+                       params = list(cid, unname(.geo_concept_names[[key]]), key))
+      }
+    }
+  }
+  invisible(nrow(rows))
 }

@@ -31,6 +31,7 @@
 ^scripts$
 ^\.Renviron$
 ^NOTES\.md$
+^OHDSI_INTEGRATION\.md$
 ^omop-duck-db-hex\.png$
 (^|/)[^/]*\.pdf$
 

@@ -322,6 +322,7 @@ from omop_etl.geography import (
     read_sdi_table,
     ruca_category,
     validate_sdi_cut_points,
+    write_geography_measurements,
 )
 from omop_etl.dqd_catalog import run_dqd_catalog, run_dqd_full
 from omop_etl.bigquery_sync import read_bigquery_table, sync_vocabulary_from_bigquery
@@ -627,6 +628,7 @@ __all__ = [
     "read_sdi_table",
     "ruca_category",
     "validate_sdi_cut_points",
+    "write_geography_measurements",
     "run_dqd_catalog",
     "run_dqd_full",
     "read_bigquery_table",

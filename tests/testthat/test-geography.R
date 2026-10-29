@@ -203,3 +203,56 @@ test_that("prior utilization counts EI (262) as inpatient only and observation a
   w <- extract_velocity_features(con, engineer = FALSE)
   expect_equal(c(w$prior_ip_count, w$prior_ed_count, w$prior_ip_os_ed_count), c(2, 1, 5))
 })
+
+geo_measurement_cdm <- function(env = parent.frame()) {
+  db_path <- tempfile(fileext = ".duckdb")
+  build_schema(db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  DBI::dbExecute(con, "INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES (1, 8507, 1960, 0, 0), (2, 8532, 1970, 0, 0)")
+  DBI::dbExecute(con, "INSERT INTO observation_period VALUES (1,1,DATE '2015-01-01',DATE '2022-01-01',0),(2,2,DATE '2015-01-01',DATE '2022-01-01',0)")
+  DBI::dbExecute(con, "INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id) VALUES (1,1,9201,DATE '2020-03-01',DATE '2020-03-05',0),(2,2,9201,DATE '2020-04-01',DATE '2020-04-05',0)")
+  DBI::dbExecute(con, "CREATE TABLE person_address_history (person_id BIGINT, location_id BIGINT, zip5 VARCHAR, address_start DATE, address_end DATE, preferred VARCHAR)")
+  DBI::dbExecute(con, "INSERT INTO person_address_history VALUES (1,1,'19104',NULL,NULL,'Y'),(2,2,'15213',NULL,NULL,'Y')")
+  list(con = con, db_path = db_path)
+}
+
+test_that("geography is written as measurement rows and is idempotent", {
+  fx <- geo_measurement_cdm()
+  on.exit({ DBI::dbDisconnect(fx$con, shutdown = TRUE); unlink(fx$db_path) }, add = TRUE)
+  g <- derive_geography_features(fx$con, ruca, sdi, cuts)
+  expect_true("admit_date" %in% names(g))
+  expect_equal(write_geography_measurements(fx$con, g), 6)
+  m <- DBI::dbGetQuery(fx$con, "SELECT person_id, measurement_concept_id, value_as_number, unit_concept_id, visit_occurrence_id FROM measurement ORDER BY person_id, measurement_concept_id")
+  expect_equal(m$value_as_number, c(95, 5, 1, 40, 2, 2))
+  expect_true(all(m$unit_concept_id == 0) && all(m$visit_occurrence_id == m$person_id))
+  expect_equal(DBI::dbGetQuery(fx$con, "SELECT count(*) AS n FROM concept WHERE vocabulary_id = 'omop-duck-db'")$n, 3)
+  expect_equal(write_geography_measurements(fx$con, g), 6)
+  expect_equal(DBI::dbGetQuery(fx$con, "SELECT count(*) AS n FROM measurement")$n, 6)
+  expect_error(write_geography_measurements(fx$con, g[, setdiff(names(g), "admit_date")]), "missing column")
+})
+
+test_that("FeatureExtraction reads RUCA and SDI as measurement-value covariates", {
+  skip_if_not_installed("FeatureExtraction")
+  skip_if_not_installed("DatabaseConnector")
+  fx <- geo_measurement_cdm()
+  g <- derive_geography_features(fx$con, ruca, sdi, cuts)
+  write_geography_measurements(fx$con, g)
+  DBI::dbExecute(fx$con, "DROP TABLE IF EXISTS cohort")
+  DBI::dbExecute(fx$con, "CREATE TABLE cohort (cohort_definition_id INT, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)")
+  DBI::dbExecute(fx$con, "INSERT INTO cohort VALUES (1,1,DATE '2020-03-05',DATE '2020-03-05'),(1,2,DATE '2020-04-05',DATE '2020-04-05')")
+  DBI::dbDisconnect(fx$con, shutdown = TRUE)
+  on.exit(unlink(fx$db_path), add = TRUE)
+  conn <- tryCatch(DatabaseConnector::connect(DatabaseConnector::createConnectionDetails(dbms = "duckdb", server = fx$db_path)),
+                   error = function(e) skip(paste("cannot connect:", conditionMessage(e))))
+  on.exit(DatabaseConnector::disconnect(conn), add = TRUE, after = FALSE)
+  cs <- FeatureExtraction::createCovariateSettings(useMeasurementValueLongTerm = TRUE, longTermStartDays = -365, endDays = 0,
+                                                   includedCovariateConceptIds = unname(GEOGRAPHY_CONCEPT_IDS))
+  cov <- tryCatch(FeatureExtraction::getDbCovariateData(connection = conn, cdmDatabaseSchema = "main", cohortTable = "cohort",
+                    cohortDatabaseSchema = "main", cohortIds = 1, rowIdField = "subject_id", covariateSettings = cs, aggregated = FALSE),
+                  error = function(e) skip(paste("FeatureExtraction cannot run here:", conditionMessage(e))))
+  got <- as.data.frame(cov$covariates)
+  expect_equal(nrow(got), 6)
+  expect_setequal(got$covariateValue[got$rowId == 1], c(95, 5, 1))
+  expect_setequal(got$covariateValue[got$rowId == 2], c(40, 2, 2))
+  expect_equal(nrow(as.data.frame(cov$covariateRef)), 3)
+})

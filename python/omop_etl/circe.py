@@ -209,24 +209,26 @@ def compile_circe_to_duckdb(
     concept_sets = data.get("ConceptSets", [])
     cs_unions = []
     for cs in concept_sets:
-        cs_id = cs.get("id", 0)
+        cs_id = int(cs.get("id", 0))
         items = cs.get("expression", {}).get("items", [])
+        included: list[str] = []
+        excluded: list[str] = []
         for item in items:
             c = item.get("concept", {})
-            cid = c.get("CONCEPT_ID", c.get("concept_id", 0))
-            include_desc = item.get("includeDescendants", False)
-            is_excluded = item.get("isExcluded", False)
-
-            if is_excluded:
-                continue
-
-            if include_desc:
-                cs_unions.append(
-                    f"SELECT {cs_id} AS codeset_id, descendant_concept_id AS concept_id "
-                    f"FROM {cdm_schema}.concept_ancestor WHERE ancestor_concept_id = {int(cid)}"
-                )
-            else:
-                cs_unions.append(f"SELECT {cs_id} AS codeset_id, {int(cid)} AS concept_id")
+            cid = int(c.get("CONCEPT_ID", c.get("concept_id", 0)))
+            # the concept itself, plus its descendants when includeDescendants (includeMapped is not supported)
+            sel = f"SELECT {cid} AS concept_id"
+            if item.get("includeDescendants", False):
+                sel += (f" UNION SELECT descendant_concept_id FROM {cdm_schema}.concept_ancestor "
+                        f"WHERE ancestor_concept_id = {cid}")
+            (excluded if item.get("isExcluded", False) else included).append(sel)
+        if not included:
+            continue
+        body = " UNION ".join(included)
+        if excluded:
+            # ATLAS semantics: excluded items (and their descendants) are removed from the set
+            body = f"SELECT concept_id FROM ({body}) WHERE concept_id NOT IN ({' UNION '.join(excluded)})"
+        cs_unions.append(f"SELECT {cs_id} AS codeset_id, concept_id FROM ({body})")
 
     cs_sql = " UNION ALL\n    ".join(cs_unions) if cs_unions else "SELECT 0 AS codeset_id, 0 AS concept_id WHERE 1=0"
 
@@ -254,6 +256,9 @@ def compile_circe_to_duckdb(
                     else ""
                 )
 
+                # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5)
+                value_where = (f"WHERE {_compile_numeric_filter('e.value_as_number', c_item['ValueAsNumber'])}"
+                               if "ValueAsNumber" in c_item else "")
                 primary_selects.append(f"""
                 SELECT 
                     e.person_id AS subject_id,
@@ -262,6 +267,7 @@ def compile_circe_to_duckdb(
                     '{domain_key}' AS criteria_type
                 FROM {cdm_schema}.{tbl} e
                 {cs_join}
+                {value_where}
                 """)
 
     if not primary_selects:
@@ -303,6 +309,11 @@ def compile_circe_to_duckdb(
         crit_clauses = []
         for crit_wrapper in crit_list:
             c_sql = _compile_criteria(crit_wrapper, cdm_schema=cdm_schema)
+            if c_sql:
+                crit_clauses.append(c_sql)
+        # ATLAS puts age / gender conditions of a rule in DemographicCriteriaList (evaluated on the entry date)
+        for demo in expr.get("DemographicCriteriaList", []) or []:
+            c_sql = _compile_criteria({"Criteria": {"DemographicCriteria": demo}}, cdm_schema=cdm_schema)
             if c_sql:
                 crit_clauses.append(c_sql)
         if crit_clauses:

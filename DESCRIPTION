@@ -51,6 +51,7 @@ Suggests:
     callr,
     DatabaseConnector,
     CohortGenerator,
+    CirceR,
     PatientLevelPrediction,
     reticulate,
     FeatureExtraction,
