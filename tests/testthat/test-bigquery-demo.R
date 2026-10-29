@@ -87,7 +87,8 @@ test_that("the diabetes definition compiles to GoogleSQL through CirceR + SqlRen
                                    "bigquery-public-data.cms_synthetic_patient_data_omop", "my-proj.scratch")
   sql <- paste(stmts, collapse = "\n")
   expect_true(grepl("`bigquery-public-data.cms_synthetic_patient_data_omop.person`", sql, fixed = TRUE))
-  expect_false(grepl("cdm_ph|vocab_ph|tgt_ph|#", sql))
+  # untranslated placeholders and temp-table markers; CirceR's own SQL comments may contain a "#" ("POWER(2,# of inclusion rules)")
+  expect_false(grepl("cdm_ph|vocab_ph|tgt_ph|#", gsub("--[^\n]*", "", sql)))
 })
 
 test_that("live BigQuery smoke test (opt in with OMOP_BQ_BILLING_PROJECT; bills that project)", {
