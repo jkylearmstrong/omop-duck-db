@@ -99,3 +99,32 @@ def test_small_cells_are_suppressed_for_sharing():
     assert np.isnan(g.loc["entry_outside_observation_window", "n"]) and g.loc["entry_outside_observation_window", "suppressed"]
     out = suppress_small_cells(pd.DataFrame({"n": [0, 1, 5], "pct": [0.0, 10.0, 50.0]}), ["n"], 3, also=["pct"])
     assert out["suppressed"].tolist() == [False, True, False] and np.isnan(out.loc[1, "pct"])
+
+
+def test_definition_as_json_text_or_path_and_reference_files(tmp_path):
+    import json
+    d = target_cohort_circe()
+    path = tmp_path / "def.json"
+    path.write_text(json.dumps(d), encoding="utf-8")
+    ref = pd.DataFrame({"person_source_value": ["P1", "P7"], "site": ["a", "b"], "index_date": ["2020-02-04", "2020-03-05"]})
+    csv, parquet = tmp_path / "ref.csv", tmp_path / "ref.parquet"
+    ref.to_csv(csv, index=False)
+    ref.to_parquet(parquet)
+    expected = {("in_cohort", ""): 1, ("entry_outside_observation_window", ""): 1}
+    for definition in (str(path), json.dumps(d), path):
+        for reference in (str(csv), str(parquet)):
+            assert _gaps(explain_cohort_gaps(_cdm(), reference, definition=definition)) == expected
+    res = explain_cohort_gaps(_cdm(), ref, definition=d, group_col="site", include_person_rows=True)
+    assert dict(zip(res["persons"]["ref_id"], res["persons"]["group"])) == {"P1": "a", "P7": "b"}
+
+
+def test_date_agreement_with_a_cohort_table_and_without_start_dates():
+    ref = pd.DataFrame({"person_source_value": ["P1", "P5"], "index_date": ["2020-02-04", "2020-03-01"]})
+    cohort = pd.DataFrame({"subject_id": [1, 5], "cohort_start_date": ["2020-02-04", "2020-03-05"]})
+    out = reconcile_cohort(_cdm(), ref, cohort=cohort, index_date_col="index_date")
+    assert out["counts"]["both"] == 2 and out["dates"]["n_same_date"] == 1 and out["dates"]["max_abs_days"] == 4.0
+    nodates = reconcile_cohort(_cdm(), ref, cohort=cohort[["subject_id"]], index_date_col="index_date")
+    assert nodates["dates"] is None                                                                   # no cohort_start_date to compare
+    empty = reconcile_cohort(_cdm(), pd.DataFrame({"person_source_value": ["P99"], "index_date": ["2020-01-01"]}),
+                             cohort=cohort, index_date_col="index_date")
+    assert empty["counts"]["both"] == 0 and empty["dates"]["n_compared"] == 0
