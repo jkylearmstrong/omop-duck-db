@@ -202,21 +202,27 @@ compile_circe_to_duckdb <- function(circe_json,
   cs_list <- data$ConceptSets %||% list()
   cs_unions <- character(0)
   for (cs in cs_list) {
-    cs_id <- cs$id %||% 0L
+    cs_id <- as.integer(cs$id %||% 0L)
     items <- cs$expression$items %||% list()
+    included <- character(0)
+    excluded <- character(0)
     for (item in items) {
-      cid <- item$concept$CONCEPT_ID %||% item$concept$concept_id %||% 0L
-      desc <- isTRUE(item$includeDescendants)
-      excl <- isTRUE(item$isExcluded)
-      if (excl) next
-
-      if (desc) {
-        cs_unions <- c(cs_unions, sprintf("SELECT %d AS codeset_id, descendant_concept_id AS concept_id FROM %s.concept_ancestor WHERE ancestor_concept_id = %d",
-                                          as.integer(cs_id), cdm_schema, as.integer(cid)))
-      } else {
-        cs_unions <- c(cs_unions, sprintf("SELECT %d AS codeset_id, %d AS concept_id", as.integer(cs_id), as.integer(cid)))
+      cid <- as.integer(item$concept$CONCEPT_ID %||% item$concept$concept_id %||% 0L)
+      # the concept itself, plus its descendants when includeDescendants (includeMapped is not supported)
+      sel <- sprintf("SELECT %d AS concept_id", cid)
+      if (isTRUE(item$includeDescendants)) {
+        sel <- paste0(sel, sprintf(" UNION SELECT descendant_concept_id FROM %s.concept_ancestor WHERE ancestor_concept_id = %d",
+                                   cdm_schema, cid))
       }
+      if (isTRUE(item$isExcluded)) excluded <- c(excluded, sel) else included <- c(included, sel)
     }
+    if (!length(included)) next
+    body <- paste(included, collapse = " UNION ")
+    if (length(excluded)) {
+      # ATLAS semantics: excluded items (and their descendants) are removed from the set
+      body <- sprintf("SELECT concept_id FROM (%s) WHERE concept_id NOT IN (%s)", body, paste(excluded, collapse = " UNION "))
+    }
+    cs_unions <- c(cs_unions, sprintf("SELECT %d AS codeset_id, concept_id FROM (%s)", cs_id, body))
   }
 
   cs_sql <- if (length(cs_unions) > 0) paste(cs_unions, collapse = " UNION ALL\n    ") else "SELECT 0 AS codeset_id, 0 AS concept_id WHERE 1=0"
@@ -240,6 +246,11 @@ compile_circe_to_duckdb <- function(circe_json,
           sprintf("JOIN _cs_resolved cs ON e.%s = cs.concept_id AND cs.codeset_id = %d", cfg$concept_col, as.integer(codeset_id))
         } else ""
 
+        # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5)
+        value_where <- if (!is.null(c_item$ValueAsNumber)) {
+          paste("WHERE", .compile_numeric_filter("e.value_as_number", c_item$ValueAsNumber))
+        } else ""
+
         primary_selects <- c(primary_selects, sprintf("
           SELECT
             e.person_id AS subject_id,
@@ -248,7 +259,8 @@ compile_circe_to_duckdb <- function(circe_json,
             '%s' AS criteria_type
           FROM %s.%s e
           %s
-        ", cfg$date_col, cfg$end_date_col, dom_key, cdm_schema, cfg$table, cs_join))
+          %s
+        ", cfg$date_col, cfg$end_date_col, dom_key, cdm_schema, cfg$table, cs_join, value_where))
       }
     }
   }
