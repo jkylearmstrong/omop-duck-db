@@ -489,17 +489,23 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 .STUDY_READMISSION_CONVENTIONS <- list(
   death_ids = 4216643,
   death_sources = "death_table",
-  evidence = c("visit", "measurement", "condition", "drug")
+  evidence = c("visit", "measurement", "condition", "drug"),
+  # Off by default so the pinned attrition steps do not change. A transfer to another acute-care hospital (PCORnet
+  # DISCHARGE_STATUS 'IP', written as 8717 by the PCORnet ETL) is not a discharge to the community;
+  # build_ederri_diabetes_cohort() turns the exclusion on.
+  transfer_ids = integer(0)
 )
 # Conventions of build_end_of_life_cohort(): death is the earliest date across the death table and every visit
 # discharged to a death concept; follow-up is also evidenced by observation periods and by a death at/after the
-# horizon. NOTE: 4155309 is kept for backwards compatibility only. In the Athena vocabulary it is 'Ileal part'
-# (an anatomic site), while this package's PCORnet ETL writes it for 'discharged against medical advice'. Pass
+# horizon. NOTE: 4155309 is kept for backwards compatibility only (pinned by golden files). In the Athena vocabulary it is
+# 'Ileal part' (an anatomic site); older PCORnet ETL versions wrote it for 'discharged against medical advice'
+# (now 32216), so databases built before that fix count AMA stays as deaths here. Pass
 # death_discharge_concept_ids = 4216643 to count only 'Patient died'.
 .STUDY_END_OF_LIFE_CONVENTIONS <- list(
   death_ids = c(4216643, 4155309),
   death_sources = .STUDY_DEATH_SOURCES,
-  evidence = .STUDY_FOLLOWUP_EVIDENCE
+  evidence = .STUDY_FOLLOWUP_EVIDENCE,
+  transfer_ids = integer(0)
 )
 # outcome family -> min_los_days (NULL = no restriction) and exclude_in_hospital_death used when "auto" is passed
 .STUDY_AUTO_MIN_LOS <- list(none = 1, readmission = 1, post_discharge = 1, composite = 1, in_hospital = 0, fixed_window = NULL)
@@ -516,13 +522,18 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                             exclude_death = TRUE, death_ids = 4216643, death_sources = "death_table",
                             window_days = 30, gap_days = 0, verified = TRUE,
                             evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42,
-                            pinned_keys = FALSE, require_diabetes = FALSE) {
+                            pinned_keys = FALSE, require_diabetes = FALSE, transfer_ids = integer(0),
+                            diabetes_drug_rule = "names", diabetes_drug_ancestors = integer(0),
+                            concept_ancestor_ref = NULL, metformin_only_pcos = NULL) {
   list(cohort_id = cohort_id, outcome = outcome, label = label, schema = schema, visit_ids = visit_ids,
        outcome_visit_ids = outcome_visit_ids, study_start = study_start, study_end = study_end,
        min_age = min_age, age_method = age_method, min_los_days = min_los_days, washin_days = washin_days,
        exclude_death = exclude_death, death_ids = death_ids, death_sources = death_sources,
        window_days = window_days, gap_days = gap_days, verified = verified, evidence = evidence,
-       rule = rule, seed = seed, pinned_keys = pinned_keys, require_diabetes = require_diabetes)
+       rule = rule, seed = seed, pinned_keys = pinned_keys, require_diabetes = require_diabetes,
+       transfer_ids = transfer_ids, diabetes_drug_rule = diabetes_drug_rule,
+       diabetes_drug_ancestors = diabetes_drug_ancestors, concept_ancestor_ref = concept_ancestor_ref,
+       metformin_only_pcos = metformin_only_pcos)
 }
 
 # ---- identifier / literal helpers --------------------------------------------------------------------
@@ -669,11 +680,26 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
   } else {
     add("Alive at index admission", "(pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)")
   }
+  if (length(spec$transfer_ids)) {
+    add("Not transferred to another acute-care hospital",
+        sprintf("COALESCE(v.discharged_to_concept_id, 0) NOT IN (%s)", .int_list(spec$transfer_ids)))
+  }
+  if (!is.null(spec$metformin_only_pcos)) {
+    add("Not metformin-only prediabetes / PCOS (patient-level)",
+        sprintf("v.person_id NOT IN (SELECT person_id FROM %s)", .STUDY_METFORMIN_TABLE))
+  }
 
   if (isTRUE(spec$require_diabetes)) {
     co <- .study_tbl(spec, "condition_occurrence")
     de <- .study_tbl(spec, "drug_exposure")
     meas <- .study_tbl(spec, "measurement")
+    ca <- spec$concept_ancestor_ref %||% .study_tbl(spec, "concept_ancestor")
+    drug_arm <- if (identical(spec$diabetes_drug_rule, "names") || is.null(spec$diabetes_drug_rule)) {
+      "regexp_matches(lower(COALESCE(de.drug_source_value, '')), '(insulin|metformin|glipizide|glyburide|glimepiride|sitagliptin|empagliflozin|dapagliflozin|liraglutide|semaglutide)')"
+    } else {
+      sprintf("de.drug_concept_id IN (SELECT descendant_concept_id FROM %s WHERE ancestor_concept_id IN (%s))",
+              ca, .int_list(spec$diabetes_drug_ancestors))
+    }
     add("eDERRI diabetes phenotype (ICD-9 249/250, ICD-10 E08-E13, antidiabetic medication, or HbA1c >= 6.5%)",
         sprintf("(
             EXISTS (
@@ -682,16 +708,14 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                   AND co.condition_start_date <= v.visit_start_date
                   AND (
                       co.condition_concept_id IN (201820, 201254, 435222, 443729, 443730, 443731, 443732, 443733, 443734, 443735, 4016045)
-                      OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E13)')
+                      OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E12|E13)')
                   )
             )
             OR EXISTS (
                 SELECT 1 FROM %s de
                 WHERE de.person_id = v.person_id
                   AND de.drug_exposure_start_date <= v.visit_start_date
-                  AND (
-                      regexp_matches(lower(COALESCE(de.drug_source_value, '')), '(insulin|metformin|glipizide|glyburide|glimepiride|sitagliptin|empagliflozin|dapagliflozin|liraglutide|semaglutide)')
-                  )
+                  AND (%s)
             )
             OR EXISTS (
                 SELECT 1 FROM %s m
@@ -699,11 +723,11 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                   AND m.measurement_date <= v.visit_start_date
                   AND m.value_as_number >= 6.5
                   AND (
-                      m.measurement_concept_id IN (3004410, 3005673, 40762352)
-                      OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|17856-6|4549-2|A1C|HBA1C|HbA1c)')
+                      m.measurement_concept_id IN (3004410, 3005673, 40762352, 3007263, 3034639, 40758583, 40765129, 42869630, 3003309)
+                      OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|41995-2|55454-3|71875-9|4549-2|17856-6|59261-8|62388-4|17855-8|A1C|HBA1C|HbA1c)')
                   )
             )
-        )", co, de, meas))
+        )", co, de, drug_arm, meas))
   }
   conds
 }
@@ -1231,7 +1255,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
   if (!is.null(spec$min_age)) bits <- c(bits, sprintf("age >= %s (%s)", .sql_int(spec$min_age), spec$age_method))
   if (!is.null(spec$min_los_days)) bits <- c(bits, sprintf("LOS >= %s d", .sql_int(spec$min_los_days)))
   if (!is.null(spec$washin_days) && spec$washin_days > 0) bits <- c(bits, sprintf("wash-in %s d", .sql_int(spec$washin_days)))
-  bits <- c(bits, if (isTRUE(spec$exclude_death)) "exclude in-hospital death" else "in-hospital death retained")
+  bits <- c(bits, if (isTRUE(spec$exclude_death)) "exclude in-hospital death" else "in-hospital death retained",
+            if (length(spec$transfer_ids)) "exclude acute-care transfers")
   bits <- c(bits, sprintf("outcome %s", spec$label))
   if (!is.null(spec$window_days) && spec$outcome != "in_hospital") {
     bits <- c(bits, sprintf("window (%s, %s] d", .sql_int(spec$gap_days), .sql_int(spec$window_days)))
@@ -1323,8 +1348,20 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #'   column `followup_verified` is reported either way.
 #' @param death_discharge_concept_ids Discharge-disposition concepts meaning "died". Default `4216643` for
 #'   readmission / cohort-only, `c(4216643, 4155309)` for mortality outcomes (the legacy end-of-life convention;
-#'   4155309 is 'Ileal part' in Athena and is written by this package's PCORnet ETL for 'discharged against
-#'   medical advice', so consider passing `4216643`).
+#'   4155309 is 'Ileal part' in Athena; PCORnet ETL versions before the fix wrote it for 'discharged against
+#'   medical advice' (now 32216), so on such databases consider passing `4216643`).
+#' @param diabetes_drug_rule Medication arm of `require_diabetes`: `"names"` (default, unchanged: ten drug names in
+#'   `drug_source_value`), `"atc_a10"` (`drug_concept_id` descending from ATC A10 in `concept_ancestor`, branded drugs and
+#'   combinations included) or `"rxnorm_cuis"` (descendants of the RxNorm concepts of `diabetes_rxnorm_cuis`). The last two
+#'   need the vocabulary on the connection.
+#' @param diabetes_rxnorm_cuis RxNorm CUIs (vector, or a text/CSV file with one per line) for `diabetes_drug_rule = "rxnorm_cuis"`.
+#' @param exclude_metformin_only_prediabetes_pcos `FALSE` (default), `TRUE` (= `"icd10"`), `"icd10"`, `"snomed"` or `"both"`:
+#'   drop patients whose only diabetes drug is metformin and who have prediabetes or PCOS and no diabetes diagnosis (see
+#'   [find_metformin_only_prediabetes_pcos()]). Adds the attrition step "Not metformin-only prediabetes / PCOS (patient-level)".
+#' @param transfer_discharge_concept_ids Discharge-disposition concepts meaning "transferred to another acute-care
+#'   hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
+#'   tables do not change; the PCORnet ETL writes `8717` for a transfer (`DISCHARGE_STATUS` 'IP'). Adds the attrition
+#'   step "Not transferred to another acute-care hospital". `integer(0)` keeps transfers.
 #' @param death_sources Where a patient's death date comes from: `"death_table"` and/or
 #'   `"discharge_disposition"` (the end date of any visit discharged to a death concept). Default `"death_table"`
 #'   for readmission / cohort-only, both for mortality outcomes.
@@ -1413,6 +1450,7 @@ define_study_cohort <- function(con,
                                 random_state = 42,
                                 require_verified_followup = TRUE,
                                 death_discharge_concept_ids = NULL,
+                                transfer_discharge_concept_ids = NULL,
                                 death_sources = NULL,
                                 followup_evidence = NULL,
                                 age_method = "year_difference",
@@ -1426,7 +1464,10 @@ define_study_cohort <- function(con,
                                 attrition = TRUE,
                                 one_per_patient = TRUE,
                                 persist_keys = NULL,
-                                require_diabetes = FALSE) {
+                                require_diabetes = FALSE,
+                                diabetes_drug_rule = "names",
+                                diabetes_rxnorm_cuis = NULL,
+                                exclude_metformin_only_prediabetes_pcos = FALSE) {
   if (!isTRUE(one_per_patient)) {
     stop("define_study_cohort selects exactly one index stay per patient; one_per_patient = FALSE is unsupported.", call. = FALSE)
   }
@@ -1501,6 +1542,9 @@ define_study_cohort <- function(con,
   conv <- if (outcome %in% .STUDY_MORTALITY_FAMILIES) .STUDY_END_OF_LIFE_CONVENTIONS else .STUDY_READMISSION_CONVENTIONS
   death_ids <- if (is.null(death_discharge_concept_ids)) conv$death_ids else
     .resolve_death_ids(death_discharge_concept_ids, "death_discharge_concept_ids")
+  transfer_ids <- if (is.null(transfer_discharge_concept_ids)) conv$transfer_ids else
+    if (!length(transfer_discharge_concept_ids)) integer(0) else
+      .resolve_death_ids(transfer_discharge_concept_ids, "transfer_discharge_concept_ids")
   sources <- if (is.null(death_sources)) conv$death_sources else
     .resolve_choices(death_sources, .STUDY_DEATH_SOURCES, "death_sources")
   evidence <- if (is.null(followup_evidence)) conv$evidence else
@@ -1514,12 +1558,20 @@ define_study_cohort <- function(con,
     if (oid == cohort_id) stop("outcome_cohort_id must differ from cohort_definition_id.", call. = FALSE)
   }
 
+  mf <- exclude_metformin_only_prediabetes_pcos
+  mf_pcos <- if (isTRUE(mf)) "icd10" else if (is.null(mf) || isFALSE(mf) || identical(mf, "")) NULL else if (is.character(mf) && length(mf) == 1L && mf %in% .PCOS_SETS) mf else {
+    stop("exclude_metformin_only_prediabetes_pcos must be FALSE, TRUE, 'icd10', 'snomed' or 'both'; got ", deparse(mf), ".", call. = FALSE)
+  }
+  drug <- .resolve_diabetes_drug_rule(con, diabetes_drug_rule, diabetes_rxnorm_cuis, schema)
+
   spec <- .new_study_spec(
     cohort_id = cohort_id, outcome = outcome, label = label, schema = schema, visit_ids = visit_ids,
     outcome_visit_ids = outcome_ids, study_start = win$start, study_end = win$end, min_age = min_age_n,
     age_method = method, min_los_days = min_los, washin_days = washin_n, exclude_death = exclude,
     death_ids = death_ids, death_sources = sources, window_days = window, gap_days = gap_n, verified = verified,
-    evidence = evidence, rule = rule, seed = seed_n, require_diabetes = isTRUE(require_diabetes)
+    evidence = evidence, rule = rule, seed = seed_n, require_diabetes = isTRUE(require_diabetes),
+    transfer_ids = transfer_ids, diabetes_drug_rule = diabetes_drug_rule,
+    diabetes_drug_ancestors = drug$ancestors, concept_ancestor_ref = drug$ca, metformin_only_pcos = mf_pcos
   )
 
   if (!is.null(persist_keys) && file.exists(persist_keys)) {
@@ -1533,6 +1585,11 @@ define_study_cohort <- function(con,
                                                  paste0("(", sprintf("%.0f", ids), ")", collapse = ", ")))
     spec$pinned_keys <- TRUE
     on.exit(DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", .STUDY_PINNED_TABLE)), add = TRUE)
+  }
+
+  if (!is.null(spec$metformin_only_pcos)) {
+    .create_metformin_only_table(con, spec)
+    on.exit(DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", .STUDY_METFORMIN_TABLE)), add = TRUE)
   }
 
   if (identical(materialise, "auto")) {
@@ -1583,6 +1640,9 @@ define_study_cohort <- function(con,
     random_state = seed_n,
     require_verified_followup = verified && .study_followup_applicable(spec),
     death_discharge_concept_ids = death_ids,
+    transfer_discharge_concept_ids = transfer_ids,
+    diabetes_drug_rule = diabetes_drug_rule,
+    exclude_metformin_only_prediabetes_pcos = mf_pcos,
     death_sources = sources,
     followup_evidence = evidence,
     schema = schema
@@ -1652,7 +1712,7 @@ build_readmission_cohort <- function(con,
     exclude_death = TRUE, death_ids = conv$death_ids, death_sources = conv$death_sources,
     window_days = as.numeric(followup_window_days), gap_days = as.numeric(grace_days),
     verified = isTRUE(require_verified_followup), evidence = conv$evidence, rule = rule,
-    seed = as.numeric(random_state)
+    seed = as.numeric(random_state), transfer_ids = conv$transfer_ids
   )
   projection <- paste0(
     "cohort_definition_id, subject_id, cohort_start_date, cohort_end_date, visit_occurrence_id, outcome_flag, ",
@@ -1685,7 +1745,7 @@ build_readmission_cohort <- function(con,
 #' Resolves dual OMOP death sources:
 #' \itemize{
 #'   \item \code{death} table: \code{death_date} linked to \code{person_id}.
-#'   \item \code{visit_occurrence} table: \code{discharged_to_concept_id IN (4216643, 4155309)} (Expired / Hospice).
+#'   \item \code{visit_occurrence} table: \code{discharged_to_concept_id IN (4216643, 4155309)} (Expired / 'Ileal part'; the legacy convention, see `death_discharge_concept_ids`).
 #' }
 #' This is a thin wrapper over the shared study-cohort engine (see [define_study_cohort()], which generalises
 #' it); its legacy conventions are pinned here and covered by golden-file tests.
@@ -2409,6 +2469,8 @@ filter_measurements <- function(con,
 #'
 #' @inheritParams define_study_cohort
 #' @param target_table Name of the table the cohort is written to when materialised (default `"cohort"`).
+#' @param transfer_discharge_concept_ids Transfer-to-acute-care discharge concepts to exclude (default `8717`; `integer(0)` keeps transfers).
+#' @param diabetes_drug_rule,diabetes_rxnorm_cuis,exclude_metformin_only_prediabetes_pcos As in [define_study_cohort()].
 #' @return As [define_study_cohort()].
 #' @export
 build_ederri_diabetes_cohort <- function(con,
@@ -2419,10 +2481,14 @@ build_ederri_diabetes_cohort <- function(con,
                                          materialise = "auto",
                                          schema = NULL,
                                          followup_days = NULL,
-                                         require_verified_followup = FALSE) {
+                                         require_verified_followup = FALSE,
+                                         transfer_discharge_concept_ids = 8717,
+                                         diabetes_drug_rule = "names",
+                                         diabetes_rxnorm_cuis = NULL,
+                                         exclude_metformin_only_prediabetes_pcos = FALSE) {
   define_study_cohort(
     con,
-    visit_type = "inpatient",
+    visit_type = c(9201, 262),   # inpatient + emergency-to-inpatient (PCORnet IP and EI)
     require_diabetes = TRUE,
     min_age = 18,
     min_los_days = 1,
@@ -2430,6 +2496,10 @@ build_ederri_diabetes_cohort <- function(con,
     target_outcome = "none",
     followup_days = followup_days,
     require_verified_followup = require_verified_followup,
+    transfer_discharge_concept_ids = transfer_discharge_concept_ids,
+    diabetes_drug_rule = diabetes_drug_rule,
+    diabetes_rxnorm_cuis = diabetes_rxnorm_cuis,
+    exclude_metformin_only_prediabetes_pcos = exclude_metformin_only_prediabetes_pcos,
     random_state = random_state,
     persist_keys = persist_keys,
     cohort_definition_id = cohort_definition_id,

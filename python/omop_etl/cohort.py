@@ -506,16 +506,21 @@ _READMISSION_CONVENTIONS = {
     "death_ids": (4216643,),
     "death_sources": ("death_table",),
     "evidence": ("visit", "measurement", "condition", "drug"),
+    # Off by default so the pinned attrition steps of the RFC example do not change. A transfer to another acute-care
+    # hospital (PCORnet DISCHARGE_STATUS 'IP', written as 8717 'Inpatient Hospital' by the PCORnet ETL) is not a
+    # discharge to the community; build_ederri_diabetes_cohort turns the exclusion on.
+    "transfer_ids": (),
 }
 # Conventions of build_end_of_life_cohort: death is the earliest date across the death table and every
 # visit discharged to a death concept; follow-up is also evidenced by observation periods and by a death
-# at/after the horizon. NOTE: 4155309 is kept for backwards compatibility only. In the Athena vocabulary it is
-# 'Ileal part' (an anatomic site), while this package's PCORnet ETL writes it for 'discharged against medical
-# advice'. Pass death_discharge_concept_ids=(4216643,) to count only 'Patient died'.
+# at/after the horizon. NOTE: 4155309 is kept for backwards compatibility only (pinned by golden files). In the Athena vocabulary it is
+# 'Ileal part' (an anatomic site); older versions of this package's PCORnet ETL wrote it for 'discharged against medical
+# advice' (now 32216), so databases built before that fix count AMA stays as deaths here. Pass death_discharge_concept_ids=(4216643,) to count only 'Patient died'.
 _END_OF_LIFE_CONVENTIONS = {
     "death_ids": (4216643, 4155309),
     "death_sources": _DEATH_SOURCES,
     "evidence": _FOLLOWUP_EVIDENCE,
+    "transfer_ids": (),
 }
 # (outcome family) -> (min_los_days, exclude_in_hospital_death) used when the caller passes "auto"
 _AUTO_STAY_RULES = {
@@ -552,6 +557,7 @@ class _StudySpec:
     exclude_death: bool = True
     death_ids: tuple[int, ...] = (4216643,)
     death_sources: tuple[str, ...] = ("death_table",)
+    transfer_ids: tuple[int, ...] = ()
     window_days: int | None = 30
     gap_days: int = 0
     verified: bool = True
@@ -560,6 +566,10 @@ class _StudySpec:
     seed: int = 42
     pinned_keys: bool = False  # prefer stays listed in the _study_pinned_keys temp table (see persist_keys)
     require_diabetes: bool = False
+    diabetes_drug_rule: str = "names"                  # names | atc_a10 | rxnorm_cuis (medication arm of the phenotype)
+    diabetes_drug_ancestors: tuple[int, ...] = ()     # ancestor concept ids for the atc_a10 / rxnorm_cuis rules
+    concept_ancestor_ref: str | None = None           # resolved concept_ancestor table for those rules
+    metformin_only_pcos: str | None = None            # PCOS concept set of the metformin-only exclusion, or None
 
 
 # ---- identifier / literal helpers -------------------------------------------------------------------
@@ -591,6 +601,72 @@ def _tbl(spec: _StudySpec, name: str) -> str:
 # ---- SQL generators ---------------------------------------------------------------------------------
 
 _STUDY_PINNED_TABLE = "_study_pinned_keys"
+_STUDY_METFORMIN_TABLE = "_study_metformin_only"
+_STUDY_METFORMIN_TABLE = "_study_metformin_only"
+
+
+_DIABETES_DRUG_RULES = ("names", "atc_a10", "rxnorm_cuis")
+_ATC_A10_CONCEPT = 21600712
+
+
+def _read_cuis(value: Any) -> list[str]:
+    """RxNorm CUIs from a sequence or a text/CSV file (quotes and other characters around the digits are ignored)."""
+    if isinstance(value, (str, os.PathLike)) and Path(value).exists():
+        text = Path(value).read_text(encoding="utf-8", errors="replace")
+        items = re.findall(r"\d+", text)
+    elif isinstance(value, (str, os.PathLike)):
+        raise ValueError(f"diabetes_rxnorm_cuis file {str(value)!r} does not exist.")
+    else:
+        items = [str(int(v)) for v in value]
+    cuis = sorted(set(items))
+    if not cuis:
+        raise ValueError("diabetes_rxnorm_cuis is empty.")
+    return cuis
+
+
+def _resolve_diabetes_drug_rule(con, rule: Any, cuis: Any, schema: str | None) -> tuple[tuple[int, ...], str | None]:
+    """Validates the medication-arm rule of the diabetes phenotype; returns (ancestor ids, concept_ancestor reference)."""
+    if rule not in _DIABETES_DRUG_RULES:
+        raise ValueError(f"diabetes_drug_rule must be one of {_DIABETES_DRUG_RULES}; got {rule!r}.")
+    if rule != "rxnorm_cuis" and cuis is not None:
+        raise ValueError("diabetes_rxnorm_cuis is only used with diabetes_drug_rule='rxnorm_cuis'.")
+    if rule == "names":
+        return (), None
+    from omop_etl.exclusions import resolve_concept_ancestor_ref
+
+    ca = resolve_concept_ancestor_ref(con, schema)
+    if ca is None:
+        raise ValueError(f"diabetes_drug_rule={rule!r} needs a vocabulary with concept_ancestor on this connection "
+                         "(load or attach it, e.g. omop_connect()).")
+    if rule == "atc_a10":
+        if con.execute(f"SELECT 1 FROM {ca} WHERE ancestor_concept_id = {_ATC_A10_CONCEPT} LIMIT 1").fetchone() is None:
+            raise ValueError("concept_ancestor has no descendants of ATC A10 (concept 21600712); the ATC vocabulary is missing.")
+        return (_ATC_A10_CONCEPT,), ca
+    if cuis is None:
+        raise ValueError("diabetes_drug_rule='rxnorm_cuis' needs diabetes_rxnorm_cuis (a list of RxNorm CUIs or a file of them).")
+    wanted = _read_cuis(cuis)
+    concept = ca[: -len("concept_ancestor")] + "concept"
+    codes = ", ".join(_sql_str(c) for c in wanted)
+    ids = [int(r[0]) for r in con.execute(
+        f"SELECT concept_id FROM {concept} WHERE vocabulary_id = 'RxNorm' AND concept_code IN ({codes})").fetchall()]
+    if not ids:
+        raise ValueError("None of diabetes_rxnorm_cuis is an RxNorm concept_code in this vocabulary.")
+    missing = len(wanted) - len(ids)
+    if missing > 0:
+        warnings.warn(f"diabetes_rxnorm_cuis: {missing} of {len(wanted)} CUIs are not RxNorm concepts in this vocabulary and "
+                      "are ignored.", UserWarning, stacklevel=3)
+    return tuple(sorted(ids)), ca
+
+
+def _create_metformin_only_table(con, spec: "_StudySpec") -> None:
+    from omop_etl.exclusions import metformin_only_sql, resolve_concept_ancestor_ref
+
+    ca = resolve_concept_ancestor_ref(con, spec.schema)
+    if ca is None:
+        warnings.warn("exclude_metformin_only_prediabetes_pcos: no usable concept_ancestor, so the concept sets are limited "
+                      "to the listed ids and source-value patterns.", UserWarning, stacklevel=3)
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_STUDY_METFORMIN_TABLE} AS SELECT person_id FROM "
+                f"({metformin_only_sql(spec.metformin_only_pcos, spec.schema, ca)})")
 
 
 def _study_order_by(rule: str, seed: int, pinned: bool = False) -> str:
@@ -687,10 +763,31 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
         ))
     else:
         conds.append(("Alive at index admission", "(pd.death_date IS NULL OR pd.death_date >= v.visit_start_date)"))
+    if spec.transfer_ids:
+        conds.append((
+            "Not transferred to another acute-care hospital",
+            f"COALESCE(v.discharged_to_concept_id, 0) NOT IN ({_int_list(spec.transfer_ids)})",
+        ))
+    if spec.metformin_only_pcos:
+        conds.append((
+            "Not metformin-only prediabetes / PCOS (patient-level)",
+            f"v.person_id NOT IN (SELECT person_id FROM {_STUDY_METFORMIN_TABLE})",
+        ))
+    if spec.metformin_only_pcos:
+        conds.append((
+            "Not metformin-only prediabetes / PCOS (patient-level)",
+            f"v.person_id NOT IN (SELECT person_id FROM {_STUDY_METFORMIN_TABLE})",
+        ))
 
     if getattr(spec, "require_diabetes", False):
         co, de, meas = _tbl(spec, "condition_occurrence"), _tbl(spec, "drug_exposure"), _tbl(spec, "measurement")
-        ca = _tbl(spec, "concept_ancestor")
+        ca = spec.concept_ancestor_ref or _tbl(spec, "concept_ancestor")
+        if spec.diabetes_drug_rule == "names":
+            drug_arm = ("regexp_matches(lower(COALESCE(de.drug_source_value, '')), "
+                        "'(insulin|metformin|glipizide|glyburide|glimepiride|sitagliptin|empagliflozin|dapagliflozin|liraglutide|semaglutide)')")
+        else:
+            drug_arm = (f"de.drug_concept_id IN (SELECT descendant_concept_id FROM {ca} "
+                        f"WHERE ancestor_concept_id IN ({_int_list(spec.diabetes_drug_ancestors)}))")
         conds.append((
             "eDERRI diabetes phenotype (ICD-9 249/250, ICD-10 E08-E13, antidiabetic medication, or HbA1c >= 6.5%)",
             f"""(
@@ -700,16 +797,14 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
                       AND co.condition_start_date <= v.visit_start_date
                       AND (
                           co.condition_concept_id IN (201820, 201254, 435222, 443729, 443730, 443731, 443732, 443733, 443734, 443735, 4016045)
-                          OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E13)')
+                          OR regexp_matches(COALESCE(co.condition_source_value, ''), '^(249|250|E08|E09|E10|E11|E12|E13)')
                       )
                 )
                 OR EXISTS (
                     SELECT 1 FROM {de} de
                     WHERE de.person_id = v.person_id
                       AND de.drug_exposure_start_date <= v.visit_start_date
-                      AND (
-                          regexp_matches(lower(COALESCE(de.drug_source_value, '')), '(insulin|metformin|glipizide|glyburide|glimepiride|sitagliptin|empagliflozin|dapagliflozin|liraglutide|semaglutide)')
-                      )
+                      AND ({drug_arm})
                 )
                 OR EXISTS (
                     SELECT 1 FROM {meas} m
@@ -717,8 +812,8 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
                       AND m.measurement_date <= v.visit_start_date
                       AND m.value_as_number >= 6.5
                       AND (
-                          m.measurement_concept_id IN (3004410, 3005673, 40762352)
-                          OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|17856-6|4549-2|A1C|HBA1C|HbA1c)')
+                          m.measurement_concept_id IN (3004410, 3005673, 40762352, 3007263, 3034639, 40758583, 40765129, 42869630, 3003309)
+                          OR regexp_matches(COALESCE(m.measurement_source_value, ''), '(4548-4|41995-2|55454-3|71875-9|4549-2|17856-6|59261-8|62388-4|17855-8|A1C|HBA1C|HbA1c)')
                       )
                 )
             )""",
@@ -1209,6 +1304,8 @@ def _describe_study(spec: _StudySpec) -> str:
     if spec.washin_days:
         bits.append(f"wash-in {spec.washin_days} d")
     bits.append("exclude in-hospital death" if spec.exclude_death else "in-hospital death retained")
+    if spec.transfer_ids:
+        bits.append("exclude acute-care transfers")
     bits.append(f"outcome {spec.label}")
     if spec.window_days is not None and spec.outcome != "in_hospital":
         bits.append(f"window ({spec.gap_days}, {spec.window_days}] d")
@@ -1256,6 +1353,7 @@ def define_study_cohort(
     require_verified_followup: bool = True,
     death_discharge_concept_ids: int | Sequence[int] | None = None,
     death_sources: str | Sequence[str] | None = None,
+    transfer_discharge_concept_ids: int | Sequence[int] | None = None,
     followup_evidence: str | Sequence[str] | None = None,
     age_method: str = "year_difference",
     cohort_definition_id: int = 1,
@@ -1269,6 +1367,9 @@ def define_study_cohort(
     one_per_patient: bool = True,
     persist_keys: str | os.PathLike | None = None,
     require_diabetes: bool = False,
+    diabetes_drug_rule: str = "names",
+    diabetes_rxnorm_cuis: Sequence[str | int] | str | os.PathLike | None = None,
+    exclude_metformin_only_prediabetes_pcos: bool | str = False,
 ) -> pd.DataFrame:
     r"""Defines a leak-free index-stay study cohort (one stay per patient) with an optional outcome.
 
@@ -1341,8 +1442,24 @@ def define_study_cohort(
     death_discharge_concept_ids : int or sequence, optional
         Discharge-disposition concepts meaning "died". Default: ``(4216643,)`` for readmission / cohort-only,
         ``(4216643, 4155309)`` for mortality outcomes (the legacy end-of-life convention; 4155309 is 'Ileal part'
-        in Athena and is written by this package's PCORnet ETL for 'discharged against medical advice', so
-        consider passing ``(4216643,)``).
+        in Athena; PCORnet ETL versions before the fix wrote it for 'discharged against medical advice' (now
+        32216), so on such databases consider passing ``(4216643,)``).
+    transfer_discharge_concept_ids : int or sequence, optional
+        Discharge-disposition concepts meaning "transferred to another acute-care hospital"; those index stays are
+        excluded (replication rule A6: only death and acute transfer are ineligible, AMA is kept). Default none, so
+        existing attrition tables do not change; the PCORnet ETL writes ``8717`` for a transfer (``DISCHARGE_STATUS``
+        'IP'). Adds the attrition step "Not transferred to another acute-care hospital".
+    diabetes_drug_rule : {"names", "atc_a10", "rxnorm_cuis"}, default "names"
+        Medication arm of ``require_diabetes``. ``names`` (default, unchanged) matches ten drug names in
+        ``drug_source_value``. ``atc_a10`` matches ``drug_concept_id`` that descends from ATC A10 in ``concept_ancestor``
+        (branded drugs and combinations included). ``rxnorm_cuis`` matches descendants of the RxNorm concepts of
+        ``diabetes_rxnorm_cuis`` (a list of CUIs, or a text/CSV file with one per line, e.g. the SAS extraction's list).
+        The last two need the vocabulary on the connection.
+    exclude_metformin_only_prediabetes_pcos : bool or {"icd10", "snomed", "both"}, default False
+        Drop patients whose only diabetes drug is metformin and who have prediabetes or PCOS and no diabetes diagnosis
+        (see :func:`omop_etl.exclusions.find_metformin_only_prediabetes_pcos`). ``True`` means ``"icd10"`` (PCOS = ICD-10
+        E28.2 / "Polycystic ovary syndrome"); ``"snomed"`` uses SNOMED 69878008 / "Polycystic ovary". Adds the attrition
+        step "Not metformin-only prediabetes / PCOS (patient-level)".
     death_sources : {"death_table", "discharge_disposition"} or sequence, optional
         Where a patient's death date comes from: the ``death`` table and / or the end date of any visit
         discharged to a death concept. Default: ``death_table`` only for readmission / cohort-only, both for
@@ -1526,6 +1643,9 @@ def define_study_cohort(
     conv = _END_OF_LIFE_CONVENTIONS if outcome in _MORTALITY_FAMILIES else _READMISSION_CONVENTIONS
     death_ids = conv["death_ids"] if death_discharge_concept_ids is None else _resolve_death_ids(
         death_discharge_concept_ids, "death_discharge_concept_ids")
+    transfer_ids = conv["transfer_ids"] if transfer_discharge_concept_ids is None else (
+        () if not isinstance(transfer_discharge_concept_ids, numbers.Real) and len(list(transfer_discharge_concept_ids)) == 0
+        else _resolve_death_ids(transfer_discharge_concept_ids, "transfer_discharge_concept_ids"))
     sources = conv["death_sources"] if death_sources is None else _resolve_choices(
         death_sources, _DEATH_SOURCES, "death_sources")
     evidence = conv["evidence"] if followup_evidence is None else _resolve_choices(
@@ -1538,13 +1658,25 @@ def define_study_cohort(
         if oid == cohort_id:
             raise ValueError("outcome_cohort_id must differ from cohort_definition_id.")
 
+    if exclude_metformin_only_prediabetes_pcos is True:
+        exclude_metformin_only_prediabetes_pcos = "icd10"
+    if exclude_metformin_only_prediabetes_pcos in (False, None, ""):
+        mf_pcos = None
+    elif exclude_metformin_only_prediabetes_pcos in ("icd10", "snomed", "both"):
+        mf_pcos = str(exclude_metformin_only_prediabetes_pcos)
+    else:
+        raise ValueError("exclude_metformin_only_prediabetes_pcos must be False, True, 'icd10', 'snomed' or 'both'; got "
+                         f"{exclude_metformin_only_prediabetes_pcos!r}.")
+    drug_ancestors, drug_ca = _resolve_diabetes_drug_rule(con, diabetes_drug_rule, diabetes_rxnorm_cuis, schema)
+
     spec = _StudySpec(
         cohort_id=cohort_id, outcome=outcome, label=label, schema=schema, visit_ids=visit_ids,
         outcome_visit_ids=outcome_ids, study_start=study_start, study_end=study_end, min_age=min_age_n,
         age_method=method, min_los_days=min_los, washin_days=washin_n, exclude_death=exclude,
-        death_ids=tuple(death_ids), death_sources=tuple(sources), window_days=window, gap_days=gap_n,
+        death_ids=tuple(death_ids), death_sources=tuple(sources), transfer_ids=tuple(transfer_ids), window_days=window, gap_days=gap_n,
         verified=verified, evidence=tuple(evidence), rule=rule, seed=seed_n,
-        require_diabetes=bool(require_diabetes),
+        require_diabetes=bool(require_diabetes), diabetes_drug_rule=diabetes_drug_rule,
+        diabetes_drug_ancestors=drug_ancestors, concept_ancestor_ref=drug_ca, metformin_only_pcos=mf_pcos,
     )
 
     keys_path = Path(persist_keys) if persist_keys is not None else None
@@ -1581,17 +1713,23 @@ def define_study_cohort(
         outcome_style="visits" if outcome == "readmission" else "event_date",
         overwrite=True,
     )
+    if spec.metformin_only_pcos:
+        _create_metformin_only_table(con, spec)
     try:
-        df = _run_study_engine(con, spec, _STUDY_COLUMNS, materialise=materialise, table_name=table_name,
-                               materialize_kwargs=mat_kwargs)
-    finally:
-        if spec.pinned_keys:
-            con.execute(f"DROP TABLE IF EXISTS {_STUDY_PINNED_TABLE}")
-    if keys_path is not None:
-        _write_index_keys(df, keys_path)
+        try:
+            df = _run_study_engine(con, spec, _STUDY_COLUMNS, materialise=materialise, table_name=table_name,
+                                   materialize_kwargs=mat_kwargs)
+        finally:
+            if spec.pinned_keys:
+                con.execute(f"DROP TABLE IF EXISTS {_STUDY_PINNED_TABLE}")
+        if keys_path is not None:
+            _write_index_keys(df, keys_path)
 
-    if attrition:
-        df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec))
+        if attrition:
+            df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec))
+    finally:
+        if spec.metformin_only_pcos:
+            con.execute(f"DROP TABLE IF EXISTS {_STUDY_METFORMIN_TABLE}")
     if materialise and schema is None:
         df.attrs["summary"] = get_cohort_summary(con, cohort_id)
     df.attrs["definition"] = {
@@ -1611,6 +1749,9 @@ def define_study_cohort(
         "require_verified_followup": verified and _study_followup_applicable(spec),
         "death_discharge_concept_ids": list(death_ids),
         "death_sources": list(sources),
+        "transfer_discharge_concept_ids": list(transfer_ids),
+        "diabetes_drug_rule": diabetes_drug_rule,
+        "exclude_metformin_only_prediabetes_pcos": mf_pcos,
         "followup_evidence": list(evidence),
         "schema": schema,
     }
@@ -1704,7 +1845,8 @@ def build_readmission_cohort(
         min_age=18, age_method="year_difference", min_los_days=1,
         washin_days=int(washin_days) if washin_days and washin_days > 0 else 0,
         exclude_death=True, death_ids=_READMISSION_CONVENTIONS["death_ids"],
-        death_sources=_READMISSION_CONVENTIONS["death_sources"], window_days=int(followup_window_days),
+        death_sources=_READMISSION_CONVENTIONS["death_sources"], transfer_ids=_READMISSION_CONVENTIONS["transfer_ids"],
+        window_days=int(followup_window_days),
         gap_days=int(grace_days), verified=bool(require_verified_followup),
         evidence=_READMISSION_CONVENTIONS["evidence"], rule=rule, seed=int(random_state),
     )
@@ -1756,7 +1898,7 @@ def build_end_of_life_cohort(
 
     Resolves dual OMOP death sources:
         - `death` table: `death_date` linked to `person_id`.
-        - `visit_occurrence` table: `discharged_to_concept_id IN (4216643, 4155309)` (Expired / Hospice).
+        - `visit_occurrence` table: `discharged_to_concept_id IN (4216643, 4155309)` (Expired / 'Ileal part'; the legacy convention, see ``death_discharge_concept_ids``).
 
     This is a thin wrapper over the shared study-cohort engine (see :func:`define_study_cohort`, which
     generalises it); its legacy conventions are pinned here and covered by golden-file tests.
@@ -2416,8 +2558,19 @@ def build_ederri_diabetes_cohort(
     schema: str | None = None,
     followup_days: int | None = None,
     require_verified_followup: bool = False,
+    transfer_discharge_concept_ids: int | Sequence[int] = (8717,),
+    diabetes_drug_rule: str = "names",
+    diabetes_rxnorm_cuis: Sequence[str | int] | str | os.PathLike | None = None,
+    exclude_metformin_only_prediabetes_pcos: bool | str = False,
 ) -> pd.DataFrame:
     """Builds the authoritative eDERRI diabetes inclusion cohort (FR-A6).
+
+    ``diabetes_drug_rule`` / ``diabetes_rxnorm_cuis`` choose the medication arm and
+    ``exclude_metformin_only_prediabetes_pcos`` drops metformin-only prediabetes / PCOS patients; see
+    :func:`define_study_cohort`.
+
+    Stays discharged to another acute-care hospital (``transfer_discharge_concept_ids``, default 8717) are excluded;
+    AMA discharges are kept. Pass ``()`` to keep transfers.
 
     Phenotype:
       Adult (>=18y) inpatient stays with length of stay >= 1 day, >=365 days wash-in,
@@ -2429,7 +2582,7 @@ def build_ederri_diabetes_cohort(
     """
     return define_study_cohort(
         con,
-        visit_type="inpatient",
+        visit_type=[9201, 262],        # inpatient + emergency-to-inpatient (PCORnet IP and EI)
         require_diabetes=True,
         min_age=18,
         min_los_days=1,
@@ -2437,6 +2590,10 @@ def build_ederri_diabetes_cohort(
         target_outcome="none",
         followup_days=followup_days,
         require_verified_followup=require_verified_followup,
+        transfer_discharge_concept_ids=transfer_discharge_concept_ids,
+        diabetes_drug_rule=diabetes_drug_rule,
+        diabetes_rxnorm_cuis=diabetes_rxnorm_cuis,
+        exclude_metformin_only_prediabetes_pcos=exclude_metformin_only_prediabetes_pcos,
         random_state=random_state,
         persist_keys=persist_keys,
         cohort_definition_id=cohort_definition_id,

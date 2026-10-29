@@ -183,7 +183,7 @@ site_baseline_risk <- function(df, site_col = "site_source", label_col = "readmi
 #' @param cohort_table Table or view with `subject_id` and `cohort_start_date` (optionally `cohort_end_date`,
 #'   `cohort_definition_id`).
 #' @param lookback_days,readmit_gap_days Window lengths in days (>= 1).
-#' @param ip_concepts,ed_concepts,os_concepts Visit concept ids counted as inpatient / emergency / outpatient.
+#' @param ip_concepts,ed_concepts,os_concepts Visit concept ids counted as inpatient / emergency / outpatient-or-observation. The defaults count concept 262 (emergency-to-inpatient) as inpatient only, as the legacy study did.
 #' @param concepts Overrides for [VELOCITY_CONCEPTS].
 #' @param extra_features Optional data.frame joined on `subject_id` + `cohort_start_date`.
 #' @param cohort_id Optional `cohort_definition_id` filter.
@@ -191,7 +191,7 @@ site_baseline_risk <- function(df, site_col = "site_source", label_col = "readmi
 #' @return A data.frame.
 #' @export
 extract_velocity_features <- function(con, cohort_table = "cohort", lookback_days = 365, readmit_gap_days = 30,
-                                      ip_concepts = c(9201L, 262L), ed_concepts = c(9203L, 262L), os_concepts = 9202L,
+                                      ip_concepts = c(9201L, 262L), ed_concepts = 9203L, os_concepts = c(9202L, 581385L),
                                       concepts = NULL, extra_features = NULL, cohort_id = NULL, engineer = TRUE) {
   if (!grepl("^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)?$", cohort_table)) {
     stop("Invalid cohort_table '", cohort_table, "'.", call. = FALSE)

@@ -389,6 +389,29 @@ load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, si
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_demographic;")
 }
 
+# PCORnet address extracts often leave a comma in ADDRESS_CITY unquoted ("St. Louis, MO"), which shifts every later
+# column with no error from the CSV reader. Returns `path`, or a repaired temp copy with surplus fields folded into the city.
+.repair_address_csv <- function(path) {
+  if (grepl("[.](parquet|pq)$", path, ignore.case = TRUE)) return(path)   # columnar sources have no delimiters to misread
+  header <- strsplit(readLines(path, n = 1L, warn = FALSE), ",", fixed = TRUE)[[1]]
+  header <- trimws(sub("^\ufeff", "", header))
+  city <- match("ADDRESS_CITY", toupper(header))
+  nf <- utils::count.fields(path, sep = ",", quote = "\"", skip = 1L, blank.lines.skip = FALSE)
+  bad <- which(!is.na(nf) & nf > length(header))
+  if (is.na(city) || !length(bad)) return(path)
+  lines <- readLines(path, warn = FALSE)
+  for (i in bad) {
+    f <- scan(text = lines[i + 1L], what = "", sep = ",", quote = "\"", quiet = TRUE, na.strings = character())
+    extra <- length(f) - length(header)
+    f <- c(f[seq_len(city - 1L)], paste(f[city:(city + extra)], collapse = ","), f[-seq_len(city + extra)])
+    lines[i + 1L] <- paste(ifelse(grepl("[\",]", f), paste0("\"", gsub("\"", "\"\"", f), "\""), f), collapse = ",")
+  }
+  out <- tempfile(fileext = "_address_history.csv")
+  writeLines(lines, out)
+  cat(sprintf("  [%s] repaired %d row(s) with unquoted commas in ADDRESS_CITY\n", basename(path), length(bad)))
+  out
+}
+
 #' Maps `lds_address_history.csv` into OMOP CDM `location` table and updates `person.location_id`
 #'
 #' @param con Active DuckDB DBI connection.
@@ -406,6 +429,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     cat("Skipping LOCATION - no lds_address_history.csv found (optional table)\n")
     return(invisible(NULL))
   }
+  path <- .repair_address_csv(path)
 
   prepare_source_view(
     con, "_temp_address_history", path,
@@ -474,6 +498,30 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     WHERE person.person_source_value = loc.patid_key;
   ", patid_expr))
 
+  # person.location_id keeps one address per person; the dated history lets a model pick the address in effect at an
+  # index admission (see derive_geography_features()). Additive, not part of the CDM DDL; rebuilt per person on each call.
+  DBI::dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS person_address_history (
+        person_id BIGINT, location_id BIGINT, zip5 VARCHAR, address_start DATE, address_end DATE, preferred VARCHAR
+    );")
+  DBI::dbExecute(con, sprintf("
+    CREATE OR REPLACE TEMPORARY TABLE _new_address_history AS
+    SELECT p.person_id,
+           pcornet_id(COALESCE(UPPER(src.ADDRESS_STATE), '') || '_' || COALESCE(src.ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(src.ADDRESS_CITY), '')) AS location_id,
+           regexp_extract(CAST(src.ADDRESS_ZIP5 AS VARCHAR), '^\\s*(\\d{5})', 1) AS zip5,
+           parse_omop_date(src.ADDRESS_PERIOD_START) AS address_start,
+           parse_omop_date(src.ADDRESS_PERIOD_END) AS address_end,
+           UPPER(src.ADDRESS_PREFERRED) AS preferred
+    FROM _temp_address_history src
+    JOIN person p ON p.person_source_value = %s
+    WHERE src.PATID IS NOT NULL
+      AND (src.ADDRESS_STATE IS NOT NULL OR src.ADDRESS_ZIP5 IS NOT NULL OR src.ADDRESS_CITY IS NOT NULL);
+  ", patid_expr))
+  DBI::dbExecute(con, "DELETE FROM person_address_history WHERE person_id IN (SELECT person_id FROM _new_address_history);")
+  DBI::dbExecute(con, "INSERT INTO person_address_history
+    SELECT person_id, location_id, nullif(zip5, ''), address_start, address_end, preferred FROM _new_address_history;")
+  DBI::dbExecute(con, "DROP TABLE IF EXISTS _new_address_history;")
+
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_address_history;")
   invisible(NULL)
 }
@@ -500,7 +548,8 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
         CASE UPPER(src.ENC_TYPE)
             WHEN 'IP' THEN 9201 -- Inpatient
-            WHEN 'OS' THEN 9201 -- Observation Services
+            WHEN 'EI' THEN 262 -- Emergency Room and Inpatient Visit (PCORnet emergency-to-inpatient; an index stay with 9201)
+            WHEN 'OS' THEN 581385 -- Observation Room (never an index inpatient stay; still counts as prior utilization)
             WHEN 'ED' THEN 9203 -- Emergency
             WHEN 'AV' THEN 9202 -- Outpatient
             WHEN 'OA' THEN 9202 -- Outpatient
@@ -521,10 +570,14 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         NULL AS admitted_from_source_value,
         CASE 
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('E', 'EX', 'EXPIRED', 'DIED', 'DECEASED') THEN 4216643 -- Expired
-            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 4155309 -- Left against medical advice
-            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HO', 'HOSPICE') THEN 8546 -- Hospice
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 32216 -- Left against medical advice or discontinued care (UB04 Pt dis status 07)
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HS', 'HOSPICE') THEN 8546 -- Hospice (PCORnet HS)
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('SN', 'SNF') THEN 8863 -- Skilled Nursing Facility
-            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HOME', 'ROUTINE') THEN 8536 -- Home
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('NH') THEN 8676 -- Nursing Facility
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HH') THEN 32215 -- UB04 06: home care of organized home health service
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('RH') THEN 32228 -- UB04 62: inpatient rehabilitation facility
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
             ELSE 0
         END AS discharged_to_concept_id,
         src.DISCHARGE_STATUS AS discharged_to_source_value,

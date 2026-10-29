@@ -10,8 +10,8 @@ extract_velocity_features(
   lookback_days = 365,
   readmit_gap_days = 30,
   ip_concepts = c(9201L, 262L),
-  ed_concepts = c(9203L, 262L),
-  os_concepts = 9202L,
+  ed_concepts = 9203L,
+  os_concepts = c(9202L, 581385L),
   concepts = NULL,
   extra_features = NULL,
   cohort_id = NULL,
@@ -26,7 +26,7 @@ extract_velocity_features(
 
 \item{lookback_days, readmit_gap_days}{Window lengths in days (>= 1).}
 
-\item{ip_concepts, ed_concepts, os_concepts}{Visit concept ids counted as inpatient / emergency / outpatient.}
+\item{ip_concepts, ed_concepts, os_concepts}{Visit concept ids counted as inpatient / emergency / outpatient-or-observation. The defaults count concept 262 (emergency-to-inpatient) as inpatient only, as the legacy study did.}
 
 \item{concepts}{Overrides for \link{VELOCITY_CONCEPTS}.}
 

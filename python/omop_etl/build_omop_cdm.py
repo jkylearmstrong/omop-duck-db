@@ -524,6 +524,39 @@ def load_person(con, source_dir, site_id=None, disambiguate_patids=False):
     con.execute("DROP VIEW IF EXISTS _temp_demographic;")
 
 
+def _repair_address_csv(path):
+    """Return ``path``, or a repaired temp copy when rows have more fields than the header.
+
+    PCORnet address extracts often leave a comma in ``ADDRESS_CITY`` unquoted ("St. Louis, MO"), which shifts every later
+    column (state, ZIP, dates) with no error from the CSV reader. Surplus fields are folded back into the city column.
+    """
+    import csv
+    import tempfile
+
+    if str(path).lower().endswith((".parquet", ".pq")):
+        return path                                    # columnar sources have no delimiters to misread
+    try:
+        with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+            rows = list(csv.reader(fh))
+    except csv.Error:
+        return path                                    # not a delimited text file; let the normal reader decide
+    if not rows:
+        return path
+    header = rows[0]
+    city = next((i for i, h in enumerate(header) if h.strip().upper() == "ADDRESS_CITY"), None)
+    bad = [r for r in rows[1:] if len(r) > len(header)]
+    if city is None or not bad:
+        return path
+    for r in bad:
+        extra = len(r) - len(header)
+        r[city:city + extra + 1] = [",".join(r[city:city + extra + 1])]
+    out = tempfile.NamedTemporaryFile("w", suffix="_address_history.csv", delete=False, newline="", encoding="utf-8")
+    with out:
+        csv.writer(out).writerows(rows)
+    print(f"  [{os.path.basename(str(path))}] repaired {len(bad)} row(s) with unquoted commas in ADDRESS_CITY")
+    return out.name
+
+
 def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
     """Maps PCORnet lds_address_history.csv into OMOP location and updates person.location_id."""
     path = find_source_file(source_dir, "lds_address_history")
@@ -532,6 +565,7 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
     if path is None:
         print("Skipping LOCATION - no lds_address_history.csv found (optional table)")
         return
+    path = _repair_address_csv(path)
 
     prepare_source_view(
         con,
@@ -603,6 +637,33 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
         ) loc
         WHERE person.person_source_value = loc.patid_key;
     """)
+
+    # person.location_id keeps one address per person; the dated history is what lets a model pick the address in effect
+    # at an index admission (omop_etl.geography). Additive: not part of the CDM DDL, rebuilt per person on every call.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS person_address_history (
+            person_id BIGINT, location_id BIGINT, zip5 VARCHAR, address_start DATE, address_end DATE, preferred VARCHAR
+        );
+    """)
+    con.execute(f"""
+        CREATE OR REPLACE TEMPORARY TABLE _new_address_history AS
+        SELECT p.person_id,
+               pcornet_id(COALESCE(UPPER(src.ADDRESS_STATE), '') || '_' || COALESCE(src.ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(src.ADDRESS_CITY), '')) AS location_id,
+               regexp_extract(CAST(src.ADDRESS_ZIP5 AS VARCHAR), '^\\s*(\\d{{5}})', 1) AS zip5,
+               parse_omop_date(src.ADDRESS_PERIOD_START) AS address_start,
+               parse_omop_date(src.ADDRESS_PERIOD_END) AS address_end,
+               UPPER(src.ADDRESS_PREFERRED) AS preferred
+        FROM _temp_address_history src
+        JOIN person p ON p.person_source_value = {patid_expr}
+        WHERE src.PATID IS NOT NULL
+          AND (src.ADDRESS_STATE IS NOT NULL OR src.ADDRESS_ZIP5 IS NOT NULL OR src.ADDRESS_CITY IS NOT NULL);
+    """)
+    con.execute("DELETE FROM person_address_history WHERE person_id IN (SELECT person_id FROM _new_address_history);")
+    con.execute("""
+        INSERT INTO person_address_history
+        SELECT person_id, location_id, nullif(zip5, ''), address_start, address_end, preferred FROM _new_address_history;
+    """)
+    con.execute("DROP TABLE IF EXISTS _new_address_history;")
     con.execute("DROP VIEW IF EXISTS _temp_address_history;")
 
 
@@ -632,7 +693,8 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
             COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
             CASE UPPER(src.ENC_TYPE)
                 WHEN 'IP' THEN 9201 -- Inpatient
-                WHEN 'OS' THEN 9201 -- Observation Services
+                WHEN 'EI' THEN 262 -- Emergency Room and Inpatient Visit (PCORnet emergency-to-inpatient; an index stay with 9201)
+                WHEN 'OS' THEN 581385 -- Observation Room (never an index inpatient stay; still counts as prior utilization)
                 WHEN 'ED' THEN 9203 -- Emergency
                 WHEN 'AV' THEN 9202 -- Outpatient
                 WHEN 'OA' THEN 9202 -- Outpatient
@@ -653,10 +715,14 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
             NULL AS admitted_from_source_value,
             CASE 
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('E', 'EX', 'EXPIRED', 'DIED', 'DECEASED') THEN 4216643 -- Expired
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 4155309 -- Left against medical advice
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HO', 'HOSPICE') THEN 8546 -- Hospice
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 32216 -- Left against medical advice or discontinued care (UB04 Pt dis status 07)
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HS', 'HOSPICE') THEN 8546 -- Hospice (PCORnet HS)
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('SN', 'SNF') THEN 8863 -- Skilled Nursing Facility
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HOME', 'ROUTINE') THEN 8536 -- Home
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('NH') THEN 8676 -- Nursing Facility
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HH') THEN 32215 -- UB04 06: home care of organized home health service
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('RH') THEN 32228 -- UB04 62: inpatient rehabilitation facility
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
                 ELSE 0
             END AS discharged_to_concept_id,
             src.DISCHARGE_STATUS AS discharged_to_source_value,

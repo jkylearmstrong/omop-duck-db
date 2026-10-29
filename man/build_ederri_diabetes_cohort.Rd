@@ -13,7 +13,11 @@ build_ederri_diabetes_cohort(
   materialise = "auto",
   schema = NULL,
   followup_days = NULL,
-  require_verified_followup = FALSE
+  require_verified_followup = FALSE,
+  transfer_discharge_concept_ids = 8717,
+  diabetes_drug_rule = "names",
+  diabetes_rxnorm_cuis = NULL,
+  exclude_metformin_only_prediabetes_pcos = FALSE
 )
 }
 \arguments{
@@ -46,6 +50,10 @@ path.}
 \item{require_verified_followup}{Keep a stay only if it has an outcome event or verified follow-up
 (default \code{TRUE}). Not applicable to in-hospital mortality or when \code{followup_days} is \code{NULL}. The result
 column \code{followup_verified} is reported either way.}
+
+\item{transfer_discharge_concept_ids}{Transfer-to-acute-care discharge concepts to exclude (default \code{8717}; \code{integer(0)} keeps transfers).}
+
+\item{diabetes_drug_rule, diabetes_rxnorm_cuis, exclude_metformin_only_prediabetes_pcos}{As in \code{\link[=define_study_cohort]{define_study_cohort()}}.}
 }
 \value{
 As \code{\link[=define_study_cohort]{define_study_cohort()}}.

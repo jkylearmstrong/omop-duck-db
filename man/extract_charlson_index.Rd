@@ -15,7 +15,8 @@ extract_charlson_index(
   hierarchy_adjusted = TRUE,
   exclude_index_diagnoses = TRUE,
   fallback_on_unmapped = FALSE,
-  return_mapping_fidelity = FALSE
+  return_mapping_fidelity = FALSE,
+  end_inclusive = FALSE
 )
 }
 \arguments{
@@ -48,11 +49,16 @@ medical coders days to weeks after discharge, so a model trained on them cannot 
 \code{TRUE}, (a) condition records whose \code{visit_occurrence_id} equals the cohort row's \code{visit_occurrence_id} are never
 counted (when both tables have that column; cohorts from \code{define_study_cohort()} do), and (b) an
 \code{index_date_col} that looks like a discharge / end date is an error, since a window ending at discharge contains
-the index stay. The window is always \verb{[index - lookback_days, index)}.}
+the index stay. The window is \verb{[index - lookback_days, index)} unless \code{end_inclusive = TRUE}. To reproduce a
+discharge-anchored window (the legacy study's 730 days up to discharge, index stay included) pass a discharge-date
+\code{index_date_col}, \code{exclude_index_diagnoses = FALSE} and \code{end_inclusive = TRUE}.}
 
 \item{fallback_on_unmapped}{Logical; if TRUE, falls back to source-value matching if standard concept ancestor is unavailable (default FALSE).}
 
 \item{return_mapping_fidelity}{Logical; if TRUE, attaches mapping fidelity diagnostics attribute (default FALSE).}
+
+\item{end_inclusive}{Logical (default \code{FALSE}): also count diagnoses dated ON the index date, window
+\verb{[index - lookback_days, index]}. Needed to match a pipeline that uses \code{condition_start_date <= discharge_date}.}
 }
 \value{
 A \code{data.frame} with the columns, in order: \code{person_col}, \code{index_date_col}, the 17 \verb{cci_<category>} flags

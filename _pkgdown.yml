@@ -201,6 +201,19 @@ reference:
   - as_tidymodels_data
   - model_concepts
   - materialize_concept_features
+- title: Geography features (RUCA and SDI)
+  desc: Area-level covariates derived from the address in effect at admission, with fixed training-cohort SDI cut points.
+  contents:
+  - derive_geography_features
+  - ruca_category
+  - validate_sdi_cut_points
+  - fit_sdi_cut_points
+  - assign_sdi_quintile
+  - read_ruca_crosswalk
+  - read_sdi_table
+  - encode_categoricals
+  - encoded_column_names
+  - find_metformin_only_prediabetes_pcos
 - title: Data quality, Table 1, and Export
   desc: Run Data Quality Dashboard checks, build publication-grade Table 1s, and export datasets.
   contents:

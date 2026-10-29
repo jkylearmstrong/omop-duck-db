@@ -21,6 +21,7 @@ define_study_cohort(
   random_state = 42,
   require_verified_followup = TRUE,
   death_discharge_concept_ids = NULL,
+  transfer_discharge_concept_ids = NULL,
   death_sources = NULL,
   followup_evidence = NULL,
   age_method = "year_difference",
@@ -34,7 +35,10 @@ define_study_cohort(
   attrition = TRUE,
   one_per_patient = TRUE,
   persist_keys = NULL,
-  require_diabetes = FALSE
+  require_diabetes = FALSE,
+  diabetes_drug_rule = "names",
+  diabetes_rxnorm_cuis = NULL,
+  exclude_metformin_only_prediabetes_pcos = FALSE
 )
 }
 \arguments{
@@ -92,8 +96,13 @@ column \code{followup_verified} is reported either way.}
 
 \item{death_discharge_concept_ids}{Discharge-disposition concepts meaning "died". Default \code{4216643} for
 readmission / cohort-only, \code{c(4216643, 4155309)} for mortality outcomes (the legacy end-of-life convention;
-4155309 is 'Ileal part' in Athena and is written by this package's PCORnet ETL for 'discharged against
-medical advice', so consider passing \code{4216643}).}
+4155309 is 'Ileal part' in Athena; PCORnet ETL versions before the fix wrote it for 'discharged against
+medical advice' (now 32216), so on such databases consider passing \code{4216643}).}
+
+\item{transfer_discharge_concept_ids}{Discharge-disposition concepts meaning "transferred to another acute-care
+hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
+tables do not change; the PCORnet ETL writes \code{8717} for a transfer (\code{DISCHARGE_STATUS} 'IP'). Adds the attrition
+step "Not transferred to another acute-care hospital". \code{integer(0)} keeps transfers.}
 
 \item{death_sources}{Where a patient's death date comes from: \code{"death_table"} and/or
 \code{"discharge_disposition"} (the end date of any visit discharged to a death concept). Default \code{"death_table"}
@@ -140,6 +149,17 @@ rewritten. It is only written when its content changes (byte-identical for ident
 
 \item{require_diabetes}{\code{TRUE} keeps only index stays with diabetes evidence (diagnosis, prescription or elevated
 HbA1c) in the wash-in window; used by \code{\link[=build_ederri_diabetes_cohort]{build_ederri_diabetes_cohort()}}. Default \code{FALSE}.}
+
+\item{diabetes_drug_rule}{Medication arm of \code{require_diabetes}: \code{"names"} (default, unchanged: ten drug names in
+\code{drug_source_value}), \code{"atc_a10"} (\code{drug_concept_id} descending from ATC A10 in \code{concept_ancestor}, branded drugs and
+combinations included) or \code{"rxnorm_cuis"} (descendants of the RxNorm concepts of \code{diabetes_rxnorm_cuis}). The last two
+need the vocabulary on the connection.}
+
+\item{diabetes_rxnorm_cuis}{RxNorm CUIs (vector, or a text/CSV file with one per line) for \code{diabetes_drug_rule = "rxnorm_cuis"}.}
+
+\item{exclude_metformin_only_prediabetes_pcos}{\code{FALSE} (default), \code{TRUE} (= \code{"icd10"}), \code{"icd10"}, \code{"snomed"} or \code{"both"}:
+drop patients whose only diabetes drug is metformin and who have prediabetes or PCOS and no diabetes diagnosis (see
+\code{\link[=find_metformin_only_prediabetes_pcos]{find_metformin_only_prediabetes_pcos()}}). Adds the attrition step "Not metformin-only prediabetes / PCOS (patient-level)".}
 }
 \value{
 A \code{data.frame}, one row per patient ordered by \code{subject_id}, with columns \code{cohort_definition_id},
