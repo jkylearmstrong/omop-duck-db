@@ -379,3 +379,24 @@ def test_address_repair_leaves_parquet_sources_alone(tmp_path):
     blob = tmp_path / "x.csv"
     blob.write_bytes(b"A,B\n1,\x002\n")
     assert _repair_address_csv(str(blob)) == str(blob)                 # NUL bytes: not repairable text, returned untouched
+
+
+def test_geography_written_as_measurements_for_ohdsi_covariates():
+    from omop_etl import write_geography_measurements
+    from omop_etl.geography import GEOGRAPHY_CONCEPT_IDS
+
+    c = _con([(1, 1, "19104", None, None, "Y"), (2, 2, "99999", None, None, "Y")], [(1, 1, "2016-06-01"), (2, 2, "2016-07-01")])
+    g = derive_geography_features(c, RUCA, SDI, CUTS)
+    n = write_geography_measurements(c, g)
+    assert n == 3                                                           # person 1: score, quintile, RUCA; person 2: nothing (unmatched ZIP)
+    rows = c.execute("SELECT person_id, measurement_concept_id, value_as_number, measurement_date, visit_occurrence_id, "
+                     "measurement_type_concept_id FROM measurement ORDER BY measurement_concept_id").fetchall()
+    ids = GEOGRAPHY_CONCEPT_IDS
+    assert [(r[0], r[1], r[2]) for r in rows] == [(1, ids["sdi_score"], 95.0), (1, ids["sdi_quintile"], 5.0), (1, ids["ruca_code"], 1.0)]
+    assert {str(r[3]) for r in rows} == {"2016-06-01"} and {r[4] for r in rows} == {1} and {r[5] for r in rows} == {45754907}
+    assert c.execute("SELECT count(*) FROM concept WHERE vocabulary_id = 'omop-duck-db'").fetchone()[0] == 3
+    assert write_geography_measurements(c, g) == 3                          # idempotent: rows of the same concepts are replaced
+    assert c.execute("SELECT count(*) FROM measurement").fetchone()[0] == 3
+    with pytest.raises(ValueError, match="missing column"):
+        write_geography_measurements(c, g.drop(columns="admit_date"))
+    assert write_geography_measurements(c, g.iloc[0:0]) == 0

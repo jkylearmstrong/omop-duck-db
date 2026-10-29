@@ -83,3 +83,35 @@ def test_cli_achilles_and_dqd_full(tmp_path, capsys):
     out = tmp_path / "dqd.json"
     assert main(["dqd", "--db", str(db), "--full", "--output", str(out)]) == 0
     assert out.stat().st_size > 10000
+
+
+def test_matches_official_achilles_on_the_fixture(con):
+    """Golden values from the official R package (Achilles 1.7.2, DuckDB) run on this same fixture."""
+    import math
+
+    run_achilles(con, [0, 1, 2, 3, 4, 5, 101, 103, 105, 108, 111, 112, 113, 200, 201, 202])
+    got = {(a, s1, s2): n for a, s1, s2, n in con.execute(
+        "SELECT analysis_id, stratum_1, stratum_2, count_value FROM achilles_results").fetchall()}
+    official = {(1, None, None): 3, (2, "8507", None): 1, (2, "8532", None): 2, (3, "1980", None): 1, (3, "1990", None): 2,
+                (4, "8527", None): 3, (5, "38003563", None): 3, (101, "25", None): 1, (101, "30", None): 1,
+                (111, "201001", None): 1, (111, "201201", None): 1, (111, "201506", None): 1,
+                (112, "201012", None): 1, (112, "201201", None): 1, (112, "201606", None): 1,
+                (113, "1", None): 1, (113, "2", None): 1, (200, "9201", None): 2, (201, "9201", None): 3,
+                (202, "9201", "201003"): 1, (202, "9201", "201507"): 1}
+    for key, n in official.items():
+        assert got.get(key) == n, key
+    assert got[(108, "12", None)] == 2                       # Achilles writes the bucket as "12.0" on DuckDB, "12" elsewhere
+    dist = {r[0]: r[1:] for r in con.execute(
+        "SELECT analysis_id, count_value, min_value, max_value, avg_value, stdev_value, median_value, p10_value, p25_value, "
+        "p75_value, p90_value FROM achilles_results_dist").fetchall()}
+    for aid, exp in ((103, (2, 25, 30, 27.5, 3.535534, 25, 25, 25, 30, 30)), (105, (2, 364, 365, 364.5, 0.707107, 364, 364, 364, 365, 365))):
+        assert all(math.isclose(a, b, abs_tol=1e-5) for a, b in zip(dist[aid], exp)), aid
+
+
+def test_single_value_distribution_has_null_stdev_like_achilles():
+    c = duckdb.connect()
+    build_schema(c)
+    c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES (1, 8507, 1980, 0, 0)")
+    c.execute("INSERT INTO observation_period VALUES (1, 1, DATE '2010-01-01', DATE '2010-12-31', 0)")
+    run_achilles(c, [103])
+    assert c.execute("SELECT count_value, stdev_value, median_value FROM achilles_results_dist WHERE analysis_id = 103").fetchone() == (1, None, 30.0)

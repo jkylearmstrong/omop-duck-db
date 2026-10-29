@@ -205,6 +205,8 @@ reference:
   desc: Area-level covariates derived from the address in effect at admission, with fixed training-cohort SDI cut points.
   contents:
   - derive_geography_features
+  - write_geography_measurements
+  - GEOGRAPHY_CONCEPT_IDS
   - ruca_category
   - validate_sdi_cut_points
   - fit_sdi_cut_points

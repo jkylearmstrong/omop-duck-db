@@ -193,6 +193,7 @@
             }
           }
         ],
+        "DemographicCriteriaList": [],
         "Groups": []
       }
     },
@@ -222,6 +223,7 @@
             }
           }
         ],
+        "DemographicCriteriaList": [],
         "Groups": []
       }
     },
@@ -251,6 +253,7 @@
             }
           }
         ],
+        "DemographicCriteriaList": [],
         "Groups": []
       }
     }

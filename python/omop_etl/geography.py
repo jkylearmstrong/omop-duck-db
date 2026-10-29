@@ -34,7 +34,8 @@ import pandas as pd
 __all__ = [
     "RUCA_MISSING", "SDI_MISSING", "SDI_LABELS", "SDI_PROBS",
     "ruca_category", "fit_sdi_cut_points", "assign_sdi_quintile", "validate_sdi_cut_points",
-    "read_ruca_crosswalk", "read_sdi_table", "derive_geography_features",
+    "read_ruca_crosswalk", "read_sdi_table", "derive_geography_features", "write_geography_measurements",
+    "GEOGRAPHY_CONCEPT_IDS",
 ]
 
 RUCA_MISSING = "RUCA: Missing / Unknown"
@@ -213,10 +214,87 @@ def derive_geography_features(
         con.unregister("_geo_stays")
 
     g = picked.merge(ruca, on="zip5", how="left").merge(sdi, on="zip5", how="left")
+    g = g.merge(stays_df[["stay_id", "admit_date"]], on="stay_id", how="left")
     g["ruca_category"] = g["ruca_code"].map(lambda c: ruca_category(c, code_99_missing=code_99_missing))
     if cuts is None:
         cuts = fit_sdi_cut_points(g["sdi_score"])
     g["sdi_quintile"] = assign_sdi_quintile(g["sdi_score"], cuts).to_numpy()
-    g = g[["person_id", "stay_id", "zip5", "rule", "ruca_code", "ruca_category", "sdi_score", "sdi_quintile"]]
+    g = g[["person_id", "stay_id", "zip5", "rule", "ruca_code", "ruca_category", "sdi_score", "sdi_quintile", "admit_date"]]
     g.attrs["sdi_cut_points"] = cuts
     return g
+
+
+# Area-level values stored as MEASUREMENT rows so OHDSI tools (FeatureExtraction, PatientLevelPrediction, ATLAS) see them
+# as ordinary covariates. Local concept ids (>= 2,000,000,000 is the OMOP convention for site-defined concepts).
+GEOGRAPHY_CONCEPT_IDS = {"sdi_score": 2000100001, "sdi_quintile": 2000100002, "ruca_code": 2000100003}
+_GEOGRAPHY_CONCEPT_NAMES = {
+    "sdi_score": "Social Deprivation Index score of the residence ZIP at admission",
+    "sdi_quintile": "Social Deprivation Index quintile (1 least to 5 most deprived) of the residence ZIP at admission",
+    "ruca_code": "Rural-Urban Commuting Area primary code of the residence ZIP at admission",
+}
+DERIVED_VALUE_TYPE_CONCEPT_ID = 45754907     # "Derived value" (Meas Type)
+
+
+def write_geography_measurements(
+    con: duckdb.DuckDBPyConnection,
+    geography: pd.DataFrame,
+    *,
+    concept_ids: dict[str, int] | None = None,
+    visit_ids: bool = True,
+    register_concepts: bool = True,
+    type_concept_id: int = DERIVED_VALUE_TYPE_CONCEPT_ID,
+) -> int:
+    """Writes the derived area-level values as ``measurement`` rows (the result of :func:`derive_geography_features`).
+
+    One row per stay and value, dated the admission date: SDI score and RUCA code as they are, SDI quintile as 1-5 (from
+    the fixed cut points). Missing values write no row. Re-running replaces the rows of the same concepts for the same
+    persons. ``visit_ids=True`` links each row to ``visit_occurrence_id = stay_id`` (right when the stays are
+    ``visit_occurrence`` rows, the default of :func:`derive_geography_features`). ``register_concepts`` adds the three local
+    concepts to ``concept`` (Measurement domain) when that table exists, so covariate names resolve. ``unit_concept_id`` is 0
+    (the values have no unit): FeatureExtraction joins measurement covariates on the unit and skips rows where it is NULL.
+    Returns the rows written.
+
+    FeatureExtraction then reads them with ``createCovariateSettings(useMeasurementValueLongTerm = TRUE,
+    includedCovariateConceptIds = c(2000100001, 2000100002, 2000100003))``.
+    """
+    ids = {**GEOGRAPHY_CONCEPT_IDS, **(concept_ids or {})}
+    need = {"person_id", "stay_id", "admit_date", "sdi_score", "sdi_quintile", "ruca_code"}
+    if need - set(geography.columns):
+        raise ValueError(f"geography is missing column(s) {sorted(need - set(geography.columns))}; pass the result of derive_geography_features().")
+    g = geography.copy()
+    quint = {label: i + 1 for i, label in enumerate(SDI_LABELS)}
+    g["sdi_quintile_n"] = g["sdi_quintile"].map(quint)
+    g["ruca_primary"] = np.floor(pd.to_numeric(g["ruca_code"], errors="coerce"))        # secondary digits (4.2) are not part of the primary code
+    parts = []
+    for col, key in (("sdi_score", "sdi_score"), ("sdi_quintile_n", "sdi_quintile"), ("ruca_primary", "ruca_code")):
+        p = g.loc[g[col].notna(), ["person_id", "stay_id", "admit_date", col]].rename(columns={col: "value"})
+        p["measurement_concept_id"] = int(ids[key])
+        parts.append(p)
+    rows = pd.concat(parts, ignore_index=True)
+    if rows.empty:
+        return 0
+    rows["admit_date"] = pd.to_datetime(rows["admit_date"]).dt.date
+    con.register("_geo_meas", rows)
+    try:
+        cid_list = ", ".join(str(int(v)) for v in ids.values())
+        con.execute(f"DELETE FROM measurement WHERE measurement_concept_id IN ({cid_list}) "
+                    "AND person_id IN (SELECT person_id FROM _geo_meas)")
+        start = con.execute("SELECT COALESCE(MAX(measurement_id), 0) FROM measurement").fetchone()[0]
+        visit = "CAST(stay_id AS BIGINT)" if visit_ids else "NULL"
+        con.execute(f"""
+            INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_datetime,
+                                     measurement_type_concept_id, value_as_number, unit_concept_id, visit_occurrence_id, measurement_source_value)
+            SELECT {int(start)} + row_number() OVER (ORDER BY person_id, stay_id, measurement_concept_id),
+                   CAST(person_id AS BIGINT), measurement_concept_id, admit_date, CAST(admit_date AS TIMESTAMP),
+                   {int(type_concept_id)}, CAST(value AS DOUBLE), 0, {visit}, 'omop_etl.geography'
+            FROM _geo_meas""")
+    finally:
+        con.unregister("_geo_meas")
+    if register_concepts and _has_table(con, "concept"):
+        for key, cid in ids.items():
+            if not con.execute("SELECT count(*) FROM concept WHERE concept_id = ?", [int(cid)]).fetchone()[0]:
+                con.execute("INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, "
+                            "concept_code, valid_start_date, valid_end_date) VALUES (?, ?, 'Measurement', 'omop-duck-db', 'Geography', 'S', ?, "
+                            "DATE '1970-01-01', DATE '2099-12-31')", [int(cid), _GEOGRAPHY_CONCEPT_NAMES[key], key])
+    return len(rows)
+

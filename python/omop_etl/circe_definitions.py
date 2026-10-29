@@ -64,11 +64,13 @@ _ALL_TIME = {"Start": {"Coeff": -1}, "End": {"Coeff": 1}}          # no Days = u
 _UP_TO_INDEX = {"Start": {"Coeff": -1}, "End": {"Days": 0, "Coeff": 1}}
 
 
-def _rule(name: str, description: str, rule_type: str, entries: Sequence[tuple[dict, dict, int, int]]) -> dict[str, Any]:
+def _rule(name: str, description: str, rule_type: str, entries: Sequence[tuple[dict, dict, int, int]],
+          demographics: Sequence[dict] = ()) -> dict[str, Any]:
     return {"name": name, "description": description,
             "expression": {"Type": rule_type,
                            "CriteriaList": [{"Criteria": c, "StartWindow": w, "Occurrence": {"Type": t, "Count": n}}
                                             for c, w, t, n in entries],
+                           "DemographicCriteriaList": list(demographics),
                            "Groups": []}}
 
 
@@ -131,8 +133,8 @@ def diabetes_phenotype_circe(drug_rule: str = "atc_a10", rxnorm_concept_ids: Seq
     ]
     primary = [{"ConditionOccurrence": {"CodesetId": 0}}, {"DrugExposure": {"CodesetId": 1}},
                {"Measurement": {"CodesetId": 2, "ValueAsNumber": {"Value": 6.5, "Op": "gte"}}}]
-    rules = [_rule("Adult at entry", "Age 18 or older on the entry date.", "ALL",
-                   [({"DemographicCriteria": {"Age": {"Value": 18, "Op": "gte"}}}, _UP_TO_INDEX, 2, 1)])]
+    rules = [_rule("Adult at entry", "Age 18 or older on the entry date.", "ALL", [],
+                   demographics=[{"Age": {"Value": 18, "Op": "gte"}}])]
     return _definition(sets, primary, rules)
 
 

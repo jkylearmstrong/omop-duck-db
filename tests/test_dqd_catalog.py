@@ -48,7 +48,7 @@ def test_planted_defects_are_flagged():
               "(2, 1, 0, DATE '1970-01-01', DATE '1970-01-02', 0), (3, 1, 9201, DATE '2030-01-01', DATE '2030-01-02', 0)")  # before birth, future
     c.execute("INSERT INTO death (person_id, death_date, death_type_concept_id) VALUES (1, DATE '2020-02-01', 0)")
     res = run_dqd_catalog(c, today=TODAY)
-    assert _by(res, "isPrimaryKey", "visit_occurrence", "visit_occurrence_id")["num_violated_rows"] == 1
+    assert _by(res, "isPrimaryKey", "visit_occurrence", "visit_occurrence_id")["num_violated_rows"] == 2   # both rows of the duplicated key, as the official DQD counts
     assert _by(res, "isForeignKey", "visit_occurrence", "person_id")["failed"]
     assert _by(res, "plausibleStartBeforeEnd", "visit_occurrence", "visit_start_date")["num_violated_rows"] == 1
     assert _by(res, "plausibleAfterBirth", "visit_occurrence", "visit_start_date")["num_violated_rows"] == 1
@@ -68,3 +68,21 @@ def test_missing_table_missing_column_and_full(tmp_path):
     full = run_dqd_full(_con(), out, today=TODAY)
     assert out.exists() and full["Overview"]["count_total"] > 500
     assert any(r["check_id"].startswith("CAT_") for r in full["CheckResults"])
+
+
+def test_agrees_with_the_official_dqd_on_a_planted_defect_fixture():
+    """Golden values from the official DataQualityDashboard (R, DuckDB) run on exactly this data."""
+    c = _con()
+    c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, "
+              "visit_type_concept_id) VALUES (1, 99, 9201, DATE '2020-03-05', DATE '2020-03-01', 0), "
+              "(2, 1, 0, DATE '1970-01-01', DATE '1970-01-02', 0), (3, 1, 9201, DATE '2030-01-01', DATE '2030-01-02', 0)")
+    res = run_dqd_catalog(c, tables=["person", "visit_occurrence"], today=TODAY)
+    failed = {(r["check_name"], r["cdm_field_name"]): r["num_violated_rows"] for r in res["CheckResults"]
+              if r["cdm_table_name"] == "visit_occurrence" and r["failed"]
+              and r["check_name"] in ("isPrimaryKey", "isForeignKey", "plausibleAfterBirth", "plausibleStartBeforeEnd")}
+    assert failed == {("isPrimaryKey", "visit_occurrence_id"): 2, ("isForeignKey", "person_id"): 1,
+                      ("plausibleAfterBirth", "visit_start_date"): 1, ("plausibleAfterBirth", "visit_end_date"): 1,
+                      ("plausibleStartBeforeEnd", "visit_start_date"): 1}
+    origin = {r["check_name"]: r["check_origin"] for r in res["CheckResults"]}
+    assert origin["isPrimaryKey"] == "DQD" and origin["plausibleFutureDate"] == "omop-duck-db"
+

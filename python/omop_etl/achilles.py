@@ -44,10 +44,12 @@ def _dist(aid, name, tables, body):
 
 
 def _stats(expr: str) -> str:
+    """Distribution columns as the official Achilles computes them: sample standard deviation (NULL for one value) and the
+    discrete percentile (the smallest value whose cumulative count reaches q * n), not an interpolated one."""
     return (f"count(*) AS count_value, min({expr}) AS min_value, max({expr}) AS max_value, avg({expr}) AS avg_value, "
-            f"coalesce(stddev_pop({expr}), 0) AS stdev_value, median({expr}) AS median_value, "
-            f"quantile_cont({expr}, 0.10) AS p10_value, quantile_cont({expr}, 0.25) AS p25_value, "
-            f"quantile_cont({expr}, 0.75) AS p75_value, quantile_cont({expr}, 0.90) AS p90_value")
+            f"stddev_samp({expr}) AS stdev_value, quantile_disc({expr}, 0.50) AS median_value, "
+            f"quantile_disc({expr}, 0.10) AS p10_value, quantile_disc({expr}, 0.25) AS p25_value, "
+            f"quantile_disc({expr}, 0.75) AS p75_value, quantile_disc({expr}, 0.90) AS p90_value")
 
 
 _FIRST_OP = ("(SELECT person_id, observation_period_start_date AS s, observation_period_end_date AS e, "

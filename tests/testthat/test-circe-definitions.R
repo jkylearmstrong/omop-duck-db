@@ -60,3 +60,55 @@ test_that("the diabetes phenotype Circe cohort covers diagnosis, drug and HbA1c 
   out <- execute_circe_cohort(con, circe_file("diabetes_phenotype.circe.json"))
   expect_equal(sort(out$subject_id), c(1, 2, 3, 5))
 })
+
+test_that("CirceR + CohortGenerator give the same people as the native compiler (the official Circe engine)", {
+  skip_if_not_installed("CirceR")
+  skip_if_not_installed("CohortGenerator")
+  skip_if_not_installed("DatabaseConnector")
+  files <- c("metformin_only_prediabetes_pcos_icd10", "metformin_only_prediabetes_pcos_snomed",
+             "metformin_only_prediabetes_pcos_both", "diabetes_phenotype")
+  paths <- vapply(files, function(f) circe_file(paste0(f, ".circe.json")), character(1))
+
+  con <- excl_con(env = new.env())          # the cleanup is done below, before CohortGenerator opens the file
+  db_path <- DBI::dbGetInfo(con)$dbname
+  excl_populate(con)
+  DBI::dbExecute(con, sprintf("UPDATE condition_occurrence SET condition_concept_id = %.0f WHERE person_id = 2", PCOS_ICD))
+  DBI::dbExecute(con, sprintf("UPDATE condition_occurrence SET condition_concept_id = %.0f WHERE person_id = 9", PREDIAB))
+  DBI::dbExecute(con, sprintf("UPDATE drug_exposure SET drug_concept_id = %.0f WHERE person_id = 9", MET))
+  DBI::dbExecute(con, sprintf("UPDATE condition_occurrence SET condition_concept_id = %.0f WHERE person_id = 10", DM))
+  DBI::dbExecute(con, sprintf("UPDATE drug_exposure SET drug_concept_id = %.0f WHERE person_id = 11 AND drug_concept_id = 0", INSULIN))
+  for (pid in 1:11) DBI::dbExecute(con, sprintf("INSERT INTO observation_period VALUES (%d,%d,DATE '2015-01-01',DATE '2022-01-01',0)", pid, pid))
+  # the official engine resolves concept sets through the concept table
+  ids <- unique(c(DBI::dbGetQuery(con, "SELECT ancestor_concept_id AS i FROM concept_ancestor UNION SELECT descendant_concept_id FROM concept_ancestor")$i,
+                  DBI::dbGetQuery(con, "SELECT DISTINCT drug_concept_id AS i FROM drug_exposure")$i,
+                  DBI::dbGetQuery(con, "SELECT DISTINCT condition_concept_id AS i FROM condition_occurrence")$i))
+  for (i in ids[ids != 0]) {
+    DBI::dbExecute(con, sprintf("INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, valid_start_date, valid_end_date) VALUES (%.0f, 'c%.0f', 'Drug', 'RxNorm', 'Ingredient', 'S', 'c%.0f', DATE '1970-01-01', DATE '2099-12-31')", i, i, i))
+  }
+  native <- lapply(seq_along(paths), function(i) sort(execute_circe_cohort(con, paths[[i]], target_cohort_id = 100L + i, cohort_table = "native_cohort")$subject_id))
+  DBI::dbExecute(con, "CHECKPOINT")
+  DBI::dbDisconnect(con, shutdown = TRUE)
+  on.exit(unlink(db_path), add = TRUE)
+
+  defs <- tryCatch(do.call(rbind, lapply(seq_along(paths), function(i) {
+    json <- paste(readLines(paths[[i]], warn = FALSE), collapse = "\n")
+    sql <- CirceR::buildCohortQuery(CirceR::cohortExpressionFromJson(json), CirceR::createGenerateOptions(generateStats = FALSE))
+    data.frame(cohortId = i, cohortName = files[[i]], json = json, sql = sql, stringsAsFactors = FALSE)
+  })), error = function(e) skip(paste("CirceR cannot run here (Java?):", conditionMessage(e))))
+
+  cd <- DatabaseConnector::createConnectionDetails(dbms = "duckdb", server = db_path)
+  tables <- CohortGenerator::getCohortTableNames("cohort_cg")
+  conn <- tryCatch(DatabaseConnector::connect(cd), error = function(e) skip(paste("cannot connect:", conditionMessage(e))))
+  CohortGenerator::createCohortTables(connection = conn, cohortDatabaseSchema = "main", cohortTableNames = tables)
+  DatabaseConnector::disconnect(conn)
+  suppressMessages(CohortGenerator::generateCohortSet(connectionDetails = cd, cdmDatabaseSchema = "main", cohortDatabaseSchema = "main",
+                                                      cohortTableNames = tables, cohortDefinitionSet = defs))
+  conn <- DatabaseConnector::connect(cd)
+  on.exit(DatabaseConnector::disconnect(conn), add = TRUE, after = FALSE)
+  official <- DatabaseConnector::querySql(conn, "SELECT cohort_definition_id, subject_id FROM cohort_cg")
+  names(official) <- tolower(names(official))
+  for (i in seq_along(paths)) {
+    expect_equal(sort(official$subject_id[official$cohort_definition_id == i]), native[[i]], info = files[[i]])
+  }
+  expect_equal(sort(official$subject_id[official$cohort_definition_id == 3]), c(1, 2, 7, 9))
+})

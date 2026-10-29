@@ -35,6 +35,11 @@ from omop_etl.jsonio import strict_dumps
 
 __all__ = ["run_dqd_catalog", "run_dqd_full", "DQD_CATALOG_CHECKS"]
 
+# check names that exist in the official DataQualityDashboard (checked against v2.x for CDM 5.4); the other catalog checks
+# (plausibleFutureDate, visitPersonMatch) are extensions of this package and are labelled so in ``check_origin``
+_OFFICIAL_DQD_CHECKS = frozenset({"cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "measureValueCompleteness",
+                                  "standardConceptRecordCompleteness", "plausibleStartBeforeEnd", "plausibleAfterBirth",
+                                  "plausibleBeforeDeath"})
 DQD_CATALOG_CHECKS = ("cdmTable", "cdmField", "isRequired", "isPrimaryKey", "isForeignKey", "visitPersonMatch", "measureValueCompleteness",
                       "standardConceptRecordCompleteness", "plausibleStartBeforeEnd", "plausibleAfterBirth",
                       "plausibleBeforeDeath", "plausibleFutureDate")
@@ -85,6 +90,7 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
         cat, ctx = _KAHN[name]
         results.append({"check_id": f"CAT_{name}_{tbl}_{fld or 'TABLE'}".upper(), "check_name": name, "check_level": level,
                         "category": cat, "context": ctx, "cdm_table_name": tbl, "cdm_field_name": fld,
+                        "check_origin": "DQD" if name in _OFFICIAL_DQD_CHECKS else "omop-duck-db",
                         "check_description": desc, "num_violated_rows": int(viol), "pct_violated_rows": round(pct, 4),
                         "num_denominator_rows": int(denom), "threshold_value": thr, "execution_status": status, "failed": failed})
 
@@ -119,7 +125,8 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
                 add("standardConceptRecordCompleteness", tbl, c.name, f"Share of {tbl}.{c.name} = 0 (unmapped).", zeros, n,
                     zero_concept_threshold_pct)
             if c.name == pk and n:
-                dup = con.execute(f"SELECT count(*) - count(DISTINCT {_q(pk)}) FROM {_q(tbl)}").fetchone()[0]
+                # like the official DQD: every row whose key occurs more than once (not only the surplus copies)
+                dup = con.execute(f"SELECT count(*) FROM (SELECT count(*) OVER (PARTITION BY {_q(pk)}) AS k FROM {_q(tbl)}) WHERE k > 1").fetchone()[0]
                 add("isPrimaryKey", tbl, pk, f"{tbl}.{pk} is unique.", dup, n, threshold_pct)
             ref = _FK.get(c.name)
             if ref and ref != tbl and ref in present and n:
@@ -139,14 +146,14 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
 
         if tbl in _VOCAB or tbl in ("cohort", "person") or "person_id" not in have or not n:
             continue
-        dates = [c.name for c in usable if have[c.name] == "DATE"]
-        for sd in [d for d in dates if d.endswith("_start_date")]:
+        dates = [c.name for c in usable if have[c.name] == "DATE" or have[c.name].startswith("TIMESTAMP")]
+        for sd in [d for d in dates if d.endswith(("_start_date", "_start_datetime"))]:
             ed = sd.replace("_start_date", "_end_date")
             if ed in dates:
                 v = con.execute(f"SELECT count(*) FROM {_q(tbl)} WHERE {_q(ed)} < {_q(sd)}").fetchone()[0]
                 nn = con.execute(f"SELECT count(*) FROM {_q(tbl)} WHERE {_q(ed)} IS NOT NULL AND {_q(sd)} IS NOT NULL").fetchone()[0]
                 add("plausibleStartBeforeEnd", tbl, sd, f"{tbl}.{ed} is not before {sd}.", v, nn, threshold_pct)
-        for d in [d for d in dates if not d.endswith("_end_date")]:
+        for d in dates:
             nn = con.execute(f"SELECT count(*) FROM {_q(tbl)} WHERE {_q(d)} IS NOT NULL").fetchone()[0]
             if person_ok:
                 v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t JOIN person p ON p.person_id = t.person_id "
@@ -156,7 +163,7 @@ def run_dqd_catalog(con: duckdb.DuckDBPyConnection, output_json: str | Path | No
                 v = con.execute(f"SELECT count(*) FROM {_q(tbl)} t JOIN (SELECT person_id, min(death_date) AS dd FROM death GROUP BY 1) x "
                                 f"ON x.person_id = t.person_id WHERE t.{_q(d)} > x.dd + INTERVAL '{int(death_grace_days)}' DAY").fetchone()[0]
                 add("plausibleBeforeDeath", tbl, d, f"{tbl}.{d} is within {int(death_grace_days)} days after death at most.", v, nn, threshold_pct)
-            v = con.execute(f"SELECT count(*) FROM {_q(tbl)} WHERE {_q(d)} > DATE '{today.isoformat()}'").fetchone()[0]
+            v = con.execute(f"SELECT count(*) FROM {_q(tbl)} WHERE CAST({_q(d)} AS DATE) > DATE '{today.isoformat()}'").fetchone()[0]
             add("plausibleFutureDate", tbl, d, f"{tbl}.{d} is not after {today.isoformat()}.", v, nn, threshold_pct)
 
     return _package(results, cdm_version, output_json)

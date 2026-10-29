@@ -306,6 +306,13 @@ compile_circe_to_duckdb <- function(circe_json,
         crit_clauses <- c(crit_clauses, c_sql)
       }
     }
+    # ATLAS puts age / gender conditions of a rule in DemographicCriteriaList (evaluated on the entry date)
+    for (demo in expr$DemographicCriteriaList %||% list()) {
+      c_sql <- .compile_criteria(list(Criteria = list(DemographicCriteria = demo)), cdm_schema = cdm_schema)
+      if (!is.null(c_sql) && nzchar(c_sql)) {
+        crit_clauses <- c(crit_clauses, c_sql)
+      }
+    }
     if (length(crit_clauses) > 0) {
       join_op <- if (rule_type == "ALL") " AND\n                " else " OR\n                "
       rule_clauses <- c(rule_clauses, sprintf("(\n                %s\n            )", paste(crit_clauses, collapse = join_op)))

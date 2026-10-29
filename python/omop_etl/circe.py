@@ -311,6 +311,11 @@ def compile_circe_to_duckdb(
             c_sql = _compile_criteria(crit_wrapper, cdm_schema=cdm_schema)
             if c_sql:
                 crit_clauses.append(c_sql)
+        # ATLAS puts age / gender conditions of a rule in DemographicCriteriaList (evaluated on the entry date)
+        for demo in expr.get("DemographicCriteriaList", []) or []:
+            c_sql = _compile_criteria({"Criteria": {"DemographicCriteria": demo}}, cdm_schema=cdm_schema)
+            if c_sql:
+                crit_clauses.append(c_sql)
         if crit_clauses:
             join_op = " AND\n                " if rule_type == "ALL" else " OR\n                "
             rule_clauses.append(f"(\n                {join_op.join(crit_clauses)}\n            )")
