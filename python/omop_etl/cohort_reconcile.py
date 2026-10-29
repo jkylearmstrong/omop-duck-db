@@ -45,9 +45,9 @@ def _table(con: duckdb.DuckDBPyConnection, x: Any) -> pd.DataFrame:
 def _definition(d: Any) -> dict:
     if isinstance(d, dict):
         return copy.deepcopy(d)
-    if isinstance(d, Path) or (isinstance(d, str) and Path(d).exists()):
-        return json.loads(Path(d).read_text(encoding="utf-8"))
-    return json.loads(d)
+    if isinstance(d, str) and d.lstrip().startswith("{"):
+        return json.loads(d)                                   # JSON text, never a path (a long string is "file name too long" on Linux)
+    return json.loads(Path(d).read_text(encoding="utf-8"))
 
 
 def _persons(con: duckdb.DuckDBPyConnection, data: dict, stage: str | None, cdm_schema: str) -> set[int]:

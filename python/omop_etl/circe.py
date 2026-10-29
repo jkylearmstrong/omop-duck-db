@@ -320,6 +320,17 @@ def _check_definition_supported(data: dict) -> None:
                       stacklevel=3)
 
 
+def _is_file(x: str | Path) -> bool:
+    """True for an existing file. JSON text is never a path: a long string raises OSError (file name too long) on Linux."""
+    s = str(x)
+    if s.lstrip().startswith(("{", "[")):
+        return False
+    try:
+        return Path(s).exists()
+    except OSError:
+        return False
+
+
 def compile_circe_to_duckdb(
     circe_json: str | dict | Path,
     target_cohort_id: int = 1,
@@ -349,7 +360,7 @@ def compile_circe_to_duckdb(
     """
     if stage is not None and stage not in ("_primary_events_raw", "_primary_limited", "_primary_qualified"):
         raise ValueError(f"unknown stage {stage!r}")
-    if isinstance(circe_json, (str, Path)) and Path(str(circe_json)).exists():
+    if isinstance(circe_json, (str, Path)) and _is_file(circe_json):
         with open(str(circe_json), "r", encoding="utf-8") as f:
             data = json.load(f)
     elif isinstance(circe_json, str):
