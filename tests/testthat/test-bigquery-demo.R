@@ -1,6 +1,12 @@
 demo_values <- list(cdm = "bigquery-public-data.cms_synthetic_patient_data_omop", scratch = "my-proj.scratch",
                     cohort_table = "demo_cohort", features_table = "demo_features", cohort_id = 1L)
-demo_cohort_json <- testthat::test_path("..", "..", "cohorts", "diabetes_phenotype.circe.json")
+# the repository definition is not in the built package; tests that mock the compiler only need a file that exists
+demo_repo_cohort_json <- testthat::test_path("..", "..", "cohorts", "diabetes_phenotype.circe.json")
+demo_cohort_json <- local({
+  f <- tempfile(fileext = ".circe.json")
+  writeLines("{}", f)
+  f
+})
 demo_all_tables <- c("person", "visit_occurrence", "observation_period", "concept_ancestor", "condition_occurrence",
                      "drug_exposure", "measurement")
 
@@ -52,7 +58,6 @@ test_that("the feature and availability templates fill every placeholder", {
 })
 
 test_that("run_bigquery_demo runs end to end against a fake runner and writes the disclaimer", {
-  skip_if_not(file.exists(demo_cohort_json))
   testthat::local_mocked_bindings(compile_cohort_bigquery = function(...) c("CREATE TABLE t", "INSERT INTO t SELECT 1"))
   for (fail in c(FALSE, TRUE)) {
     out <- withr::local_tempdir()
@@ -68,7 +73,6 @@ test_that("run_bigquery_demo runs end to end against a fake runner and writes th
 })
 
 test_that("missing CDM tables and a placeholder billing project fail with clear messages", {
-  skip_if_not(file.exists(demo_cohort_json))
   testthat::local_mocked_bindings(compile_cohort_bigquery = function(...) "CREATE TABLE t")
   expect_error(run_bigquery_demo("my-proj", withr::local_tempdir(), cohort_json = demo_cohort_json, runner = fake_runner(setdiff(demo_all_tables, "concept_ancestor"))),
                "missing concept_ancestor")
@@ -78,8 +82,8 @@ test_that("missing CDM tables and a placeholder billing project fail with clear 
 test_that("the diabetes definition compiles to GoogleSQL through CirceR + SqlRender", {
   skip_if_not_installed("CirceR")
   skip_if_not_installed("SqlRender")
-  skip_if_not(file.exists(demo_cohort_json))
-  stmts <- compile_cohort_bigquery(demo_cohort_json,
+  skip_if_not(file.exists(demo_repo_cohort_json))
+  stmts <- compile_cohort_bigquery(demo_repo_cohort_json,
                                    "bigquery-public-data.cms_synthetic_patient_data_omop", "my-proj.scratch")
   sql <- paste(stmts, collapse = "\n")
   expect_true(grepl("`bigquery-public-data.cms_synthetic_patient_data_omop.person`", sql, fixed = TRUE))
@@ -90,12 +94,11 @@ test_that("live BigQuery smoke test (opt in with OMOP_BQ_BILLING_PROJECT; bills 
   skip_if(!nzchar(Sys.getenv("OMOP_BQ_BILLING_PROJECT")), "set OMOP_BQ_BILLING_PROJECT to run against BigQuery")
   skip_if_not_installed("CirceR")
   skip_if_not_installed("bigrquery")
-  s <- run_bigquery_demo(Sys.getenv("OMOP_BQ_BILLING_PROJECT"), withr::local_tempdir(), cohort_json = demo_cohort_json)
+  s <- run_bigquery_demo(Sys.getenv("OMOP_BQ_BILLING_PROJECT"), withr::local_tempdir(), cohort_json = demo_repo_cohort_json)
   expect_gt(s$n_cohort, 0)
 })
 
 test_that("a dry run needs neither CirceR nor credentials", {
-  skip_if_not(file.exists(demo_cohort_json))
   testthat::local_mocked_bindings(requireNamespace = function(package, ...) FALSE, .package = "base")
   out <- withr::local_tempdir()
   expect_warning(run_bigquery_demo("my-proj", out, cohort_json = demo_cohort_json, dry_run = TRUE), "feature SQL only")
@@ -103,4 +106,27 @@ test_that("a dry run needs neither CirceR nor credentials", {
   expect_false(file.exists(file.path(out, "cohort.googlesql.sql")))
   expect_true(grepl("`my-proj.omop_duckdb_demo.demo_features`", paste(readLines(file.path(out, "features.googlesql.sql")), collapse = "
 "), fixed = TRUE))
+})
+
+test_that("the default runner sends queries through bigrquery with the billing project", {
+  skip_if_not_installed("bigrquery")
+  calls <- list()
+  testthat::local_mocked_bindings(
+    bq_perform_query = function(query, billing, ...) { calls$perform <<- list(query = query, billing = billing); "job" },
+    bq_job_wait = function(x, ...) { calls$waited <<- x; x },
+    bq_project_query = function(x, query, ...) { calls$project <<- list(x = x, query = query); "tbl" },
+    bq_table_download = function(x, ...) { force(x); tibble::tibble(a = 1L) },
+    bq_dataset = function(project, dataset) list(project = project, dataset = dataset),
+    bq_dataset_exists = function(x) FALSE,
+    bq_dataset_create = function(x, ...) { calls$created <<- x; x },
+    .package = "bigrquery"
+  )
+  r <- omopduckdb:::.bq_runner("my-proj")
+  r$execute("SELECT 1")
+  expect_equal(calls$perform$billing, "my-proj")
+  expect_equal(calls$waited, "job")
+  expect_equal(r$fetch("SELECT 2"), data.frame(a = 1L))
+  expect_equal(calls$project$x, "my-proj")
+  r$ensure_dataset("my-proj.scratch")
+  expect_equal(calls$created, list(project = "my-proj", dataset = "scratch"))
 })
