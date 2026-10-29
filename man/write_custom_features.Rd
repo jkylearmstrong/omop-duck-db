@@ -4,7 +4,14 @@
 \alias{write_custom_features}
 \title{Write your own features so the OHDSI tools read them}
 \usage{
-write_custom_features(con, features, labels = NULL, date_col = "date", ...)
+write_custom_features(
+  con,
+  features,
+  labels = NULL,
+  date_col = "date",
+  registry = NULL,
+  ...
+)
 }
 \arguments{
 \item{con}{A DBI connection to an OMOP DuckDB.}
@@ -14,6 +21,8 @@ write_custom_features(con, features, labels = NULL, date_col = "date", ...)
 \item{labels}{Optional named character vector of concept names, \code{c(feature = "label")}.}
 
 \item{date_col}{Name of the date column (default \code{"date"}).}
+
+\item{registry}{Optional shared registry that pins the concept ids (see \code{\link[=register_custom_concepts]{register_custom_concepts()}}).}
 
 \item{...}{Passed to \code{\link[=write_custom_covariates]{write_custom_covariates()}}.}
 }
