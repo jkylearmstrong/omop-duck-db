@@ -192,8 +192,8 @@ test_that("constructs that would change the cohort are refused, not ignored", {
   expect_error(compile_circe_to_duckdb(d), "First")
   d <- atlas_def(primary = list(list(ConditionOccurrence = list(CodesetId = 0, Unit = list(list(CONCEPT_ID = 1))))))
   expect_error(compile_circe_to_duckdb(d), "Unit")
-  d <- atlas_def(primary = list(list(Death = list())))
-  expect_error(compile_circe_to_duckdb(d), "Death")
+  d <- atlas_def(primary = list(list(Specimen = list())))
+  expect_error(compile_circe_to_duckdb(d), "Specimen")
   d <- atlas_def(); d$ConceptSets[[1]]$expression$items[[1]]$includeMapped <- TRUE
   expect_error(compile_circe_to_duckdb(d), "includeMapped")
   expect_warning(compile_circe_to_duckdb(atlas_def(end = list(CustomEra = list(DrugCodesetId = 1, GapDays = 0, Offset = 0)))), "CustomEra")
@@ -207,4 +207,80 @@ test_that("between operators are supported and unknown operators are refused", {
   expect_equal(sort(atlas_run(con, mdef("bt"))$subject_id), 1)
   expect_equal(sort(atlas_run(con, mdef("!bt"))$subject_id), 2)
   expect_error(compile_circe_to_duckdb(mdef("between-ish")), "operator")
+})
+
+# ---- the index-stay (target) cohort as Circe JSON -------------------------------------------------------------------------------
+target_cdm <- function(env = parent.frame()) {
+  db <- tempfile(fileext = ".duckdb")
+  build_schema(db)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
+  withr::defer({ DBI::dbDisconnect(con, shutdown = TRUE); unlink(db) }, envir = env)
+  DBI::dbExecute(con, "INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES
+    (1,8507,1980,0,0),(2,8507,1980,0,0),(3,8507,2015,0,0),(4,8507,1980,0,0),(5,8507,1980,0,0),(6,8507,2002,0,0),(7,8507,1980,0,0),(8,8507,1980,0,0),(9,8507,1980,0,0)")
+  DBI::dbExecute(con, "INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, observation_period_end_date, period_type_concept_id)
+    SELECT person_id, person_id, DATE '2015-01-01', CASE WHEN person_id = 4 THEN DATE '2020-02-01' WHEN person_id = 7 THEN DATE '2020-03-20' ELSE DATE '2020-12-31' END, 0 FROM person")
+  DBI::dbExecute(con, "INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id, discharged_to_concept_id) VALUES
+    (1,1,9201,DATE '2020-03-01',DATE '2020-03-05',0,NULL),(2,1,9201,DATE '2020-02-01',DATE '2020-02-04',0,NULL),
+    (3,2,9201,DATE '2020-03-01',DATE '2020-03-05',0,4216643),(4,3,9201,DATE '2020-03-01',DATE '2020-03-05',0,NULL),
+    (5,4,9201,DATE '2020-01-10',DATE '2020-01-20',0,NULL),(6,5,262,DATE '2020-03-01',DATE '2020-03-05',0,NULL),
+    (7,1,9203,DATE '2020-01-01',DATE '2020-01-01',0,NULL),(8,6,9201,DATE '2019-12-28',DATE '2020-01-03',0,NULL),
+    (9,7,9201,DATE '2020-03-01',DATE '2020-03-05',0,NULL),(10,8,9201,DATE '2020-03-01',DATE '2020-03-05',0,NULL),
+    (11,9,9201,DATE '2020-01-10',DATE '2020-01-20',0,NULL),(12,9,9201,DATE '2020-05-01',DATE '2020-05-05',0,NULL)")
+  DBI::dbExecute(con, "INSERT INTO death (person_id, death_date, death_type_concept_id) VALUES (7, DATE '2020-03-20', 0), (8, DATE '2020-03-03', 0), (9, DATE '2020-01-20', 0)")
+  con
+}
+
+target_pairs <- function(con, d) {
+  out <- DBI::dbGetQuery(con, compile_circe_to_duckdb(d, cdm_schema = "main"))
+  sort(sprintf("%d@%s", out$subject_id, format(as.Date(out$cohort_start_date))))
+}
+
+target_json <- function() jsonlite::fromJSON(circe_file("target_cohort.circe.json"), simplifyVector = FALSE)
+
+# what CirceR + CohortGenerator return for this definition on this CDM (scripts/ohdsi_parity_target_cohort.R repeats the run)
+target_official <- c("1@2020-02-04", "2@2020-03-05", "5@2020-03-05", "6@2020-01-03")
+
+test_that("the native compiler gives the target cohort the official engine returns", {
+  con <- target_cdm()
+  expect_equal(target_pairs(con, target_json()), target_official)
+})
+
+test_that("the target cohort differs from the authoritative SQL only in the two documented cases", {
+  con <- target_cdm()
+  cohort_sql <- readLines(circe_file("target_cohort.sql"), warn = FALSE)
+  expect_true(any(grepl("discharged_to_concept_id", cohort_sql)))
+  # the SQL (run in test_target_cohort_circe.py) returns 1, 5, 6 and 7: person 7 died within 30 days of discharge and the
+  # observation period ends at death; person 2 is discharged "dead" without a death record, which Circe cannot see
+  got <- target_pairs(con, target_json())
+  expect_true("2@2020-03-05" %in% got)
+  expect_false(any(startsWith(got, "7@")))
+})
+
+test_that("date adjustment, age at the adjusted date and correlated criteria on an entry event are evaluated", {
+  con <- target_cdm()
+  d <- target_json()
+  d$PrimaryCriteria$ObservationWindow <- list(PriorDays = 0, PostDays = 0)
+  v <- d$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence
+  d$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$DateAdjustment <- list(StartWith = "END_DATE", StartOffset = 2, EndWith = "END_DATE", EndOffset = 2)
+  expect_true("1@2020-02-06" %in% target_pairs(con, d))
+  d$PrimaryCriteria$CriteriaList[[1]]$VisitOccurrence$DateAdjustment <- NULL
+  expect_true("1@2020-02-01" %in% target_pairs(con, d))
+  any_death <- list(Type = "ANY", DemographicCriteriaList = list(), Groups = list(), CriteriaList = list(list(
+    Criteria = list(Death = structure(list(), names = character(0))),
+    StartWindow = list(Start = list(Days = 0, Coeff = 1), End = list(Days = 30, Coeff = 1)), Occurrence = list(Type = 2, Count = 1))))
+  d$PrimaryCriteria$CriteriaList <- list(list(VisitOccurrence = list(CodesetId = 0, CorrelatedCriteria = any_death)))
+  expect_equal(sort(unique(as.integer(sub("@.*", "", target_pairs(con, d))))), c(7L, 8L, 9L))
+  nested <- any_death; nested$Groups <- list(list(Type = "ALL", CriteriaList = list()))
+  d$PrimaryCriteria$CriteriaList <- list(list(VisitOccurrence = list(CodesetId = 0, CorrelatedCriteria = nested)))
+  expect_error(compile_circe_to_duckdb(d), "nested criteria groups")
+  d$PrimaryCriteria$CriteriaList <- list(list(VisitOccurrence = list(CodesetId = 0, DateAdjustment = list(StartWith = "CODE_DATE"))))
+  expect_error(compile_circe_to_duckdb(d), "DateAdjustment")
+})
+
+test_that("Death is a domain for entry events", {
+  con <- target_cdm()
+  d <- target_json()
+  d$PrimaryCriteria$ObservationWindow <- list(PriorDays = 0, PostDays = 0)
+  d$PrimaryCriteria$CriteriaList <- list(list(Death = structure(list(), names = character(0))))
+  expect_equal(sort(as.integer(sub("@.*", "", target_pairs(con, d)))), c(7L, 8L, 9L))
 })

@@ -5,7 +5,10 @@
 #' registers tables as views (`v_person`, `v_condition_occurrence`, etc.).
 #'
 #' @param lake_uri Root URI or filesystem path to the lakehouse storage directory.
-#' @param format Lakehouse table format: `"delta"`, `"iceberg"`, or `"parquet"`.
+#' @param format Lakehouse table format: `"delta"`, `"iceberg"`, or `"parquet"`. The DuckDB `delta` / `iceberg` extension is
+#'   installed and loaded only when a table directory is a Delta (`_delta_log`) or Iceberg (`metadata`) table or the URI is remote;
+#'   a plain parquet directory is read with `read_parquet()` whatever `format` says. Install the extension beforehand
+#'   (`INSTALL delta`) on machines without internet access: a failed install or load can crash the R session.
 #' @param s3_options Optional named list of S3 configuration options (endpoint, access keys, region).
 #' @param tables Optional character vector of CDM tables to register.
 #' @param output_con Optional existing DBI connection (creates new in-memory connection if `NULL`).
@@ -62,7 +65,14 @@ omop_connect_lakehouse <- function(lake_uri,
   delta_ok <- FALSE
   iceberg_ok <- FALSE
 
-  if (format == "delta") {
+  # The delta / iceberg extension is loaded only for tables that are one (a `_delta_log` or `metadata` directory, or a remote
+  # URI that cannot be inspected). A failed INSTALL / LOAD leaves the DuckDB R connection in a state that segfaults intermittently
+  # on disconnect or garbage collection (reproduced on Windows with duckdb 2.0.0), so a plain parquet directory must never try.
+  marker <- c(delta = "_delta_log", iceberg = "metadata")[format]
+  is_lake_table <- function(tbl) is_remote || (!is.na(marker) && dir.exists(file.path(uri_str, tbl, marker)))
+  needs_extension <- format != "parquet" && any(vapply(target_tables, is_lake_table, logical(1)))
+
+  if (format == "delta" && needs_extension) {
     tryCatch({
       DBI::dbExecute(con, "INSTALL delta; LOAD delta;")
       delta_ok <- TRUE
@@ -72,7 +82,7 @@ omop_connect_lakehouse <- function(lake_uri,
         delta_ok <- TRUE
       }, error = function(e2) NULL)
     })
-  } else if (format == "iceberg") {
+  } else if (format == "iceberg" && needs_extension) {
     tryCatch({
       DBI::dbExecute(con, "INSTALL iceberg; LOAD iceberg;")
       iceberg_ok <- TRUE
@@ -91,9 +101,9 @@ omop_connect_lakehouse <- function(lake_uri,
     }
 
     scan_expr <- NULL
-    if (format == "delta" && delta_ok) {
+    if (format == "delta" && delta_ok && is_lake_table(tbl)) {
       scan_expr <- sprintf("delta_scan('%s')", table_path)
-    } else if (format == "iceberg" && iceberg_ok) {
+    } else if (format == "iceberg" && iceberg_ok && is_lake_table(tbl)) {
       scan_expr <- sprintf("iceberg_scan('%s')", table_path)
     } else {
       if (!is_remote) {

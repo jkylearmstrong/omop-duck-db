@@ -232,6 +232,8 @@ reference:
   desc: Run Data Quality Dashboard checks, build publication-grade Table 1s, and export datasets.
   contents:
   - run_dqd
+  - run_dqd_catalog
+  - run_dqd_full
   - sanitize_measurements
   - generate_table1
   - export_table1

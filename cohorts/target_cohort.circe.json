@@ -2,11 +2,37 @@
   "ConceptSets": [
     {
       "id": 0,
-      "name": "Inpatient and ED-to-inpatient visits",
+      "name": "Index stay visit types",
       "expression": {
         "items": [
-          {"concept": {"CONCEPT_ID": 9201, "CONCEPT_NAME": "Inpatient Visit", "DOMAIN_ID": "Visit", "VOCABULARY_ID": "Visit", "CONCEPT_CLASS_ID": "Visit", "STANDARD_CONCEPT": "S", "CONCEPT_CODE": "IP"}, "isExcluded": false, "includeDescendants": false, "includeMapped": false},
-          {"concept": {"CONCEPT_ID": 262, "CONCEPT_NAME": "Emergency Room and Inpatient Visit", "DOMAIN_ID": "Visit", "VOCABULARY_ID": "Visit", "CONCEPT_CLASS_ID": "Visit", "STANDARD_CONCEPT": "S", "CONCEPT_CODE": "ERIP"}, "isExcluded": false, "includeDescendants": false, "includeMapped": false}
+          {
+            "concept": {
+              "CONCEPT_ID": 9201,
+              "CONCEPT_NAME": "Inpatient Visit",
+              "DOMAIN_ID": "Visit",
+              "VOCABULARY_ID": "Visit",
+              "CONCEPT_CLASS_ID": "Visit",
+              "STANDARD_CONCEPT": "S",
+              "CONCEPT_CODE": "IP"
+            },
+            "isExcluded": false,
+            "includeDescendants": false,
+            "includeMapped": false
+          },
+          {
+            "concept": {
+              "CONCEPT_ID": 262,
+              "CONCEPT_NAME": "Emergency Room and Inpatient Visit",
+              "DOMAIN_ID": "Visit",
+              "VOCABULARY_ID": "Visit",
+              "CONCEPT_CLASS_ID": "Visit",
+              "STANDARD_CONCEPT": "S",
+              "CONCEPT_CODE": "ERIP"
+            },
+            "isExcluded": false,
+            "includeDescendants": false,
+            "includeMapped": false
+          }
         ]
       }
     }
@@ -15,39 +41,71 @@
     "CriteriaList": [
       {
         "VisitOccurrence": {
-          "VisitTypeCS": null,
           "CodesetId": 0,
-          "Age": {"Value": 18, "Op": "gte"},
-          "VisitLength": null,
-          "DateAdjustment": {"StartWith": "END_DATE", "StartOffset": 0, "EndWith": "END_DATE", "EndOffset": 0}
+          "Age": {
+            "Value": 18,
+            "Op": "gte"
+          },
+          "DateAdjustment": {
+            "StartWith": "END_DATE",
+            "StartOffset": 0,
+            "EndWith": "END_DATE",
+            "EndOffset": 0
+          },
+          "CorrelatedCriteria": {
+            "Type": "ALL",
+            "CriteriaList": [
+              {
+                "Criteria": {
+                  "Death": {}
+                },
+                "StartWindow": {
+                  "Start": {
+                    "Coeff": -1
+                  },
+                  "End": {
+                    "Days": 0,
+                    "Coeff": 1
+                  }
+                },
+                "Occurrence": {
+                  "Type": 0,
+                  "Count": 0
+                }
+              }
+            ],
+            "DemographicCriteriaList": [],
+            "Groups": []
+          }
         }
       }
     ],
-    "ObservationWindow": {"PriorDays": 0, "PostDays": 30},
-    "PrimaryCriteriaLimit": {"Type": "First"}
-  },
-  "QualifiedLimit": {"Type": "First"},
-  "ExpressionLimit": {"Type": "First"},
-  "InclusionRules": [
-    {
-      "name": "Not discharged dead and no death on or before discharge",
-      "description": "No death record on or before the index date. Discharge disposition 4216643 (Patient died) must also be excluded: ATLAS cannot express discharged_to_concept_id on a visit, so the SQL version (target_cohort.sql) is the authoritative definition.",
-      "expression": {
-        "Type": "ALL",
-        "CriteriaList": [
-          {
-            "Criteria": {"Death": {}},
-            "StartWindow": {"Start": {"Coeff": -1}, "End": {"Days": 0, "Coeff": 1}},
-            "Occurrence": {"Type": 0, "Count": 0}
-          }
-        ],
-        "Groups": []
-      }
+    "ObservationWindow": {
+      "PriorDays": 0,
+      "PostDays": 30
+    },
+    "PrimaryCriteriaLimit": {
+      "Type": "First"
     }
-  ],
-  "EndStrategy": {"DateOffset": {"DateField": "StartDate", "Offset": 0}},
+  },
+  "QualifiedLimit": {
+    "Type": "First"
+  },
+  "ExpressionLimit": {
+    "Type": "First"
+  },
+  "InclusionRules": [],
+  "EndStrategy": {
+    "DateOffset": {
+      "DateField": "StartDate",
+      "Offset": 0
+    }
+  },
   "CensoringCriteria": [],
-  "CollapseSettings": {"CollapseType": "ERA", "EraPad": 0},
+  "CollapseSettings": {
+    "CollapseType": "ERA",
+    "EraPad": 0
+  },
   "CensorWindow": {},
   "cdmVersionRange": ">=5.3.0"
 }

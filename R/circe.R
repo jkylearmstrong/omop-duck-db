@@ -50,6 +50,12 @@ NULL
     concept_col = "device_concept_id",
     date_col = "device_exposure_start_date",
     end_date_col = "COALESCE(device_exposure_end_date, device_exposure_start_date + INTERVAL '1' DAY)"
+  ),
+  Death = list(
+    table = "death",
+    concept_col = "cause_concept_id",
+    date_col = "death_date",
+    end_date_col = "death_date + INTERVAL '1' DAY"
   )
 )
 
@@ -109,16 +115,33 @@ NULL
 .SUPPORTED_ATTRS <- c("CodesetId", "ValueAsNumber", "First", "ConditionTypeExclude", "DrugTypeExclude", "MeasurementTypeExclude",
                       "ProcedureTypeExclude", "ObservationTypeExclude", "VisitTypeExclude", "DeviceTypeExclude")
 
+# attributes the compiler evaluates on an entry event (primary criterion) but not on an inclusion-rule criterion
+.PRIMARY_ONLY_ATTRS <- c("Age", "DateAdjustment", "CorrelatedCriteria")
+
 .circe_empty <- function(v) is.null(v) || identical(v, FALSE) || identical(v, "") || (is.list(v) && length(v) == 0L)
 
-.check_criteria_supported <- function(item, where) {
+# A criteria group: an inclusion rule's expression or the CorrelatedCriteria of an entry event.
+.check_group_supported <- function(expr, where) {
+  if (length(expr$Groups %||% list())) stop(sprintf("%s: nested criteria groups are not supported by the native compiler.", where), call. = FALSE)
+  if (!(toupper(expr$Type %||% "ALL") %in% c("ALL", "ANY"))) stop(sprintf("%s: group type '%s' is not supported.", where, expr$Type), call. = FALSE)
+}
+
+.check_criteria_supported <- function(item, where, primary = FALSE) {
   set <- names(item)[!vapply(item, .circe_empty, logical(1))]
-  extra <- setdiff(set, .SUPPORTED_ATTRS)
+  extra <- setdiff(set, if (primary) c(.SUPPORTED_ATTRS, .PRIMARY_ONLY_ATTRS) else .SUPPORTED_ATTRS)
   if (length(extra)) {
     stop(sprintf("%s: criterion attribute(s) %s are not supported by the native compiler; run this definition with CirceR + CohortGenerator.",
                  where, paste(sort(extra), collapse = ", ")), call. = FALSE)
   }
   if (isTRUE(item$First)) stop(sprintf("%s: 'First' (earliest event only) is not supported by the native compiler.", where), call. = FALSE)
+  if (primary) {
+    adj <- item$DateAdjustment %||% list()
+    for (key in c("StartWith", "EndWith")) {
+      if (!is.null(adj[[key]]) && !(toupper(adj[[key]]) %in% c("START_DATE", "END_DATE")))
+        stop(sprintf("%s: DateAdjustment %s '%s' is not supported by the native compiler.", where, key, adj[[key]]), call. = FALSE)
+    }
+    if (!.circe_empty(item$CorrelatedCriteria)) .check_group_supported(item$CorrelatedCriteria, paste(where, "CorrelatedCriteria"))
+  }
 }
 
 .check_wrapper_supported <- function(w, where) {
@@ -135,6 +158,24 @@ NULL
   }
 }
 
+# SQL condition (on the alias p with subject_id and event_start_date) of a criteria group, or NULL when it has none.
+.compile_group <- function(expr, cdm_schema) {
+  group_type <- toupper(expr$Type %||% "ALL")
+  clauses <- character(0)
+  for (crit_wrapper in expr$CriteriaList %||% list()) {
+    c_sql <- .compile_criteria(crit_wrapper, cdm_schema = cdm_schema)
+    if (!is.null(c_sql) && nzchar(c_sql)) clauses <- c(clauses, c_sql)
+  }
+  # ATLAS puts age / gender conditions of a rule in DemographicCriteriaList (evaluated on the entry date)
+  for (demo in expr$DemographicCriteriaList %||% list()) {
+    c_sql <- .compile_criteria(list(Criteria = list(DemographicCriteria = demo)), cdm_schema = cdm_schema)
+    if (!is.null(c_sql) && nzchar(c_sql)) clauses <- c(clauses, c_sql)
+  }
+  if (!length(clauses)) return(NULL)
+  join_op <- if (group_type == "ALL") " AND\n                " else " OR\n                "
+  sprintf("(\n                %s\n            )", paste(clauses, collapse = join_op))
+}
+
 # Raises for constructs that change WHO is in the cohort and that this compiler does not evaluate (silently dropping them gave
 # larger cohorts than ATLAS); warns for constructs that only change the end dates.
 .check_definition_supported <- function(data) {
@@ -147,9 +188,7 @@ NULL
     }
   }
   for (rule in data$InclusionRules %||% list()) {
-    expr <- rule$expression %||% list()
-    if (length(expr$Groups %||% list())) stop(sprintf("inclusion rule '%s': nested criteria groups are not supported by the native compiler.", rule$name %||% ""), call. = FALSE)
-    if (!(toupper(expr$Type %||% "ALL") %in% c("ALL", "ANY"))) stop(sprintf("inclusion rule '%s': group type '%s' is not supported.", rule$name %||% "", expr$Type), call. = FALSE)
+    .check_group_supported(rule$expression %||% list(), sprintf("inclusion rule '%s'", rule$name %||% ""))
   }
   for (crit in data$PrimaryCriteria$CriteriaList %||% list()) {
     if (!length(intersect(names(crit), names(.DOMAIN_TABLE_MAP)))) {
@@ -157,7 +196,7 @@ NULL
                    paste(sort(names(crit)), collapse = "/"), paste(sort(names(.DOMAIN_TABLE_MAP)), collapse = ", ")), call. = FALSE)
     }
     for (key in intersect(names(crit), names(.DOMAIN_TABLE_MAP))) {
-      if (is.list(crit[[key]])) .check_criteria_supported(crit[[key]], paste("primary criterion", key))
+      if (is.list(crit[[key]])) .check_criteria_supported(crit[[key]], paste("primary criterion", key), primary = TRUE)
     }
   }
   notes <- character(0)
@@ -341,21 +380,44 @@ compile_circe_to_duckdb <- function(circe_json,
           sprintf("JOIN _cs_resolved cs ON e.%s = cs.concept_id AND cs.codeset_id = %d", cfg$concept_col, as.integer(codeset_id))
         } else ""
 
-        # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5)
-        value_where <- if (!is.null(c_item$ValueAsNumber)) {
-          paste("WHERE", .compile_numeric_filter("e.value_as_number", c_item$ValueAsNumber))
-        } else ""
+        # DateAdjustment moves the event's start / end onto its start or end date plus an offset (ATLAS: an index on discharge)
+        adj <- c_item$DateAdjustment %||% list()
+        src <- c(START_DATE = sprintf("CAST(e.%s AS DATE)", cfg$date_col), END_DATE = sprintf("CAST(%s AS DATE)", cfg$end_date_col))
+        start_expr <- src[["START_DATE"]]
+        end_expr_ev <- src[["END_DATE"]]
+        if (!.circe_empty(adj)) {
+          start_expr <- sprintf("CAST(%s + INTERVAL '%d' DAY AS DATE)", src[[toupper(adj$StartWith %||% "START_DATE")]], as.integer(adj$StartOffset %||% 0L))
+          end_expr_ev <- sprintf("CAST(%s + INTERVAL '%d' DAY AS DATE)", src[[toupper(adj$EndWith %||% "END_DATE")]], as.integer(adj$EndOffset %||% 0L))
+        }
+        # a measurement entry event can carry a value filter (e.g. HbA1c >= 6.5); Age is the year of the (adjusted) start date
+        # minus the year of birth, as in ATLAS
+        filters <- character(0)
+        person_join <- ""
+        if (!is.null(c_item$ValueAsNumber)) filters <- c(filters, .compile_numeric_filter("e.value_as_number", c_item$ValueAsNumber))
+        if (!.circe_empty(c_item$Age)) {
+          person_join <- sprintf("JOIN %s.person per ON per.person_id = e.person_id", cdm_schema)
+          filters <- c(filters, .compile_numeric_filter(sprintf("(year(%s) - per.year_of_birth)", start_expr), c_item$Age))
+        }
+        value_where <- if (length(filters)) paste("WHERE", paste(filters, collapse = " AND ")) else ""
+        # CorrelatedCriteria qualify the entry event itself, before the primary limit, so the limit picks the earliest event that qualifies
+        corr_sql <- if (!.circe_empty(c_item$CorrelatedCriteria)) .compile_group(c_item$CorrelatedCriteria, cdm_schema) else NULL
+        corr_where <- if (!is.null(corr_sql)) paste("WHERE", corr_sql) else ""
 
         primary_selects <- c(primary_selects, sprintf("
-          SELECT
-            e.person_id AS subject_id,
-            CAST(e.%s AS DATE) AS event_start_date,
-            CAST(%s AS DATE) AS event_end_date,
-            '%s' AS criteria_type
-          FROM %s.%s e
+          SELECT p.subject_id, p.event_start_date, p.event_end_date, p.criteria_type
+          FROM (
+            SELECT
+              e.person_id AS subject_id,
+              %s AS event_start_date,
+              %s AS event_end_date,
+              '%s' AS criteria_type
+            FROM %s.%s e
+            %s
+            %s
+            %s
+          ) p
           %s
-          %s
-        ", cfg$date_col, cfg$end_date_col, dom_key, cdm_schema, cfg$table, cs_join, value_where))
+        ", start_expr, end_expr_ev, dom_key, cdm_schema, cfg$table, cs_join, person_join, value_where, corr_where))
       }
     }
   }
@@ -390,27 +452,8 @@ compile_circe_to_duckdb <- function(circe_json,
   inclusion_rules <- data$InclusionRules %||% list()
   rule_clauses <- character(0)
   for (rule in inclusion_rules) {
-    expr <- rule$expression %||% list()
-    rule_type <- toupper(expr$Type %||% "ALL")
-    crit_list_sub <- expr$CriteriaList %||% list()
-    crit_clauses <- character(0)
-    for (crit_wrapper in crit_list_sub) {
-      c_sql <- .compile_criteria(crit_wrapper, cdm_schema = cdm_schema)
-      if (!is.null(c_sql) && nzchar(c_sql)) {
-        crit_clauses <- c(crit_clauses, c_sql)
-      }
-    }
-    # ATLAS puts age / gender conditions of a rule in DemographicCriteriaList (evaluated on the entry date)
-    for (demo in expr$DemographicCriteriaList %||% list()) {
-      c_sql <- .compile_criteria(list(Criteria = list(DemographicCriteria = demo)), cdm_schema = cdm_schema)
-      if (!is.null(c_sql) && nzchar(c_sql)) {
-        crit_clauses <- c(crit_clauses, c_sql)
-      }
-    }
-    if (length(crit_clauses) > 0) {
-      join_op <- if (rule_type == "ALL") " AND\n                " else " OR\n                "
-      rule_clauses <- c(rule_clauses, sprintf("(\n                %s\n            )", paste(crit_clauses, collapse = join_op)))
-    }
+    rule_sql <- .compile_group(rule$expression %||% list(), cdm_schema)
+    if (!is.null(rule_sql)) rule_clauses <- c(rule_clauses, rule_sql)
   }
 
   inc_filter <- if (length(rule_clauses) > 0) {

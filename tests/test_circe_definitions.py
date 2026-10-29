@@ -200,7 +200,7 @@ def test_observation_domain_is_supported_and_events_need_an_observation_period()
     ({"AdditionalCriteria": {"Type": "ALL", "CriteriaList": [{}]}}, "AdditionalCriteria"),
     ({"PrimaryCriteria": {"CriteriaList": [{"ConditionOccurrence": {"CodesetId": 0, "First": True}}], "ObservationWindow": {}}}, "First"),
     ({"PrimaryCriteria": {"CriteriaList": [{"ConditionOccurrence": {"CodesetId": 0, "Unit": [{"CONCEPT_ID": 1}]}}], "ObservationWindow": {}}}, "Unit"),
-    ({"PrimaryCriteria": {"CriteriaList": [{"Death": {}}], "ObservationWindow": {}}}, "Death"),
+    ({"PrimaryCriteria": {"CriteriaList": [{"Specimen": {}}], "ObservationWindow": {}}}, "Specimen"),
     ({"ConceptSets": [{"id": 0, "name": "m", "expression": {"items": [{"concept": {"CONCEPT_ID": 1}, "includeMapped": True}]}}]}, "includeMapped"),
 ])
 def test_constructs_that_would_change_the_cohort_are_refused_not_ignored(bad, match):

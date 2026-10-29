@@ -22,7 +22,8 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
-__all__ = ["PCOS_SETS", "metformin_only_prediabetes_pcos_circe", "diabetes_phenotype_circe", "write_circe_definitions"]
+__all__ = ["PCOS_SETS", "metformin_only_prediabetes_pcos_circe", "diabetes_phenotype_circe", "target_cohort_circe",
+           "write_circe_definitions"]
 
 PCOS_SETS = ("icd10", "snomed", "both")
 
@@ -45,6 +46,8 @@ _C = {
     40762352: ("Hemoglobin A1c/Hemoglobin.total standardized per IFCC-RMP for CDT in Blood", "Measurement", "LOINC", "Lab Test", "S", "59261-8"),
     40765129: ("Hemoglobin A1c/Hemoglobin.total in Blood by JDS/JSCC protocol", "Measurement", "LOINC", "Lab Test", "S", "62388-4"),
     3007263: ("Hemoglobin A1c/Hemoglobin.total in Blood by calculation", "Measurement", "LOINC", "Lab Test", "S", "17855-8"),
+    9201: ("Inpatient Visit", "Visit", "Visit", "Visit", "S", "IP"),
+    262: ("Emergency Room and Inpatient Visit", "Visit", "Visit", "Visit", "S", "ERIP"),
 }
 # the 9 HbA1c codes of the SAS extraction (its "549-2" is a typo for 4549-2; 55454-3 is deprecated)
 _HBA1C = (3004410, 3034639, 40758583, 42869630, 3003309, 3005673, 40762352, 40765129, 3007263)
@@ -146,12 +149,36 @@ def diabetes_phenotype_circe(drug_rule: str = "atc_a10", rxnorm_concept_ids: Seq
     return _definition(sets, primary, rules)
 
 
+def target_cohort_circe(min_age: int = 18, followup_days: int = 30) -> dict[str, Any]:
+    """The index-stay cohort of ``cohorts/target_cohort.sql`` (adult inpatient and ED-to-IP stays, one per patient, indexed on the
+    discharge date) as Circe JSON.
+
+    The rules that decide whether a stay qualifies are correlated criteria of the entry event, not inclusion rules, because Circe
+    applies the primary limit before the inclusion rules: with inclusion rules a patient whose first stay failed would be dropped, where
+    the SQL takes the earliest stay that qualifies. The index date is the discharge date (``DateAdjustment`` on the end date), the
+    observation window requires ``followup_days`` of observation after it, and a death on or before discharge disqualifies the stay.
+
+    Two rules of the SQL cannot be written in Circe and remain differences of the ATLAS version: ``discharged_to_concept_id``
+    (a visit attribute that Circe has no criterion for; a patient who died in hospital is still excluded when the death is recorded in
+    ``death``), and the SQL's alternative for follow-up, a death within ``followup_days`` after discharge when the observation period
+    ends at death (Circe requires the observation period itself to cover the window)."""
+    stay = {"CodesetId": 0, "Age": {"Value": min_age, "Op": "gte"},
+            "DateAdjustment": {"StartWith": "END_DATE", "StartOffset": 0, "EndWith": "END_DATE", "EndOffset": 0},
+            "CorrelatedCriteria": {"Type": "ALL", "CriteriaList": [
+                {"Criteria": {"Death": {}}, "StartWindow": _UP_TO_INDEX, "Occurrence": {"Type": 0, "Count": 0}}],
+                "DemographicCriteriaList": [], "Groups": []}}
+    out = _definition([_concept_set(0, "Index stay visit types", [_item(9201), _item(262)])], [{"VisitOccurrence": stay}], [])
+    out["PrimaryCriteria"]["ObservationWindow"] = {"PriorDays": 0, "PostDays": int(followup_days)}
+    return out
+
+
 def write_circe_definitions(out_dir: str | Path) -> list[Path]:
     """Writes the committed definitions (``cohorts/*.circe.json`` names) and returns their paths."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     files = {f"metformin_only_prediabetes_pcos_{p}.circe.json": metformin_only_prediabetes_pcos_circe(p) for p in PCOS_SETS}
     files["diabetes_phenotype.circe.json"] = diabetes_phenotype_circe()
+    files["target_cohort.circe.json"] = target_cohort_circe()
     paths = []
     for name, data in files.items():
         path = out / name
