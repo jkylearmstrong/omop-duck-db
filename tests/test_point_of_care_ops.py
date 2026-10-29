@@ -195,6 +195,7 @@ def test_fhir_history_encounters_feed_utilization_features(bundle):
     b["entry"] += [{"resource": {"resourceType": "Encounter", "id": f"h{i}", "class": {"code": "IMP"},
                                  "period": {"start": s, "end": e}}}
                    for i, (s, e) in enumerate([("2023-12-01", "2023-12-04"), ("2023-10-01", "2023-10-03")])]
+    b["entry"].append({"resource": {"resourceType": "Encounter", "id": "nostart", "class": {"code": "IMP"}}})  # skipped
     r = score_fhir_bundle(b, bundle)
     assert r["fhir"]["encounter_id"] == "e1"
     assert r["features"]["prior_ip_count"] == 2
