@@ -141,9 +141,12 @@ def _summarise(terms: list[str], beta: np.ndarray, cov: np.ndarray, ratio: str, 
     se = np.sqrt(np.clip(np.diag(cov), 0, None))
     z = np.divide(beta, se, out=np.full_like(beta, np.nan), where=se > 0)
     q = stats.norm.ppf(1 - alpha / 2)
+    def _exp(x):  # separable data -> huge coefficients; clip so exp saturates to a finite bound instead of overflowing
+        return np.exp(np.clip(x, -700.0, 700.0))
+
     return pd.DataFrame({"term": terms, "estimate": beta, "std_error": se, "z": z,
-                         "p_value": 2 * stats.norm.sf(np.abs(z)), ratio: np.exp(beta),
-                         f"{ratio}_lower": np.exp(beta - q * se), f"{ratio}_upper": np.exp(beta + q * se)})
+                         "p_value": 2 * stats.norm.sf(np.abs(z)), ratio: _exp(beta),
+                         f"{ratio}_lower": _exp(beta - q * se), f"{ratio}_upper": _exp(beta + q * se)})
 
 
 def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str, *, l2: float = 0.0,

@@ -72,6 +72,10 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--data-cutoff", default=None, metavar="YYYY-MM-DD|auto",
                               help="Cap observation_period ends: an ISO date, or 'auto' for the latest event before today "
                                    "(default: today).")
+    build_parser.add_argument("--mode", choices=["full", "append"], default="full",
+                              help="'append' adds newly arrived rows to an existing --target database (needs --since).")
+    build_parser.add_argument("--since", default=None, metavar="YYYY-MM-DD",
+                              help="With --mode append: only events dated on/after this day are loaded.")
     _add_manifest_args(build_parser)
 
     # 2. DQD
@@ -180,6 +184,30 @@ def create_parser() -> argparse.ArgumentParser:
     se.add_argument("--extra-features", default=None, help="Parquet/CSV of extra feature columns keyed by subject_id + cohort_start_date.")
     se.add_argument("--risk-tiers", default=None, help="JSON file of [{name, min}] cut-points replacing the bundle's tiers (see risk-tiers fit).")
     se.add_argument("--on-violation", choices=["raise", "clip", "nullify"], default="raise")
+    se.add_argument("--explain", action="store_true", help="Add top_drivers: the patient-specific features pushing the risk up/down.")
+    se.add_argument("--top-k", type=int, default=5)
+
+    sf = subparsers.add_parser("score-fhir", help="Score a FHIR Bundle (JSON file) in memory - no database needed.")
+    sf.add_argument("--bundle", required=True, help="Model bundle directory.")
+    sf.add_argument("--fhir", required=True, help="FHIR Bundle JSON file.")
+    sf.add_argument("--concept-map", default=None, help="JSON {system|code: omop_concept_id} for Condition/MedicationRequest codes.")
+    sf.add_argument("--explain", action="store_true")
+    sf.add_argument("--top-k", type=int, default=5)
+
+    rd = subparsers.add_parser("report-drift", help="Self-contained HTML report of the monitoring log (PSI, Brier, calibration).")
+    rd.add_argument("--log", required=True, help="Monitoring log written by 'monitor' (.csv or .jsonl).")
+    rd.add_argument("--out", required=True, help="HTML file to write.")
+    rd.add_argument("--scores", default=None, help="Optional scores with an outcome column for the calibration curve.")
+    rd.add_argument("--prob-col", default="prob")
+    rd.add_argument("--outcome-col", default="outcome_flag")
+    rd.add_argument("--model-version", default=None)
+    rd.add_argument("--months", type=int, default=12)
+
+    uc = subparsers.add_parser("unit-check", help="Flag lab features whose site median is >N x off the reference median (unit mismatch).")
+    uc.add_argument("--features", required=True, help="Feature table (.parquet or .csv).")
+    uc.add_argument("--reference", default=None, help="JSON {feature: reference_median} overriding the built-in medians.")
+    uc.add_argument("--max-ratio", type=float, default=3.0)
+    uc.add_argument("--fail-on-flag", action="store_true", help="Exit 2 if any feature is flagged.")
 
     mo = subparsers.add_parser("monitor", help="Monthly drift (PSI) and calibration report for live scores; upserts an aggregate-only CSV log.")
     mo.add_argument("--scores", required=True, help="Live scores (.parquet or .csv) with a date, a probability and optionally an outcome column.")
@@ -291,7 +319,8 @@ def handle_score_encounter(args: argparse.Namespace) -> int:
     con = duckdb.connect(args.db, read_only=True)
     try:
         res = score_encounter(con, args.visit_id, args.bundle, as_of=args.as_of, extra_features=extra,
-                              on_violation=args.on_violation, risk_tiers=tiers)
+                              on_violation=args.on_violation, risk_tiers=tiers,
+                              explain=args.explain, top_k=args.top_k)
     except (ValueError, KeyError) as exc:
         print(f"score-encounter: {exc}", file=sys.stderr)
         return 1
@@ -299,6 +328,42 @@ def handle_score_encounter(args: argparse.Namespace) -> int:
         con.close()
     print(strict_dumps(res, indent=2, default=str))
     return 0
+
+
+def handle_score_fhir(args: argparse.Namespace) -> int:
+    from omop_etl.fhir import score_fhir_bundle
+
+    cmap = json.loads(Path(args.concept_map).read_text(encoding="utf-8")) if args.concept_map else None
+    try:
+        res = score_fhir_bundle(Path(args.fhir), args.bundle, concept_map=cmap, explain=args.explain, top_k=args.top_k)
+    except (ValueError, KeyError, OSError) as exc:
+        print(f"score-fhir: {exc}", file=sys.stderr)
+        return 1
+    print(strict_dumps(res, indent=2, default=str))
+    return 0
+
+
+def handle_report_drift(args: argparse.Namespace) -> int:
+    from omop_etl.drift_report import write_drift_report
+
+    scores = _read_table(args.scores) if args.scores else None
+    try:
+        out = write_drift_report(args.log, args.out, scores=scores, prob_col=args.prob_col, outcome_col=args.outcome_col,
+                                 model_version=args.model_version, months=args.months)
+    except (KeyError, ValueError, OSError) as exc:
+        print(f"report-drift: {exc}", file=sys.stderr)
+        return 1
+    print(f"Report -> {out}")
+    return 0
+
+
+def handle_unit_check(args: argparse.Namespace) -> int:
+    from omop_etl.unit_guard import check_unit_sanity
+
+    ref = json.loads(Path(args.reference).read_text(encoding="utf-8")) if args.reference else None
+    res = check_unit_sanity(_read_table(args.features), reference_medians=ref, max_ratio=args.max_ratio, warn=False)
+    print(res.to_string(index=False, float_format=lambda v: f"{v:.4g}") if len(res) else "No checkable features found.")
+    return 2 if args.fail_on_flag and res["flag"].any() else 0
 
 
 def handle_monitor(args: argparse.Namespace) -> int:
@@ -420,7 +485,9 @@ def handle_build(args: argparse.Namespace) -> int:
         etl_pcornet(
             args.source,
             args.target,
-            build_schema_flag=True,
+            build_schema_flag=args.mode != "append",
+            mode=args.mode,
+            since=args.since,
             central_vocab=args.vocab,
             site_id=args.site_id,
             site_name=args.site_name,
@@ -596,6 +663,12 @@ def main(argv: list[str] | None = None) -> int:
         return handle_score_encounter(args)
     if args.command == "monitor":
         return handle_monitor(args)
+    if args.command == "score-fhir":
+        return handle_score_fhir(args)
+    if args.command == "report-drift":
+        return handle_report_drift(args)
+    if args.command == "unit-check":
+        return handle_unit_check(args)
     if args.command == "risk-tiers":
         return handle_risk_tiers(args)
     if args.command == "materialize-vocab":

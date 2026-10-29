@@ -12,7 +12,9 @@ score_encounter(
   extra_features = NULL,
   on_violation = "raise",
   risk_tiers = NULL,
-  concepts = NULL
+  concepts = NULL,
+  explain = FALSE,
+  top_k = 5L
 )
 }
 \arguments{
@@ -32,6 +34,11 @@ dates cannot be NULL, so for a live open stay with a placeholder end date pass \
 \item{risk_tiers}{Optional \code{list(list(name =, min =), ...)} replacing the bundle's tiers (see \code{\link[=fit_capacity_thresholds]{fit_capacity_thresholds()}}).}
 
 \item{concepts}{Overrides for \link{VELOCITY_CONCEPTS}.}
+
+\item{explain}{If \code{TRUE}, add \code{top_drivers}: the \code{top_k} patient-specific risk contributors (\code{feature}, \code{name}, \code{value}, signed \code{impact} on
+the probability), see \code{\link[=explain_rows]{explain_rows()}}.}
+
+\item{top_k}{Number of drivers.}
 }
 \value{
 A list: \code{visit_occurrence_id}, \code{person_id}, \code{prob}, \code{risk_tier}, \code{as_of}, \code{features} (the values scored),

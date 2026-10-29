@@ -7,6 +7,7 @@ import them.
 """
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,6 +31,12 @@ def import_or_skip(name: str):
     initialization failed`` (not ``ImportError``), which ``importorskip`` would turn into a test error.
     """
     try:
+        if name == "torch" and sys.platform == "win32" and "torch" not in sys.modules:
+            # On CPU-only Windows hosts torch can die with a native access violation (SEH) while probing CUDA DLLs, which
+            # no ``except`` can catch and which kills the whole pytest process. Probe in a child process first.
+            probe = subprocess.run([sys.executable, "-c", "import torch"], capture_output=True)
+            if probe.returncode != 0:
+                pytest.skip(f"torch cannot be imported on this host (probe exit code {probe.returncode})")
         return __import__(name)
     except (ImportError, OSError) as exc:
         pytest.skip(f"{name} is unavailable: {type(exc).__name__}: {exc}", allow_module_level=False)

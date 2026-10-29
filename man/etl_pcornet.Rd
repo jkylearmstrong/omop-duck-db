@@ -22,7 +22,9 @@ etl_pcornet(
   key_check_callback = NULL,
   use_enrollment = "auto",
   enrollment_type_concept_id = 0L,
-  data_cutoff = NULL
+  data_cutoff = NULL,
+  mode = c("full", "append"),
+  since = NULL
 )
 }
 \arguments{
@@ -76,6 +78,13 @@ event-span period. \code{TRUE} fails if no usable ENROLLMENT file exists.}
 
 \item{data_cutoff}{\code{NULL} (default, today), an ISO date or \code{"auto"}: caps \code{observation_period} ends. \code{"auto"} uses the
 latest event dated before today, so events filled with the build date do not set period ends.}
+
+\item{mode}{\code{"full"} (default) or \code{"append"}: add only newly arrived rows to an existing database. Patients, providers and
+encounters already present are skipped (matched on source values), events dated before \code{since} are skipped, surrogate keys
+continue from the current maximum, care sites / locations are left alone, and \code{observation_period} and the eras are rebuilt.
+Encounters are selected by admit date. Mirror of Python \code{etl_pcornet(mode = "append")}.}
+
+\item{since}{With \code{mode = "append"}: ISO date; only events on/after it are loaded.}
 }
 \value{
 Invisibly, \code{db_path}.

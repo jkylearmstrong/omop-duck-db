@@ -156,6 +156,13 @@ reference:
   - score_cohort
   - bundle_predict_proba
   - score_encounter
+  - score_fhir_bundle
+  - explain_rows
+  - check_unit_sanity
+  - REFERENCE_MEDIANS
+  - LOINC_TO_FEATURE
+  - write_drift_report
+  - calibration_curve
   - population_stability_index
   - monitor_scores
   - fit_capacity_thresholds

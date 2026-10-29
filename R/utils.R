@@ -174,6 +174,32 @@ load_macros <- function(con, temporary = NULL, skip_unresolved = FALSE) {
   ADDRESS_PERIOD_END = c("ADDRESS_PERIOD_END", "PERIOD_END")
 )
 
+# Active only inside etl_pcornet(mode = "append"): holds `since` and `patid_suffix`.
+.append_state <- new.env(parent = emptyenv())
+.SINCE_COLS <- list(
+  `_temp_encounter` = "ADMIT_DATE", `_temp_diagnosis` = c("DX_DATE", "ADMIT_DATE"), `_temp_procedures` = c("PX_DATE", "ADMIT_DATE"),
+  `_temp_lab_result` = "RESULT_DATE", `_temp_vital` = "MEASURE_DATE", `_temp_prescribing` = c("RX_START_DATE", "RX_ORDER_DATE"),
+  `_temp_med_admin` = "MEDADMIN_START_DATE", `_temp_dispensing` = c("DISPENSE_DATE", "DISPENSING_DATE"), `_temp_death` = "DEATH_DATE")
+.APPEND_ANTIJOIN <- list(
+  `_temp_demographic` = c("PATID", "person", "person_source_value"),
+  `_temp_provider` = c("PROVIDERID", "provider", "provider_source_value"),
+  `_temp_encounter` = c("ENCOUNTERID", "visit_occurrence", "visit_source_value"))
+
+.append_filter <- function(view_name, expected_columns) {
+  conds <- character()
+  if (!is.null(.append_state$since) && !is.null(.SINCE_COLS[[view_name]])) {
+    cols <- intersect(.SINCE_COLS[[view_name]], expected_columns)
+    if (length(cols)) conds <- c(conds, sprintf("COALESCE(%s) >= DATE '%s'", paste(sprintf("parse_omop_date(%s)", cols), collapse = ", "), .append_state$since))
+  }
+  aj <- .APPEND_ANTIJOIN[[view_name]]
+  if (!is.null(aj) && aj[[1]] %in% expected_columns) {
+    key <- aj[[1]]
+    if (identical(view_name, "_temp_demographic") && !is.null(.append_state$patid_suffix)) key <- sprintf("%s || '%s'", key, .append_state$patid_suffix)
+    conds <- c(conds, sprintf("NOT EXISTS (SELECT 1 FROM %s t WHERE t.%s = %s)", aj[[2]], aj[[3]], key))
+  }
+  if (length(conds)) paste0(" WHERE ", paste(conds, collapse = " AND ")) else ""
+}
+
 #' @keywords internal
 #' @noRd
 prepare_source_view <- function(con, view_name, csv_path, expected_columns, aliases = .DEFAULT_ALIASES) {
@@ -221,6 +247,10 @@ prepare_source_view <- function(con, view_name, csv_path, expected_columns, alia
     "CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT %s FROM %s;",
     view_name, paste(exprs, collapse = ", "), .source_relation(csv_path)
   )
+  if (!is.null(.append_state$active)) {
+    sql <- sprintf("CREATE OR REPLACE TEMPORARY VIEW %s AS SELECT * FROM (SELECT %s FROM %s) s%s;",
+                   view_name, paste(exprs, collapse = ", "), .source_relation(csv_path), .append_filter(view_name, expected_columns))
+  }
   DBI::dbExecute(con, sql)
 }
 

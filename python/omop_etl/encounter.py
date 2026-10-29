@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 import duckdb
 import pandas as pd
 
-from omop_etl.model_bundle import ModelBundle, load_model_bundle, score_cohort
+from omop_etl.model_bundle import ModelBundle, explain_rows, load_model_bundle, score_cohort
 from omop_etl.risk_tiers import map_risk_tiers
 from omop_etl.velocity import VELOCITY_CONCEPTS, derive_labs, engineer_clinical_features, extract_velocity_features
 
@@ -32,7 +32,7 @@ _COHORT_VIEW = "_score_encounter_cohort"
 def score_encounter(con: duckdb.DuckDBPyConnection, visit_occurrence_id: int, bundle: ModelBundle | str,
                     *, as_of: Any = None, extra_features: pd.DataFrame | None = None, on_violation: str = "raise",
                     risk_tiers: Sequence[Mapping[str, Any]] | None = None, concepts: Mapping[str, Any] | None = None,
-                    ) -> dict[str, Any]:
+                    explain: bool = False, top_k: int = 5) -> dict[str, Any]:
     """Real-time risk for one encounter.
 
     Args:
@@ -45,6 +45,8 @@ def score_encounter(con: duckdb.DuckDBPyConnection, visit_occurrence_id: int, bu
         on_violation: ``raise`` | ``clip`` | ``nullify`` for out-of-contract values (see ``validate_feature_frame``).
         risk_tiers: ``[{"name", "min"}]`` cut-points (e.g. from ``fit_capacity_thresholds``) replacing the bundle's tiers.
         concepts: override of ``VELOCITY_CONCEPTS`` (feature -> measurement concept ids).
+        explain: add ``top_drivers`` - the ``top_k`` patient-specific risk contributors (``feature``, ``value``, signed
+            ``impact`` on the probability), see :func:`omop_etl.model_bundle.explain_rows`.
 
     Returns:
         dict with ``visit_occurrence_id``, ``person_id``, ``prob``, ``risk_tier``, ``as_of``, ``features`` (the values
@@ -94,10 +96,17 @@ def score_encounter(con: duckdb.DuckDBPyConnection, visit_occurrence_id: int, bu
     prob = float(scored["prob"].iloc[0])
     tier = map_risk_tiers(prob, risk_tiers) if risk_tiers is not None else str(scored["risk_tier"].iloc[0])
     values = {n: (None if pd.isna(feats[n].iloc[0]) else float(feats[n].iloc[0])) for n in b.feature_names if n in feats}
-    return {"visit_occurrence_id": vid, "person_id": int(person_id), "prob": prob, "risk_tier": tier,
-            "as_of": cutoff.date().isoformat(), "features": values,
-            "measurement_dates": {k: d.date().isoformat() for k, (_, d) in latest.items()},
-            "validation": report.summary()}
+    result = {"visit_occurrence_id": vid, "person_id": int(person_id), "prob": prob, "risk_tier": tier,
+              "as_of": cutoff.date().isoformat(), "features": values,
+              "measurement_dates": {k: d.date().isoformat() for k, (_, d) in latest.items()},
+              "validation": report.summary()}
+    if explain:
+        filled = report.frame.copy()
+        for f in b.feature_spec["features"]:
+            if filled[f["name"]].isna().any() and f.get("impute") is not None:
+                filled[f["name"]] = filled[f["name"]].fillna(f["impute"])
+        result["top_drivers"] = explain_rows(b, filled, top_k=top_k)[0]
+    return result
 
 
 def _latest_measurements(con, person_id, start, cutoff, concepts) -> dict[str, tuple[float, pd.Timestamp]]:

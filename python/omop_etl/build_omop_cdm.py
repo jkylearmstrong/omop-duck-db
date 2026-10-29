@@ -100,6 +100,39 @@ def _source_relation(path):
     return f"read_csv_auto({sql_path_literal(path)}, union_by_name = true, all_varchar = true)"
 
 
+# Active only inside etl_pcornet(mode="append"): {"since": "YYYY-MM-DD"}. Event views keep rows dated on/after ``since``.
+_APPEND: dict = {}
+_SINCE_COLS = {
+    "_temp_encounter": ["ADMIT_DATE"], "_temp_diagnosis": ["DX_DATE", "ADMIT_DATE"], "_temp_procedures": ["PX_DATE", "ADMIT_DATE"],
+    "_temp_lab_result": ["RESULT_DATE"], "_temp_vital": ["MEASURE_DATE"],
+    "_temp_prescribing": ["RX_START_DATE", "RX_ORDER_DATE"], "_temp_med_admin": ["MEDADMIN_START_DATE"],
+    "_temp_dispensing": ["DISPENSE_DATE", "DISPENSING_DATE"], "_temp_death": ["DEATH_DATE"],
+}
+# Dimension/anchor views: keep only source rows whose key is not already in the CDM (new patients, providers, encounters).
+_APPEND_ANTIJOIN = {
+    "_temp_demographic": ("PATID", "person", "person_source_value"),
+    "_temp_provider": ("PROVIDERID", "provider", "provider_source_value"),
+    "_temp_encounter": ("ENCOUNTERID", "visit_occurrence", "visit_source_value"),
+}
+
+
+def _append_filter(view_name, expected_columns, disambiguate_suffix=None):
+    conds = []
+    if "since" in _APPEND and view_name in _SINCE_COLS:
+        cols = [c for c in _SINCE_COLS[view_name] if c in expected_columns]
+        if cols:
+            conds.append("COALESCE(" + ", ".join(f"parse_omop_date({c})" for c in cols)
+                         + f") >= DATE '{_APPEND['since']}'")
+    if _APPEND and view_name in _APPEND_ANTIJOIN:
+        key, table, col = _APPEND_ANTIJOIN[view_name]
+        if key in expected_columns:
+            keyexpr = key
+            if view_name == "_temp_demographic" and _APPEND.get("patid_suffix"):
+                keyexpr = f"{key} || '{_APPEND['patid_suffix']}'"
+            conds.append(f"NOT EXISTS (SELECT 1 FROM {table} t WHERE t.{col} = {keyexpr})")
+    return (" WHERE " + " AND ".join(conds)) if conds else ""
+
+
 def prepare_source_view(con, view_name, csv_path, expected_columns, aliases=None):
     """Creates a temporary view over a source CSV with case-insensitive column discovery,
     alias resolution (e.g. ssid -> PATID), and NULL projections for missing columns."""
@@ -139,7 +172,11 @@ def prepare_source_view(con, view_name, csv_path, expected_columns, aliases=None
     if padded:
         print(f"  [{label}] null-padded missing columns: {', '.join(padded)}")
 
-    sql = f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS SELECT {', '.join(exprs)} FROM {_source_relation(csv_path)};"
+    if _APPEND:
+        sql = (f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS SELECT * FROM (SELECT {', '.join(exprs)} "
+               f"FROM {_source_relation(csv_path)}) s{_append_filter(view_name, expected_columns)};")
+    else:
+        sql = f"CREATE OR REPLACE TEMPORARY VIEW {view_name} AS SELECT {', '.join(exprs)} FROM {_source_relation(csv_path)};"
     con.execute(sql)
 
 
@@ -1768,8 +1805,17 @@ def etl_pcornet(
     use_enrollment="auto",
     enrollment_type_concept_id=0,
     data_cutoff=None,
+    mode="full",
+    since=None,
 ):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline.
+
+    ``mode="append"`` (with ``since`` = ISO date) adds only newly arrived rows to an existing database: patients,
+    providers and encounters already present are skipped (matched on their source values), event rows (diagnosis,
+    procedures, labs, vitals, drugs, deaths) dated before ``since`` are skipped, and surrogate keys continue from the
+    current maximum. care_site/location are left as they are; observation_period and the eras are derived tables and
+    are rebuilt (their ids are regenerated). Encounters are selected by admit date, so an encounter already loaded is
+    never duplicated, but a stay admitted before ``since`` and discharged after it is not updated.
 
     ``key_check`` ('warn' | 'raise' | 'ignore') compares distinct source ids with distinct surrogate keys at the end
     of the build (FR-C12, see ``omop_etl.key_checks.check_etl_keys``); ``key_check_callback`` receives the list of
@@ -1790,6 +1836,17 @@ def etl_pcornet(
     """
     if not os.path.isdir(source_dir):
         raise FileNotFoundError(f"Source directory not found: {source_dir}")
+    if mode not in ("full", "append"):
+        raise ValueError("mode must be 'full' or 'append'.")
+    append = mode == "append"
+    if append:
+        if since is None:
+            raise ValueError("mode='append' requires since='YYYY-MM-DD'.")
+        since = _iso_date(since, "since")
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(f"mode='append' needs an existing database: {db_path}")
+        if build_schema_flag:
+            raise ValueError("build_schema_flag cannot be combined with mode='append'.")
     if strict_source:
         from omop_etl.source_check import check_source
 
@@ -1819,10 +1876,18 @@ def etl_pcornet(
         build_schema(con)
     load_macros(con)
 
-    load_care_site(con, source_dir, site_id=site_id, site_anon=site_anon, site_name=site_name)
+    _APPEND.clear()
+    if append:
+        _APPEND["since"] = since
+        if disambiguate_patids:
+            _APPEND["patid_suffix"] = f"-{site_id}"
+        print(f"Append mode: new patients/providers/encounters and events dated >= {since}.")
+    else:
+        load_care_site(con, source_dir, site_id=site_id, site_anon=site_anon, site_name=site_name)
     load_provider(con, source_dir)
     load_person(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_location(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    if not append:
+        load_location(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_visit_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_condition_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_procedure_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
@@ -1831,6 +1896,10 @@ def etl_pcornet(
     load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
 
+    _APPEND.clear()
+    if append:
+        for t in ("observation_period", "drug_era", "condition_era"):
+            con.execute(f"DELETE FROM {t}")
     cutoff = resolve_max_date(con, data_cutoff)
     enrolled = False
     if use_enrollment in ("auto", True):
@@ -1841,9 +1910,10 @@ def etl_pcornet(
     build_observation_period(con, max_date=cutoff, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
     build_drug_era(con)
     build_condition_era(con)
-    load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
+    if not append:
+        load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
 
-    if key_check != "ignore":
+    if key_check != "ignore" and not append:  # the check compares whole-source ids with whole-table keys
         from omop_etl.key_checks import check_etl_keys
 
         try:
