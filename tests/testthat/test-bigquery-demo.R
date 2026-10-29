@@ -1,4 +1,4 @@
-demo_values <- list(cdm = "`bigquery-public-data.cms_synthetic_patient_data_omop`", scratch = "`my-proj.scratch`",
+demo_values <- list(cdm = "bigquery-public-data.cms_synthetic_patient_data_omop", scratch = "my-proj.scratch",
                     cohort_table = "demo_cohort", features_table = "demo_features", cohort_id = 1L)
 demo_cohort_json <- testthat::test_path("..", "..", "cohorts", "diabetes_phenotype.circe.json")
 demo_all_tables <- c("person", "visit_occurrence", "observation_period", "concept_ancestor", "condition_occurrence",
@@ -45,7 +45,8 @@ test_that("the feature and availability templates fill every placeholder", {
   for (f in c("bigquery_demo_features.sql", "bigquery_demo_availability.sql")) {
     sql <- omopduckdb:::.demo_template(f, demo_values)
     expect_false(grepl("{{", sql, fixed = TRUE))
-    expect_true(grepl("`bigquery-public-data.cms_synthetic_patient_data_omop`.", sql, fixed = TRUE))
+    expect_true(grepl("`bigquery-public-data.cms_synthetic_patient_data_omop.", sql, fixed = TRUE))
+    expect_false(grepl("omop`.", sql, fixed = TRUE))  # project.dataset is never backticked on its own
   }
   expect_error(omopduckdb:::.demo_template("bigquery_demo_features.sql", list(cdm = "x")), "placeholder")
 })
@@ -81,7 +82,7 @@ test_that("the diabetes definition compiles to GoogleSQL through CirceR + SqlRen
   stmts <- compile_cohort_bigquery(demo_cohort_json,
                                    "bigquery-public-data.cms_synthetic_patient_data_omop", "my-proj.scratch")
   sql <- paste(stmts, collapse = "\n")
-  expect_true(grepl("`bigquery-public-data.cms_synthetic_patient_data_omop`.", sql, fixed = TRUE))
+  expect_true(grepl("`bigquery-public-data.cms_synthetic_patient_data_omop.person`", sql, fixed = TRUE))
   expect_false(grepl("cdm_ph|vocab_ph|tgt_ph|#", sql))
 })
 
@@ -91,4 +92,15 @@ test_that("live BigQuery smoke test (opt in with OMOP_BQ_BILLING_PROJECT; bills 
   skip_if_not_installed("bigrquery")
   s <- run_bigquery_demo(Sys.getenv("OMOP_BQ_BILLING_PROJECT"), withr::local_tempdir(), cohort_json = demo_cohort_json)
   expect_gt(s$n_cohort, 0)
+})
+
+test_that("a dry run needs neither CirceR nor credentials", {
+  skip_if_not(file.exists(demo_cohort_json))
+  testthat::local_mocked_bindings(requireNamespace = function(package, ...) FALSE, .package = "base")
+  out <- withr::local_tempdir()
+  expect_warning(run_bigquery_demo("my-proj", out, cohort_json = demo_cohort_json, dry_run = TRUE), "feature SQL only")
+  expect_true(file.exists(file.path(out, "features.googlesql.sql")))
+  expect_false(file.exists(file.path(out, "cohort.googlesql.sql")))
+  expect_true(grepl("`my-proj.omop_duckdb_demo.demo_features`", paste(readLines(file.path(out, "features.googlesql.sql")), collapse = "
+"), fixed = TRUE))
 })

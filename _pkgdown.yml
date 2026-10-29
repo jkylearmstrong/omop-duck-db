@@ -25,6 +25,7 @@ reference:
   - compile_cohort_bigquery
   - summarize_bigquery_demo
   - BIGQUERY_DEMO_DISCLAIMER
+  - BIGQUERY_DEMO_UTILIZATION_NOTE
   - check_vocabulary_version
 - title: PCORnet ETL and synthesizers
   desc: Ingest PCORnet extracts and generate required OHDSI eras and observation periods.

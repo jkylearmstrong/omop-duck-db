@@ -8,6 +8,15 @@ BIGQUERY_DEMO_DISCLAIMER <- paste(
   "sub-model can be exercised."
 )
 
+#' Note printed beside the utilization features in the BigQuery demonstration report
+#' @format A character string.
+#' @export
+BIGQUERY_DEMO_UTILIZATION_NOTE <- paste(
+  "Utilization is counted before the cohort entry date, which is each patient's FIRST qualifying diabetes event (not a",
+  "sampled hospitalization). In claims data most patients have few or no earlier inpatient stays, so",
+  "readmission_count_twelve_months is expected to be zero for most of the cohort."
+)
+
 .DEMO_PUBLIC_DATASET <- "bigquery-public-data.cms_synthetic_patient_data_omop"
 .DEMO_UTILIZATION <- c("prior_ip_os_ed_count", "readmission_count_twelve_months")
 .DEMO_TELEMETRY <- c(serum_creatinine = "n_creatinine", serum_glucose = "n_glucose", serum_albumin = "n_albumin",
@@ -18,7 +27,7 @@ BIGQUERY_DEMO_DISCLAIMER <- paste(
   if (length(bits) != 2L || !grepl("^[A-Za-z0-9][A-Za-z0-9._:-]*$", bits[[1]]) || !grepl("^[A-Za-z_][A-Za-z0-9_]*$", bits[[2]])) {
     stop(what, " must be 'project.dataset', got '", x, "'", call. = FALSE)
   }
-  paste0("`", x, "`")
+  x  # templates add the table and ONE pair of backticks around the whole project.dataset.table
 }
 
 .demo_template <- function(file, values) {
@@ -60,10 +69,10 @@ compile_cohort_bigquery <- function(circe_json, cdm, scratch, cohort_table = "de
   sql <- SqlRender::translate(sql, targetDialect = "bigquery", tempEmulationSchema = "tgt_ph")
   stmts <- SqlRender::splitSql(sql)
   stmts <- vapply(stmts, function(s) {
-    for (ph in names(q)) s <- gsub(paste0("\\b", ph, "\\."), paste0(q[[ph]], "."), s)
+    for (ph in names(q)) s <- gsub(paste0("\\b", ph, "\\.(\\w+)"), paste0("`", q[[ph]], ".\\1`"), s)
     s
   }, character(1), USE.NAMES = FALSE)
-  create <- sprintf("CREATE OR REPLACE TABLE %s.%s (cohort_definition_id INT64, subject_id INT64, cohort_start_date DATE, cohort_end_date DATE)",
+  create <- sprintf("CREATE OR REPLACE TABLE `%s.%s` (cohort_definition_id INT64, subject_id INT64, cohort_start_date DATE, cohort_end_date DATE)",
                     q[["tgt_ph"]], cohort_table)
   c(create, stmts)
 }
@@ -118,7 +127,7 @@ summarize_bigquery_demo <- function(features, availability = NULL) {
            "## Cohort", "", paste0("- Patients: **", summary$n_cohort, "**"),
            paste0("- Age at index: mean ", f(age$mean), ", SD ", f(age$sd), ", median ", f(age$median)), "",
            "| Sex | n (%) |", "|---|---|", rows(summary$sex), "", "| Race | n (%) |", "|---|---|", rows(summary$race), "",
-           "## Prior-year utilization (administrative sub-model)", "", "| Feature | Mean | SD | Median |", "|---|---|---|---|",
+           "## Prior-year utilization (administrative sub-model)", "", paste0("_", BIGQUERY_DEMO_UTILIZATION_NOTE, "_"), "", "| Feature | Mean | SD | Median |", "|---|---|---|---|",
            sprintf("| %s | %s | %s | %s |", names(summary$utilization),
                    vapply(summary$utilization, function(v) f(v$mean), ""), vapply(summary$utilization, function(v) f(v$sd), ""),
                    vapply(summary$utilization, function(v) f(v$median), "")), "",
@@ -188,13 +197,21 @@ run_bigquery_demo <- function(billing_project = NULL, output_dir = "bigquery_dem
     force(expr)
   }
 
-  cohort_sql <- timed("compile_cohort_to_googlesql",
-                      compile_cohort_bigquery(cohort_json, dataset, scratch, cohort_table, cohort_id, vocabulary_dataset))
+  # a dry run must not need CirceR/Java/credentials: without CirceR it still writes the feature SQL and says so
+  can_compile <- requireNamespace("CirceR", quietly = TRUE) && requireNamespace("SqlRender", quietly = TRUE)
+  if (dry_run && !can_compile) {
+    warning("CirceR and/or SqlRender are not installed: the dry run writes the feature SQL only, not the cohort SQL.",
+            call. = FALSE)
+    cohort_sql <- NULL
+  } else {
+    cohort_sql <- timed("compile_cohort_to_googlesql",
+                        compile_cohort_bigquery(cohort_json, dataset, scratch, cohort_table, cohort_id, vocabulary_dataset))
+  }
   values <- list(cdm = .demo_dataset(dataset, "dataset"), scratch = .demo_dataset(scratch, "scratch"),
                  cohort_table = cohort_table, features_table = "demo_features", cohort_id = as.integer(cohort_id))
   features_sql <- .demo_template("bigquery_demo_features.sql", values)
   avail_sql <- .demo_template("bigquery_demo_availability.sql", values)
-  writeLines(paste0(cohort_sql, ";"), file.path(output_dir, "cohort.googlesql.sql"))
+  if (!is.null(cohort_sql)) writeLines(paste0(cohort_sql, ";"), file.path(output_dir, "cohort.googlesql.sql"))
   writeLines(paste0(features_sql, ";"), file.path(output_dir, "features.googlesql.sql"))
   writeLines(paste0(avail_sql, ";"), file.path(output_dir, "availability.googlesql.sql"))
 
@@ -218,7 +235,7 @@ run_bigquery_demo <- function(billing_project = NULL, output_dir = "bigquery_dem
   timed("create_scratch_dataset", runner$ensure_dataset(scratch))
   timed("build_cohort", for (stmt in cohort_sql) runner$execute(stmt))
   timed("extract_features", runner$execute(features_sql))
-  features <- timed("download_features", runner$fetch(sprintf("SELECT * FROM %s.demo_features", .demo_dataset(scratch, "scratch"))))
+  features <- timed("download_features", runner$fetch(sprintf("SELECT * FROM `%s.demo_features`", .demo_dataset(scratch, "scratch"))))
   availability <- tryCatch(timed("lab_availability", runner$fetch(avail_sql)), error = function(e) {
     run$availability_note <<- paste0("availability query failed (", class(e)[[1]], "); treated as no numeric values")
     NULL

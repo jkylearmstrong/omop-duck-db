@@ -25,7 +25,7 @@ import pandas as pd
 
 from omop_etl.circe import compile_circe_to_duckdb
 
-__all__ = ["DEFAULT_DATASET", "DISCLAIMER", "CLINICAL_TELEMETRY", "UTILIZATION_FEATURES",
+__all__ = ["DEFAULT_DATASET", "DISCLAIMER", "UTILIZATION_NOTE", "CLINICAL_TELEMETRY", "UTILIZATION_FEATURES",
            "compile_cohort_bigquery", "render_template", "run_demo", "summarize_features", "main"]
 
 DEFAULT_DATASET = "bigquery-public-data.cms_synthetic_patient_data_omop"
@@ -42,6 +42,11 @@ DISCLAIMER = (
     "(cohort SQL, dialect translation, feature extraction). They say nothing about real-world clinical performance "
     "or human epidemiology, and SynPUF has no laboratory values or vital signs, so only the administrative "
     "utilization sub-model can be exercised."
+)
+UTILIZATION_NOTE = (
+    "Utilization is counted before the cohort entry date, which is each patient's FIRST qualifying diabetes event "
+    "(not a sampled hospitalization). In claims data most patients have few or no earlier inpatient stays, so "
+    "readmission_count_twelve_months is expected to be zero for most of the cohort."
 )
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PROJECT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -61,7 +66,7 @@ def _split_dataset(dataset: str, what: str = "dataset") -> tuple[str, str]:
 
 def _qualified(dataset: str, what: str = "dataset") -> str:
     _split_dataset(dataset, what)
-    return f"`{dataset}`"
+    return dataset  # templates add the table and ONE pair of backticks around the whole project.dataset.table
 
 
 def render_template(sql: str, **values: Any) -> str:
@@ -82,6 +87,12 @@ def _bigquery_ast_fixes(tree: Any) -> Any:
         sel = q.parent
         if not (sel.args.get("where") or sel.args.get("group") or sel.args.get("having")):
             sel.set("where", exp.Where(this=exp.true()))
+
+    # DuckDB's explicit NULLS LAST inside a window ORDER BY cannot be translated (sqlglot warns); the keys here are
+    # non-null dates, so dropping it does not change a result
+    for ordered in list(tree.find_all(exp.Ordered)):
+        if ordered.find_ancestor(exp.Window) is not None:
+            ordered.set("nulls_first", True)  # BigQuery ASC puts NULLs first, so nothing is emitted
 
     def date_math(node):
         if isinstance(node, (exp.Add, exp.Sub)) and isinstance(node.expression, exp.Interval):
@@ -110,9 +121,9 @@ def compile_cohort_bigquery(circe_json: str | Path | dict, cdm: str, scratch: st
     source = compile_circe_to_duckdb(circe_json, target_cohort_id=cohort_id, cdm_schema="cdm_ph")
     tree = _bigquery_ast_fixes(sqlglot.parse_one(source, read="duckdb"))
     sql = tree.sql(dialect="bigquery")
-    sql = re.sub(r"\bcdm_ph\.concept_ancestor\b", f"{vocab_q}.concept_ancestor", sql)
-    sql = re.sub(r"\bcdm_ph\.(\w+)", lambda m: f"{cdm_q}.{m.group(1)}", sql)
-    return f"CREATE OR REPLACE TABLE {scratch_q}.{cohort_table} AS\n{sql}"
+    sql = re.sub(r"\bcdm_ph\.concept_ancestor\b", f"`{vocab_q}.concept_ancestor`", sql)
+    sql = re.sub(r"\bcdm_ph\.(\w+)", lambda m: f"`{cdm_q}.{m.group(1)}`", sql)
+    return f"CREATE OR REPLACE TABLE `{scratch_q}.{cohort_table}` AS\n{sql}"
 
 
 class _Runner:
@@ -197,7 +208,7 @@ def _report_markdown(summary: dict, run: dict) -> str:
         lines += ["## Cohort", "", f"- Patients: **{n}**", f"- Age at index: mean {age['mean']}, SD {age['sd']}, median {age['median']}",
                   "", "| Sex | n (%) |", "|---|---|"] + [row(k, v) for k, v in summary["sex"].items()]
         lines += ["", "| Race | n (%) |", "|---|---|"] + [row(k, v) for k, v in summary["race"].items()]
-        lines += ["", "## Prior-year utilization (administrative sub-model)", "", "| Feature | Mean | SD | Median |", "|---|---|---|---|"]
+        lines += ["", "## Prior-year utilization (administrative sub-model)", "", f"_{UTILIZATION_NOTE}_", "", "| Feature | Mean | SD | Median |", "|---|---|---|---|"]
         lines += [f"| {k} | {v['mean']} | {v['sd']} | {v['median']} |" for k, v in summary["utilization"].items()]
         lines += ["", "## Clinical telemetry", "", "| Feature | Numeric values in cohort | Status |", "|---|---|---|"]
         lines += [f"| {k} | {v['n_numeric_values']} | {v['status']} |" for k, v in summary["clinical_telemetry"].items()]
@@ -258,7 +269,7 @@ def run_demo(billing_project: str, output_dir: str | Path = "bigquery_demo_out",
     _timed(timings, "build_cohort", lambda: runner.execute(cohort_sql))
     _timed(timings, "extract_features", lambda: runner.execute(features_sql))
     features = _timed(timings, "download_features", lambda: runner.fetch(
-        f"SELECT * FROM {_qualified(scratch, 'scratch')}.{features_table}"))
+        f"SELECT * FROM `{_qualified(scratch, 'scratch')}.{features_table}`"))
     try:
         availability = _timed(timings, "lab_availability", lambda: runner.fetch(avail_sql))
     except Exception as exc:  # noqa: BLE001 - no measurement table / no rows is the expected claims case

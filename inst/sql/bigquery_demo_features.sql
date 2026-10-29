@@ -2,10 +2,10 @@
 -- One row per cohort member: age/sex/race at the index date and prior utilization strictly BEFORE it.
 -- Placeholders ({{cdm}}, {{scratch}}, {{cohort_table}}, {{features_table}}, {{cohort_id}}) are substituted by both
 -- implementations; nothing here reads a lab or vital sign, so it runs unchanged on claims data.
-CREATE OR REPLACE TABLE {{scratch}}.{{features_table}} AS
+CREATE OR REPLACE TABLE `{{scratch}}.{{features_table}}` AS
 WITH cohort AS (
   SELECT subject_id, MIN(cohort_start_date) AS index_date
-  FROM {{scratch}}.{{cohort_table}}
+  FROM `{{scratch}}.{{cohort_table}}`
   WHERE cohort_definition_id = {{cohort_id}}
   GROUP BY subject_id
 ),
@@ -18,7 +18,7 @@ prior_visits AS (
     v.visit_start_date,
     COALESCE(v.visit_end_date, v.visit_start_date) AS visit_end_date
   FROM cohort AS c
-  JOIN {{cdm}}.visit_occurrence AS v ON v.person_id = c.subject_id
+  JOIN `{{cdm}}.visit_occurrence` AS v ON v.person_id = c.subject_id
   WHERE v.visit_start_date < c.index_date
 ),
 inpatient AS (
@@ -60,6 +60,6 @@ SELECT
   COALESCE(u.prior_ip_count, 0) + COALESCE(u.prior_ed_count, 0) + COALESCE(u.prior_os_count, 0) AS prior_ip_os_ed_count,
   COALESCE(r.n, 0) AS readmission_count_twelve_months
 FROM cohort AS c
-JOIN {{cdm}}.person AS p ON p.person_id = c.subject_id
+JOIN `{{cdm}}.person` AS p ON p.person_id = c.subject_id
 LEFT JOIN utilization AS u ON u.subject_id = c.subject_id
 LEFT JOIN readmissions AS r ON r.subject_id = c.subject_id

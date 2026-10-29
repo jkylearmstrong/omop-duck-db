@@ -11,14 +11,15 @@ from omop_etl.demo_bigquery import (DISCLAIMER, compile_cohort_bigquery, render_
 
 CDM = "bigquery-public-data.cms_synthetic_patient_data_omop"
 SCRATCH = "my-proj.scratch"
-VALUES = dict(cdm=f"`{CDM}`", scratch=f"`{SCRATCH}`", cohort_table="demo_cohort", features_table="demo_features", cohort_id=1)
+VALUES = dict(cdm=CDM, scratch=SCRATCH, cohort_table="demo_cohort", features_table="demo_features", cohort_id=1)
 
 
 def test_cohort_compiles_to_parseable_googlesql():
     sql = compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
     sqlglot.parse_one(sql, read="bigquery")  # raises on a syntax error
-    assert sql.startswith("CREATE OR REPLACE TABLE `my-proj.scratch`.demo_cohort AS")
-    assert f"`{CDM}`.concept_ancestor" in sql and "cdm_ph" not in sql
+    assert sql.startswith("CREATE OR REPLACE TABLE `my-proj.scratch.demo_cohort` AS")
+    assert f"`{CDM}.concept_ancestor`" in sql and "cdm_ph" not in sql
+    assert f"`{CDM}`." not in sql  # project.dataset must not be backticked on its own
     assert "INTERVAL '" not in sql  # DuckDB-style interval literals are not GoogleSQL
     tree = sqlglot.parse_one(sql, read="bigquery")
     for q in tree.find_all(sqlglot.exp.Qualify):  # GoogleSQL needs WHERE/GROUP BY/HAVING beside QUALIFY
@@ -32,7 +33,7 @@ def test_gestational_exclusion_is_in_the_sql():
 
 def test_vocabulary_dataset_is_used_for_concept_ancestor():
     sql = compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH, vocabulary="my-proj.vocab")
-    assert "`my-proj.vocab`.concept_ancestor" in sql and f"`{CDM}`.concept_ancestor" not in sql
+    assert "`my-proj.vocab.concept_ancestor`" in sql and f"`{CDM}.concept_ancestor`" not in sql
 
 
 @pytest.mark.parametrize("name", ["features", "availability"])
@@ -150,3 +151,12 @@ def test_runner_wraps_client_calls():
     r.ensure_dataset("my-proj.d")
     assert list(r.fetch("SELECT x FROM INFORMATION_SCHEMA.TABLES")["table_name"]) == ALL
     assert client.sql[0] == "SELECT 1" and client.datasets == ["my-proj.d"]
+
+
+def test_no_sqlglot_warnings_and_utilization_note(tmp_path, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="sqlglot"):
+        compile_cohort_bigquery("cohorts/diabetes_phenotype.circe.json", CDM, SCRATCH)
+    assert not [r for r in caplog.records if "NULLS LAST" in r.getMessage()]
+    run_demo("my-proj", tmp_path, client=_FakeClient(ALL), cohort_json="cohorts/diabetes_phenotype.circe.json")
+    assert "FIRST qualifying diabetes event" in (tmp_path / "demo_report.md").read_text(encoding="utf-8")

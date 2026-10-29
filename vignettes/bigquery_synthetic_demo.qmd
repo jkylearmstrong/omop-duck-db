@@ -33,7 +33,7 @@ epidemiology, and the data are not an EHR site. Do not cite results from it as f
 ## 1. Check the SQL without any credentials
 
 A dry run compiles `cohorts/diabetes_phenotype.circe.json` (including the gestational-diabetes exclusion) and the
-feature queries, writes them to `output_dir`, and makes no BigQuery call:
+feature queries, writes them to `output_dir`, and makes no BigQuery call. In R the cohort step needs CirceR; without it the dry run warns and writes only the feature SQL (Python's dry run always writes both):
 
 ```bash
 Rscript inst/scripts/run_bigquery_demo.R --billing-project my-gcp-project --dry-run
@@ -68,6 +68,10 @@ lacks `person`, `visit_occurrence`, `observation_period`, `condition_occurrence`
 | `demo_summary.json` | The same numbers, machine readable |
 | `demo_features.csv` | One row per cohort member |
 | `*.googlesql.sql` | The exact statements that were run |
+
+## How to read the utilization features
+
+Utilization is counted before the cohort entry date, which is each patient's *first* qualifying diabetes event, not a sampled hospitalization. In claims data most patients have few or no earlier inpatient stays, so `readmission_count_twelve_months` is expected to be zero for most of the cohort. The report repeats this note.
 
 ## How claims data are handled
 

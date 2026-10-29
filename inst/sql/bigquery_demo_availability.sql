@@ -8,6 +8,6 @@ SELECT
   COUNTIF(m.value_as_number IS NOT NULL AND m.measurement_concept_id = 3024561) AS n_albumin,
   COUNTIF(m.value_as_number IS NOT NULL AND m.measurement_concept_id = 3004249) AS n_systolic_bp,
   COUNTIF(m.value_as_number IS NOT NULL AND m.measurement_concept_id = 3012888) AS n_diastolic_bp
-FROM {{scratch}}.{{cohort_table}} AS c
-JOIN {{cdm}}.measurement AS m ON m.person_id = c.subject_id
+FROM `{{scratch}}.{{cohort_table}}` AS c
+JOIN `{{cdm}}.measurement` AS m ON m.person_id = c.subject_id
 WHERE c.cohort_definition_id = {{cohort_id}}
