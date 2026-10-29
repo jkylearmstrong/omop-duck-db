@@ -533,8 +533,13 @@ def _repair_address_csv(path):
     import csv
     import tempfile
 
-    with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
-        rows = list(csv.reader(fh))
+    if str(path).lower().endswith((".parquet", ".pq")):
+        return path                                    # columnar sources have no delimiters to misread
+    try:
+        with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+            rows = list(csv.reader(fh))
+    except csv.Error:
+        return path                                    # not a delimited text file; let the normal reader decide
     if not rows:
         return path
     header = rows[0]

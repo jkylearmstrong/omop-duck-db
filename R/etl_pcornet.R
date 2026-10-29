@@ -392,8 +392,9 @@ load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, si
 # PCORnet address extracts often leave a comma in ADDRESS_CITY unquoted ("St. Louis, MO"), which shifts every later
 # column with no error from the CSV reader. Returns `path`, or a repaired temp copy with surplus fields folded into the city.
 .repair_address_csv <- function(path) {
+  if (grepl("[.](parquet|pq)$", path, ignore.case = TRUE)) return(path)   # columnar sources have no delimiters to misread
   header <- strsplit(readLines(path, n = 1L, warn = FALSE), ",", fixed = TRUE)[[1]]
-  header <- trimws(sub("^﻿", "", header))
+  header <- trimws(sub("^\ufeff", "", header))
   city <- match("ADDRESS_CITY", toupper(header))
   nf <- utils::count.fields(path, sep = ",", quote = "\"", skip = 1L, blank.lines.skip = FALSE)
   bad <- which(!is.na(nf) & nf > length(header))

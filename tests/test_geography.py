@@ -368,3 +368,14 @@ def test_prior_utilization_counts_ei_as_inpatient_only_and_observation_as_prior_
     v = extract_velocity_features(_prior_visits_cdm(), engineer=False).iloc[0]
     assert (v.prior_ip_count, v.prior_ed_count) == (2, 1)
     assert v.prior_ip_os_ed_count == 5                                  # EI, ED, observation, outpatient, IP: each visit once
+
+
+def test_address_repair_leaves_parquet_sources_alone(tmp_path):
+    from omop_etl.build_omop_cdm import _repair_address_csv
+
+    pq = tmp_path / "lds_address_history.parquet"
+    duckdb.connect().execute(f"COPY (SELECT 1 AS ADDRESSID) TO '{pq.as_posix()}' (FORMAT PARQUET)")
+    assert _repair_address_csv(str(pq)) == str(pq)
+    blob = tmp_path / "x.csv"
+    blob.write_bytes(b"A,B\n1,\x002\n")
+    assert _repair_address_csv(str(blob)) == str(blob)                 # NUL bytes: not repairable text, returned untouched
