@@ -32,3 +32,16 @@ test_that("custom_covariate_settings asks FeatureExtraction for the custom conce
   expect_equal(cs$longTermStartDays, -180)
   expect_equal(cs$includedCovariateConceptIds, c(2000200001, 2000200002))
 })
+
+test_that("wide features get stable named concepts beside the standard one", {
+  fx <- cc_cdm()
+  on.exit({ DBI::dbDisconnect(fx$con, shutdown = TRUE); unlink(fx$db_path) }, add = TRUE)
+  wide <- data.frame(person_id = c(1, 2), date = as.Date("2020-01-01"), charlson_site = c(3, 1), elix_site = c(4, NA))
+  ids <- write_custom_features(fx$con, wide, labels = c(charlson_site = "Charlson index, site definition"))
+  expect_equal(as.numeric(ids$charlson_site[[1]]), 2001000000)
+  expect_equal(as.numeric(ids$elix_site[[1]]), 2001000001)
+  again <- write_custom_features(fx$con, wide)
+  expect_equal(as.numeric(again$charlson_site[[1]]), 2001000000)
+  expect_equal(DBI::dbGetQuery(fx$con, "SELECT count(*) AS n FROM measurement")$n, 3)
+  expect_equal(DBI::dbGetQuery(fx$con, "SELECT concept_name AS n FROM concept WHERE concept_id = 2001000000")$n, "Charlson index, site definition")
+})

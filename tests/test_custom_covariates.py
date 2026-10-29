@@ -51,3 +51,15 @@ def test_rejects_vocabulary_range_ids_and_unknown_features():
         write_custom_covariates(c, _values().assign(feature="other"), CONCEPTS)
     with pytest.raises(ValueError, match="missing column"):
         write_custom_covariates(c, _values().drop(columns="date"), CONCEPTS)
+
+
+def test_wide_features_get_stable_named_concepts_beside_the_standard_one():
+    from omop_etl.custom_covariates import write_custom_features
+    c = _con()
+    wide = pd.DataFrame({"person_id": [1, 2], "date": [datetime.date(2020, 1, 1)] * 2, "charlson_site": [3.0, 1.0], "elix_site": [4.0, None]})
+    ids = write_custom_features(c, wide, labels={"charlson_site": "Charlson index, site definition"})
+    assert ids["charlson_site"] == (2001000000, "Charlson index, site definition") and ids["elix_site"][0] == 2001000001
+    again = write_custom_features(c, wide)                              # re-run: same ids, rows replaced, not duplicated
+    assert {k: v[0] for k, v in again.items()} == {k: v[0] for k, v in ids.items()}
+    assert c.execute("SELECT count(*) FROM measurement").fetchone()[0] == 3
+    assert c.execute("SELECT concept_name FROM concept WHERE concept_id = 2001000000").fetchone()[0] == "Charlson index, site definition"

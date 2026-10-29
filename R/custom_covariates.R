@@ -73,3 +73,60 @@ custom_covariate_settings <- function(concept_ids, long_term_start_days = -365, 
   FeatureExtraction::createCovariateSettings(useMeasurementValueLongTerm = TRUE, longTermStartDays = long_term_start_days,
                                              endDays = end_days, includedCovariateConceptIds = as.numeric(concept_ids), ...)
 }
+
+#' Concept ids for your own feature names
+#'
+#' Returns the `concepts` list for [write_custom_covariates()], reusing the id already registered for a feature name in this
+#' database (`concept_code` = the name, vocabulary `omop-duck-db`) and otherwise taking the next free id from 2,001,000,000.
+#' Ids are per database, so a study refers to a feature by name, not by id.
+#'
+#' @param con A DBI connection to an OMOP DuckDB.
+#' @param names Character vector of feature names, or a named character vector `c(name = "label")`.
+#' @return A named list; each element is `c(concept_id, label)`.
+#' @export
+register_custom_concepts <- function(con, names) {
+  labels <- if (is.null(base::names(names))) stats::setNames(as.character(names), names) else names
+  out <- list()
+  used <- numeric(0)
+  if (DBI::dbGetQuery(con, "SELECT count(*) AS n FROM information_schema.tables WHERE lower(table_name) = 'concept' AND table_catalog = current_database() AND table_schema = current_schema()")$n[[1]] > 0) {
+    have <- DBI::dbGetQuery(con, "SELECT concept_id, concept_code FROM concept WHERE vocabulary_id = 'omop-duck-db'")
+    for (i in seq_len(nrow(have))) if (have$concept_code[[i]] %in% base::names(labels)) out[[have$concept_code[[i]]]] <- c(have$concept_id[[i]], labels[[have$concept_code[[i]]]])
+    used <- DBI::dbGetQuery(con, "SELECT concept_id FROM concept WHERE concept_id >= 2000100000")$concept_id
+  }
+  nxt <- max(c(2000999999, used, vapply(out, function(x) as.numeric(x[[1]]), numeric(1)))) + 1
+  for (nm in base::names(labels)) {
+    if (is.null(out[[nm]])) { out[[nm]] <- c(nxt, labels[[nm]]); nxt <- nxt + 1 }
+  }
+  out
+}
+
+#' Write your own features so the OHDSI tools read them
+#'
+#' Writes a wide data frame (`person_id`, a date column and one numeric column per feature) as covariates that
+#' FeatureExtraction, PatientLevelPrediction and DeepPatientLevelPrediction read like any other. This is how a study adds its
+#' own version of a feature OMOP already defines (a Charlson index, an Elixhauser score, a frailty index) next to the standard
+#' one: give it its own name (`charlson_site`) and extract both with the same covariate settings.
+#'
+#' @param con A DBI connection to an OMOP DuckDB.
+#' @param features Wide data frame with `person_id`, the date column, optionally `visit_occurrence_id`, and one column per feature.
+#' @param labels Optional named character vector of concept names, `c(feature = "label")`.
+#' @param date_col Name of the date column (default `"date"`).
+#' @param ... Passed to [write_custom_covariates()].
+#' @return The `concepts` list used (see [register_custom_concepts()]); pass its ids to [custom_covariate_settings()].
+#' @export
+write_custom_features <- function(con, features, labels = NULL, date_col = "date", ...) {
+  id_cols <- intersect(c("person_id", date_col, "visit_occurrence_id"), names(features))
+  feats <- setdiff(names(features), c("person_id", date_col, "visit_occurrence_id"))
+  lab <- stats::setNames(feats, feats)
+  lab[names(labels)] <- labels
+  concepts <- register_custom_concepts(con, lab)
+  long <- do.call(rbind, lapply(feats, function(f) {
+    d <- features[, id_cols, drop = FALSE]
+    names(d)[names(d) == date_col] <- "date"
+    d$feature <- f
+    d$value <- as.numeric(features[[f]])
+    d
+  }))
+  write_custom_covariates(con, long, concepts, ...)
+  concepts
+}

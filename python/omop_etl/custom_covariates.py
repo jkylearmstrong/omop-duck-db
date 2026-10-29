@@ -14,7 +14,7 @@ from typing import Any, Mapping
 import duckdb
 import pandas as pd
 
-__all__ = ["write_custom_covariates", "DERIVED_VALUE_TYPE_CONCEPT_ID", "LOCAL_CONCEPT_MIN"]
+__all__ = ["write_custom_covariates", "write_custom_features", "register_custom_concepts", "DERIVED_VALUE_TYPE_CONCEPT_ID", "LOCAL_CONCEPT_MIN"]
 
 DERIVED_VALUE_TYPE_CONCEPT_ID = 45754907     # "Derived value" (Meas Type)
 LOCAL_CONCEPT_MIN = 2_000_000_000
@@ -83,3 +83,49 @@ def write_custom_covariates(
                             "concept_code, valid_start_date, valid_end_date) VALUES (?, ?, 'Measurement', 'omop-duck-db', 'Custom covariate', 'S', ?, "
                             "DATE '1970-01-01', DATE '2099-12-31')", [int(cid), name, key])
     return len(rows)
+
+
+def register_custom_concepts(con: duckdb.DuckDBPyConnection, names: Mapping[str, str] | list[str]) -> dict[str, tuple[int, str]]:
+    """Returns ``{feature: (concept_id, label)}`` for ``write_custom_covariates``, reusing the id already registered for a
+    feature name in this database (``concept_code`` = the name, vocabulary ``omop-duck-db``) and otherwise taking the next free
+    id from 2,001,000,000 upwards (clear of the geography ids 2,000,100,001-3). ``names`` is a list of feature names or ``{name: label}``. Ids are per database, so a
+    downstream study refers to a feature by name, not by id."""
+    labels = dict(names) if isinstance(names, Mapping) else {n: n for n in names}
+    have = _has_table(con, "concept")
+    out: dict[str, tuple[int, str]] = {}
+    used = set()
+    if have:
+        for cid, code in con.execute("SELECT concept_id, concept_code FROM concept WHERE vocabulary_id = 'omop-duck-db'").fetchall():
+            if code in labels:
+                out[code] = (int(cid), labels[code])
+        used = {int(r[0]) for r in con.execute("SELECT concept_id FROM concept WHERE concept_id >= 2001000000").fetchall()}
+    nxt = max([2_001_000_000 - 1, *used, *(v[0] for v in out.values())]) + 1
+    for name, label in labels.items():
+        if name not in out:
+            out[name] = (nxt, label)
+            nxt += 1
+    return out
+
+
+def write_custom_features(
+    con: duckdb.DuckDBPyConnection,
+    features: pd.DataFrame,
+    *,
+    labels: Mapping[str, str] | None = None,
+    date_col: str = "date",
+    **kwargs: Any,
+) -> dict[str, tuple[int, str]]:
+    """Writes a wide table of your own features (``person_id``, ``date_col`` and one numeric column per feature) so
+    FeatureExtraction, PatientLevelPrediction and DeepPatientLevelPrediction read them like any other covariate.
+
+    This is how a study adds its own version of a feature that OMOP already defines (a Charlson index, an Elixhauser score, a
+    frailty index) next to the standard one: give it its own name (``charlson_site``), and pull both through the same
+    covariate settings. Returns the ``{feature: (concept_id, label)}`` mapping to pass to ``custom_covariate_settings``.
+    ``kwargs`` go to :func:`write_custom_covariates`.
+    """
+    feats = [c for c in features.columns if c not in ("person_id", date_col, "visit_occurrence_id")]
+    concepts = register_custom_concepts(con, {f: (labels or {}).get(f, f) for f in feats})
+    long = features.melt(id_vars=[c for c in ("person_id", date_col, "visit_occurrence_id") if c in features.columns],
+                         value_vars=feats, var_name="feature", value_name="value").rename(columns={date_col: "date"})
+    write_custom_covariates(con, long, concepts, **kwargs)
+    return concepts
