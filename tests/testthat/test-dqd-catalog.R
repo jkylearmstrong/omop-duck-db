@@ -101,6 +101,13 @@ test_that("class, value, person-completeness, era and overlap checks find plante
   DBI::dbExecute(con, "INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, value_as_number, unit_concept_id) VALUES
     (1, 1, 3004249, DATE '2020-01-01', 0, 120, 8876), (2, 1, 3004249, DATE '2020-01-02', 0, 900, 8876), (3, 1, 3004249, DATE '2020-01-03', 0, 900, 0)")
   res <- run_dqd_catalog(con, today = dqd_today)
+  # golden values from the official DataQualityDashboard 2.9.1 (R, DuckDB) run on this data: violated rows and denominator
+  gold <- list(list("measurePersonCompleteness", "visit_occurrence", "", 1, 2), list("measurePersonCompleteness", "condition_occurrence", "", 0, 2), list("measurePersonCompleteness", "drug_exposure", "", 1, 2), list("measureConditionEraCompleteness", "condition_era", "", 1, 2), list("fkClass", "drug_era", "drug_concept_id", 1, 2), list("sourceConceptRecordCompleteness", "drug_exposure", "drug_source_concept_id", 2, 2), list("plausibleValueLow", "drug_exposure", "days_supply", 0, 2), list("plausibleValueLow", "drug_exposure", "quantity", 1, 2), list("plausibleValueLow", "person", "year_of_birth", 1, 2), list("plausibleValueHigh", "drug_exposure", "days_supply", 1, 2), list("plausibleValueHigh", "person", "year_of_birth", 0, 2))
+  for (g in gold) {
+    hit <- Filter(function(r) r$check_name == g[[1]] && r$cdm_table_name == g[[2]] && identical(r$cdm_field_name %||% "", g[[3]]), res$CheckResults)
+    expect_length(hit, 1)
+    expect_equal(c(hit[[1]]$num_violated_rows, hit[[1]]$num_denominator_rows), c(g[[4]], g[[5]]), info = paste(g[[1]], g[[2]], g[[3]]))
+  }
   expect_equal(dqd_by(res, "fkClass", "drug_era", "drug_concept_id")$num_violated_rows, 1)
   expect_equal(dqd_by(res, "measureConditionEraCompleteness", "condition_era")$num_violated_rows, 1)
   expect_equal(dqd_by(res, "measureObservationPeriodOverlap", "observation_period")$num_violated_rows, 2)
