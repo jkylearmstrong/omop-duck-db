@@ -50,7 +50,11 @@
 #'   `TRUE`, (a) condition records whose `visit_occurrence_id` equals the cohort row's `visit_occurrence_id` are never
 #'   counted (when both tables have that column; cohorts from `define_study_cohort()` do), and (b) an
 #'   `index_date_col` that looks like a discharge / end date is an error, since a window ending at discharge contains
-#'   the index stay. The window is always `[index - lookback_days, index)`.
+#'   the index stay. The window is `[index - lookback_days, index)` unless `end_inclusive = TRUE`. To reproduce a
+#'   discharge-anchored window (the legacy study's 730 days up to discharge, index stay included) pass a discharge-date
+#'   `index_date_col`, `exclude_index_diagnoses = FALSE` and `end_inclusive = TRUE`.
+#' @param end_inclusive Logical (default `FALSE`): also count diagnoses dated ON the index date, window
+#'   `[index - lookback_days, index]`. Needed to match a pipeline that uses `condition_start_date <= discharge_date`.
 #' @param fallback_on_unmapped Logical; if TRUE, falls back to source-value matching if standard concept ancestor is unavailable (default FALSE).
 #' @param return_mapping_fidelity Logical; if TRUE, attaches mapping fidelity diagnostics attribute (default FALSE).
 #' @return A `data.frame` with the columns, in order: `person_col`, `index_date_col`, the 31 `elix_<domain>` flags
@@ -81,10 +85,12 @@ extract_elixhauser_comorbidities <- function(con,
                                              hierarchy_adjusted = TRUE,
                                              exclude_index_diagnoses = TRUE,
                                              fallback_on_unmapped = FALSE,
-                                             return_mapping_fidelity = FALSE) {
+                                             return_mapping_fidelity = FALSE,
+                                             end_inclusive = FALSE) {
   .comorb_profile(con, .comorb_elixhauser, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
                   index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses,
-                  fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity)
+                  fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity,
+                  end_inclusive = end_inclusive)
 }
 
 #' Charlson comorbidity profile (17 categories, Charlson index)
@@ -145,10 +151,12 @@ extract_charlson_index <- function(con,
                                    hierarchy_adjusted = TRUE,
                                    exclude_index_diagnoses = TRUE,
                                    fallback_on_unmapped = FALSE,
-                                   return_mapping_fidelity = FALSE) {
+                                   return_mapping_fidelity = FALSE,
+                                   end_inclusive = FALSE) {
   .comorb_profile(con, .comorb_charlson, "extract_charlson_index", cohort_table, cohort_id, person_col,
                   index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses,
-                  fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity)
+                  fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity,
+                  end_inclusive = end_inclusive)
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -318,7 +326,7 @@ extract_charlson_index <- function(con,
 # The profiler as one statement of CTEs (see the Python twin for the walk-through).
 .comorb_build_sql <- function(spec, codes, qualified, person, index_col, person_out, index_out, cohort_where,
                               lookback_days, concept_ancestor, hierarchy_adjusted, index_visit_col = NULL,
-                              fallback_on_unmapped = FALSE, return_mapping_fidelity = FALSE) {
+                              fallback_on_unmapped = FALSE, return_mapping_fidelity = FALSE, end_inclusive = FALSE) {
   icd_values <- paste(sprintf("(%s, %s)", .comorb_qs(codes$icd$domain), .comorb_qs(codes$icd$code)),
                       collapse = ",\n      ")
   ctes <- c(
@@ -367,7 +375,7 @@ extract_charlson_index <- function(con,
   } else {
     cond_hit <- paste0("SELECT c.pid, c.cdate", vid_sel, ", h.domain, 0 AS is_std FROM cond AS c JOIN src_hit AS h ON h.src = c.src")
   }
-  window <- "ch.cdate < cb.idx_d"
+  window <- if (isTRUE(end_inclusive)) "ch.cdate <= cb.idx_d" else "ch.cdate < cb.idx_d"
   if (!is.null(index_visit_col)) {
     # train/serve skew guard: diagnoses attached to the index visit itself are coded after discharge
     ctes <- c(ctes, sprintf(paste0(
@@ -424,12 +432,13 @@ extract_charlson_index <- function(con,
 
 .comorb_profile <- function(con, spec, fn, cohort_table, cohort_id, person_col, index_date_col, lookback_days,
                             source_and_standard, hierarchy_adjusted, exclude_index_diagnoses = TRUE,
-                            fallback_on_unmapped = FALSE, return_mapping_fidelity = FALSE) {
+                            fallback_on_unmapped = FALSE, return_mapping_fidelity = FALSE, end_inclusive = FALSE) {
   lookback <- .comorb_check_int(lookback_days, "lookback_days", allow_null = TRUE, minimum = 0)
   cohort <- .comorb_check_int(cohort_id, "cohort_id", allow_null = TRUE)
   .comorb_check_flag(source_and_standard, "source_and_standard")
   .comorb_check_flag(hierarchy_adjusted, "hierarchy_adjusted")
   .comorb_check_flag(exclude_index_diagnoses, "exclude_index_diagnoses")
+  .comorb_check_flag(end_inclusive, "end_inclusive")
   codes <- .comorb_load_codes(spec)
   qualified <- .comorb_qualified_table(cohort_table)
   if (!inherits(con, "DBIConnection") || !DBI::dbIsValid(con)) stop("con must be an open DBI connection", call. = FALSE)
@@ -501,7 +510,8 @@ extract_charlson_index <- function(con,
 
   sql <- .comorb_build_sql(spec, codes, qualified, person, index_col, person_col, index_date_col, cohort_where,
                            lookback, concept_ancestor, hierarchy_adjusted, index_visit_col,
-                           fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity)
+                           fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity,
+                           end_inclusive = end_inclusive)
   res <- DBI::dbGetQuery(con, sql)
   avg_score <- if ("mapping_fidelity_score" %in% names(res)) mean(res$mapping_fidelity_score, na.rm = TRUE) else 1.0
   attr(res, "mapping_fidelity_score") <- round(avg_score, 4)

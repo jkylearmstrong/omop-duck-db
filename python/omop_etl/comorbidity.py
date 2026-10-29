@@ -219,7 +219,7 @@ def _resolve_concept_ancestor(con) -> tuple[str | None, str]:
 # --------------------------------------------------------------------------------------
 def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_out, cohort_where, lookback_days,
                concept_ancestor, hierarchy_adjusted, index_visit_col=None, fallback_on_unmapped=False,
-               return_mapping_fidelity=False):
+               return_mapping_fidelity=False, end_inclusive=False):
     """The profiler as one statement of CTEs.
 
     ``cohort_base`` is the distinct (person, index date) rows and ``cond`` the condition records of those persons with a
@@ -274,7 +274,7 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
     else:
         cond_hit = f"SELECT c.pid, c.cdate{vid_sel}, h.domain, 0 AS is_std FROM cond AS c JOIN src_hit AS h ON h.src = c.src"
 
-    window = "ch.cdate < cb.idx_d"
+    window = "ch.cdate <= cb.idx_d" if end_inclusive else "ch.cdate < cb.idx_d"
     if index_visit_col:
         # train/serve skew guard: diagnoses attached to the index visit itself are coded after discharge
         ctes.append(
@@ -338,14 +338,14 @@ def _build_sql(spec, codes, *, qualified, person, index_col, person_out, index_o
 # --------------------------------------------------------------------------------------
 def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, index_date_col, lookback_days,
              source_and_standard, hierarchy_adjusted, format, exclude_index_diagnoses=True,
-             fallback_on_unmapped=False, return_mapping_fidelity=False):
+             fallback_on_unmapped=False, return_mapping_fidelity=False, end_inclusive=False):
     if not isinstance(format, str) or format.lower().strip() not in _FORMATS:
         raise ValueError(f"format must be one of {_FORMATS}; got {format!r}")
     fmt = format.lower().strip()
     lookback = _as_int(lookback_days, "lookback_days", allow_none=True, minimum=0)
     cohort = _as_int(cohort_id, "cohort_id", allow_none=True)
     for name, value in (("source_and_standard", source_and_standard), ("hierarchy_adjusted", hierarchy_adjusted),
-                        ("exclude_index_diagnoses", exclude_index_diagnoses)):
+                        ("exclude_index_diagnoses", exclude_index_diagnoses), ("end_inclusive", end_inclusive)):
         if not isinstance(value, bool):
             raise ValueError(f"{name} must be True or False; got {value!r}")
     if fmt == "polars":
@@ -419,7 +419,8 @@ def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, ind
         spec, codes, qualified=qualified, person=person, index_col=index_col, person_out=person_col,
         index_out=index_date_col, cohort_where=cohort_where, lookback_days=lookback,
         concept_ancestor=concept_ancestor, hierarchy_adjusted=hierarchy_adjusted, index_visit_col=index_visit_col,
-        fallback_on_unmapped=fallback_on_unmapped, return_mapping_fidelity=return_mapping_fidelity)
+        fallback_on_unmapped=fallback_on_unmapped, return_mapping_fidelity=return_mapping_fidelity,
+        end_inclusive=end_inclusive)
     res = con.execute(sql)
     if fmt == "df":
         out_df = res.df()
@@ -451,6 +452,7 @@ def extract_elixhauser_comorbidities(
     exclude_index_diagnoses: bool = True,
     fallback_on_unmapped: bool = False,
     return_mapping_fidelity: bool = False,
+    end_inclusive: bool = False,
 ) -> Any:
     """Elixhauser comorbidity profile (31 domains, Quan et al. 2005) with the van Walraven 2009 score.
 
@@ -491,7 +493,14 @@ def extract_elixhauser_comorbidities(
         ``visit_occurrence_id`` equals the cohort row's ``visit_occurrence_id`` are never counted (when both tables
         have that column; the cohorts from :func:`define_study_cohort` do), and (b) an ``index_date_col`` that looks like
         a discharge / end date raises ``ValueError``, since a window ending at discharge contains the index stay.
-        The window is always ``[index - lookback_days, index)``, i.e. strictly before an admission-anchored index.
+        The window is ``[index - lookback_days, index)``, i.e. strictly before an admission-anchored index, unless
+        ``end_inclusive`` is set. To reproduce a discharge-anchored window (the legacy study's 730 days up to discharge,
+        index stay included) pass a discharge-date ``index_date_col``, ``exclude_index_diagnoses=False`` and
+        ``end_inclusive=True``.
+    end_inclusive : bool, default False
+        Count diagnoses dated ON the index date too (window ``[index - lookback_days, index]``). Off by default so
+        nothing dated on the index day leaks in; needed to match a pipeline that uses ``condition_start_date <=
+        discharge_date``, where diagnoses coded on the discharge day are included.
     format : {'df', 'arrow', 'polars'}, default 'df'
         Return a pandas DataFrame, a pyarrow Table or a polars DataFrame. ``'polars'`` needs the optional ``polars``
         package and raises ``ImportError`` without it.
@@ -542,7 +551,7 @@ def extract_elixhauser_comorbidities(
     return _profile(con, _ELIXHAUSER, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
                     index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format,
                     exclude_index_diagnoses, fallback_on_unmapped=fallback_on_unmapped,
-                    return_mapping_fidelity=return_mapping_fidelity)
+                    return_mapping_fidelity=return_mapping_fidelity, end_inclusive=end_inclusive)
 
 
 def extract_charlson_index(
@@ -558,6 +567,7 @@ def extract_charlson_index(
     exclude_index_diagnoses: bool = True,
     fallback_on_unmapped: bool = False,
     return_mapping_fidelity: bool = False,
+    end_inclusive: bool = False,
 ) -> Any:
     """Charlson comorbidity profile (17 categories, Quan et al. 2005 coding) with the Charlson index.
 
@@ -599,7 +609,14 @@ def extract_charlson_index(
         ``visit_occurrence_id`` equals the cohort row's ``visit_occurrence_id`` are never counted (when both tables
         have that column; the cohorts from :func:`define_study_cohort` do), and (b) an ``index_date_col`` that looks like
         a discharge / end date raises ``ValueError``, since a window ending at discharge contains the index stay.
-        The window is always ``[index - lookback_days, index)``, i.e. strictly before an admission-anchored index.
+        The window is ``[index - lookback_days, index)``, i.e. strictly before an admission-anchored index, unless
+        ``end_inclusive`` is set. To reproduce a discharge-anchored window (the legacy study's 730 days up to discharge,
+        index stay included) pass a discharge-date ``index_date_col``, ``exclude_index_diagnoses=False`` and
+        ``end_inclusive=True``.
+    end_inclusive : bool, default False
+        Count diagnoses dated ON the index date too (window ``[index - lookback_days, index]``). Off by default so
+        nothing dated on the index day leaks in; needed to match a pipeline that uses ``condition_start_date <=
+        discharge_date``, where diagnoses coded on the discharge day are included.
     format : {'df', 'arrow', 'polars'}, default 'df'
         Return a pandas DataFrame, a pyarrow Table or a polars DataFrame. ``'polars'`` needs the optional ``polars``
         package and raises ``ImportError`` without it.
@@ -647,4 +664,4 @@ def extract_charlson_index(
     return _profile(con, _CHARLSON, "extract_charlson_index", cohort_table, cohort_id, person_col,
                     index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format,
                     exclude_index_diagnoses, fallback_on_unmapped=fallback_on_unmapped,
-                    return_mapping_fidelity=return_mapping_fidelity)
+                    return_mapping_fidelity=return_mapping_fidelity, end_inclusive=end_inclusive)

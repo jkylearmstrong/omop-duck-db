@@ -157,3 +157,29 @@ test_that("transfer exclusion is opt-in, keeps AMA, and the diabetes cohort turn
   expect_equal(sort(run(transfer_discharge_concept_ids = integer(0))$subject_id), 1:3)
   expect_equal(formals(build_ederri_diabetes_cohort)$transfer_discharge_concept_ids, 8717)
 })
+
+test_that("comorbidity window can end on discharge, inclusive, for legacy parity", {
+  db_path <- tempfile(fileext = ".duckdb")
+  build_schema(db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  on.exit({ DBI::dbDisconnect(con, shutdown = TRUE); unlink(db_path) }, add = TRUE)
+  DBI::dbExecute(con, "INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES (1, 8507, 1960, 0, 0)")
+  DBI::dbExecute(con, "DROP TABLE cohort")
+  DBI::dbExecute(con, "CREATE TABLE cohort (subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE, visit_occurrence_id BIGINT)")
+  DBI::dbExecute(con, "INSERT INTO cohort VALUES (1, DATE '2020-03-01', DATE '2020-03-10', 5)")
+  rows <- list(list(1, "I50.9", "2018-04-10", 1), list(2, "J44.9", "2017-12-20", 2),
+               list(3, "I27.0", "2020-03-10", 3), list(4, "I10", "2020-03-02", 5))
+  for (r in rows) {
+    DBI::dbExecute(con, sprintf("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, condition_type_concept_id, condition_source_value, visit_occurrence_id) VALUES (%d, 1, 0, DATE '%s', 0, '%s', %d)", r[[1]], r[[3]], r[[2]], r[[4]]))
+  }
+  kw <- list(con = con, index_date_col = "cohort_end_date", lookback_days = 730, source_and_standard = FALSE)
+  expect_error(do.call(extract_elixhauser_comorbidities, kw), "discharge")
+  strict <- do.call(extract_elixhauser_comorbidities, c(kw, exclude_index_diagnoses = FALSE))
+  incl <- do.call(extract_elixhauser_comorbidities, c(kw, exclude_index_diagnoses = FALSE, end_inclusive = TRUE))
+  expect_equal(c(strict$elix_chf, strict$elix_copd, strict$elix_pulm_circ, strict$elix_htn_uncomp), c(1, 0, 0, 1))
+  expect_equal(c(incl$elix_chf, incl$elix_copd, incl$elix_pulm_circ, incl$elix_htn_uncomp), c(1, 0, 1, 1))
+  guarded <- extract_elixhauser_comorbidities(con, index_date_col = "cohort_start_date", lookback_days = 730,
+                                              source_and_standard = FALSE, end_inclusive = TRUE)
+  expect_equal(guarded$elix_htn_uncomp, 0)
+  expect_error(do.call(extract_elixhauser_comorbidities, c(kw, end_inclusive = "yes")), "end_inclusive")
+})

@@ -310,3 +310,34 @@ def test_emergency_to_inpatient_is_an_index_stay_for_the_ederri_cohort(tmp_path)
                 "condition_type_concept_id, condition_source_value) VALUES (1, ?, 0, DATE '2019-01-01', 0, 'E12.9')", [pid])
     out = build_ederri_diabetes_cohort(con)
     assert list(out["subject_id"]) == [pid]                                  # EI stay, qualified through an E12 code
+
+
+def test_comorbidity_window_can_end_on_discharge_inclusive_for_legacy_parity():
+    from omop_etl import extract_charlson_index, extract_elixhauser_comorbidities
+
+    c = duckdb.connect()
+    build_schema(c)
+    c.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) "
+              "VALUES (1, 8507, 1960, 0, 0)")
+    c.execute("DROP TABLE cohort")
+    c.execute("CREATE TABLE cohort (subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE, visit_occurrence_id BIGINT)")
+    c.execute("INSERT INTO cohort VALUES (1, DATE '2020-03-01', DATE '2020-03-10', 5)")
+    # CHF 700 d before discharge (inside 730), COPD 800 d before (outside), pulmonary-circulation disease coded ON the
+    # discharge day, and a hypertension code attached to the index visit itself
+    rows = [(1, "I50.9", "2018-04-10", 1), (2, "J44.9", "2017-12-20", 2), (3, "I27.0", "2020-03-10", 3), (4, "I10", "2020-03-02", 5)]
+    for cid, src, d, vid in rows:
+        c.execute("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, "
+                  f"condition_type_concept_id, condition_source_value, visit_occurrence_id) VALUES ({cid}, 1, 0, DATE '{d}', 0, '{src}', {vid})")
+    kw = dict(index_date_col="cohort_end_date", lookback_days=730, source_and_standard=False)
+    with pytest.raises(ValueError, match="discharge"):
+        extract_elixhauser_comorbidities(c, **kw)                                  # default guard still refuses a discharge anchor
+    strict = extract_elixhauser_comorbidities(c, exclude_index_diagnoses=False, **kw).iloc[0]
+    incl = extract_elixhauser_comorbidities(c, exclude_index_diagnoses=False, end_inclusive=True, **kw).iloc[0]
+    assert (strict.elix_chf, strict.elix_copd, strict.elix_pulm_circ, strict.elix_htn_uncomp) == (1, 0, 0, 1)
+    assert (incl.elix_chf, incl.elix_copd, incl.elix_pulm_circ, incl.elix_htn_uncomp) == (1, 0, 1, 1)
+    guarded = extract_elixhauser_comorbidities(c, index_date_col="cohort_start_date", lookback_days=730, source_and_standard=False,
+                                               end_inclusive=True).iloc[0]
+    assert guarded.elix_htn_uncomp == 0                                            # index-visit diagnoses stay out by default
+    assert extract_charlson_index(c, exclude_index_diagnoses=False, end_inclusive=True, **kw).iloc[0].cci_chf == 1
+    with pytest.raises(ValueError, match="end_inclusive"):
+        extract_elixhauser_comorbidities(c, end_inclusive="yes", **kw)
