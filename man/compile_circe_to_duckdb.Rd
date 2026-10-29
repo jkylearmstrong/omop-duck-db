@@ -4,7 +4,12 @@
 \alias{compile_circe_to_duckdb}
 \title{Compile CIRCE JSON to Vectorized DuckDB SQL}
 \usage{
-compile_circe_to_duckdb(circe_json, target_cohort_id = 1L, cdm_schema = "main")
+compile_circe_to_duckdb(
+  circe_json,
+  target_cohort_id = 1L,
+  cdm_schema = "main",
+  stage = NULL
+)
 }
 \arguments{
 \item{circe_json}{JSON character string, parsed list, or file path.}
@@ -12,6 +17,9 @@ compile_circe_to_duckdb(circe_json, target_cohort_id = 1L, cdm_schema = "main")
 \item{target_cohort_id}{Target cohort definition id (default 1).}
 
 \item{cdm_schema}{CDM schema name (default \code{"main"}).}
+
+\item{stage}{\code{NULL} (the cohort), or \code{"_primary_events_raw"} (entry events), \code{"_primary_limited"} (inside the observation window, after the
+primary limit) or \code{"_primary_qualified"} (after the inclusion rules): returns \verb{subject_id, event_start_date} of that step. \code{\link[=explain_cohort_gaps]{explain_cohort_gaps()}} uses it.}
 }
 \value{
 SQL character string.
