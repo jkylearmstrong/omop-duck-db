@@ -34,15 +34,16 @@ mssql = ["sqlalchemy>=1.4", "pyodbc"]
 oracle = ["sqlalchemy>=2.0", "oracledb"]  # the oracle+oracledb dialect needs SQLAlchemy 2.x
 snowflake = ["sqlalchemy>=1.4", "snowflake-sqlalchemy"]
 # Zero-copy Athena vocabulary from BigQuery (Arrow Storage Read API into DuckDB).
-bigquery = ["google-cloud-bigquery-storage>=2.20", "google-cloud-bigquery>=3.0", "pyarrow>=14"]
+bigquery = ["google-cloud-bigquery-storage>=2.20", "google-cloud-bigquery>=3.0", "pyarrow>=14", "db-dtypes>=1.0", "sqlglot>=25", "pyyaml"]
 # Model bundles (FR-A1): native XGBoost JSON and ONNX runtimes.
 bundle = ["xgboost>=2.0", "onnxruntime>=1.16"]
-dev = ["pytest>=7.0,<9.0", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot", "statsmodels"]
+dev = ["pytest>=7.0,<9.0", "pyyaml", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot", "statsmodels"]
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
 omop-duckdb = "omop_etl.cli:main"
 omop-duckdb-cli = "omop_etl.cli:main"
+omop-bigquery-demo = "omop_etl.demo_bigquery:main"
 
 [project.urls]
 Homepage = "https://github.com/jkylearmstrong/omop-duck-db"
@@ -58,6 +59,8 @@ packages = ["python/omop_etl", "python/omop_duck_db"]
 "inst/sql/cohort_readmission.sql" = "omop_etl/resources/sql/cohort_readmission.sql"
 "inst/sql/cohort_mortality.sql" = "omop_etl/resources/sql/cohort_mortality.sql"
 "inst/sql/table1_aggregations.sql" = "omop_etl/resources/sql/table1_aggregations.sql"
+"inst/sql/bigquery_demo_features.sql" = "omop_etl/resources/sql/bigquery_demo_features.sql"
+"inst/sql/bigquery_demo_availability.sql" = "omop_etl/resources/sql/bigquery_demo_availability.sql"
 "inst/sql/omop_learn" = "omop_etl/resources/sql/omop_learn"
 "inst/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql" = "omop_etl/resources/extdata/5.4/duckdb/OMOPCDM_duckdb_5.4_ddl.sql"
 "inst/extdata/comorbidity" = "omop_etl/resources/extdata/comorbidity"

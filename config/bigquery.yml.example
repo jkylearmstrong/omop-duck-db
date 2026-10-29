@@ -3,6 +3,9 @@
 
 # Your own GCP project, used to attribute BigQuery query cost/quota
 # (required even when querying public datasets like bigquery-public-data.*).
+# This is a project ID, not a credential. Do NOT put service-account keys or tokens in this file:
+# authenticate with `bigrquery::bq_auth()` (R) or `gcloud auth application-default login` (Python), or keep
+# a key file outside the repository and point GOOGLE_APPLICATION_CREDENTIALS at it.
 billing_project: "REPLACE_WITH_YOUR_GCP_PROJECT_ID"
 
 # Default BigQuery dataset to pull from -- e.g. the CMS synthetic OMOP dataset.
