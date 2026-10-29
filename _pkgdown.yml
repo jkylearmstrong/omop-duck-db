@@ -237,6 +237,9 @@ reference:
   - explain_cohort_gaps
   - reconcile_cohort
   - suppress_small_cells
+  - ablate_feature_groups
+  - compare_model_runs
+  - ridge_logistic_fit_predict
   - sanitize_measurements
   - generate_table1
   - export_table1
