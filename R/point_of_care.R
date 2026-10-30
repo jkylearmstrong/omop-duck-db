@@ -86,9 +86,12 @@ check_unit_sanity <- function(features, reference_medians = NULL, max_ratio = 3,
 #' @param features data.frame of features.
 #' @param sanity Output of [check_unit_sanity()]; computed here (without a warning) when `NULL`.
 #' @param reference_medians Passed to [check_unit_sanity()] when `sanity` is `NULL`.
+#' @param recompute_derived If `TRUE` (default), a rescaled creatinine also refreshes `lab_egfr` (CKD-EPI 2021; needs `age` and
+#'   `gender_concept_id`) and a rescaled sodium / chloride / bicarbonate refreshes `lab_anion_gap`, so they do not keep the values
+#'   computed from the unharmonized inputs. Refreshed columns are listed in `applied` with `rescaled = FALSE`.
 #' @return A list: `features` (the rescaled data.frame) and `applied` (data.frame: `feature`, `factor`, `rescaled`, `hint`).
 #' @export
-harmonize_contract_units <- function(features, sanity = NULL, reference_medians = NULL) {
+harmonize_contract_units <- function(features, sanity = NULL, reference_medians = NULL, recompute_derived = TRUE) {
   if (is.null(sanity)) sanity <- check_unit_sanity(features, reference_medians = reference_medians, warn = FALSE)
   bad <- sanity[sanity$flag, , drop = FALSE]
   fixed <- features
@@ -98,9 +101,33 @@ harmonize_contract_units <- function(features, sanity = NULL, reference_medians 
     ok[[i]] <- is.finite(f) && n %in% names(fixed)
     if (ok[[i]]) fixed[[n]] <- suppressWarnings(as.numeric(fixed[[n]])) * f
   }
-  list(features = fixed,
-       applied = data.frame(feature = as.character(bad$feature), factor = as.numeric(bad$suspect_factor), rescaled = ok,
-                            hint = as.character(bad$hint), stringsAsFactors = FALSE))
+  applied <- data.frame(feature = as.character(bad$feature), factor = as.numeric(bad$suspect_factor), rescaled = ok,
+                        hint = as.character(bad$hint), stringsAsFactors = FALSE)
+  if (isTRUE(recompute_derived)) {
+    done <- applied$feature[applied$rescaled]
+    extra <- list()
+    # .derive_labs only fills NA (anion gap) or eGFR >= 60, so a stale value must be cleared first.
+    if ("lab_creatinine" %in% done && all(c("age", "gender_concept_id") %in% names(fixed))) {
+      fixed$lab_egfr <- if ("lab_egfr" %in% names(fixed)) as.numeric(fixed$lab_egfr) else rep(NA_real_, nrow(fixed))
+      fixed$lab_egfr[!is.na(fixed$lab_creatinine)] <- NA_real_
+      extra[[1L]] <- data.frame(feature = "lab_egfr", factor = NA_real_, rescaled = FALSE,
+                                hint = "recomputed from harmonized lab_creatinine", stringsAsFactors = FALSE)
+    }
+    gap_in <- c("lab_sodium", "lab_chloride", "lab_bicarbonate")
+    if (any(done %in% gap_in) && all(gap_in %in% names(fixed))) {
+      fixed$lab_anion_gap <- if ("lab_anion_gap" %in% names(fixed)) as.numeric(fixed$lab_anion_gap) else rep(NA_real_, nrow(fixed))
+      fixed$lab_anion_gap[stats::complete.cases(fixed[gap_in])] <- NA_real_
+      extra[[length(extra) + 1L]] <- data.frame(feature = "lab_anion_gap", factor = NA_real_, rescaled = FALSE,
+                                                hint = "recomputed from harmonized sodium / chloride / bicarbonate", stringsAsFactors = FALSE)
+    }
+    if (length(extra)) {
+      extra <- do.call(rbind, extra)
+      fixed <- .derive_labs(fixed)
+      # a derived column that was itself flagged is updated, not repeated
+      applied <- rbind(applied[!applied$feature %in% extra$feature, , drop = FALSE], extra)
+    }
+  }
+  list(features = fixed, applied = applied)
 }
 
 #' Typical adult inpatient reference medians (contract units)
@@ -125,7 +152,30 @@ LOINC_TO_FEATURE <- c("8867-4" = "heart_rate", "8480-6" = "systolic_bp", "8462-4
   if (is.null(names(blk)) && length(blk)) blk <- blk[[1]]
   lapply(blk$coding, function(c) list(system = if (is.null(c$system)) "" else c$system, code = if (is.null(c$code)) "" else c$code))
 }
-.fhir_date <- function(x) if (is.null(x) || !nzchar(x)) NULL else as.Date(substr(x, 1, 10))
+# Date part of a FHIR date / dateTime; NULL for empty or non-date text ("unknown", "TBD", "null", ...).
+.fhir_date <- function(x) {
+  if (is.null(x) || length(x) != 1L || is.na(x) || !nzchar(x)) return(NULL)
+  d <- tryCatch(as.Date(substr(as.character(x), 1, 10)), error = function(e) NA)
+  if (is.na(d)) NULL else d
+}
+
+# Numeric Observation.valueQuantity.value as list(value, censored), or NULL when it is not a number. EHR feeds put
+# detection-limit results in the value ("> 60", "<0.02") or in valueQuantity.comparator; the limit itself is used and
+# `censored` is TRUE. Qualitative results ("negative", "trace") and NaN / Inf give NULL.
+.fhir_quantity_value <- function(qty) {
+  raw <- qty$value
+  cmp <- if (is.null(qty$comparator)) "" else as.character(qty$comparator)
+  if (is.null(raw) || length(raw) != 1L || is.logical(raw)) return(NULL)
+  if (is.numeric(raw)) {
+    val <- as.numeric(raw)
+  } else {
+    m <- regmatches(as.character(raw), regexec("^\\s*(<=|>=|<|>|\u2264|\u2265)?\\s*([+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][+-]?[0-9]+)?)\\s*$", as.character(raw)))[[1]]
+    if (!length(m)) return(NULL)
+    if (!nzchar(cmp)) cmp <- m[[2]]
+    val <- as.numeric(m[[3]])
+  }
+  if (!is.finite(val)) NULL else list(value = val, censored = nzchar(cmp))
+}
 
 #' FHIR system URIs and the OMOP vocabulary each one selects
 #' @format Named character.
@@ -201,7 +251,7 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
     encs <- Filter(function(x) identical(x$id, encounter_id), encs)
     if (!length(encs)) stop("Encounter '", encounter_id, "' not in the bundle.", call. = FALSE)
   }
-  starts <- vapply(encs, function(x) if (is.null(x$period$start)) "" else as.character(x$period$start), character(1))
+  starts <- vapply(encs, function(x) { d <- .fhir_date(x$period$start); if (is.null(d)) "" else format(d) }, character(1))
   enc <- encs[[order(starts, decreasing = TRUE)[[1]]]]
   start <- .fhir_date(enc$period$start)
   if (is.null(start)) stop("Encounter has no period.start.", call. = FALSE)
@@ -209,6 +259,7 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
   end <- .fhir_date(enc$period$end)
   if (is.null(end)) end <- if (!is.null(as_of)) as.Date(as_of) else today
   birth <- .fhir_date(patient$birthDate)
+  if (is.null(birth)) stop("Patient.birthDate is missing or not a date.", call. = FALSE)
   gender <- c(female = 8532L, male = 8507L)[tolower(if (is.null(patient$gender)) "" else patient$gender)]
   cmap <- as.list(concept_map)
   if (!is.null(vocab_con) || !is.null(vocab_db_path)) {
@@ -221,7 +272,7 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
     }
     cmap <- utils::modifyList(resolve_fhir_codes(vc, wanted), cmap)
   }
-  unmapped <- character(); skipped <- 0L
+  unmapped <- character(); skipped <- 0L; censored <- 0L
   factors <- list(lab_creatinine = c("umol/l" = 1 / 88.4, "\u00b5mol/l" = 1 / 88.4), lab_bun = c("mmol/l" = 2.801),
                   lab_glucose = c("mmol/l" = 18.016))
   enc_class <- c(IMP = 9201L, ACUTE = 9201L, NONAC = 9201L, EMER = 9203L, AMB = 9202L, OBSENC = 581385L)
@@ -262,7 +313,10 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
       feat <- LOINC_TO_FEATURE[[cod[[1]]$code]]
       unit <- tolower(if (!is.null(qty$unit)) qty$unit else if (!is.null(qty$code)) qty$code else "")
       f <- factors[[feat]][unit]
-      value <- as.numeric(qty$value) * (if (length(f) && !is.na(f)) f[[1]] else 1)
+      pv <- .fhir_quantity_value(qty)
+      if (is.null(pv)) { skipped <- skipped + 1L; next }  # qualitative ("negative", "trace") or malformed result
+      value <- pv$value * (if (length(f) && !is.na(f)) f[[1]] else 1)
+      if (pv$censored) censored <- censored + 1L
       mid <- mid + 1L
       ex(sprintf("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (%d, 1, %d, %s, 0, %.10g, 1)",
                  mid, as.integer(VELOCITY_CONCEPTS[[feat]][[1]]), q(when), value))
@@ -285,7 +339,7 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
                i, as.integer(cid), q(when), q(when)))
   }
   out <- score_encounter(con, 1, model_bundle, as_of = as_of, explain = explain, top_k = top_k, ...)
-  out$fhir <- list(encounter_id = enc$id, patient_id = patient$id, observations_skipped = skipped, unmapped_codes = sort(unique(unmapped)))
+  out$fhir <- list(encounter_id = enc$id, patient_id = patient$id, observations_skipped = skipped, observations_censored = censored, unmapped_codes = sort(unique(unmapped)))
   out
 }
 
