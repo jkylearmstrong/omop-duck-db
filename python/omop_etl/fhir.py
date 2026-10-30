@@ -13,6 +13,8 @@ units the feature contract expects (creatinine / BUN from SI units). Conditions 
 from __future__ import annotations
 
 import json
+import math
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -83,7 +85,37 @@ def _load(fhir_json: Any) -> dict[str, Any]:
 
 
 def _date(s: Any) -> pd.Timestamp | None:
-    return pd.Timestamp(str(s)[:10]) if s else None
+    """Date part of a FHIR date / dateTime; ``None`` for empty or non-date text ("unknown", "TBD", "null", ...)."""
+    if not s:
+        return None
+    try:
+        d = pd.Timestamp(str(s)[:10])
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return None if pd.isna(d) else d
+
+
+_NUMBER = re.compile(r"^\s*(<=|>=|<|>|≤|≥)?\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*$")
+
+
+def _quantity_value(q: Mapping[str, Any]) -> tuple[float, bool] | None:
+    """Numeric ``Observation.valueQuantity.value`` as ``(value, censored)``, or ``None`` when it is not a number.
+
+    EHR feeds put detection-limit results in the value ("> 60", "<0.02") or in ``valueQuantity.comparator``; the limit
+    itself is used and ``censored`` is True. Qualitative results ("negative", "trace") and NaN / inf give ``None``.
+    """
+    raw = q.get("value")
+    cmp_ = str(q.get("comparator") or "")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        val = float(raw)
+    else:
+        m = _NUMBER.match(str(raw))
+        if not m:
+            return None
+        cmp_, val = cmp_ or (m.group(1) or ""), float(m.group(2))
+    return (val, bool(cmp_)) if math.isfinite(val) else None
 
 
 def _codings(res: Mapping[str, Any], field: str = "code") -> list[tuple[str, str]]:
@@ -122,7 +154,7 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
         encs = [x for x in encs if x.get("id") == encounter_id]
         if not encs:
             raise ValueError(f"Encounter {encounter_id!r} not in the bundle.")
-    enc = max(encs, key=lambda x: str((x.get("period") or {}).get("start") or ""))
+    enc = max(encs, key=lambda x: _date((x.get("period") or {}).get("start")) or pd.Timestamp.min)
     cmap = dict(concept_map or {})
     if vocab_con is not None or vocab_db_path is not None:
         wanted = [f"{s}|{k}" for r in res.get("Condition", []) for s, k in _codings(r)] + \
@@ -138,11 +170,14 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
                 vc.close()
     unmapped: set[str] = set()
     skipped_obs = 0
+    censored_obs = 0
 
     con = duckdb.connect(":memory:")
     try:
         build_schema(con)
         birth = _date(patient.get("birthDate"))
+        if birth is None:  # person.year_of_birth is required and age is a model feature: do not guess one
+            raise ValueError("Patient.birthDate is missing or not a date.")
         con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, birth_datetime, race_concept_id, "
                     "ethnicity_concept_id) VALUES (1, ?, ?, ?, 0, 0)",
                     [_GENDER.get(str(patient.get("gender", "")).lower(), 0), None if birth is None else birth.year, birth])
@@ -185,7 +220,12 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
                     skipped_obs += 1
                     continue
                 unit = str(q.get("unit") or q.get("code") or "").lower()
-                value = float(q["value"]) * _UNIT_FACTORS.get((feat, unit), 1.0)
+                parsed = _quantity_value(q)
+                if parsed is None:  # qualitative ("negative", "trace") or malformed result: no number to score
+                    skipped_obs += 1
+                    continue
+                value = parsed[0] * _UNIT_FACTORS.get((feat, unit), 1.0)
+                censored_obs += parsed[1]
                 mid += 1
                 con.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, "
                             "measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (?, 1, ?, ?, 0, ?, 1)",
@@ -212,5 +252,6 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
     finally:
         con.close()
     out["fhir"] = {"encounter_id": enc.get("id"), "patient_id": patient.get("id"), "observations_skipped": skipped_obs,
+                   "observations_censored": censored_obs,
                    "unmapped_codes": sorted(unmapped)}
     return out
