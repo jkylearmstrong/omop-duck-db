@@ -12,6 +12,8 @@ score_fhir_bundle(
   concept_map = NULL,
   explain = FALSE,
   top_k = 5L,
+  vocab_con = NULL,
+  vocab_db_path = NULL,
   ...
 )
 }
@@ -24,6 +26,10 @@ score_fhir_bundle(
 
 \item{as_of, concept_map, explain, top_k}{See \code{\link[=score_encounter]{score_encounter()}}.}
 
+\item{vocab_con}{A DBI connection with the OMOP vocabulary, used for codes not in \code{concept_map}.}
+
+\item{vocab_db_path}{Path of a DuckDB vocabulary file (opened read-only) used when \code{vocab_con} is \code{NULL}.}
+
 \item{...}{Further arguments to \code{\link[=score_encounter]{score_encounter()}}.}
 }
 \value{
@@ -33,5 +39,6 @@ As \code{\link[=score_encounter]{score_encounter()}} plus a \code{fhir} element.
 Loads the Patient, Encounter, Observation, Condition and MedicationRequest resources of a FHIR R4 Bundle into a throw-away
 temporary DuckDB CDM (deleted on exit) and runs \code{\link[=score_encounter]{score_encounter()}}. Observations are matched on LOINC and creatinine / BUN
 are converted from SI units. Condition and medication codes are loaded only when \code{concept_map} (\code{c("system|code" = concept_id)})
-maps them; the rest are returned in \code{fhir$unmapped_codes}. Mirror of Python \code{omop_etl.fhir.score_fhir_bundle}.
+maps them or, when \code{vocab_con} / \code{vocab_db_path} is given, \code{\link[=resolve_fhir_codes]{resolve_fhir_codes()}} finds them in the OMOP vocabulary; the rest are
+returned in \code{fhir$unmapped_codes}. Mirror of Python \code{omop_etl.fhir.score_fhir_bundle}.
 }

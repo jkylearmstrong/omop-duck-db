@@ -13,7 +13,7 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-__all__ = ["REFERENCE_MEDIANS", "check_unit_sanity"]
+__all__ = ["REFERENCE_MEDIANS", "check_unit_sanity", "harmonize_contract_units"]
 
 # Typical adult inpatient medians in the contract units (mg/dL for creatinine / BUN; mmol/L = mEq/L for electrolytes).
 # Override with the consortium's own medians via ``reference_medians``.
@@ -47,16 +47,41 @@ def check_unit_sanity(features: pd.DataFrame, *, reference_medians: Mapping[str,
         med = float(np.median(v))
         ratio = med / float(r) if r else np.nan
         flag = bool(np.isfinite(ratio) and (ratio > max_ratio or (ratio < 1 / max_ratio if ratio > 0 else True)))
-        hint = ""
+        hint, factor = "", np.nan
         if flag:
-            near = [msg for target, msg in _SUSPECTS.get(name, []) if abs(np.log(max(ratio, 1e-9) / target)) < np.log(1.6)]
-            hint = near[0] if near else "unharmonized unit or scale suspected"
+            near = [(target, msg) for target, msg in _SUSPECTS.get(name, [])
+                    if abs(np.log(max(ratio, 1e-9) / target)) < np.log(1.6)]
+            hint = near[0][1] if near else "unharmonized unit or scale suspected"
+            factor = 1.0 / near[0][0] if near else np.nan  # multiply the column by this to reach the contract unit
         rows.append({"feature": name, "n": int(len(v)), "site_median": med, "reference_median": float(r),
-                     "ratio": float(ratio), "flag": flag, "hint": hint})
-    out = pd.DataFrame(rows, columns=["feature", "n", "site_median", "reference_median", "ratio", "flag", "hint"])
+                     "ratio": float(ratio), "flag": flag, "hint": hint, "suspect_factor": factor})
+    out = pd.DataFrame(rows, columns=["feature", "n", "site_median", "reference_median", "ratio", "flag", "hint",
+                                      "suspect_factor"])
     if warn and out["flag"].any():
         bad = out[out["flag"]]
         warnings.warn("unit sanity: " + "; ".join(f"{r.feature} median {r.site_median:.3g} vs reference {r.reference_median:.3g}"
                                                   + (f" ({r.hint})" if r.hint else "") for r in bad.itertuples()),
                       UserWarning, stacklevel=2)
     return out
+
+
+def harmonize_contract_units(features: pd.DataFrame, sanity: pd.DataFrame | None = None, *,
+                             reference_medians: Mapping[str, float] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Rescale features flagged by :func:`check_unit_sanity` to the contract units; returns ``(fixed, applied)``.
+
+    Only features whose median matches a named suspect conversion (umol/L creatinine, mmol/L urea, mmol/L glucose, ...)
+    are rescaled, by ``suspect_factor``; features flagged for an unexplained reason are left untouched and listed in
+    ``applied`` with ``rescaled == False`` so they can still be reviewed. ``features`` is not modified. Pass the
+    ``sanity`` frame from an earlier ``check_unit_sanity`` call, or omit it to run the check here (without a warning).
+    """
+    sanity = check_unit_sanity(features, reference_medians=reference_medians, warn=False) if sanity is None else sanity
+    flagged = sanity[sanity["flag"].astype(bool)] if len(sanity) else sanity
+    fixed = features.copy()
+    rows = []
+    for r in flagged.itertuples():
+        ok = bool(np.isfinite(r.suspect_factor)) and r.feature in fixed.columns
+        if ok:
+            fixed[r.feature] = pd.to_numeric(fixed[r.feature], errors="coerce") * float(r.suspect_factor)
+        rows.append({"feature": r.feature, "factor": float(r.suspect_factor) if np.isfinite(r.suspect_factor) else np.nan,
+                     "rescaled": ok, "hint": r.hint})
+    return fixed, pd.DataFrame(rows, columns=["feature", "factor", "rescaled", "hint"])

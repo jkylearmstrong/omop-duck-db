@@ -108,3 +108,52 @@ test_that("score_fhir_bundle reads BP panel components and prior Encounters", {
   expect_equal(r$fhir$encounter_id, "e1")
   expect_equal(r$features$prior_ip_count, 2)
 })
+
+poc_vocab <- function() {
+  v <- DBI::dbConnect(duckdb::duckdb())
+  DBI::dbExecute(v, "CREATE TABLE concept (concept_id INT, concept_name VARCHAR, domain_id VARCHAR, vocabulary_id VARCHAR, concept_class_id VARCHAR, standard_concept VARCHAR, concept_code VARCHAR, invalid_reason VARCHAR)")
+  DBI::dbExecute(v, "CREATE TABLE concept_relationship (concept_id_1 INT, concept_id_2 INT, relationship_id VARCHAR, invalid_reason VARCHAR)")
+  DBI::dbExecute(v, "INSERT INTO concept VALUES (201826, 'T2DM', 'Condition', 'SNOMED', 'Clinical Finding', 'S', '44054006', NULL), (1503297, 'metformin', 'Drug', 'RxNorm', 'Ingredient', 'S', '6809', NULL), (900, 'icd', 'Condition', 'ICD10CM', 'ICD10 code', NULL, 'E11.9', NULL)")
+  DBI::dbExecute(v, "INSERT INTO concept_relationship VALUES (900, 201826, 'Maps to', NULL), (900, 999, 'Maps to', 'D')")
+  v
+}
+
+test_that("resolve_fhir_codes maps standard and non-standard codes", {
+  v <- poc_vocab(); on.exit(DBI::dbDisconnect(v, shutdown = TRUE))
+  got <- resolve_fhir_codes(v, c("http://snomed.info/sct|44054006", "http://hl7.org/fhir/sid/icd-10-cm|E11.9",
+                                 "http://www.nlm.nih.gov/research/umls/rxnorm|6809", "http://snomed.info/sct|0", "http://example.org|x"))
+  expect_equal(got[order(names(got))], list("http://hl7.org/fhir/sid/icd-10-cm|E11.9" = 201826L,
+                                           "http://snomed.info/sct|44054006" = 201826L,
+                                           "http://www.nlm.nih.gov/research/umls/rxnorm|6809" = 1503297L))
+})
+
+test_that("score_fhir_bundle resolves codes from the vocabulary and concept_map wins", {
+  v <- poc_vocab(); on.exit(DBI::dbDisconnect(v, shutdown = TRUE))
+  expect_length(score_fhir_bundle(poc_fhir(), poc_bundle(), vocab_con = v)$fhir$unmapped_codes, 0)
+  expect_length(score_fhir_bundle(poc_fhir(), poc_bundle(), vocab_con = v,
+                                  concept_map = c("http://snomed.info/sct|44054006" = 5L))$fhir$unmapped_codes, 0)
+})
+
+test_that("harmonize_contract_units rescales named suspects only", {
+  df <- data.frame(lab_creatinine = rep(88.4, 50), lab_glucose = rep(6.1, 50), heart_rate = rep(400, 50), lab_sodium = rep(139, 50))
+  r <- harmonize_contract_units(df)
+  expect_equal(r$features$lab_creatinine[[1]], 1, tolerance = 0.02)
+  expect_equal(r$features$lab_glucose[[1]], 110, tolerance = 0.02)
+  expect_true(all(r$features$heart_rate == 400) && all(r$features$lab_sodium == 139))
+  expect_equal(df$lab_creatinine[[1]], 88.4)
+  ap <- r$applied; rownames(ap) <- ap$feature
+  expect_true(ap["lab_creatinine", "rescaled"] && ap["lab_glucose", "rescaled"] && !ap["heart_rate", "rescaled"])
+  expect_false(any(check_unit_sanity(r$features[, c("lab_creatinine", "lab_glucose", "lab_sodium")], warn = FALSE)$flag))
+})
+
+test_that("export_consort_flowchart writes png and svg", {
+  att <- structure(data.frame(step_number = 1:3, step_name = c("Adults", "Has labs", "Index admission"),
+                              subjects_retained = c(1000L, 800L, 650L), subjects_dropped = c(0L, 200L, 150L),
+                              percent_retained = c(100, 80, 65)), class = c("consort_attrition", "data.frame"))
+  d <- tempfile(); png <- file.path(d, "out", "figure1.png")
+  expect_equal(export_consort_flowchart(att, png, title = "Figure 1"), png)
+  expect_equal(readBin(png, "raw", 4), as.raw(c(0x89, 0x50, 0x4e, 0x47)))
+  svg <- export_consort_flowchart(as.data.frame(att), file.path(d, "f.svg"))
+  expect_gt(file.size(svg), 500)
+  expect_error(export_consort_flowchart(att[0, ], file.path(d, "e.png")), "no steps")
+})

@@ -421,6 +421,60 @@ plp_arrow_to_plp_data <- function(plp_arrow, con, target_id = 1L, outcome_id = 1
             class = "plpData")
 }
 
+#' Export a publication-ready CONSORT flowchart image
+#'
+#' Draws one box per attrition step (N and percent retained) and an "Excluded" box for every step with drops, straight from
+#' the attrition table, so the figure cannot drift from the SQL counts. Uses base graphics only. The format follows the file
+#' extension (png, svg, pdf, jpeg). Mirror of Python `omop_etl.cohort.export_consort_flowchart`.
+#'
+#' @param attrition A `consort_attrition` object, the [compute_attrition()] data.frame, or a cohort carrying an `attrition` attribute.
+#' @param out_path Output file (default `"figure1.png"`).
+#' @param title Optional title.
+#' @param dpi Resolution for raster formats.
+#' @return `out_path`, invisibly.
+#' @export
+export_consort_flowchart <- function(attrition, out_path = "figure1.png", title = NULL, dpi = 300) {
+  df <- if (is.data.frame(attrition) && all(c("step_name", "subjects_retained") %in% names(attrition))) as.data.frame(attrition) else
+    as.data.frame(generate_consort_attrition(cohort_data = attrition))
+  if (!nrow(df)) stop("The attrition table has no steps.", call. = FALSE)
+  n <- nrow(df)
+  ret <- as.numeric(df$subjects_retained)
+  drop <- if ("subjects_dropped" %in% names(df)) pmax(as.numeric(df$subjects_dropped), 0) else c(0, pmax(-diff(ret), 0))
+  pct <- if ("percent_retained" %in% names(df)) as.numeric(df$percent_retained) else if (ret[[1]] > 0) 100 * ret / ret[[1]] else rep(0, n)
+  dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
+  ext <- tolower(tools::file_ext(out_path))
+  h <- 1.6 * n + 0.8
+  switch(ext,
+         svg = grDevices::svg(out_path, width = 8, height = h),
+         pdf = grDevices::pdf(out_path, width = 8, height = h),
+         jpg = , jpeg = grDevices::jpeg(out_path, width = 8, height = h, units = "in", res = dpi),
+         grDevices::png(out_path, width = 8, height = h, units = "in", res = dpi))
+  on.exit(grDevices::dev.off(), add = TRUE)
+  op <- graphics::par(mar = c(0, 0, 0, 0)); on.exit(graphics::par(op), add = TRUE)
+  graphics::plot.new(); graphics::plot.window(xlim = c(0, 10), ylim = c(0, n * 2 + 1))
+  box <- function(x, y, label, fill) {
+    w <- max(graphics::strwidth(strsplit(label, "\n", fixed = TRUE)[[1]], cex = 0.9)) / 2 + 0.2
+    ht <- graphics::strheight(label, cex = 0.9) / 2 + 0.15
+    graphics::rect(x - w, y - ht, x + w, y + ht, col = fill, border = "black", lwd = 1.2)
+    graphics::text(x, y, label, cex = 0.9)
+    c(w, ht)
+  }
+  for (i in seq_len(n)) {
+    y <- (n - i) * 2 + 1.5
+    b <- box(3.6, y, sprintf("%s\nN = %s (%.1f%%)", df$step_name[[i]], format(ret[[i]], big.mark = ",", scientific = FALSE), pct[[i]]), "white")
+    if (i > 1) {
+      graphics::arrows(3.6, y + 2 - b[[2]], 3.6, y + b[[2]], length = 0.08, lwd = 1.2)
+      if (drop[[i]] > 0) {
+        ym <- y + 1
+        e <- box(8.1, ym, sprintf("Excluded\nn = %s", format(drop[[i]], big.mark = ",", scientific = FALSE)), "grey95")
+        graphics::arrows(3.6, ym, 8.1 - e[[1]], ym, length = 0.08, lwd = 1)
+      }
+    }
+  }
+  if (!is.null(title)) graphics::text(5, n * 2 + 0.6, title, font = 2, cex = 1.1)
+  invisible(out_path)
+}
+
 #' Plot Visual Cohort Attrition Flow (CONSORT / Sankey)
 #'
 #' @description

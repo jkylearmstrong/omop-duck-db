@@ -37,7 +37,8 @@ snowflake = ["sqlalchemy>=1.4", "snowflake-sqlalchemy"]
 bigquery = ["google-cloud-bigquery-storage>=2.20", "google-cloud-bigquery>=3.0", "pyarrow>=14", "db-dtypes>=1.0", "sqlglot>=25", "pyyaml"]
 # Model bundles (FR-A1): native XGBoost JSON and ONNX runtimes.
 bundle = ["xgboost>=2.0", "onnxruntime>=1.16"]
-dev = ["pytest>=7.0,<9.0", "pyyaml", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot", "statsmodels"]
+plot = ["matplotlib>=3.5"]
+dev = ["matplotlib>=3.5", "pytest>=7.0,<9.0", "pyyaml", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot", "statsmodels"]
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
