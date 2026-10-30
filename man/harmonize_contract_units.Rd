@@ -4,7 +4,8 @@
 \alias{harmonize_contract_units}
 \title{Rescale flagged features to the contract units}
 \usage{
-harmonize_contract_units(features, sanity = NULL, reference_medians = NULL)
+harmonize_contract_units(features, sanity = NULL, reference_medians = NULL,
+  recompute_derived = TRUE)
 }
 \arguments{
 \item{features}{data.frame of features.}
@@ -12,6 +13,10 @@ harmonize_contract_units(features, sanity = NULL, reference_medians = NULL)
 \item{sanity}{Output of \code{\link[=check_unit_sanity]{check_unit_sanity()}}; computed here (without a warning) when \code{NULL}.}
 
 \item{reference_medians}{Passed to \code{\link[=check_unit_sanity]{check_unit_sanity()}} when \code{sanity} is \code{NULL}.}
+
+\item{recompute_derived}{If \code{TRUE} (default), a rescaled creatinine also refreshes \code{lab_egfr} (CKD-EPI 2021; needs \code{age} and
+\code{gender_concept_id}) and a rescaled sodium / chloride / bicarbonate refreshes \code{lab_anion_gap}, so they do not keep the values
+computed from the unharmonized inputs. Refreshed columns are listed in \code{applied} with \code{rescaled = FALSE}.}
 }
 \value{
 A list: \code{features} (the rescaled data.frame) and \code{applied} (data.frame: \code{feature}, \code{factor}, \code{rescaled}, \code{hint}).

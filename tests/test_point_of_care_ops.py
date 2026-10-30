@@ -278,3 +278,72 @@ def test_export_consort_flowchart_writes_images(tmp_path):
     assert "650" in svg.read_text(encoding="utf-8") or svg.stat().st_size > 1000
     with pytest.raises(ValueError):
         export_consort_flowchart(ConsortAttrition(att.to_dataframe().iloc[0:0]), tmp_path / "e.png")
+
+
+def _bundle_with(extra_obs):
+    import copy
+    b = copy.deepcopy(FHIR)
+    for code, vq in extra_obs:
+        b["entry"].append({"resource": {"resourceType": "Observation", "effectiveDateTime": "2024-01-04",
+                                        "code": {"coding": [{"system": "http://loinc.org", "code": code}]},
+                                        "valueQuantity": vq}})
+    return b
+
+
+def test_fhir_censored_and_qualitative_values_do_not_abort_scoring(bundle):
+    b = _bundle_with([("62238-1", {"value": "> 60", "unit": "mL/min"}),          # eGFR ceiling: censored, kept
+                      ("2160-0", {"value": "<0.2", "unit": "mg/dL"}),            # string below the limit: censored
+                      ("3094-0", {"value": 12, "comparator": ">", "unit": "mg/dL"}),  # FHIR comparator field
+                      ("2951-2", {"value": "negative"}),                          # qualitative: skipped
+                      ("2823-3", {"value": "trace"}),                             # qualitative: skipped
+                      ("2075-0", {"value": True}), ("2028-9", {"value": "nan"})])  # malformed: skipped
+    r = score_fhir_bundle(b, bundle)
+    assert r["fhir"]["observations_censored"] == 3
+    assert r["fhir"]["observations_skipped"] == 4
+    assert score_fhir_bundle(FHIR, bundle)["fhir"]["observations_censored"] == 0
+
+
+def test_fhir_quantity_value_parsing():
+    from omop_etl.fhir import _quantity_value
+    assert _quantity_value({"value": 5}) == (5.0, False)
+    assert _quantity_value({"value": " >= 90 "}) == (90.0, True)
+    assert _quantity_value({"value": "-1.5e-2"}) == (-0.015, False)  # sign and exponent survive (a digit-strip would not)
+    assert _quantity_value({"value": "< 0.02"}) == (0.02, True)
+    for bad in ("negative", "", "1.2.3", "inf", None, False):
+        assert _quantity_value({"value": bad}) is None
+
+
+def test_fhir_unparseable_dates_are_ignored_not_fatal(bundle):
+    import copy
+    from omop_etl.fhir import _date
+    assert _date("unknown") is None and _date("TBD") is None and _date("null") is None and _date(None) is None
+    assert _date("2024-01-04T10:00:00Z") == pd.Timestamp("2024-01-04")
+    b = copy.deepcopy(FHIR)
+    b["entry"].append({"resource": {"resourceType": "Observation", "effectiveDateTime": "TBD",
+                                    "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+                                    "valueQuantity": {"value": 90, "unit": "/min"}}})
+    b["entry"].append({"resource": {"resourceType": "Encounter", "id": "bad", "class": {"code": "IMP"},
+                                    "period": {"start": "unknown"}}})
+    r = score_fhir_bundle(b, bundle)
+    assert r["fhir"]["encounter_id"] == "e1" and r["fhir"]["observations_skipped"] >= 1
+    b["entry"][0]["resource"]["birthDate"] = "unknown"
+    with pytest.raises(ValueError, match="birthDate"):
+        score_fhir_bundle(b, bundle)
+
+
+def test_harmonize_recomputes_derived_labs():
+    from omop_etl.unit_guard import harmonize_contract_units
+    n = 50
+    df = pd.DataFrame({"lab_creatinine": np.full(n, 88.4), "age": np.full(n, 60.0), "gender_concept_id": np.full(n, 8507),
+                       "lab_egfr": np.full(n, 1.0),  # stale: computed from the umol/L value, so far below 60
+                       "lab_sodium": np.full(n, 139.0), "lab_chloride": np.full(n, 103.0), "lab_bicarbonate": np.full(n, 24.0),
+                       "lab_anion_gap": np.full(n, 12.0)})
+    fixed, applied = harmonize_contract_units(df)
+    assert fixed["lab_creatinine"].iloc[0] == pytest.approx(1.0, rel=0.02)
+    assert fixed["lab_egfr"].iloc[0] == pytest.approx(85, abs=8)  # CKD-EPI 2021, 60-year-old man, creatinine 1.0
+    assert fixed["lab_anion_gap"].iloc[0] == 12.0  # inputs untouched: reported value kept
+    by = applied.set_index("feature")
+    assert not by.loc["lab_egfr", "rescaled"] and "recomputed" in by.loc["lab_egfr", "hint"]
+    kept, applied_off = harmonize_contract_units(df, recompute_derived=False)
+    assert (kept["lab_egfr"] == 1.0).all() and not applied_off["hint"].str.contains("recomputed").any()
+    assert (df["lab_egfr"] == 1.0).all()  # input not modified

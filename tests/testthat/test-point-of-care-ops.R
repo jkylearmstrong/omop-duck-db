@@ -167,3 +167,62 @@ test_that("score_fhir_bundle opens vocab_db_path read-only", {
   empty <- DBI::dbConnect(duckdb::duckdb()); on.exit(DBI::dbDisconnect(empty, shutdown = TRUE))
   expect_error(resolve_fhir_codes(empty, "http://snomed.info/sct|1"), "no 'concept' table")
 })
+
+poc_fhir_with <- function(...) {
+  b <- poc_fhir()
+  for (vq in list(...)) {
+    b$entry[[length(b$entry) + 1L]] <- list(resource = list(resourceType = "Observation", effectiveDateTime = "2024-01-04",
+      code = list(coding = list(list(system = "http://loinc.org", code = vq$code))), valueQuantity = vq$q))
+  }
+  b
+}
+
+test_that("score_fhir_bundle skips qualitative values and keeps censored limits", {
+  b <- poc_fhir_with(list(code = "62238-1", q = list(value = "> 60", unit = "mL/min")),
+                     list(code = "2160-0", q = list(value = "<0.2", unit = "mg/dL")),
+                     list(code = "3094-0", q = list(value = 12, comparator = ">", unit = "mg/dL")),
+                     list(code = "2951-2", q = list(value = "negative")),
+                     list(code = "2823-3", q = list(value = "trace")),
+                     list(code = "2075-0", q = list(value = TRUE)), list(code = "2028-9", q = list(value = "nan")))
+  r <- score_fhir_bundle(b, poc_bundle())
+  expect_equal(r$fhir$observations_censored, 3)
+  expect_equal(r$fhir$observations_skipped, 4)
+  expect_equal(score_fhir_bundle(poc_fhir(), poc_bundle())$fhir$observations_censored, 0)
+})
+
+test_that(".fhir_quantity_value parses limits, signs and exponents", {
+  pv <- omopduckdb:::.fhir_quantity_value
+  expect_equal(pv(list(value = 5)), list(value = 5, censored = FALSE))
+  expect_equal(pv(list(value = " >= 90 ")), list(value = 90, censored = TRUE))
+  expect_equal(pv(list(value = "-1.5e-2"))$value, -0.015)
+  expect_equal(pv(list(value = "< 0.02")), list(value = 0.02, censored = TRUE))
+  for (bad in list("negative", "", "1.2.3", "inf", NULL, FALSE)) expect_null(pv(list(value = bad)))
+})
+
+test_that("unparseable FHIR dates are ignored, not fatal", {
+  d <- omopduckdb:::.fhir_date
+  expect_null(d("unknown")); expect_null(d("TBD")); expect_null(d("null")); expect_null(d(NULL))
+  expect_equal(d("2024-01-04T10:00:00Z"), as.Date("2024-01-04"))
+  b <- poc_fhir()
+  b$entry[[length(b$entry) + 1L]] <- list(resource = list(resourceType = "Encounter", id = "bad", class = list(code = "IMP"),
+                                                         period = list(start = "unknown")))
+  r <- score_fhir_bundle(b, poc_bundle())
+  expect_equal(r$fhir$encounter_id, "e1")
+  b$entry[[1]]$resource$birthDate <- "unknown"
+  expect_error(score_fhir_bundle(b, poc_bundle()), "birthDate")
+})
+
+test_that("harmonize_contract_units recomputes derived labs", {
+  n <- 50
+  df <- data.frame(lab_creatinine = rep(88.4, n), age = rep(60, n), gender_concept_id = rep(8507, n), lab_egfr = rep(1, n),
+                   lab_sodium = rep(139, n), lab_chloride = rep(103, n), lab_bicarbonate = rep(24, n), lab_anion_gap = rep(12, n))
+  r <- harmonize_contract_units(df)
+  expect_equal(r$features$lab_creatinine[[1]], 1, tolerance = 0.02)
+  expect_equal(r$features$lab_egfr[[1]], 85, tolerance = 0.1)
+  expect_equal(r$features$lab_anion_gap[[1]], 12)
+  ap <- r$applied; rownames(ap) <- ap$feature
+  expect_false(ap["lab_egfr", "rescaled"]); expect_match(ap["lab_egfr", "hint"], "recomputed")
+  off <- harmonize_contract_units(df, recompute_derived = FALSE)
+  expect_true(all(off$features$lab_egfr == 1)); expect_false(any(grepl("recomputed", off$applied$hint)))
+  expect_true(all(df$lab_egfr == 1))
+})

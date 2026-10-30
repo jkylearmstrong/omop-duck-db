@@ -66,13 +66,19 @@ def check_unit_sanity(features: pd.DataFrame, *, reference_medians: Mapping[str,
 
 
 def harmonize_contract_units(features: pd.DataFrame, sanity: pd.DataFrame | None = None, *,
-                             reference_medians: Mapping[str, float] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+                             reference_medians: Mapping[str, float] | None = None,
+                             recompute_derived: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Rescale features flagged by :func:`check_unit_sanity` to the contract units; returns ``(fixed, applied)``.
 
     Only features whose median matches a named suspect conversion (umol/L creatinine, mmol/L urea, mmol/L glucose, ...)
     are rescaled, by ``suspect_factor``; features flagged for an unexplained reason are left untouched and listed in
     ``applied`` with ``rescaled == False`` so they can still be reviewed. ``features`` is not modified. Pass the
     ``sanity`` frame from an earlier ``check_unit_sanity`` call, or omit it to run the check here (without a warning).
+
+    With ``recompute_derived`` (default) a rescaled creatinine also refreshes ``lab_egfr`` (CKD-EPI 2021, needs ``age`` and
+    ``gender_concept_id``) and a rescaled sodium / chloride / bicarbonate refreshes ``lab_anion_gap``, so they do not keep
+    the values computed from the unharmonized inputs. Only rows that have the inputs are overwritten; each refreshed
+    column is listed in ``applied`` with ``rescaled == False`` and a hint saying it was recomputed.
     """
     sanity = check_unit_sanity(features, reference_medians=reference_medians, warn=False) if sanity is None else sanity
     flagged = sanity[sanity["flag"].astype(bool)] if len(sanity) else sanity
@@ -84,4 +90,28 @@ def harmonize_contract_units(features: pd.DataFrame, sanity: pd.DataFrame | None
             fixed[r.feature] = pd.to_numeric(fixed[r.feature], errors="coerce") * float(r.suspect_factor)
         rows.append({"feature": r.feature, "factor": float(r.suspect_factor) if np.isfinite(r.suspect_factor) else np.nan,
                      "rescaled": ok, "hint": r.hint})
+    if recompute_derived:
+        done = {r["feature"] for r in rows if r["rescaled"]}
+        for d in _recompute_derived(fixed, done):  # a derived column that was itself flagged is updated, not repeated
+            rows = [r for r in rows if r["feature"] != d["feature"]] + [d]
     return fixed, pd.DataFrame(rows, columns=["feature", "factor", "rescaled", "hint"])
+
+
+def _recompute_derived(fixed: pd.DataFrame, rescaled: set[str]) -> list[dict[str, Any]]:
+    """Blank and re-derive ``lab_egfr`` / ``lab_anion_gap`` in place where their inputs were rescaled."""
+    from omop_etl.velocity import derive_labs  # lazy: velocity imports heavier modules
+
+    rows = []
+    # derive_labs only fills NaN (anion gap) or eGFR >= 60, so a stale value must be cleared first.
+    if "lab_creatinine" in rescaled and {"age", "gender_concept_id"} <= set(fixed.columns):
+        fixed.loc[fixed["lab_creatinine"].notna(), "lab_egfr"] = np.nan
+        rows.append({"feature": "lab_egfr", "factor": np.nan, "rescaled": False,
+                     "hint": "recomputed from harmonized lab_creatinine"})
+    gap_in = ["lab_sodium", "lab_chloride", "lab_bicarbonate"]
+    if rescaled & set(gap_in) and all(c in fixed.columns for c in gap_in):
+        fixed.loc[fixed[gap_in].notna().all(axis=1), "lab_anion_gap"] = np.nan
+        rows.append({"feature": "lab_anion_gap", "factor": np.nan, "rescaled": False,
+                     "hint": "recomputed from harmonized sodium / chloride / bicarbonate"})
+    if rows:
+        derive_labs(fixed)
+    return rows
