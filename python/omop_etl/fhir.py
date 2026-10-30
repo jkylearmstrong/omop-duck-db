@@ -1,7 +1,7 @@
 """In-memory FHIR -> risk score adapter for CDS Hooks / EHR point-of-care alerts.
 
 ``score_fhir_bundle(fhir_json, model_bundle)`` reads the Patient, Encounter, Observation, Condition and
-MedicationRequest resources of a FHIR R4 Bundle into a throw-away in-memory DuckDB OMOP CDM and runs the same
+MedicationRequest / MedicationAdministration / MedicationStatement resources of a FHIR R4 Bundle into a throw-away in-memory DuckDB OMOP CDM and runs the same
 :func:`omop_etl.encounter.score_encounter` path as the on-disk database - nothing is written to disk.
 
 Observations are matched on LOINC (``http://loinc.org``) to the model's measurement concepts and converted to the
@@ -38,6 +38,12 @@ VOCABULARY_BY_SYSTEM = {"http://snomed.info/sct": "SNOMED", "http://www.nlm.nih.
                         "http://hl7.org/fhir/sid/icd-10-cm": "ICD10CM", "http://hl7.org/fhir/sid/icd-10": "ICD10",
                         "http://hl7.org/fhir/sid/icd-9-cm": "ICD9CM", "http://hl7.org/fhir/sid/ndc": "NDC",
                         "http://www.ama-assn.org/go/cpt": "CPT4"}
+# Resource types that become drug_exposure rows: (start field fallbacks, statuses that mean "no exposure happened").
+MEDICATION_RESOURCES = {
+    "MedicationRequest": (("authoredOn",), set()),
+    "MedicationAdministration": (("effectiveDateTime", "effectivePeriod.start"), {"entered-in-error", "not-done"}),
+    "MedicationStatement": (("effectiveDateTime", "effectivePeriod.start", "dateAsserted"), {"entered-in-error", "not-taken"}),
+}
 _ENC_CLASS = {"IMP": 9201, "ACUTE": 9201, "NONAC": 9201, "EMER": 9203, "AMB": 9202, "OBSENC": 581385}
 _GENDER = {"female": 8532, "male": 8507}
 
@@ -124,6 +130,12 @@ def _codings(res: Mapping[str, Any], field: str = "code") -> list[tuple[str, str
     return [(c.get("system", ""), c.get("code", "")) for c in (block.get("coding") or [])]
 
 
+def _dig(res: Mapping[str, Any], dotted: str) -> Any:
+    for part in dotted.split("."):
+        res = res.get(part) if isinstance(res, Mapping) else None
+    return res
+
+
 resolve_fhir_codes = resolve_codes  # name parity with the R package
 
 
@@ -133,7 +145,7 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
                       **score_kwargs: Any) -> dict[str, Any]:
     """Score the latest (or ``encounter_id``) Encounter of a FHIR Bundle. Extra keywords go to ``score_encounter``.
 
-    Condition and MedicationRequest codes are mapped through ``concept_map`` first; the rest are resolved against the
+    Condition and medication (MedicationRequest, MedicationAdministration, MedicationStatement) codes are mapped through ``concept_map`` first; the rest are resolved against the
     OMOP vocabulary in ``vocab_con`` (an open DuckDB connection) or ``vocab_db_path`` (opened read-only) when given.
     """
     from omop_etl.build_omop_cdm import build_schema
@@ -158,7 +170,7 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
     cmap = dict(concept_map or {})
     if vocab_con is not None or vocab_db_path is not None:
         wanted = [f"{s}|{k}" for r in res.get("Condition", []) for s, k in _codings(r)] + \
-                 [f"{s}|{k}" for r in res.get("MedicationRequest", []) for s, k in _codings(r, "medicationCodeableConcept")]
+                 [f"{s}|{k}" for t in MEDICATION_RESOURCES for r in res.get(t, []) for s, k in _codings(r, "medicationCodeableConcept")]
         wanted = [w for w in wanted if w not in cmap]
         if vocab_con is not None:
             cmap = {**resolve_codes(vocab_con, wanted), **cmap}
@@ -239,15 +251,22 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
             con.execute("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, "
                         "condition_start_date, condition_type_concept_id, visit_occurrence_id) VALUES (?, 1, ?, ?, 0, 1)",
                         [i, int(cid), when])
-        for i, m in enumerate(res.get("MedicationRequest", []), 1):
-            cid = next((cmap[f"{s}|{k}"] for s, k in _codings(m, "medicationCodeableConcept") if f"{s}|{k}" in cmap), None)
-            if cid is None:
-                unmapped.update(f"{s}|{k}" for s, k in _codings(m, "medicationCodeableConcept"))
-                continue
-            when = _date(m.get("authoredOn")) or start
-            con.execute("INSERT INTO drug_exposure (drug_exposure_id, person_id, drug_concept_id, drug_exposure_start_date, "
-                        "drug_exposure_end_date, drug_type_concept_id, visit_occurrence_id) VALUES (?, 1, ?, ?, ?, 0, 1)",
-                        [i, int(cid), when, when])
+        did = 0
+        for rtype, (date_fields, void_status) in MEDICATION_RESOURCES.items():
+            for m in res.get(rtype, []):
+                if str(m.get("status", "")).lower() in void_status:
+                    continue
+                codings = _codings(m, "medicationCodeableConcept")
+                cid = next((cmap[f"{s}|{k}"] for s, k in codings if f"{s}|{k}" in cmap), None)
+                if cid is None:
+                    unmapped.update(f"{s}|{k}" for s, k in codings)
+                    continue
+                when = next((d for d in (_date(_dig(m, f)) for f in date_fields) if d is not None), None) or start
+                end_d = _date(_dig(m, "effectivePeriod.end")) or when
+                did += 1
+                con.execute("INSERT INTO drug_exposure (drug_exposure_id, person_id, drug_concept_id, drug_exposure_start_date, "
+                            "drug_exposure_end_date, drug_type_concept_id, visit_occurrence_id) VALUES (?, 1, ?, ?, ?, 0, 1)",
+                            [did, int(cid), when, max(when, end_d) if rtype != "MedicationRequest" else when])
         out = score_encounter(con, 1, model_bundle, as_of=as_of, explain=explain, top_k=top_k, **score_kwargs)
     finally:
         con.close()

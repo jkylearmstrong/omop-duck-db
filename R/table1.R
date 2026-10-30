@@ -87,7 +87,12 @@ DEFAULT_MEDICATION_CONCEPTS <- list(
 #' @param strata_labels Named list mapping strata values to display names.
 #' @param compute_smd Logical. Compute Standardized Mean Differences between strata (default TRUE).
 #' @param compute_pvalues Logical. Compute p-values between strata (default TRUE).
-#' @param decimal_places Integer decimal places for numeric outputs (default 1).
+#' @param decimal_places Decimal places for numeric outputs: one integer for every variable, or a named vector / list
+#'   `c(lab_creatinine = 2, age = 1)` per variable. Variables not named use the `default` entry, else 1. Percentages of a
+#'   categorical variable follow that variable's setting; the header row uses the default.
+#' @param groups Optional named list `list("Demographics" = c("age", "female"), ...)`. Variables are ordered by section,
+#'   each preceded by a header row (`Variable` = the title, other cells blank); variables not listed follow under "Other".
+#'   Unknown names are ignored and a variable listed twice stays in its first section.
 #' @return A list containing:
 #'   - `table1`: Formatted Table 1 descriptive statistics.
 #'   - `table1b`: Table 1b completeness / missingness matrix.
@@ -100,7 +105,12 @@ generate_table1 <- function(data,
                             strata_labels = NULL,
                             compute_smd = TRUE,
                             compute_pvalues = TRUE,
-                            decimal_places = 1) {
+                            decimal_places = 1,
+                            groups = NULL) {
+  dp_map <- if (length(decimal_places) > 1L || !is.null(names(decimal_places))) as.list(decimal_places) else list()
+  default_dp <- if (length(dp_map)) as.integer(if (is.null(dp_map[["default"]])) 1L else dp_map[["default"]]) else as.integer(decimal_places)
+  dp_of <- function(v) as.integer(if (is.null(dp_map[[v]])) default_dp else dp_map[[v]])
+  decimal_places <- default_dp  # header row and anything not tied to one variable
   df <- if (inherits(data, "DBIConnection")) {
     if (is.null(table_name)) stop("table_name is required when data is a DBIConnection.")
     DBI::dbGetQuery(data, sprintf("SELECT * FROM %s", table_name))
@@ -153,6 +163,7 @@ generate_table1 <- function(data,
   }
 
   table1_rows <- list()
+  var_blocks <- list()
   table1b_rows <- list()
 
   overall_header <- sprintf("Overall (N=%s)", format(total_n, big.mark = ","))
@@ -178,6 +189,7 @@ generate_table1 <- function(data,
   # 1. Continuous Variables
   for (var in cont_vars) {
     if (!var %in% names(df)) next
+    dp <- dp_of(var)
     s_all <- as.numeric(df[[var]])
     all_clean <- s_all[!is.na(s_all)]
 
@@ -194,13 +206,13 @@ generate_table1 <- function(data,
       Variable = var,
       Category = "Mean (SD)"
     )
-    mean_sd_row[[overall_header]] <- if (!is.na(mean_all)) sprintf("%.*f (%.*f)", decimal_places, mean_all, decimal_places, std_all) else "-"
+    mean_sd_row[[overall_header]] <- if (!is.na(mean_all)) sprintf("%.*f (%.*f)", dp, mean_all, dp, std_all) else "-"
 
     med_iqr_row <- list(
       Variable = var,
       Category = "Median [IQR]"
     )
-    med_iqr_row[[overall_header]] <- if (!is.na(med_all)) sprintf("%.*f [%.*f, %.*f]", decimal_places, med_all, decimal_places, q25_all, decimal_places, q75_all) else "-"
+    med_iqr_row[[overall_header]] <- if (!is.na(med_all)) sprintf("%.*f [%.*f, %.*f]", dp, med_all, dp, q25_all, dp, q75_all) else "-"
 
     t1b_row <- list(
       Variable = var,
@@ -225,8 +237,8 @@ generate_table1 <- function(data,
         lbl <- if (!is.null(strata_map[[v_char]])) strata_map[[v_char]] else sprintf("Stratum %s", v_char)
         col_lbl <- sprintf("%s (N=%s)", lbl, format(strata_ns[[v_char]], big.mark = ","))
 
-        mean_sd_row[[col_lbl]] <- if (!is.na(m_v)) sprintf("%.*f (%.*f)", decimal_places, m_v, decimal_places, std_v) else "-"
-        med_iqr_row[[col_lbl]] <- if (!is.na(med_v)) sprintf("%.*f [%.*f, %.*f]", decimal_places, med_v, decimal_places, q25_v, decimal_places, q75_v) else "-"
+        mean_sd_row[[col_lbl]] <- if (!is.na(m_v)) sprintf("%.*f (%.*f)", dp, m_v, dp, std_v) else "-"
+        med_iqr_row[[col_lbl]] <- if (!is.na(med_v)) sprintf("%.*f [%.*f, %.*f]", dp, med_v, dp, q25_v, dp, q75_v) else "-"
 
         m_miss <- sum(is.na(s_str))
         m_pct <- if (strata_ns[[v_char]] > 0) m_miss / strata_ns[[v_char]] * 100.0 else 0.0
@@ -257,14 +269,15 @@ generate_table1 <- function(data,
       }
     }
 
-    table1_rows[[length(table1_rows) + 1]] <- mean_sd_row
-    table1_rows[[length(table1_rows) + 1]] <- med_iqr_row
+    var_blocks[[var]] <- c(var_blocks[[var]], list(mean_sd_row))
+    var_blocks[[var]] <- c(var_blocks[[var]], list(med_iqr_row))
     table1b_rows[[length(table1b_rows) + 1]] <- t1b_row
   }
 
   # 2. Categorical Variables
   for (var in cat_vars) {
     if (!var %in% names(df)) next
+    dp <- dp_of(var)
     raw_s <- df[[var]]
     miss_n_all <- sum(is.na(raw_s))
     miss_pct_all <- if (total_n > 0) miss_n_all / total_n * 100.0 else 0.0
@@ -297,7 +310,7 @@ generate_table1 <- function(data,
         Variable = if (first_cat) var else "",
         Category = as.character(cat)
       )
-      cat_row[[overall_header]] <- sprintf("%s (%.*f%%)", format(n_cat_all, big.mark = ","), decimal_places, pct_cat_all)
+      cat_row[[overall_header]] <- sprintf("%s (%.*f%%)", format(n_cat_all, big.mark = ","), dp, pct_cat_all)
 
       if (has_strata) {
         prop_strata <- list()
@@ -310,7 +323,7 @@ generate_table1 <- function(data,
 
           lbl <- if (!is.null(strata_map[[v_char]])) strata_map[[v_char]] else sprintf("Stratum %s", v_char)
           col_lbl <- sprintf("%s (N=%s)", lbl, format(strata_ns[[v_char]], big.mark = ","))
-          cat_row[[col_lbl]] <- sprintf("%s (%.*f%%)", format(n_v, big.mark = ","), decimal_places, pct_v)
+          cat_row[[col_lbl]] <- sprintf("%s (%.*f%%)", format(n_v, big.mark = ","), dp, pct_v)
 
           if (first_cat) {
             m_miss <- sum(is.na(sdf[[var]]))
@@ -334,10 +347,31 @@ generate_table1 <- function(data,
         }
       }
 
-      table1_rows[[length(table1_rows) + 1]] <- cat_row
+      var_blocks[[var]] <- c(var_blocks[[var]], list(cat_row))
       first_cat <- FALSE
     }
     table1b_rows[[length(table1b_rows) + 1]] <- t1b_row
+  }
+
+  if (length(groups)) {
+    placed <- character(0)
+    sections <- list()
+    for (title in names(groups)) {
+      keep <- setdiff(intersect(as.character(groups[[title]]), names(var_blocks)), placed)
+      placed <- c(placed, keep)
+      sections[[title]] <- keep
+    }
+    rest <- setdiff(names(var_blocks), placed)
+    if (length(rest)) sections[["Other"]] <- rest
+    for (title in names(sections)) {
+      if (!length(sections[[title]])) next
+      hdr <- stats::setNames(rep(list(""), length(header_row)), names(header_row))
+      hdr$Variable <- title
+      table1_rows[[length(table1_rows) + 1]] <- hdr
+      for (v in sections[[title]]) table1_rows <- c(table1_rows, var_blocks[[v]])
+    }
+  } else {
+    for (v in names(var_blocks)) table1_rows <- c(table1_rows, var_blocks[[v]])
   }
 
   df_t1 <- as.data.frame(do.call(rbind, lapply(table1_rows, as.data.frame, stringsAsFactors = FALSE, check.names = FALSE)))

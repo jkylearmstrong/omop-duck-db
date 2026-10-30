@@ -224,9 +224,21 @@ resolve_fhir_codes <- function(vocab_con, codes) {
 #' @export
 resolve_codes <- resolve_fhir_codes
 
+# Resource types that become drug_exposure rows: date fields tried in order, and statuses meaning "no exposure happened".
+.fhir_med_resources <- list(
+  MedicationRequest = list(dates = "authoredOn", void = character(0)),
+  MedicationAdministration = list(dates = c("effectiveDateTime", "effectivePeriod.start"), void = c("entered-in-error", "not-done")),
+  MedicationStatement = list(dates = c("effectiveDateTime", "effectivePeriod.start", "dateAsserted"), void = c("entered-in-error", "not-taken"))
+)
+
+.fhir_dig <- function(x, dotted) {
+  for (part in strsplit(dotted, ".", fixed = TRUE)[[1]]) x <- if (is.list(x)) x[[part]] else NULL
+  x
+}
+
 #' Score a FHIR Bundle without a pre-built database
 #'
-#' Loads the Patient, Encounter, Observation, Condition and MedicationRequest resources of a FHIR R4 Bundle into a throw-away
+#' Loads the Patient, Encounter, Observation, Condition and MedicationRequest / MedicationAdministration / MedicationStatement resources of a FHIR R4 Bundle into a throw-away
 #' temporary DuckDB CDM (deleted on exit) and runs [score_encounter()]. Observations are matched on LOINC and creatinine / BUN
 #' are converted from SI units. Condition and medication codes are loaded only when `concept_map` (`c("system|code" = concept_id)`)
 #' maps them or, when `vocab_con` / `vocab_db_path` is given, [resolve_fhir_codes()] finds them in the OMOP vocabulary; the rest are
@@ -268,7 +280,8 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
   cmap <- as.list(concept_map)
   if (!is.null(vocab_con) || !is.null(vocab_db_path)) {
     codes_of <- function(rs, field) unlist(lapply(rs, function(r) vapply(.fhir_codings(r, field), function(c) paste0(c$system, "|", c$code), character(1))))
-    wanted <- setdiff(c(codes_of(res$Condition, "code"), codes_of(res$MedicationRequest, "medicationCodeableConcept")), names(cmap))
+    wanted <- setdiff(c(codes_of(res$Condition, "code"),
+                        unlist(lapply(names(.fhir_med_resources), function(t) codes_of(res[[t]], "medicationCodeableConcept")))), names(cmap))
     vc <- vocab_con
     if (is.null(vc)) {
       vc <- DBI::dbConnect(duckdb::duckdb(), vocab_db_path, read_only = TRUE)
@@ -335,12 +348,22 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
     ex(sprintf("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, condition_start_date, condition_type_concept_id, visit_occurrence_id) VALUES (%d, 1, %d, %s, 0, 1)",
                i, as.integer(cid), q(if (is.null(when)) start else when)))
   }
-  for (i in seq_along(res$MedicationRequest)) {
-    m <- res$MedicationRequest[[i]]; cod <- .fhir_codings(m, "medicationCodeableConcept"); cid <- lookup(cod)
-    if (is.null(cid)) { unmapped <- c(unmapped, note(cod)); next }
-    when <- .fhir_date(m$authoredOn); when <- if (is.null(when)) start else when
-    ex(sprintf("INSERT INTO drug_exposure (drug_exposure_id, person_id, drug_concept_id, drug_exposure_start_date, drug_exposure_end_date, drug_type_concept_id, visit_occurrence_id) VALUES (%d, 1, %d, %s, %s, 0, 1)",
-               i, as.integer(cid), q(when), q(when)))
+  did <- 0L
+  for (rtype in names(.fhir_med_resources)) {
+    spec <- .fhir_med_resources[[rtype]]
+    for (m in res[[rtype]]) {
+      if (tolower(if (is.null(m$status)) "" else m$status) %in% spec$void) next
+      cod <- .fhir_codings(m, "medicationCodeableConcept"); cid <- lookup(cod)
+      if (is.null(cid)) { unmapped <- c(unmapped, note(cod)); next }
+      when <- NULL
+      for (f in spec$dates) { when <- .fhir_date(.fhir_dig(m, f)); if (!is.null(when)) break }
+      if (is.null(when)) when <- start
+      end_d <- .fhir_date(.fhir_dig(m, "effectivePeriod.end"))
+      end_d <- if (is.null(end_d) || rtype == "MedicationRequest") when else max(when, end_d)
+      did <- did + 1L
+      ex(sprintf("INSERT INTO drug_exposure (drug_exposure_id, person_id, drug_concept_id, drug_exposure_start_date, drug_exposure_end_date, drug_type_concept_id, visit_occurrence_id) VALUES (%d, 1, %d, %s, %s, 0, 1)",
+                 did, as.integer(cid), q(when), q(end_d)))
+    }
   }
   out <- score_encounter(con, 1, model_bundle, as_of = as_of, explain = explain, top_k = top_k, ...)
   out$fhir <- list(encounter_id = enc$id, patient_id = patient$id, observations_skipped = skipped, observations_censored = censored, unmapped_codes = sort(unique(unmapped)))
