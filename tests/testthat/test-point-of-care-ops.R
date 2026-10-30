@@ -226,3 +226,16 @@ test_that("harmonize_contract_units recomputes derived labs", {
   expect_true(all(off$features$lab_egfr == 1)); expect_false(any(grepl("recomputed", off$applied$hint)))
   expect_true(all(df$lab_egfr == 1))
 })
+
+test_that("harmonize_contract_units recomputes anion gap from rescaled electrolytes", {
+  df <- data.frame(lab_sodium = c(13.9, 13.9, NA), lab_chloride = 103, lab_bicarbonate = 24, lab_anion_gap = c(-113.1, -113.1, 7))
+  san <- data.frame(feature = "lab_sodium", flag = TRUE, hint = "sodium scaled 1/10", suspect_factor = 10, stringsAsFactors = FALSE)
+  r <- harmonize_contract_units(df, san)
+  expect_equal(r$features$lab_anion_gap, c(12, 12, 7), tolerance = 1e-6)
+  ap <- r$applied; rownames(ap) <- ap$feature
+  expect_match(ap["lab_anion_gap", "hint"], "recomputed")
+  # no age / gender columns: eGFR cannot be derived, so it is left alone and not reported
+  df2 <- data.frame(lab_creatinine = rep(88.4, 50), lab_egfr = rep(1, 50))
+  r2 <- harmonize_contract_units(df2)
+  expect_true(all(r2$features$lab_egfr == 1)); expect_false(any(grepl("recomputed", r2$applied$hint)))
+})

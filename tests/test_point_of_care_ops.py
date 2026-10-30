@@ -347,3 +347,13 @@ def test_harmonize_recomputes_derived_labs():
     kept, applied_off = harmonize_contract_units(df, recompute_derived=False)
     assert (kept["lab_egfr"] == 1.0).all() and not applied_off["hint"].str.contains("recomputed").any()
     assert (df["lab_egfr"] == 1.0).all()  # input not modified
+
+
+def test_harmonize_recomputes_anion_gap_from_rescaled_electrolytes():
+    from omop_etl.unit_guard import harmonize_contract_units
+    df = pd.DataFrame({"lab_sodium": [13.9, 13.9, np.nan], "lab_chloride": [103.0, 103.0, 103.0],
+                       "lab_bicarbonate": [24.0, 24.0, 24.0], "lab_anion_gap": [-113.1, -113.1, 7.0]})
+    sanity = pd.DataFrame({"feature": ["lab_sodium"], "flag": [True], "hint": ["sodium scaled 1/10"], "suspect_factor": [10.0]})
+    fixed, applied = harmonize_contract_units(df, sanity)
+    assert fixed["lab_anion_gap"].tolist()[:2] == [12.0, 12.0] and fixed["lab_anion_gap"].iloc[2] == 7.0  # NaN input row kept
+    assert "recomputed" in applied.set_index("feature").loc["lab_anion_gap", "hint"]
