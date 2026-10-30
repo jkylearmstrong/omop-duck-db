@@ -8,7 +8,8 @@ export_consort_flowchart(
   attrition,
   out_path = "figure1.png",
   title = NULL,
-  dpi = 300
+  dpi = 300,
+  terminal_split = NULL
 )
 }
 \arguments{
@@ -29,4 +30,7 @@ export_consort_flowchart(
 Draws one box per attrition step (N and percent retained) and an "Excluded" box for every step with drops, straight from
 the attrition table, so the figure cannot drift from the SQL counts. Uses base graphics only. The format follows the file
 extension (png, svg, pdf, jpeg). Mirror of Python \code{omop_etl.cohort.export_consort_flowchart}.
+}
+\details{
+An \code{exclusion_reason} column in the attrition table is shown in the exclusion boxes.
 }
