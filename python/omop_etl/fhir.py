@@ -21,7 +21,7 @@ import pandas as pd
 
 from omop_etl.velocity import VELOCITY_CONCEPTS
 
-__all__ = ["score_fhir_bundle", "LOINC_TO_FEATURE", "resolve_codes", "VOCABULARY_BY_SYSTEM"]
+__all__ = ["score_fhir_bundle", "LOINC_TO_FEATURE", "resolve_codes", "resolve_fhir_codes", "VOCABULARY_BY_SYSTEM"]
 
 LOINC_TO_FEATURE = {
     "8867-4": "heart_rate", "8480-6": "systolic_bp", "8462-4": "diastolic_bp", "3094-0": "lab_bun", "2160-0": "lab_creatinine",
@@ -90,6 +90,9 @@ def _codings(res: Mapping[str, Any], field: str = "code") -> list[tuple[str, str
     block = res.get(field) or {}
     block = block[0] if isinstance(block, list) and block else block
     return [(c.get("system", ""), c.get("code", "")) for c in (block.get("coding") or [])]
+
+
+resolve_fhir_codes = resolve_codes  # name parity with the R package
 
 
 def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | None = None, as_of: Any = None,

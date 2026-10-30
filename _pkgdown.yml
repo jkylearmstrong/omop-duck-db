@@ -162,6 +162,7 @@ reference:
   - check_unit_sanity
   - harmonize_contract_units
   - resolve_fhir_codes
+  - resolve_codes
   - VOCABULARY_BY_SYSTEM
   - REFERENCE_MEDIANS
   - LOINC_TO_FEATURE

@@ -376,8 +376,8 @@ from omop_etl.feature_contract import validate_feature_frame  # noqa: E402
 from omop_etl.model_bundle import load_model_bundle, score_cohort  # noqa: E402
 from omop_etl.encounter import score_encounter  # noqa: E402
 from omop_etl.drift_report import write_drift_report  # noqa: E402
-from omop_etl.fhir import score_fhir_bundle  # noqa: E402
-from omop_etl.unit_guard import check_unit_sanity, harmonize_contract_units  # noqa: E402
+from omop_etl.fhir import LOINC_TO_FEATURE, VOCABULARY_BY_SYSTEM, resolve_codes, resolve_fhir_codes, score_fhir_bundle  # noqa: E402
+from omop_etl.unit_guard import REFERENCE_MEDIANS, check_unit_sanity, harmonize_contract_units  # noqa: E402
 from omop_etl.monitoring import (  # noqa: E402
     calibration_summary,
     monitor_scores,
@@ -393,7 +393,7 @@ from omop_etl.velocity import extract_velocity_features  # noqa: E402
 
 __all__ = [
     "from_sql", "import_omop", "validate_feature_frame", "load_model_bundle", "score_cohort", "RunManifest",
-    "score_encounter", "score_fhir_bundle", "write_drift_report", "check_unit_sanity", "harmonize_contract_units", "calibration_summary", "monitor_scores", "population_stability_index", "update_monitoring_log",
+    "score_encounter", "score_fhir_bundle", "resolve_codes", "resolve_fhir_codes", "VOCABULARY_BY_SYSTEM", "LOINC_TO_FEATURE", "REFERENCE_MEDIANS", "write_drift_report", "check_unit_sanity", "harmonize_contract_units", "calibration_summary", "monitor_scores", "population_stability_index", "update_monitoring_log",
     "fit_capacity_thresholds", "map_risk_tiers", "tier_load",
     "verify_manifest", "check_source", "aggregate_telemetry", "site_telemetry", "split_by_date",
     "extract_velocity_features",

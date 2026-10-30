@@ -2324,13 +2324,16 @@ def generate_consort_attrition(
 
 
 def export_consort_flowchart(attrition: Any, out_path: str | Path = "figure1.png", *, title: str | None = None,
-                             dpi: int = 300, format: str | None = None) -> Path:
+                             dpi: int = 300, format: str | None = None,
+                             terminal_split: dict[str, int] | None = None) -> Path:
     """Render a publication-ready CONSORT flowchart from an attrition table and write it to ``out_path``.
 
     ``attrition`` is a :class:`ConsortAttrition`, the DataFrame from ``compute_attrition`` or anything
     :func:`generate_consort_attrition` accepts. One box per step shows ``N`` (and the percentage retained); the
     subjects excluded at a step go in a box to its right. The counts come from the table itself, so the figure cannot
-    drift from the SQL output. The format follows the file extension (png, svg, pdf) unless ``format`` is given.
+    drift from the SQL output. When the table has an ``exclusion_reason`` column the exclusion box carries that reason.
+    ``terminal_split`` (label -> N, e.g. ``{"Readmitted": 31560, "No readmission": 238393}``) adds a final row of
+    branching outcome boxes under the last step, each with its percentage of the split total. The format follows the file extension (png, svg, pdf) unless ``format`` is given.
     Needs matplotlib.
     """
     try:
@@ -2351,11 +2354,13 @@ def export_consort_flowchart(attrition: Any, out_path: str | Path = "figure1.png
                [0] + [max(a - b, 0) for a, b in zip(retained, retained[1:])])
     pct = [float(v) for v in df["percent_retained"]] if "percent_retained" in df.columns else \
         [100.0 * n / retained[0] if retained[0] else 0.0 for n in retained]
+    reasons = [str(v).strip() if isinstance(v, str) and v.strip() else "" for v in df["exclusion_reason"]]         if "exclusion_reason" in df.columns else [""] * len(df)
     n = len(df)
-    fig = Figure(figsize=(8.0, 1.6 * n + 0.8))
+    extra = 1 if terminal_split else 0
+    fig = Figure(figsize=(8.0, 1.6 * (n + extra) + 0.8))
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, 10)
-    ax.set_ylim(0, n * 2 + 1)
+    ax.set_ylim(-extra * 2, n * 2 + 1)
     ax.axis("off")
     box = dict(boxstyle="round,pad=0.4", fc="white", ec="black", lw=1.2)
     for i in range(n):
@@ -2368,8 +2373,18 @@ def export_consort_flowchart(attrition: Any, out_path: str | Path = "figure1.png
             if dropped[i] > 0:
                 ym = y + 1
                 ax.annotate("", xy=(7.65, ym), xytext=(3.6, ym), arrowprops=dict(arrowstyle="-|>", lw=1.0, shrinkA=0, shrinkB=0))
-                ax.text(8.1, ym, f"Excluded\nn = {dropped[i]:,}", ha="center", va="center", fontsize=9,
+                ax.text(8.1, ym, (f"Excluded: {reasons[i]}\nn = {dropped[i]:,}" if reasons[i] else f"Excluded\nn = {dropped[i]:,}"), ha="center", va="center", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.4", fc="#f2f2f2", ec="black", lw=1.0))
+    if terminal_split:
+        total = sum(int(v) for v in terminal_split.values())
+        k = len(terminal_split)
+        y0, yb = 1.5, -1.0
+        for j, (lab, cnt) in enumerate(terminal_split.items()):
+            x = 3.6 + (j - (k - 1) / 2) * 3.4
+            ax.annotate("", xy=(x, yb + 0.5), xytext=(3.6, y0 - 0.26),
+                        arrowprops=dict(arrowstyle="-|>", lw=1.2, shrinkA=0, shrinkB=0))
+            share = 100.0 * int(cnt) / total if total else 0.0
+            ax.text(x, yb, f"{lab}\nN = {int(cnt):,} ({share:.2f}%)", ha="center", va="center", fontsize=10, bbox=box)
     if title:
         ax.text(5, n * 2 + 0.6, title, ha="center", va="center", fontsize=12, fontweight="bold")
     out = Path(out_path)

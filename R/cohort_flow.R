@@ -431,9 +431,12 @@ plp_arrow_to_plp_data <- function(plp_arrow, con, target_id = 1L, outcome_id = 1
 #' @param out_path Output file (default `"figure1.png"`).
 #' @param title Optional title.
 #' @param dpi Resolution for raster formats.
+#' @param terminal_split Optional named numeric (label = N, e.g. `c(Readmitted = 31560, "No readmission" = 238393)`) drawn as a
+#'   row of branching outcome boxes under the last step, each with its percentage of the split total.
+#' @details An `exclusion_reason` column in the attrition table is shown in the exclusion boxes.
 #' @return `out_path`, invisibly.
 #' @export
-export_consort_flowchart <- function(attrition, out_path = "figure1.png", title = NULL, dpi = 300) {
+export_consort_flowchart <- function(attrition, out_path = "figure1.png", title = NULL, dpi = 300, terminal_split = NULL) {
   df <- if (is.data.frame(attrition) && all(c("step_name", "subjects_retained") %in% names(attrition))) as.data.frame(attrition) else
     as.data.frame(generate_consort_attrition(cohort_data = attrition))
   if (!nrow(df)) stop("The attrition table has no steps.", call. = FALSE)
@@ -441,9 +444,11 @@ export_consort_flowchart <- function(attrition, out_path = "figure1.png", title 
   ret <- as.numeric(df$subjects_retained)
   drop <- if ("subjects_dropped" %in% names(df)) pmax(as.numeric(df$subjects_dropped), 0) else c(0, pmax(-diff(ret), 0))
   pct <- if ("percent_retained" %in% names(df)) as.numeric(df$percent_retained) else if (ret[[1]] > 0) 100 * ret / ret[[1]] else rep(0, n)
+  reason <- if ("exclusion_reason" %in% names(df)) trimws(ifelse(is.na(df$exclusion_reason), "", as.character(df$exclusion_reason))) else rep("", n)
+  extra <- if (length(terminal_split)) 1 else 0
   dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
   ext <- tolower(tools::file_ext(out_path))
-  h <- 1.6 * n + 0.8
+  h <- 1.6 * (n + extra) + 0.8
   switch(ext,
          svg = grDevices::svg(out_path, width = 8, height = h),
          pdf = grDevices::pdf(out_path, width = 8, height = h),
@@ -451,7 +456,7 @@ export_consort_flowchart <- function(attrition, out_path = "figure1.png", title 
          grDevices::png(out_path, width = 8, height = h, units = "in", res = dpi))
   on.exit(grDevices::dev.off(), add = TRUE)
   op <- graphics::par(mar = c(0, 0, 0, 0)); on.exit(graphics::par(op), add = TRUE)
-  graphics::plot.new(); graphics::plot.window(xlim = c(0, 10), ylim = c(0, n * 2 + 1))
+  graphics::plot.new(); graphics::plot.window(xlim = c(0, 10), ylim = c(-extra * 2, n * 2 + 1))
   box <- function(x, y, label, fill) {
     w <- max(graphics::strwidth(strsplit(label, "\n", fixed = TRUE)[[1]], cex = 0.9)) / 2 + 0.2
     ht <- graphics::strheight(label, cex = 0.9) / 2 + 0.15
@@ -469,6 +474,16 @@ export_consort_flowchart <- function(attrition, out_path = "figure1.png", title 
         e <- box(8.1, ym, sprintf("Excluded\nn = %s", format(drop[[i]], big.mark = ",", scientific = FALSE)), "grey95")
         graphics::arrows(3.6, ym, 8.1 - e[[1]], ym, length = 0.08, lwd = 1)
       }
+    }
+  }
+  if (length(terminal_split)) {
+    cnt <- as.numeric(terminal_split); k <- length(cnt)
+    for (j in seq_len(k)) {
+      x <- 3.6 + (j - (k + 1) / 2) * 3.4
+      b <- box(x, -1, sprintf("%s
+N = %s (%.2f%%)", names(terminal_split)[[j]], format(cnt[[j]], big.mark = ",", scientific = FALSE),
+                              if (sum(cnt) > 0) 100 * cnt[[j]] / sum(cnt) else 0), "white")
+      graphics::arrows(3.6, 1.5 - 0.26, x, -1 + b[[2]], length = 0.08, lwd = 1.2)
     }
   }
   if (!is.null(title)) graphics::text(5, n * 2 + 0.6, title, font = 2, cex = 1.1)

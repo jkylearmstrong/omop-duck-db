@@ -278,3 +278,23 @@ def test_export_consort_flowchart_writes_images(tmp_path):
     assert "650" in svg.read_text(encoding="utf-8") or svg.stat().st_size > 1000
     with pytest.raises(ValueError):
         export_consort_flowchart(ConsortAttrition(att.to_dataframe().iloc[0:0]), tmp_path / "e.png")
+
+
+def test_top_level_vocab_exports_and_alias():
+    import omop_etl
+    from omop_etl import LOINC_TO_FEATURE, REFERENCE_MEDIANS, VOCABULARY_BY_SYSTEM, resolve_codes, resolve_fhir_codes
+    assert resolve_fhir_codes is resolve_codes
+    assert LOINC_TO_FEATURE and REFERENCE_MEDIANS and VOCABULARY_BY_SYSTEM
+    assert {"resolve_fhir_codes", "resolve_codes", "REFERENCE_MEDIANS"} <= set(omop_etl.__all__)
+
+
+def test_export_consort_flowchart_reasons_and_terminal_split(tmp_path):
+    pytest.importorskip("matplotlib")
+    import matplotlib
+    matplotlib.rcParams["svg.fonttype"] = "none"
+    from omop_etl import export_consort_flowchart
+    df = pd.DataFrame({"step_name": ["All", "Adults"], "subjects_retained": [1000, 900], "subjects_dropped": [0, 100],
+                       "percent_retained": [100.0, 90.0], "exclusion_reason": ["", "Age < 18"]})
+    svg = export_consort_flowchart(df, tmp_path / "f.svg", terminal_split={"Readmitted": 100, "No readmission": 800})
+    txt = svg.read_text(encoding="utf-8")
+    assert "Age &lt; 18" in txt and "Readmitted" in txt and "88.89%" in txt

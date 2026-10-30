@@ -19,6 +19,8 @@ export_consort_flowchart(
 \item{title}{Optional title.}
 
 \item{dpi}{Resolution for raster formats.}
+
+\item{terminal_split}{Optional named numeric (label = N) drawn as a row of branching outcome boxes under the last step, each with its percentage of the split total.}
 }
 \value{
 \code{out_path}, invisibly.
