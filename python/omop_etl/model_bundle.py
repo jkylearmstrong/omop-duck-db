@@ -34,7 +34,7 @@ from omop_etl.jsonio import strict_dumps
 from omop_etl.feature_contract import FeatureValidationReport, load_feature_spec, validate_feature_frame
 
 __all__ = ["BundleIntegrityError", "ModelBundle", "load_model_bundle", "score_cohort", "write_model_bundle",
-           "sha256_file", "DEFAULT_RISK_TIERS"]
+           "sha256_file", "DEFAULT_RISK_TIERS", "export_to_onnx"]
 
 BUNDLE_SCHEMA_VERSION = 1
 DEFAULT_RISK_TIERS = [{"name": "low", "min": 0.0}, {"name": "moderate", "min": 0.10}, {"name": "high", "min": 0.25}]
@@ -314,6 +314,115 @@ def write_model_bundle(
         "license": license, "intended_use": intended_use,
     }
     (out / "manifest.json").write_text(strict_dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return out
+
+
+def export_to_onnx(bundle: ModelBundle | str | Path, output_path: str | Path, *, opset: int = 13) -> Path:
+    """Serialise a bundle to one standalone ONNX file for C++ / Java / Go / .NET runtimes (no Python at scoring time).
+
+    The graph takes ``float32 [N, n_features]`` in ``bundle.feature_names`` order and returns ``probabilities``
+    (``float32 [N, 1]``) - the same blended, calibrated probability as :meth:`ModelBundle.predict_proba`. Supported:
+
+    * ``logistic`` components (any number, weighted blend) with ``platt`` calibration or none - needs only ``onnx``;
+    * a single ``onnx`` component with no calibration (copied through);
+    * a single ``xgboost_json`` component with no calibration (needs ``onnxmltools``).
+
+    Anything else (isotonic calibration, torchscript, mixed blends) raises ``NotImplementedError`` rather than
+    exporting a model whose output differs from the bundle's. Feature validation (bounds clipping, imputation) is *not*
+    in the graph: ``<output>.features.json`` beside it lists the ordered features with their bounds and ``impute``
+    values, and the risk tiers, for the host to apply. The graph also carries ``feature_names`` / ``risk_tiers`` as
+    ONNX metadata. Returns the written path.
+    """
+    b = bundle if isinstance(bundle, ModelBundle) else load_model_bundle(bundle)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cal = b.calibration
+    method = (cal or {}).get("method")
+    kinds = {c.kind for c in b.components}
+    if method not in (None, "platt"):
+        raise NotImplementedError(f"ONNX export of {method!r} calibration is not supported.")
+    names = b.feature_names
+
+    if kinds == {"logistic"}:
+        try:
+            import onnx
+            from onnx import TensorProto, helper, numpy_helper
+        except ImportError as exc:
+            raise ImportError("onnx is required for export_to_onnx: pip install onnx") from exc
+        nodes, inits = [], []
+
+        def const(name, arr):
+            inits.append(numpy_helper.from_array(np.asarray(arr, dtype=np.float32), name))
+            return name
+
+        probs, weights = [], []
+        for i, c in enumerate(b.components):
+            spec = json.loads(c.path.read_text(encoding="utf-8"))
+            coef = np.asarray(spec["coef"], dtype="float64")
+            if coef.shape[0] != len(names):
+                raise BundleIntegrityError(f"{c.path.name}: {coef.shape[0]} coefficients for {len(names)} features.")
+            mean = np.asarray(spec.get("mean", np.zeros_like(coef)), dtype="float64")
+            scale = np.asarray(spec.get("scale", np.ones_like(coef)), dtype="float64")
+            w_eff = coef / scale  # ((x - mean) / scale) @ coef + b  ==  x @ w_eff + (b - mean @ w_eff)
+            bias = float(spec.get("intercept", 0.0)) - float(mean @ w_eff)
+            nodes += [helper.make_node("MatMul", ["X", const(f"W{i}", w_eff.reshape(-1, 1))], [f"z{i}"]),
+                      helper.make_node("Add", [f"z{i}", const(f"b{i}", [bias])], [f"zb{i}"]),
+                      helper.make_node("Sigmoid", [f"zb{i}"], [f"p{i}"])]
+            probs.append(f"p{i}")
+            weights.append(c.weight)
+        wsum = float(sum(weights))
+        acc = None
+        for i, (pn, w) in enumerate(zip(probs, weights)):
+            nodes.append(helper.make_node("Mul", [pn, const(f"w{i}", [w / wsum])], [f"wp{i}"]))
+            if acc is None:
+                acc = f"wp{i}"
+            else:
+                nodes.append(helper.make_node("Add", [acc, f"wp{i}"], [f"acc{i}"]))
+                acc = f"acc{i}"
+        if method == "platt":  # sigmoid(slope * logit(clip(p)) + intercept)
+            nodes += [helper.make_node("Clip", [acc, const("eps", [1e-7]), const("one_m_eps", [1 - 1e-7])], ["pc"]),
+                      helper.make_node("Sub", [const("one", [1.0]), "pc"], ["q"]),
+                      helper.make_node("Div", ["pc", "q"], ["odds"]),
+                      helper.make_node("Log", ["odds"], ["lg"]),
+                      helper.make_node("Mul", ["lg", const("slope", [float(cal["slope"])])], ["ls"]),
+                      helper.make_node("Add", ["ls", const("icpt", [float(cal["intercept"])])], ["lc"]),
+                      helper.make_node("Sigmoid", ["lc"], ["probabilities"])]
+        else:
+            nodes.append(helper.make_node("Identity", [acc], ["probabilities"]))
+        graph = helper.make_graph(
+            nodes, "omop_duck_db_bundle",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["N", len(names)])],
+            [helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, ["N", 1])], inits)
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)])
+        model.ir_version = min(model.ir_version, 8)
+        for k, v in (("feature_names", json.dumps(names)), ("risk_tiers", json.dumps(b.risk_tiers)),
+                     ("bundle_name", str(b.manifest.get("name"))), ("bundle_version", str(b.manifest.get("version")))):
+            entry = model.metadata_props.add()
+            entry.key, entry.value = k, v
+        onnx.checker.check_model(model)
+        out.write_bytes(model.SerializeToString())
+    elif len(b.components) == 1 and cal is None and kinds == {"onnx"}:
+        shutil.copyfile(b.components[0].path, out)
+    elif len(b.components) == 1 and cal is None and kinds == {"xgboost_json"}:
+        try:
+            import onnxmltools
+            import xgboost as xgb
+            from onnxmltools.convert.common.data_types import FloatTensorType
+        except ImportError as exc:
+            raise ImportError("onnxmltools and xgboost are required to export xgboost_json: "
+                              "pip install onnxmltools xgboost") from exc
+        clf = xgb.XGBClassifier()
+        clf.load_model(str(b.components[0].path))
+        clf.get_booster().feature_names = [f"f{i}" for i in range(len(names))]
+        onnxmltools.utils.save_model(
+            onnxmltools.convert_xgboost(clf, initial_types=[("X", FloatTensorType([None, len(names)]))]), str(out))
+    else:
+        raise NotImplementedError("export_to_onnx supports logistic blends (optionally Platt-calibrated), or a single "
+                                  f"uncalibrated onnx / xgboost_json component; this bundle has {sorted(kinds)} "
+                                  f"with calibration {method!r}.")
+    sidecar = out.with_name(out.name + ".features.json")
+    sidecar.write_text(strict_dumps({"features": b.feature_spec["features"], "risk_tiers": b.risk_tiers,
+                                     "input": "X", "output": "probabilities"}, indent=2, sort_keys=True), encoding="utf-8")
     return out
 
 

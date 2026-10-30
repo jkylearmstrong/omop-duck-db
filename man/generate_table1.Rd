@@ -13,7 +13,8 @@ generate_table1(
   strata_labels = NULL,
   compute_smd = TRUE,
   compute_pvalues = TRUE,
-  decimal_places = 1
+  decimal_places = 1,
+  groups = NULL
 )
 }
 \arguments{
@@ -33,7 +34,13 @@ generate_table1(
 
 \item{compute_pvalues}{Logical. Compute p-values between strata (default TRUE).}
 
-\item{decimal_places}{Integer decimal places for numeric outputs (default 1).}
+\item{decimal_places}{Decimal places for numeric outputs: one integer for every variable, or a named vector / list
+\code{c(lab_creatinine = 2, age = 1)} per variable. Variables not named use the \code{default} entry, else 1. Percentages of a
+categorical variable follow that variable's setting; the header row uses the default.}
+
+\item{groups}{Optional named list \code{list("Demographics" = c("age", "female"), ...)}. Variables are ordered by section,
+each preceded by a header row (\code{Variable} = the title, other cells blank); variables not listed follow under "Other".
+Unknown names are ignored and a variable listed twice stays in its first section.}
 }
 \value{
 A list containing:

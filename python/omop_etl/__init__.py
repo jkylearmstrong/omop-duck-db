@@ -90,6 +90,8 @@ from omop_etl.medication_classes import (
 )
 from omop_etl.table1_profiles import DOMAIN_PROFILES, Table1Generator
 from omop_etl.table1 import generate_table1, export_table1, table1_to_quarto, table1_to_typst
+from omop_etl.odds_ratios import generate_table3_odds_ratios, export_table3  # noqa: E402
+from omop_etl.model_bundle import export_to_onnx  # noqa: E402
 from omop_etl.cohort_flow import (
     CohortFlow,
     Table2Generator,
@@ -403,7 +405,7 @@ __all__ = [
     "calculate_lace_index", "calculate_hospital_score",
     "DOMAIN_PROFILES", "Table1Generator", "CohortFlow", "Table2Generator", "as_plp_arrow",
     "plot_consort_flow", "plot_multisite_attrition_heatmap",
-    "generate_table1", "export_table1", "table1_to_quarto", "table1_to_typst",
+    "generate_table1", "export_table1", "table1_to_quarto", "table1_to_typst", "generate_table3_odds_ratios", "export_table3", "export_to_onnx",
     "ACUTE_LAB_PANEL",
     "extract_inpatient_labs",
     "extract_prior_utilization",
@@ -711,7 +713,7 @@ __all__ = [
     "filter_measurements",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 

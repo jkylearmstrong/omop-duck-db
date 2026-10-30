@@ -154,6 +154,7 @@ reference:
   - feature_validation_telemetry
   - load_model_bundle
   - write_model_bundle
+  - export_to_onnx
   - score_cohort
   - bundle_predict_proba
   - score_encounter
@@ -264,6 +265,8 @@ reference:
   - export_table1
   - table1_to_quarto
   - table1_to_typst
+  - generate_table3_odds_ratios
+  - export_table3
   - to_markdown
   - to_latex
   - validate_table1_reconciliation

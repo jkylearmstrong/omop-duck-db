@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import re
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 import duckdb
 import pandas as pd
 
@@ -156,7 +156,8 @@ def generate_table1(
     strata_labels: dict[Any, str] | None = None,
     compute_smd: bool = True,
     compute_pvalues: bool = True,
-    decimal_places: int = 1,
+    decimal_places: int | Mapping[str, int] = 1,
+    groups: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Generates Table 1 (Descriptive Statistics) and Table 1b (Completeness/Missingness).
     
@@ -175,13 +176,28 @@ def generate_table1(
                        (e.g. {0: "Non-readmitted", 1: "Readmitted"}).
         compute_smd: Whether to calculate Standardized Mean Differences between strata.
         compute_pvalues: Whether to calculate hypothesis test p-values between strata.
-        decimal_places: Number of decimal places for numeric outputs (default 1).
+        decimal_places: Decimal places for numeric outputs. An int applies to every variable; a mapping
+                        ``{variable: places}`` sets them per variable (e.g. ``{"lab_creatinine": 2}``). Variables
+                        not in the mapping use the ``"default"`` entry, else 1. Percentages of a categorical variable
+                        follow that variable's setting; the header row uses the default.
+        groups: Optional ``{section title: [variables]}``. Variables are ordered by section, each preceded by a
+                header row (``Variable`` = title, other cells blank). Variables not listed follow under "Other".
+                Unknown names are ignored; a variable listed twice stays in its first section.
         
     Returns:
         dict[str, pd.DataFrame]: Dictionary containing:
             - 'table1': Formatted descriptive statistics table.
             - 'table1b': Missingness audit matrix with counts and percentages.
     """
+    if isinstance(decimal_places, Mapping):
+        _dp_map = {str(k): int(v) for k, v in decimal_places.items()}
+        default_dp = _dp_map.get("default", 1)
+    else:
+        _dp_map, default_dp = {}, int(decimal_places)
+
+    def _dp(name: str) -> int:
+        return _dp_map.get(str(name), default_dp)
+
     if isinstance(data, duckdb.DuckDBPyConnection):
         if not table_name:
             raise ValueError("table_name is required when data is a DuckDB connection.")
@@ -231,6 +247,8 @@ def generate_table1(
         cat_vars = list(categorical_vars or [])
 
     table1_rows: list[dict[str, Any]] = []
+    var_blocks: dict[str, list[dict[str, Any]]] = {}
+    decimal_places = default_dp  # header row and anything not tied to one variable
     table1b_rows: list[dict[str, Any]] = []
 
     # Header Row: Cohort Counts
@@ -254,6 +272,7 @@ def generate_table1(
     for var in cont_vars:
         if var not in df.columns:
             continue
+        dp = _dp(var)
         s_all = pd.to_numeric(df[var], errors="coerce")
         all_clean = s_all.dropna()
 
@@ -271,14 +290,14 @@ def generate_table1(
         mean_sd_row: dict[str, Any] = {
             "Variable": var,
             "Category": "Mean (SD)",
-            overall_header: f"{mean_all:.{decimal_places}f} ({std_all:.{decimal_places}f})" if not math.isnan(mean_all) else "-",
+            overall_header: f"{mean_all:.{dp}f} ({std_all:.{dp}f})" if not math.isnan(mean_all) else "-",
         }
 
         # Median [IQR] Row
         med_iqr_row: dict[str, Any] = {
             "Variable": var,
             "Category": "Median [IQR]",
-            overall_header: f"{med_all:.{decimal_places}f} [{q25_all:.{decimal_places}f}, {q75_all:.{decimal_places}f}]" if not math.isnan(med_all) else "-",
+            overall_header: f"{med_all:.{dp}f} [{q25_all:.{dp}f}, {q75_all:.{dp}f}]" if not math.isnan(med_all) else "-",
         }
 
         # Table 1b row
@@ -304,8 +323,8 @@ def generate_table1(
                 label = strata_map.get(val, f"Stratum {val}")
                 col_name = f"{label} (N={strata_ns[val]:,})"
 
-                mean_sd_row[col_name] = f"{m_val:.{decimal_places}f} ({std_val:.{decimal_places}f})" if not math.isnan(m_val) else "-"
-                med_iqr_row[col_name] = f"{med_val:.{decimal_places}f} [{q25_val:.{decimal_places}f}, {q75_val:.{decimal_places}f}]" if not math.isnan(med_val) else "-"
+                mean_sd_row[col_name] = f"{m_val:.{dp}f} ({std_val:.{dp}f})" if not math.isnan(m_val) else "-"
+                med_iqr_row[col_name] = f"{med_val:.{dp}f} [{q25_val:.{dp}f}, {q75_val:.{dp}f}]" if not math.isnan(med_val) else "-"
 
                 m_miss = s_str.isna().sum()
                 m_pct = (m_miss / strata_ns[val] * 100.0) if strata_ns[val] > 0 else 0.0
@@ -330,14 +349,14 @@ def generate_table1(
                 mean_sd_row["p_value"] = "-"
                 med_iqr_row["p_value"] = "-"
 
-        table1_rows.append(mean_sd_row)
-        table1_rows.append(med_iqr_row)
+        var_blocks.setdefault(var, []).extend([mean_sd_row, med_iqr_row])
         table1b_rows.append(t1b_row)
 
     # 2. Categorical Variables
     for var in cat_vars:
         if var not in df.columns:
             continue
+        dp = _dp(var)
         s_all = df[var].astype(str)
         # Identify categories excluding nan
         raw_s = df[var]
@@ -374,7 +393,7 @@ def generate_table1(
             cat_row: dict[str, Any] = {
                 "Variable": var if first_cat else "",
                 "Category": str(cat),
-                overall_header: f"{n_cat_all:,} ({pct_cat_all:.{decimal_places}f}%)",
+                overall_header: f"{n_cat_all:,} ({pct_cat_all:.{dp}f}%)",
             }
 
             if has_strata:
@@ -384,7 +403,7 @@ def generate_table1(
                     n_val = (sdf[var] == cat).sum()
                     pct_val = (n_val / strata_ns[val] * 100.0) if strata_ns[val] > 0 else 0.0
                     label = strata_map.get(val, f"Stratum {val}")
-                    cat_row[f"{label} (N={strata_ns[val]:,})"] = f"{n_val:,} ({pct_val:.{decimal_places}f}%)"
+                    cat_row[f"{label} (N={strata_ns[val]:,})"] = f"{n_val:,} ({pct_val:.{dp}f}%)"
                     prop_strata[val] = pct_val / 100.0
 
                     if first_cat:
@@ -404,10 +423,33 @@ def generate_table1(
                 if compute_pvalues:
                     cat_row["p_value"] = format_pvalue(pval_cat) if first_cat else ""
 
-            table1_rows.append(cat_row)
+            var_blocks.setdefault(var, []).append(cat_row)
             first_cat = False
 
         table1b_rows.append(t1b_row)
+
+    if groups:
+        placed: set[str] = set()
+        sections: list[tuple[str, list[str]]] = []
+        for title, members in groups.items():
+            keep = [v for v in members if v in var_blocks and v not in placed]
+            placed.update(keep)
+            sections.append((str(title), keep))
+        rest = [v for v in var_blocks if v not in placed]
+        if rest:
+            sections.append(("Other", rest))
+        cols = list(table1_rows[0].keys())
+        for title, members in sections:
+            if not members:
+                continue
+            hdr = {c: "" for c in cols}
+            hdr["Variable"] = title
+            table1_rows.append(hdr)
+            for v in members:
+                table1_rows.extend(var_blocks[v])
+    else:
+        for rows in var_blocks.values():
+            table1_rows.extend(rows)
 
     return {
         "table1": pd.DataFrame(table1_rows),

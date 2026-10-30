@@ -36,7 +36,7 @@ score_fhir_bundle(
 As \code{\link[=score_encounter]{score_encounter()}} plus a \code{fhir} element.
 }
 \description{
-Loads the Patient, Encounter, Observation, Condition and MedicationRequest resources of a FHIR R4 Bundle into a throw-away
+Loads the Patient, Encounter, Observation, Condition and MedicationRequest / MedicationAdministration / MedicationStatement resources of a FHIR R4 Bundle into a throw-away
 temporary DuckDB CDM (deleted on exit) and runs \code{\link[=score_encounter]{score_encounter()}}. Observations are matched on LOINC and creatinine / BUN
 are converted from SI units. Condition and medication codes are loaded only when \code{concept_map} (\code{c("system|code" = concept_id)})
 maps them or, when \code{vocab_con} / \code{vocab_db_path} is given, \code{\link[=resolve_fhir_codes]{resolve_fhir_codes()}} finds them in the OMOP vocabulary; the rest are
