@@ -82,6 +82,7 @@ reference:
   - build_end_of_life_cohort
   - build_treatment_episodes
   - generate_consort_attrition
+  - export_consort_flowchart
   - to_mermaid
   - to_typst
   - to_tikz
@@ -159,6 +160,9 @@ reference:
   - score_fhir_bundle
   - explain_rows
   - check_unit_sanity
+  - harmonize_contract_units
+  - resolve_fhir_codes
+  - VOCABULARY_BY_SYSTEM
   - REFERENCE_MEDIANS
   - LOINC_TO_FEATURE
   - write_drift_report

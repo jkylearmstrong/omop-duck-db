@@ -21,7 +21,7 @@ import pandas as pd
 
 from omop_etl.velocity import VELOCITY_CONCEPTS
 
-__all__ = ["score_fhir_bundle", "LOINC_TO_FEATURE"]
+__all__ = ["score_fhir_bundle", "LOINC_TO_FEATURE", "resolve_codes", "VOCABULARY_BY_SYSTEM"]
 
 LOINC_TO_FEATURE = {
     "8867-4": "heart_rate", "8480-6": "systolic_bp", "8462-4": "diastolic_bp", "3094-0": "lab_bun", "2160-0": "lab_creatinine",
@@ -32,8 +32,45 @@ LOINC_TO_FEATURE = {
 # (feature, source unit lower-case) -> multiplier into the contract unit (mg/dL; mmol/L == mEq/L)
 _UNIT_FACTORS = {("lab_creatinine", "umol/l"): 1 / 88.4, ("lab_creatinine", "µmol/l"): 1 / 88.4,
                  ("lab_bun", "mmol/l"): 2.801, ("lab_glucose", "mmol/l"): 18.016}
+VOCABULARY_BY_SYSTEM = {"http://snomed.info/sct": "SNOMED", "http://www.nlm.nih.gov/research/umls/rxnorm": "RxNorm",
+                        "http://hl7.org/fhir/sid/icd-10-cm": "ICD10CM", "http://hl7.org/fhir/sid/icd-10": "ICD10",
+                        "http://hl7.org/fhir/sid/icd-9-cm": "ICD9CM", "http://hl7.org/fhir/sid/ndc": "NDC",
+                        "http://www.ama-assn.org/go/cpt": "CPT4"}
 _ENC_CLASS = {"IMP": 9201, "ACUTE": 9201, "NONAC": 9201, "EMER": 9203, "AMB": 9202, "OBSENC": 581385}
 _GENDER = {"female": 8532, "male": 8507}
+
+
+def resolve_codes(vocab_con: duckdb.DuckDBPyConnection, codes: Any) -> dict[str, int]:
+    """Resolve ``"system|code"`` strings to standard OMOP concept ids using the ``concept`` tables of ``vocab_con``.
+
+    The FHIR system URI selects the vocabulary (:data:`VOCABULARY_BY_SYSTEM`); a standard concept is used as is,
+    otherwise the valid ``Maps to`` relationship is followed (when ``concept_relationship`` exists). Systems that are
+    not in the table, and codes with no standard target, are omitted.
+    """
+    pairs = []
+    for k in dict.fromkeys(codes):
+        system, _, code = str(k).partition("|")
+        if system in VOCABULARY_BY_SYSTEM and code:
+            pairs.append((k, VOCABULARY_BY_SYSTEM[system], code))
+    if not pairs:
+        return {}
+    tables = {r[0].lower() for r in vocab_con.execute("SHOW TABLES").fetchall()}
+    if "concept" not in tables:
+        raise ValueError("The vocabulary connection has no 'concept' table.")
+    vocab_con.register("_fhir_codes", pd.DataFrame(pairs, columns=["k", "vocabulary_id", "concept_code"]))
+    try:
+        if "concept_relationship" in tables:
+            join = ("LEFT JOIN concept_relationship r ON r.concept_id_1 = c.concept_id AND r.relationship_id = 'Maps to' "
+                    "AND r.invalid_reason IS NULL")
+            target = "CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE r.concept_id_2 END"
+        else:
+            join, target = "", "CASE WHEN c.standard_concept = 'S' THEN c.concept_id END"
+        rows = vocab_con.execute(
+            f"SELECT q.k, min({target}) AS cid FROM _fhir_codes q JOIN concept c ON c.vocabulary_id = q.vocabulary_id "
+            f"AND c.concept_code = q.concept_code AND c.invalid_reason IS NULL {join} GROUP BY q.k").fetchall()
+    finally:
+        vocab_con.unregister("_fhir_codes")
+    return {k: int(cid) for k, cid in rows if cid is not None}
 
 
 def _load(fhir_json: Any) -> dict[str, Any]:
@@ -56,9 +93,14 @@ def _codings(res: Mapping[str, Any], field: str = "code") -> list[tuple[str, str
 
 
 def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | None = None, as_of: Any = None,
-                      concept_map: Mapping[str, int] | None = None, explain: bool = False, top_k: int = 5,
+                      concept_map: Mapping[str, int] | None = None,
+                      vocab_con: Any = None, vocab_db_path: Any = None, explain: bool = False, top_k: int = 5,
                       **score_kwargs: Any) -> dict[str, Any]:
-    """Score the latest (or ``encounter_id``) Encounter of a FHIR Bundle. Extra keywords go to ``score_encounter``."""
+    """Score the latest (or ``encounter_id``) Encounter of a FHIR Bundle. Extra keywords go to ``score_encounter``.
+
+    Condition and MedicationRequest codes are mapped through ``concept_map`` first; the rest are resolved against the
+    OMOP vocabulary in ``vocab_con`` (an open DuckDB connection) or ``vocab_db_path`` (opened read-only) when given.
+    """
     from omop_etl.build_omop_cdm import build_schema
     from omop_etl.encounter import score_encounter
 
@@ -79,6 +121,18 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
             raise ValueError(f"Encounter {encounter_id!r} not in the bundle.")
     enc = max(encs, key=lambda x: str((x.get("period") or {}).get("start") or ""))
     cmap = dict(concept_map or {})
+    if vocab_con is not None or vocab_db_path is not None:
+        wanted = [f"{s}|{k}" for r in res.get("Condition", []) for s, k in _codings(r)] + \
+                 [f"{s}|{k}" for r in res.get("MedicationRequest", []) for s, k in _codings(r, "medicationCodeableConcept")]
+        wanted = [w for w in wanted if w not in cmap]
+        if vocab_con is not None:
+            cmap = {**resolve_codes(vocab_con, wanted), **cmap}
+        else:
+            vc = duckdb.connect(str(vocab_db_path), read_only=True)
+            try:
+                cmap = {**resolve_codes(vc, wanted), **cmap}
+            finally:
+                vc.close()
     unmapped: set[str] = set()
     skipped_obs = 0
 

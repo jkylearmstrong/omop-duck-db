@@ -40,7 +40,8 @@ explain_rows <- function(bundle, features, top_k = 5L) {
 #' @param max_ratio Flag when `site/reference` is above this or below its inverse.
 #' @param min_n Skip features with fewer non-missing values.
 #' @param warn Emit a warning naming flagged features.
-#' @return data.frame: `feature`, `n`, `site_median`, `reference_median`, `ratio`, `flag`, `hint`.
+#' @return data.frame: `feature`, `n`, `site_median`, `reference_median`, `ratio`, `flag`, `hint`, `suspect_factor`
+#'   (the multiplier that brings a flagged column to the contract unit, `NA` when no named conversion matches).
 #' @export
 check_unit_sanity <- function(features, reference_medians = NULL, max_ratio = 3, min_n = 20L, warn = TRUE) {
   ref <- utils::modifyList(as.list(REFERENCE_MEDIANS), as.list(reference_medians))
@@ -54,23 +55,52 @@ check_unit_sanity <- function(features, reference_medians = NULL, max_ratio = 3,
     if (length(v) < min_n) next
     med <- stats::median(v); ratio <- med / ref[[n]]
     flag <- is.finite(ratio) && (ratio > max_ratio || ratio < 1 / max_ratio)
-    hint <- ""
+    hint <- ""; factor <- NA_real_
     if (flag) {
       hint <- "unharmonized unit or scale suspected"
-      for (s in suspects[[n]]) if (abs(log(max(ratio, 1e-9) / as.numeric(s[[1]]))) < log(1.6)) { hint <- s[[2]]; break }
+      for (s in suspects[[n]]) if (abs(log(max(ratio, 1e-9) / as.numeric(s[[1]]))) < log(1.6)) {
+        hint <- s[[2]]; factor <- 1 / as.numeric(s[[1]]); break
+      }
     }
     rows[[length(rows) + 1L]] <- data.frame(feature = n, n = length(v), site_median = med, reference_median = ref[[n]],
-                                            ratio = ratio, flag = flag, hint = hint, stringsAsFactors = FALSE)
+                                            ratio = ratio, flag = flag, hint = hint, suspect_factor = factor,
+                                            stringsAsFactors = FALSE)
   }
   out <- if (length(rows)) do.call(rbind, rows) else
     data.frame(feature = character(), n = integer(), site_median = numeric(), reference_median = numeric(),
-               ratio = numeric(), flag = logical(), hint = character(), stringsAsFactors = FALSE)
+               ratio = numeric(), flag = logical(), hint = character(), suspect_factor = numeric(), stringsAsFactors = FALSE)
   if (warn && any(out$flag)) {
     b <- out[out$flag, ]
     warning("unit sanity: ", paste(sprintf("%s median %.3g vs reference %.3g%s", b$feature, b$site_median, b$reference_median,
                                            ifelse(nzchar(b$hint), paste0(" (", b$hint, ")"), "")), collapse = "; "), call. = FALSE)
   }
   out
+}
+
+#' Rescale flagged features to the contract units
+#'
+#' Multiplies every feature flagged by [check_unit_sanity()] whose median matches a named conversion (umol/L creatinine, mmol/L
+#' urea, mmol/L glucose, ...) by its `suspect_factor`. Features flagged for an unexplained reason are left untouched and listed
+#' with `rescaled = FALSE` for review. `features` is not modified. Mirror of Python `omop_etl.unit_guard.harmonize_contract_units`.
+#'
+#' @param features data.frame of features.
+#' @param sanity Output of [check_unit_sanity()]; computed here (without a warning) when `NULL`.
+#' @param reference_medians Passed to [check_unit_sanity()] when `sanity` is `NULL`.
+#' @return A list: `features` (the rescaled data.frame) and `applied` (data.frame: `feature`, `factor`, `rescaled`, `hint`).
+#' @export
+harmonize_contract_units <- function(features, sanity = NULL, reference_medians = NULL) {
+  if (is.null(sanity)) sanity <- check_unit_sanity(features, reference_medians = reference_medians, warn = FALSE)
+  bad <- sanity[sanity$flag, , drop = FALSE]
+  fixed <- features
+  ok <- logical(nrow(bad))
+  for (i in seq_len(nrow(bad))) {
+    f <- bad$suspect_factor[[i]]; n <- bad$feature[[i]]
+    ok[[i]] <- is.finite(f) && n %in% names(fixed)
+    if (ok[[i]]) fixed[[n]] <- suppressWarnings(as.numeric(fixed[[n]])) * f
+  }
+  list(features = fixed,
+       applied = data.frame(feature = as.character(bad$feature), factor = as.numeric(bad$suspect_factor), rescaled = ok,
+                            hint = as.character(bad$hint), stringsAsFactors = FALSE))
 }
 
 #' Typical adult inpatient reference medians (contract units)
@@ -97,22 +127,68 @@ LOINC_TO_FEATURE <- c("8867-4" = "heart_rate", "8480-6" = "systolic_bp", "8462-4
 }
 .fhir_date <- function(x) if (is.null(x) || !nzchar(x)) NULL else as.Date(substr(x, 1, 10))
 
+#' FHIR system URIs and the OMOP vocabulary each one selects
+#' @format Named character.
+#' @export
+VOCABULARY_BY_SYSTEM <- c("http://snomed.info/sct" = "SNOMED", "http://www.nlm.nih.gov/research/umls/rxnorm" = "RxNorm",
+                          "http://hl7.org/fhir/sid/icd-10-cm" = "ICD10CM", "http://hl7.org/fhir/sid/icd-10" = "ICD10",
+                          "http://hl7.org/fhir/sid/icd-9-cm" = "ICD9CM", "http://hl7.org/fhir/sid/ndc" = "NDC",
+                          "http://www.ama-assn.org/go/cpt" = "CPT4")
+
+#' Resolve FHIR codes to standard OMOP concept ids
+#'
+#' Looks `"system|code"` strings up in the `concept` table of a vocabulary connection. The system URI selects the vocabulary
+#' ([VOCABULARY_BY_SYSTEM]); a standard concept is used as is, otherwise the valid `Maps to` relationship is followed (when
+#' `concept_relationship` exists). Unknown systems and codes with no standard target are omitted. Mirror of Python
+#' `omop_etl.fhir.resolve_codes`.
+#'
+#' @param vocab_con A DBI connection holding the OMOP vocabulary tables.
+#' @param codes Character vector of `"system|code"`.
+#' @return A named list `"system|code" = concept_id`.
+#' @export
+resolve_fhir_codes <- function(vocab_con, codes) {
+  codes <- unique(as.character(codes))
+  sys <- sub("\\|.*$", "", codes); code <- sub("^[^|]*\\|", "", codes)
+  keep <- sys %in% names(VOCABULARY_BY_SYSTEM) & nzchar(code) & grepl("|", codes, fixed = TRUE)
+  if (!any(keep)) return(list())
+  codes <- codes[keep]; sys <- sys[keep]; code <- code[keep]
+  tabs <- tolower(DBI::dbListTables(vocab_con))
+  if (!"concept" %in% tabs) stop("The vocabulary connection has no 'concept' table.", call. = FALSE)
+  qs <- function(x) as.character(DBI::dbQuoteString(vocab_con, x))
+  vals <- paste(sprintf("(%s, %s, %s)", qs(codes), qs(unname(VOCABULARY_BY_SYSTEM[sys])), qs(code)), collapse = ", ")
+  if ("concept_relationship" %in% tabs) {
+    join <- paste("LEFT JOIN concept_relationship r ON r.concept_id_1 = c.concept_id AND r.relationship_id = 'Maps to'",
+                  "AND r.invalid_reason IS NULL")
+    target <- "CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE r.concept_id_2 END"
+  } else {
+    join <- ""; target <- "CASE WHEN c.standard_concept = 'S' THEN c.concept_id END"
+  }
+  r <- DBI::dbGetQuery(vocab_con, sprintf(
+    "SELECT q.k, MIN(%s) AS cid FROM (VALUES %s) AS q(k, vocabulary_id, concept_code) JOIN concept c ON c.vocabulary_id = q.vocabulary_id AND c.concept_code = q.concept_code AND c.invalid_reason IS NULL %s GROUP BY q.k",
+    target, vals, join))
+  r <- r[!is.na(r$cid), , drop = FALSE]
+  stats::setNames(as.list(as.integer(r$cid)), r$k)
+}
+
 #' Score a FHIR Bundle without a pre-built database
 #'
 #' Loads the Patient, Encounter, Observation, Condition and MedicationRequest resources of a FHIR R4 Bundle into a throw-away
 #' temporary DuckDB CDM (deleted on exit) and runs [score_encounter()]. Observations are matched on LOINC and creatinine / BUN
 #' are converted from SI units. Condition and medication codes are loaded only when `concept_map` (`c("system|code" = concept_id)`)
-#' maps them; the rest are returned in `fhir$unmapped_codes`. Mirror of Python `omop_etl.fhir.score_fhir_bundle`.
+#' maps them or, when `vocab_con` / `vocab_db_path` is given, [resolve_fhir_codes()] finds them in the OMOP vocabulary; the rest are
+#' returned in `fhir$unmapped_codes`. Mirror of Python `omop_etl.fhir.score_fhir_bundle`.
 #'
 #' @param fhir_json A FHIR Bundle as a JSON string, a file path, or a parsed list.
 #' @param model_bundle A `model_bundle` or bundle directory.
 #' @param encounter_id Encounter `id` to score (default: the latest by start).
 #' @param as_of,concept_map,explain,top_k See [score_encounter()].
+#' @param vocab_con A DBI connection with the OMOP vocabulary, used for codes not in `concept_map`.
+#' @param vocab_db_path Path of a DuckDB vocabulary file (opened read-only) used when `vocab_con` is `NULL`.
 #' @param ... Further arguments to [score_encounter()].
 #' @return As [score_encounter()] plus a `fhir` element.
 #' @export
 score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_of = NULL, concept_map = NULL,
-                              explain = FALSE, top_k = 5L, ...) {
+                              explain = FALSE, top_k = 5L, vocab_con = NULL, vocab_db_path = NULL, ...) {
   b <- if (is.list(fhir_json)) fhir_json else if (file.exists(fhir_json)) jsonlite::fromJSON(fhir_json, simplifyVector = FALSE) else
     jsonlite::fromJSON(fhir_json, simplifyVector = FALSE)
   if (!identical(b$resourceType, "Bundle")) stop("score_fhir_bundle expects a FHIR Bundle (resourceType 'Bundle').", call. = FALSE)
@@ -135,6 +211,16 @@ score_fhir_bundle <- function(fhir_json, model_bundle, encounter_id = NULL, as_o
   birth <- .fhir_date(patient$birthDate)
   gender <- c(female = 8532L, male = 8507L)[tolower(if (is.null(patient$gender)) "" else patient$gender)]
   cmap <- as.list(concept_map)
+  if (!is.null(vocab_con) || !is.null(vocab_db_path)) {
+    codes_of <- function(rs, field) unlist(lapply(rs, function(r) vapply(.fhir_codings(r, field), function(c) paste0(c$system, "|", c$code), character(1))))
+    wanted <- setdiff(c(codes_of(res$Condition, "code"), codes_of(res$MedicationRequest, "medicationCodeableConcept")), names(cmap))
+    vc <- vocab_con
+    if (is.null(vc)) {
+      vc <- DBI::dbConnect(duckdb::duckdb(), vocab_db_path, read_only = TRUE)
+      on.exit(try(DBI::dbDisconnect(vc, shutdown = TRUE), silent = TRUE), add = TRUE)
+    }
+    cmap <- utils::modifyList(resolve_fhir_codes(vc, wanted), cmap)
+  }
   unmapped <- character(); skipped <- 0L
   factors <- list(lab_creatinine = c("umol/l" = 1 / 88.4, "\u00b5mol/l" = 1 / 88.4), lab_bun = c("mmol/l" = 2.801),
                   lab_glucose = c("mmol/l" = 18.016))

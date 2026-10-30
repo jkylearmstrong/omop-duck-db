@@ -2323,6 +2323,61 @@ def generate_consort_attrition(
     )
 
 
+def export_consort_flowchart(attrition: Any, out_path: str | Path = "figure1.png", *, title: str | None = None,
+                             dpi: int = 300, format: str | None = None) -> Path:
+    """Render a publication-ready CONSORT flowchart from an attrition table and write it to ``out_path``.
+
+    ``attrition`` is a :class:`ConsortAttrition`, the DataFrame from ``compute_attrition`` or anything
+    :func:`generate_consort_attrition` accepts. One box per step shows ``N`` (and the percentage retained); the
+    subjects excluded at a step go in a box to its right. The counts come from the table itself, so the figure cannot
+    drift from the SQL output. The format follows the file extension (png, svg, pdf) unless ``format`` is given.
+    Needs matplotlib.
+    """
+    try:
+        from matplotlib.figure import Figure
+    except ImportError as e:  # pragma: no cover - matplotlib is optional
+        raise ImportError("export_consort_flowchart needs matplotlib (pip install matplotlib).") from e
+    if hasattr(attrition, "to_dataframe"):
+        df = attrition.to_dataframe()
+    elif isinstance(attrition, pd.DataFrame) and "step_name" in attrition.columns:
+        df = attrition
+    else:
+        df = generate_consort_attrition(cohort_data=attrition).to_dataframe()
+    if df.empty:
+        raise ValueError("The attrition table has no steps.")
+    df = df.reset_index(drop=True)
+    retained = [int(v) for v in df["subjects_retained"]]
+    dropped = ([max(int(v), 0) for v in df["subjects_dropped"]] if "subjects_dropped" in df.columns else
+               [0] + [max(a - b, 0) for a, b in zip(retained, retained[1:])])
+    pct = [float(v) for v in df["percent_retained"]] if "percent_retained" in df.columns else \
+        [100.0 * n / retained[0] if retained[0] else 0.0 for n in retained]
+    n = len(df)
+    fig = Figure(figsize=(8.0, 1.6 * n + 0.8))
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, n * 2 + 1)
+    ax.axis("off")
+    box = dict(boxstyle="round,pad=0.4", fc="white", ec="black", lw=1.2)
+    for i in range(n):
+        y = (n - i) * 2 - 0.5
+        label = f"{df['step_name'].iloc[i]}\nN = {retained[i]:,} ({pct[i]:.1f}%)"
+        ax.text(3.6, y, label, ha="center", va="center", fontsize=10, bbox=box)
+        if i > 0:
+            ax.annotate("", xy=(3.6, y + 0.26), xytext=(3.6, y + 2 - 0.26),
+                        arrowprops=dict(arrowstyle="-|>", lw=1.2, shrinkA=0, shrinkB=0))
+            if dropped[i] > 0:
+                ym = y + 1
+                ax.annotate("", xy=(7.65, ym), xytext=(3.6, ym), arrowprops=dict(arrowstyle="-|>", lw=1.0, shrinkA=0, shrinkB=0))
+                ax.text(8.1, ym, f"Excluded\nn = {dropped[i]:,}", ha="center", va="center", fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.4", fc="#f2f2f2", ec="black", lw=1.0))
+    if title:
+        ax.text(5, n * 2 + 0.6, title, ha="center", va="center", fontsize=12, fontweight="bold")
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=dpi, format=format or (out.suffix.lstrip(".").lower() or "png"))
+    return out
+
+
 def build_treatment_episodes(
     con: duckdb.DuckDBPyConnection,
     target_table: str = "drug_exposure",

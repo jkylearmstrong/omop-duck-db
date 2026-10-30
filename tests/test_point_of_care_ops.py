@@ -210,3 +210,71 @@ def test_fhir_bp_panel_components_are_extracted(bundle):
                                     "code": {"coding": [{"system": "http://loinc.org", "code": "85354-9"}]},
                                     "component": [comp("8480-6", 130), comp("8462-4", 80)]}})
     assert score_fhir_bundle(b, bundle)["fhir"]["observations_skipped"] == 0
+
+
+def _vocab():
+    import duckdb
+    v = duckdb.connect(":memory:")
+    v.execute("CREATE TABLE concept (concept_id INT, concept_name VARCHAR, domain_id VARCHAR, vocabulary_id VARCHAR, "
+              "concept_class_id VARCHAR, standard_concept VARCHAR, concept_code VARCHAR, invalid_reason VARCHAR)")
+    v.execute("CREATE TABLE concept_relationship (concept_id_1 INT, concept_id_2 INT, relationship_id VARCHAR, invalid_reason VARCHAR)")
+    v.execute("INSERT INTO concept VALUES (201826, 'T2DM', 'Condition', 'SNOMED', 'Clinical Finding', 'S', '44054006', NULL), "
+              "(1503297, 'metformin', 'Drug', 'RxNorm', 'Ingredient', 'S', '6809', NULL), "
+              "(900, 'icd', 'Condition', 'ICD10CM', 'ICD10 code', NULL, 'E11.9', NULL)")
+    v.execute("INSERT INTO concept_relationship VALUES (900, 201826, 'Maps to', NULL), (900, 999, 'Maps to', 'D')")
+    return v
+
+
+def test_resolve_codes_standard_and_mapped():
+    from omop_etl.fhir import resolve_codes
+    got = resolve_codes(_vocab(), ["http://snomed.info/sct|44054006", "http://hl7.org/fhir/sid/icd-10-cm|E11.9",
+                                   "http://www.nlm.nih.gov/research/umls/rxnorm|6809", "http://snomed.info/sct|0",
+                                   "http://example.org|x"])
+    assert got == {"http://snomed.info/sct|44054006": 201826, "http://hl7.org/fhir/sid/icd-10-cm|E11.9": 201826,
+                   "http://www.nlm.nih.gov/research/umls/rxnorm|6809": 1503297}
+
+
+def test_score_fhir_bundle_resolves_codes_from_vocabulary(bundle, tmp_path):
+    import duckdb
+    r = score_fhir_bundle(FHIR, bundle, vocab_con=_vocab())
+    assert r["fhir"]["unmapped_codes"] == []
+    path = tmp_path / "v.duckdb"
+    v = duckdb.connect(str(path))
+    v.execute("CREATE TABLE concept AS SELECT * FROM (VALUES (1, 'x', 'Condition', 'SNOMED', 'c', 'S', '44054006', NULL::VARCHAR)) "
+              "t(concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, invalid_reason)")
+    v.close()
+    assert score_fhir_bundle(FHIR, bundle, vocab_db_path=path)["fhir"]["unmapped_codes"] == []
+    # an explicit concept_map entry wins over the vocabulary
+    assert score_fhir_bundle(FHIR, bundle, vocab_con=_vocab(),
+                             concept_map={"http://snomed.info/sct|44054006": 5})["fhir"]["unmapped_codes"] == []
+
+
+def test_harmonize_contract_units_rescales_named_suspects_only():
+    from omop_etl.unit_guard import harmonize_contract_units
+    df = pd.DataFrame({"lab_creatinine": np.full(50, 88.4), "lab_glucose": np.full(50, 6.1),
+                       "heart_rate": np.full(50, 400.0), "lab_sodium": np.full(50, 139.0)})
+    fixed, applied = harmonize_contract_units(df)
+    assert fixed["lab_creatinine"].iloc[0] == pytest.approx(1.0, rel=0.02)
+    assert fixed["lab_glucose"].iloc[0] == pytest.approx(110, rel=0.02)
+    assert (fixed["heart_rate"] == 400.0).all() and (fixed["lab_sodium"] == 139.0).all()  # unexplained / fine: untouched
+    assert df["lab_creatinine"].iloc[0] == 88.4  # input not modified
+    by = applied.set_index("feature")
+    assert by.loc["lab_creatinine", "rescaled"] and by.loc["lab_glucose", "rescaled"] and not by.loc["heart_rate", "rescaled"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert not check_unit_sanity(fixed.drop(columns="heart_rate"))["flag"].any()
+
+
+def test_export_consort_flowchart_writes_images(tmp_path):
+    pytest.importorskip("matplotlib")
+    from omop_etl import export_consort_flowchart
+    from omop_etl.cohort import ConsortAttrition
+    att = ConsortAttrition(pd.DataFrame({"step_number": [1, 2, 3], "step_name": ["Adults", "Has labs", "Index admission"],
+                                         "subjects_retained": [1000, 800, 650], "subjects_dropped": [0, 200, 150],
+                                         "percent_retained": [100.0, 80.0, 65.0]}))
+    png = export_consort_flowchart(att, tmp_path / "out" / "figure1.png", title="Figure 1")
+    svg = export_consort_flowchart(att.to_dataframe(), tmp_path / "f.svg")
+    assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert "650" in svg.read_text(encoding="utf-8") or svg.stat().st_size > 1000
+    with pytest.raises(ValueError):
+        export_consort_flowchart(ConsortAttrition(att.to_dataframe().iloc[0:0]), tmp_path / "e.png")

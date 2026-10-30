@@ -24,7 +24,8 @@ check_unit_sanity(
 \item{warn}{Emit a warning naming flagged features.}
 }
 \value{
-data.frame: \code{feature}, \code{n}, \code{site_median}, \code{reference_median}, \code{ratio}, \code{flag}, \code{hint}.
+data.frame: \code{feature}, \code{n}, \code{site_median}, \code{reference_median}, \code{ratio}, \code{flag}, \code{hint}, \code{suspect_factor}
+(the multiplier that brings a flagged column to the contract unit, \code{NA} when no named conversion matches).
 }
 \description{
 Flags lab/vital features whose median is more than \code{max_ratio} times above or below the reference median, which is how an
