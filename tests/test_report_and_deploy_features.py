@@ -9,10 +9,18 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
+from conftest import import_or_skip  # noqa: E402
 from omop_etl.fhir import score_fhir_bundle  # noqa: E402
 from omop_etl.model_bundle import export_to_onnx, load_model_bundle, write_model_bundle  # noqa: E402
 from omop_etl.odds_ratios import export_table3, generate_table3_odds_ratios  # noqa: E402
 from omop_etl.table1 import generate_table1  # noqa: E402
+
+
+def _need_onnx():
+    try:
+        import onnx  # noqa: F401
+    except Exception as exc:  # absent, or installed but binary-incompatible with this numpy
+        pytest.skip(f"onnx is unavailable: {type(exc).__name__}: {exc}")
 
 
 def _df(n=200):
@@ -59,19 +67,74 @@ def test_table3_scaling_and_export():
     assert ten.loc[0, "or"] == pytest.approx(per_unit.loc[0, "or"] ** 10)
     assert sd.loc[1, "Increment"] == "Yes vs No" and 1.5 < sd.loc[1, "or"] < 3.0
     assert sd.loc[0, "p_value"] == "<0.001"
-    sk = pytest.importorskip("sklearn.linear_model")
-    m = sk.LogisticRegression(C=1e8, max_iter=1000).fit(X, y)
-    assert generate_table3_odds_ratios(m, X, y, continuous_scale=None).loc[0, "or"] == pytest.approx(per_unit.loc[0, "or"], rel=1e-3)
-    for fmt, token in (("markdown", "| Variable"), ("quarto", "tbl-table3"), ("typst", "#figure")):
+    for fmt, token in (("markdown", "| Variable"), ("quarto", "tbl-table3"), ("typst", "#figure"), ("csv", "Variable,Increment")):
         assert token in export_table3(sd, fmt)
+    assert "or" not in sd.columns[:5].tolist() and "ci_low" not in export_table3(sd, "csv")
+
+
+def _table3_data(n=3000):
+    rng = np.random.default_rng(3)
+    X = pd.DataFrame({"sbp": rng.normal(130, 20, n), "dm": rng.integers(0, 2, n)})
+    y = (rng.random(n) < 1 / (1 + np.exp(-(-3 + 0.03 * (X.sbp - 130) + 0.7 * X.dm)))).astype(int)
+    return X, y
+
+
+def test_table3_accepts_sklearn_and_statsmodels_like_models_and_labels():
+    X, y = _table3_data()
+    base = generate_table3_odds_ratios(None, X, y, continuous_scale=None)
+
+    class SkLike:  # scikit-learn style: coef_ / intercept_ only; Wald SEs are recomputed from the data
+        coef_ = np.log(base["or"].to_numpy())[None, :]
+        intercept_ = np.array([0.0])
+
+    got = generate_table3_odds_ratios(SkLike(), X, y, continuous_scale=None, labels={"sbp": "Systolic BP"})
+    assert got.loc[0, "Variable"] == "Systolic BP" and got.loc[0, "or"] == pytest.approx(base.loc[0, "or"])
+
+    class SmLike:  # statsmodels style: params (with const) and bse
+        params = np.r_[0.0, np.log(base["or"].to_numpy())]
+        bse = np.r_[0.1, 0.05, 0.2]
+
+    got = generate_table3_odds_ratios(SmLike(), X.to_numpy(), y, feature_names=["a", "b"], continuous_scale=None)
+    assert got.loc[1, "ci_high"] == pytest.approx(np.exp(np.log(base.loc[1, "or"]) + 1.959964 * 0.2), rel=1e-5)
+    # a negative explicit increment flips the interval but keeps low < high
+    neg = generate_table3_odds_ratios(None, X, y, continuous_scale={"sbp": -10.0})
+    assert neg.loc[0, "ci_low"] < neg.loc[0, "or"] < neg.loc[0, "ci_high"]
+
+
+def test_table3_validation_errors():
+    X, y = _table3_data(200)
+    with pytest.raises(TypeError):
+        generate_table3_odds_ratios(object(), X, y)
+    with pytest.raises(ValueError, match="continuous_scale"):
+        generate_table3_odds_ratios(None, X, y, continuous_scale="iqr")
+    with pytest.raises(ValueError, match="y must be"):
+        generate_table3_odds_ratios(None, X, y + 2)
+    with pytest.raises(ValueError, match="feature_names"):
+        generate_table3_odds_ratios(None, X, y, feature_names=["only_one"])
+    with pytest.raises(ValueError, match="2-dimensional"):
+        generate_table3_odds_ratios(None, X["sbp"].to_numpy(), y)
+
+    class Wrong:
+        coef_ = np.zeros((1, 5))
+
+    with pytest.raises(ValueError, match="coefficients"):
+        generate_table3_odds_ratios(Wrong(), X, y)
+
+
+def test_table3_sklearn_fit_matches_irls():
+    sk = pytest.importorskip("sklearn.linear_model")
+    X, y = _table3_data()
+    m = sk.LogisticRegression(C=1e8, max_iter=1000).fit(X, y)
+    a = generate_table3_odds_ratios(m, X, y, continuous_scale=None).loc[0, "or"]
+    assert a == pytest.approx(generate_table3_odds_ratios(None, X, y, continuous_scale=None).loc[0, "or"], rel=1e-3)
 
 
 SPEC = {"features": [{"name": "a", "dtype": "float", "impute": 0.0}, {"name": "b", "dtype": "float", "impute": 0.0}]}
 
 
 def test_export_to_onnx_matches_bundle(tmp_path):
-    pytest.importorskip("onnx")
-    ort = pytest.importorskip("onnxruntime")
+    _need_onnx()
+    ort = import_or_skip("onnxruntime")
     b = write_model_bundle(tmp_path / "b", name="m", version="1", feature_spec=SPEC, components=[
         {"kind": "logistic", "filename": "g1.json", "weight": 2.0,
          "content": {"intercept": -1.0, "coef": [0.5, -0.2], "mean": [1.0, 2.0], "scale": [2.0, 4.0]}},
@@ -86,8 +149,33 @@ def test_export_to_onnx_matches_bundle(tmp_path):
     assert (tmp_path / "out" / "m.onnx.features.json").is_file()
 
 
+def test_export_to_onnx_single_onnx_component_is_copied_and_other_kinds_refused(tmp_path):
+    src = tmp_path / "model.onnx"
+    src.write_bytes(b"not-a-real-model")
+    b = write_model_bundle(tmp_path / "b1", name="m", version="1", feature_spec=SPEC,
+                           components=[{"kind": "onnx", "filename": "model.onnx", "file": str(src)}])
+    out = export_to_onnx(b, tmp_path / "o.onnx")
+    assert out.read_bytes() == b"not-a-real-model" and (tmp_path / "o.onnx.features.json").is_file()
+    mixed = write_model_bundle(tmp_path / "b2", name="m", version="1", feature_spec=SPEC, components=[
+        {"kind": "onnx", "filename": "model.onnx", "file": str(src)},
+        {"kind": "logistic", "filename": "g.json", "content": {"intercept": 0, "coef": [1, 1]}}])
+    with pytest.raises(NotImplementedError, match="supports logistic"):
+        export_to_onnx(mixed, tmp_path / "x.onnx")
+
+
+def test_export_to_onnx_logistic_without_calibration_and_bad_coef_count(tmp_path):
+    _need_onnx()
+    ok = write_model_bundle(tmp_path / "ok", name="m", version="1", feature_spec=SPEC,
+                            components=[{"kind": "logistic", "filename": "g.json", "content": {"intercept": 0.2, "coef": [1, -1]}}])
+    assert export_to_onnx(ok, tmp_path / "ok.onnx").stat().st_size > 100
+    bad = write_model_bundle(tmp_path / "bad", name="m", version="1", feature_spec=SPEC,
+                             components=[{"kind": "logistic", "filename": "g.json", "content": {"intercept": 0, "coef": [1]}}])
+    with pytest.raises(Exception, match="coefficients"):
+        export_to_onnx(bad, tmp_path / "bad.onnx")
+
+
 def test_export_to_onnx_refuses_isotonic(tmp_path):
-    pytest.importorskip("onnx")
+    _need_onnx()
     b = write_model_bundle(tmp_path / "b", name="m", version="1", feature_spec=SPEC,
                            components=[{"kind": "logistic", "filename": "g.json", "content": {"intercept": 0, "coef": [1, 1]}}],
                            calibration={"method": "isotonic", "x": [0, 1], "y": [0, 1]})
