@@ -44,7 +44,7 @@ generate_table3_odds_ratios <- function(model, X, y, feature_names = NULL, conti
     d <- places
     while (d < max_places && !isTRUE(all.equal(lo, hi)) &&
            (round(lo, d) == round(hi, d) || round(o, d) %in% c(round(lo, d), round(hi, d)))) d <- d + 1L
-    sprintf("%.*f (%.*f–%.*f)", d, o, d, lo, d, hi)
+    sprintf("%.*f (%.*f%s%.*f)", d, o, d, lo, intToUtf8(8211L), d, hi)
   }
   rows <- lapply(seq_along(names_), function(j) {
     nm <- names_[[j]]; col <- A[, j]

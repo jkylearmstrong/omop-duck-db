@@ -23,14 +23,6 @@ def _need_onnx():
         pytest.skip(f"onnx is unavailable: {type(exc).__name__}: {exc}")
 
 
-def _need_onnxruntime_after_onnx():
-    """Skip unless ``import onnx, onnxruntime`` (this order) survives in a child process: on some Windows runners
-    onnxruntime dies with a native access violation that kills pytest, and only when onnx was imported first."""
-    probe = subprocess.run([sys.executable, "-c", "import onnx, onnxruntime"], capture_output=True)
-    if probe.returncode != 0:
-        pytest.skip(f"onnx + onnxruntime cannot be imported together on this host (exit code {probe.returncode})")
-
-
 def _df(n=200):
     rng = np.random.default_rng(0)
     return pd.DataFrame({"outcome_flag": rng.integers(0, 2, n), "lab_creatinine": rng.normal(1.4, 1.4, n).round(3),
@@ -142,8 +134,6 @@ SPEC = {"features": [{"name": "a", "dtype": "float", "impute": 0.0}, {"name": "b
 
 def test_export_to_onnx_matches_bundle(tmp_path):
     _need_onnx()
-    _need_onnxruntime_after_onnx()
-    import onnxruntime as ort
     b = write_model_bundle(tmp_path / "b", name="m", version="1", feature_spec=SPEC, components=[
         {"kind": "logistic", "filename": "g1.json", "weight": 2.0,
          "content": {"intercept": -1.0, "coef": [0.5, -0.2], "mean": [1.0, 2.0], "scale": [2.0, 4.0]}},
@@ -151,11 +141,21 @@ def test_export_to_onnx_matches_bundle(tmp_path):
         calibration={"method": "platt", "slope": 0.9, "intercept": -0.1})
     bundle = load_model_bundle(b)
     path = export_to_onnx(bundle, tmp_path / "out" / "m.onnx")
-    X = np.random.default_rng(2).normal(size=(50, 2))
-    sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-    got = sess.run(["probabilities"], {"X": X.astype("float32")})[0].ravel()
-    np.testing.assert_allclose(got, bundle.predict_proba(X), atol=1e-5)
     assert (tmp_path / "out" / "m.onnx.features.json").is_file()
+    X = np.random.default_rng(2).normal(size=(50, 2))
+    np.save(tmp_path / "x.npy", X.astype("float32"))
+    # onnxruntime runs in a fresh interpreter: on some Windows runners it dies with a native access violation / DLL
+    # initialisation failure once other native libraries are already loaded, which would kill the whole pytest run.
+    code = ("import sys, numpy as np, onnxruntime as ort\n"
+            "s = ort.InferenceSession(sys.argv[1], providers=['CPUExecutionProvider'])\n"
+            "np.save(sys.argv[3], s.run(['probabilities'], {'X': np.load(sys.argv[2])})[0].ravel())\n")
+    run = subprocess.run([sys.executable, "-c", code, str(path), str(tmp_path / "x.npy"), str(tmp_path / "p.npy")],
+                         capture_output=True, text=True)
+    if run.returncode != 0:
+        if sys.platform == "win32":
+            pytest.skip(f"onnxruntime cannot run on this Windows host (exit code {run.returncode})")
+        pytest.fail(run.stderr[-500:])
+    np.testing.assert_allclose(np.load(tmp_path / "p.npy"), bundle.predict_proba(X), atol=1e-5)
 
 
 def test_export_to_onnx_single_onnx_component_is_copied_and_other_kinds_refused(tmp_path):
