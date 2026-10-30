@@ -22,7 +22,7 @@ from omop_etl.build_omop_cdm import load_drug_exposure, load_macros
 
 def test_package_version_and_commit():
     """Verify version is at least 0.6.5 and commit is present."""
-    assert __version__ in ("0.6.5", "0.6.6", "0.6.7", "0.6.8", "0.7.0", "0.8.6", "0.8.7")
+    assert __version__ in ("0.6.5", "0.6.6", "0.6.7", "0.6.8", "0.7.0", "0.8.6", "0.8.7", "0.8.7.1")
     import omop_etl
     assert hasattr(omop_etl, "__commit__")
     assert len(omop_etl.__commit__) >= 7

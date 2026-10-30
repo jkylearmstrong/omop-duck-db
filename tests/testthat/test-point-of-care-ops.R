@@ -93,3 +93,18 @@ test_that("etl_pcornet(mode = 'append') adds only new rows and is idempotent", {
   expect_equal(v$visit_source_value, c("E1", "E2", "E3")); expect_equal(as.integer(v$visit_occurrence_id), 1:3)
   expect_error(etl_pcornet(src, db, mode = "append"), "since")
 })
+
+test_that("score_fhir_bundle reads BP panel components and prior Encounters", {
+  b <- poc_fhir()
+  comp <- function(code, v) list(code = list(coding = list(list(system = "http://loinc.org", code = code))), valueQuantity = list(value = v, unit = "mmHg"))
+  b$entry <- c(b$entry, list(
+    list(resource = list(resourceType = "Observation", effectiveDateTime = "2024-01-04",
+                         code = list(coding = list(list(system = "http://loinc.org", code = "85354-9"))),
+                         component = list(comp("8480-6", 130), comp("8462-4", 80)))),
+    list(resource = list(resourceType = "Encounter", id = "h1", class = list(code = "IMP"), period = list(start = "2023-12-01", end = "2023-12-04"))),
+    list(resource = list(resourceType = "Encounter", id = "h2", class = list(code = "IMP"), period = list(start = "2023-10-01", end = "2023-10-03")))))
+  r <- score_fhir_bundle(b, poc_bundle())
+  expect_equal(r$fhir$observations_skipped, 0)
+  expect_equal(r$fhir$encounter_id, "e1")
+  expect_equal(r$features$prior_ip_count, 2)
+})

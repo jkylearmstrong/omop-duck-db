@@ -68,7 +68,7 @@ score_encounter <- function(con, visit_occurrence_id, bundle, as_of = NULL, extr
   cols <- tolower(DBI::dbGetQuery(con, "DESCRIBE measurement")$column_name)
   when <- if ("measurement_datetime" %in% cols) "COALESCE(measurement_datetime, CAST(measurement_date AS TIMESTAMP))" else "CAST(measurement_date AS TIMESTAMP)"
   feats <- c("heart_rate", "systolic_bp", "diastolic_bp", "lab_bun", "lab_creatinine", "lab_sodium", "lab_potassium", "lab_chloride",
-             "lab_bicarbonate", "lab_anion_gap", "lab_egfr")
+             "lab_bicarbonate", "lab_anion_gap", "lab_egfr", "lab_glucose")
   out <- list()
   for (f in feats) {
     ids <- as.integer(concepts[[f]])

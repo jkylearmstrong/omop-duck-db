@@ -25,7 +25,8 @@ from omop_etl.velocity import VELOCITY_CONCEPTS, derive_labs, engineer_clinical_
 __all__ = ["score_encounter"]
 
 _LATEST_FEATURES = ("heart_rate", "systolic_bp", "diastolic_bp", "lab_bun", "lab_creatinine", "lab_sodium",
-                    "lab_potassium", "lab_chloride", "lab_bicarbonate", "lab_anion_gap", "lab_egfr")
+                    "lab_potassium", "lab_chloride", "lab_bicarbonate", "lab_anion_gap", "lab_egfr",
+                    "lab_glucose")
 _COHORT_VIEW = "_score_encounter_cohort"
 
 

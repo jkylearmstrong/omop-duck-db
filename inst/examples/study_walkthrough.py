@@ -53,8 +53,8 @@ def synthetic_cdm(n: int = 400, seed: int = 1) -> tuple[duckdb.DuckDBPyConnectio
     stays = []
     for pid in person["person_id"]:
         for _ in range(int(rng.integers(1, 4))):
-            start = pd.Timestamp("2018-01-01") + pd.Timedelta(days=int(rng.integers(0, 900)))
-            stays.append((int(pid), int(rng.choice([9201, 262], p=[0.85, 0.15])), start, start + pd.Timedelta(days=int(rng.integers(2, 10)))))
+            start = pd.Timestamp("2018-01-01") + pd.to_timedelta(int(rng.integers(0, 900)), unit="D")
+            stays.append((int(pid), int(rng.choice([9201, 262], p=[0.85, 0.15])), start, start + pd.to_timedelta(int(rng.integers(2, 10)), unit="D")))
     visits = pd.DataFrame(stays, columns=["person_id", "visit_concept_id", "s", "e"])
     visits.insert(0, "visit_occurrence_id", np.arange(1, len(visits) + 1))
     con.register("_v", visits)
@@ -62,7 +62,7 @@ def synthetic_cdm(n: int = 400, seed: int = 1) -> tuple[duckdb.DuckDBPyConnectio
                 "visit_type_concept_id) SELECT visit_occurrence_id, person_id, visit_concept_id, s, e, 0 FROM _v")
     dead = person.sample(frac=0.06, random_state=seed)
     last = visits.groupby("person_id")["e"].max()
-    con.register("_d", pd.DataFrame({"person_id": dead["person_id"], "d": [last[p] + pd.Timedelta(days=int(rng.integers(-3, 40))) for p in dead["person_id"]]}))
+    con.register("_d", pd.DataFrame({"person_id": dead["person_id"], "d": [last[p] + pd.to_timedelta(int(rng.integers(-3, 40)), unit="D") for p in dead["person_id"]]}))
     con.execute("INSERT INTO death (person_id, death_date, death_type_concept_id) SELECT person_id, d, 0 FROM _d")
     return con, person
 

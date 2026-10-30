@@ -35,7 +35,8 @@ VELOCITY_CONCEPTS <- list(heart_rate = 3027018L, systolic_bp = 3004249L, diastol
                           lab_sodium = c(3019550L, 3014576L), lab_potassium = c(3023103L, 3028437L),
                           lab_chloride = c(3014576L, 3010813L), lab_bicarbonate = c(3007220L, 3016462L),
                           lab_anion_gap = c(3037278L, 3013444L, 3020564L),
-                          lab_egfr = c(40764999L, 1619025L, 36306178L, 36303797L))
+                          lab_egfr = c(40764999L, 1619025L, 36306178L, 36303797L),
+                          lab_glucose = c(3004501L, 3000483L))
 
 .fill <- function(x, v) { x[is.na(x)] <- v; x }
 .clip <- function(x, lower = -Inf, upper = Inf) pmin(pmax(x, lower), upper)  # NA stays NA

@@ -27,11 +27,11 @@ LOINC_TO_FEATURE = {
     "8867-4": "heart_rate", "8480-6": "systolic_bp", "8462-4": "diastolic_bp", "3094-0": "lab_bun", "2160-0": "lab_creatinine",
     "38483-4": "lab_creatinine", "2951-2": "lab_sodium", "2823-3": "lab_potassium", "2075-0": "lab_chloride",
     "1963-8": "lab_bicarbonate", "2028-9": "lab_bicarbonate", "33037-3": "lab_anion_gap", "62238-1": "lab_egfr",
-    "33914-3": "lab_egfr",
+    "33914-3": "lab_egfr", "2345-7": "lab_glucose", "2339-0": "lab_glucose",
 }
 # (feature, source unit lower-case) -> multiplier into the contract unit (mg/dL; mmol/L == mEq/L)
 _UNIT_FACTORS = {("lab_creatinine", "umol/l"): 1 / 88.4, ("lab_creatinine", "µmol/l"): 1 / 88.4,
-                 ("lab_bun", "mmol/l"): 2.801}
+                 ("lab_bun", "mmol/l"): 2.801, ("lab_glucose", "mmol/l"): 18.016}
 _ENC_CLASS = {"IMP": 9201, "ACUTE": 9201, "NONAC": 9201, "EMER": 9203, "AMB": 9202, "OBSENC": 581385}
 _GENDER = {"female": 8532, "male": 8507}
 
@@ -98,23 +98,41 @@ def score_fhir_bundle(fhir_json: Any, model_bundle: Any, *, encounter_id: str | 
         cls = (enc.get("class") or {}).get("code", "IMP")
         con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, "
                     "visit_end_date, visit_type_concept_id) VALUES (1, 1, ?, ?, ?, 0)", [_ENC_CLASS.get(cls, 9201), start, end])
+        # Other Encounters are the longitudinal history behind prior_ip_count, prior_ed_count, days_since_prior_encounter.
+        first = start
+        vid = 1
+        for other in res["Encounter"]:
+            if other is enc:
+                continue
+            p_o = other.get("period") or {}
+            s_o = _date(p_o.get("start"))
+            if s_o is None:
+                continue
+            vid += 1
+            first = min(first, s_o)
+            con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, "
+                        "visit_end_date, visit_type_concept_id) VALUES (?, 1, ?, ?, ?, 0)",
+                        [vid, _ENC_CLASS.get((other.get("class") or {}).get("code", "IMP"), 9201), s_o, _date(p_o.get("end")) or s_o])
         con.execute("INSERT INTO observation_period (observation_period_id, person_id, observation_period_start_date, "
                     "observation_period_end_date, period_type_concept_id) VALUES (1, 1, ?, ?, 0)",
-                    [min(start, birth or start), max(end, today)])
+                    [min(first, birth or first), max(end, today)])
         mid = 0
         for o in res.get("Observation", []):
-            feat = next((LOINC_TO_FEATURE[c] for s, c in _codings(o) if s.endswith("loinc.org") and c in LOINC_TO_FEATURE), None)
-            q = o.get("valueQuantity") or {}
             when = _date(o.get("effectiveDateTime") or (o.get("effectivePeriod") or {}).get("start") or o.get("issued"))
-            if feat is None or q.get("value") is None or when is None:
-                skipped_obs += 1
-                continue
-            unit = str(q.get("unit") or q.get("code") or "").lower()
-            value = float(q["value"]) * _UNIT_FACTORS.get((feat, unit), 1.0)
-            mid += 1
-            con.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, "
-                        "measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (?, 1, ?, ?, 0, ?, 1)",
-                        [mid, int(VELOCITY_CONCEPTS[feat][0]), when, value])
+            # A panel (e.g. blood pressure 85354-9 / 55284-4) has no valueQuantity; its values sit in component[].
+            parts = [o] if o.get("valueQuantity") else [c for c in (o.get("component") or []) if isinstance(c, Mapping)] or [o]
+            for part in parts:
+                feat = next((LOINC_TO_FEATURE[c] for s, c in _codings(part) if s.endswith("loinc.org") and c in LOINC_TO_FEATURE), None)
+                q = part.get("valueQuantity") or {}
+                if feat is None or q.get("value") is None or when is None:
+                    skipped_obs += 1
+                    continue
+                unit = str(q.get("unit") or q.get("code") or "").lower()
+                value = float(q["value"]) * _UNIT_FACTORS.get((feat, unit), 1.0)
+                mid += 1
+                con.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, "
+                            "measurement_type_concept_id, value_as_number, visit_occurrence_id) VALUES (?, 1, ?, ?, 0, ?, 1)",
+                            [mid, int(VELOCITY_CONCEPTS[feat][0]), when, value])
         for i, c in enumerate(res.get("Condition", []), 1):
             cid = next((cmap[f"{s}|{k}"] for s, k in _codings(c) if f"{s}|{k}" in cmap), None)
             if cid is None:
