@@ -2,6 +2,7 @@
 % Please edit documentation in R/point_of_care.R
 \name{resolve_fhir_codes}
 \alias{resolve_fhir_codes}
+\alias{resolve_codes}
 \title{Resolve FHIR codes to standard OMOP concept ids}
 \usage{
 resolve_fhir_codes(vocab_con, codes)

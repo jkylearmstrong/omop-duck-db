@@ -220,6 +220,10 @@ resolve_fhir_codes <- function(vocab_con, codes) {
   stats::setNames(as.list(as.integer(r$cid)), r$k)
 }
 
+#' @rdname resolve_fhir_codes
+#' @export
+resolve_codes <- resolve_fhir_codes
+
 #' Score a FHIR Bundle without a pre-built database
 #'
 #' Loads the Patient, Encounter, Observation, Condition and MedicationRequest resources of a FHIR R4 Bundle into a throw-away

@@ -158,6 +158,14 @@ test_that("export_consort_flowchart writes png and svg", {
   expect_error(export_consort_flowchart(att[0, ], file.path(d, "e.png")), "no steps")
 })
 
+test_that("export_consort_flowchart takes exclusion reasons and a terminal split; resolve_codes aliases resolve_fhir_codes", {
+  df <- data.frame(step_name = c("All", "Adults"), subjects_retained = c(1000L, 900L), subjects_dropped = c(0L, 100L),
+                   percent_retained = c(100, 90), exclusion_reason = c("", "Age < 18"))
+  png <- export_consort_flowchart(df, file.path(tempfile(), "f.png"), terminal_split = c(Readmitted = 100, "No readmission" = 800))
+  expect_equal(readBin(png, "raw", 4), as.raw(c(0x89, 0x50, 0x4e, 0x47)))
+  expect_identical(resolve_codes, resolve_fhir_codes)
+})
+
 test_that("score_fhir_bundle opens vocab_db_path read-only", {
   path <- tempfile(fileext = ".duckdb")
   v <- DBI::dbConnect(duckdb::duckdb(), path)
