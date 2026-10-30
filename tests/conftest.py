@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+os.environ.setdefault("MPLBACKEND", "Agg")  # headless: a CI runner's Tk install can be broken
+
 import duckdb
 import pandas as pd
 import pytest

@@ -157,3 +157,13 @@ test_that("export_consort_flowchart writes png and svg", {
   expect_gt(file.size(svg), 500)
   expect_error(export_consort_flowchart(att[0, ], file.path(d, "e.png")), "no steps")
 })
+
+test_that("score_fhir_bundle opens vocab_db_path read-only", {
+  path <- tempfile(fileext = ".duckdb")
+  v <- DBI::dbConnect(duckdb::duckdb(), path)
+  DBI::dbExecute(v, "CREATE TABLE concept AS SELECT 1 AS concept_id, 'x' AS concept_name, 'Condition' AS domain_id, 'SNOMED' AS vocabulary_id, 'c' AS concept_class_id, 'S' AS standard_concept, '44054006' AS concept_code, CAST(NULL AS VARCHAR) AS invalid_reason")
+  DBI::dbDisconnect(v, shutdown = TRUE)
+  expect_length(score_fhir_bundle(poc_fhir(), poc_bundle(), vocab_db_path = path)$fhir$unmapped_codes, 0)
+  empty <- DBI::dbConnect(duckdb::duckdb()); on.exit(DBI::dbDisconnect(empty, shutdown = TRUE))
+  expect_error(resolve_fhir_codes(empty, "http://snomed.info/sct|1"), "no 'concept' table")
+})
