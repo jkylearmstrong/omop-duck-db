@@ -1,4 +1,5 @@
 """Per-variable Table 1 decimals + section headers, Table 3 odds ratios, ONNX export, FHIR inpatient medications."""
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,7 +10,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from conftest import import_or_skip  # noqa: E402
 from omop_etl.fhir import score_fhir_bundle  # noqa: E402
 from omop_etl.model_bundle import export_to_onnx, load_model_bundle, write_model_bundle  # noqa: E402
 from omop_etl.odds_ratios import export_table3, generate_table3_odds_ratios  # noqa: E402
@@ -21,6 +21,14 @@ def _need_onnx():
         import onnx  # noqa: F401
     except Exception as exc:  # absent, or installed but binary-incompatible with this numpy
         pytest.skip(f"onnx is unavailable: {type(exc).__name__}: {exc}")
+
+
+def _need_onnxruntime_after_onnx():
+    """Skip unless ``import onnx, onnxruntime`` (this order) survives in a child process: on some Windows runners
+    onnxruntime dies with a native access violation that kills pytest, and only when onnx was imported first."""
+    probe = subprocess.run([sys.executable, "-c", "import onnx, onnxruntime"], capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip(f"onnx + onnxruntime cannot be imported together on this host (exit code {probe.returncode})")
 
 
 def _df(n=200):
@@ -134,7 +142,8 @@ SPEC = {"features": [{"name": "a", "dtype": "float", "impute": 0.0}, {"name": "b
 
 def test_export_to_onnx_matches_bundle(tmp_path):
     _need_onnx()
-    ort = import_or_skip("onnxruntime")
+    _need_onnxruntime_after_onnx()
+    import onnxruntime as ort
     b = write_model_bundle(tmp_path / "b", name="m", version="1", feature_spec=SPEC, components=[
         {"kind": "logistic", "filename": "g1.json", "weight": 2.0,
          "content": {"intercept": -1.0, "coef": [0.5, -0.2], "mean": [1.0, 2.0], "scale": [2.0, 4.0]}},
