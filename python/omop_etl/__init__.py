@@ -715,7 +715,7 @@ __all__ = [
     "filter_measurements",
 ]
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 
