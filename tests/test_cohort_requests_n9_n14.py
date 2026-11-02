@@ -174,3 +174,58 @@ def test_n14_grouped_folds_keep_patients_together():
     for g in range(30):
         assert len(set(folds[groups == g])) == 1
     assert set(folds) == set(range(5))
+
+
+# ---- extra coverage for the validation / warning branches ----------------------------------------------
+
+def test_n8_warns_when_ip_discharges_are_unmapped_and_stays_quiet_otherwise():
+    import warnings
+    from omop_etl import build_schema, define_study_cohort
+    con = duckdb.connect(":memory:")
+    build_schema(con)
+    con.execute("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) "
+                "VALUES (1, 8507, 1960, 8527, 38003564)")
+    con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, "
+                "visit_end_date, visit_type_concept_id, discharged_to_concept_id, discharged_to_source_value) "
+                "VALUES (1, 1, 9201, DATE '2020-01-10', DATE '2020-01-14', 32827, 0, 'IP')")
+    kw = dict(washin_days=0, require_verified_followup=False, min_age=None, target_outcome="none",
+              attrition=False, materialise=False, transfer_discharge_concept_ids=[8717])
+    with pytest.warns(UserWarning, match="predates the ETL mapping"):
+        define_study_cohort(con, **kw)
+    con.execute("UPDATE visit_occurrence SET discharged_to_concept_id = 8717")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        define_study_cohort(con, **kw)  # a mapped transfer stay: no warning
+
+
+def test_metformin_exclusion_warns_without_concept_ancestor():
+    from omop_etl import build_schema, define_study_cohort
+    con = duckdb.connect(":memory:")
+    build_schema(con)
+    con.execute("DROP TABLE IF EXISTS concept_ancestor")
+    with pytest.warns(UserWarning, match="descendant concepts are not resolved"):
+        define_study_cohort(con, washin_days=0, require_verified_followup=False, min_age=None, target_outcome="none",
+                            attrition=False, materialise=False, exclude_metformin_only_prediabetes_pcos=True)
+
+
+def test_n12_n13_n14_argument_validation():
+    df = _repeated_stays(patients=30)
+    with pytest.raises(ValueError, match="Length of cluster_col"):
+        consortium_multivariable_risk_factors(df[["sbp", "male"]], y=df["y"].values, cluster_col=np.arange(5))
+    with pytest.raises(ValueError, match="increments"):
+        consortium_multivariable_risk_factors(df[["sbp"]], y=df["y"].values, increments={"sbp": (0, "bad")})
+    plain = consortium_multivariable_risk_factors(df[["pid", "sbp", "male"]], y=df["y"].values, cluster_col=df["pid"].values)
+    assert "pid" in plain.table["variable"].tolist() and plain.metadata["cov_type"] == "cluster"
+    df["site"] = np.where(df["pid"] % 2 == 0, "A", "B")
+    with pytest.raises(ValueError, match="n_splits"):
+        consortium_cross_site_validation(df, ["sbp"], target_col="y", group_col="pid", n_splits=1)
+
+
+def test_discovery_handles_a_connection_without_catalog_functions():
+    from omop_etl.comorbidity import _discover_concept_ancestors
+
+    class Broken:
+        def execute(self, *a, **k):
+            raise duckdb.Error("no catalog functions")
+
+    assert _discover_concept_ancestors(Broken()) == []
