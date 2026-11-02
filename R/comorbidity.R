@@ -303,10 +303,28 @@ extract_charlson_index <- function(con,
   columns[[hit]]
 }
 
-# First reachable, non-empty concept_ancestor -> list(ref, reason = ""); else list(ref = NULL, reason).
+# catalog.schema.concept_ancestor of every table or view with that name on the connection (any attached catalog, e.g. a
+# central vocabulary shared by several site databases).
+.comorb_discover_concept_ancestors <- function(con) {
+  found <- tryCatch({
+    t <- DBI::dbGetQuery(con, paste(
+      "SELECT database_name, schema_name FROM duckdb_tables() WHERE table_name = 'concept_ancestor'",
+      "AND database_name NOT IN ('system', 'temp') ORDER BY database_name, schema_name"))
+    v <- DBI::dbGetQuery(con, paste(
+      "SELECT database_name, schema_name FROM duckdb_views() WHERE view_name = 'concept_ancestor'",
+      "AND NOT internal AND database_name NOT IN ('system') ORDER BY database_name, schema_name"))
+    rbind(t, v)
+  }, error = function(e) NULL)
+  if (is.null(found) || !nrow(found)) return(character(0))
+  sprintf('"%s"."%s".concept_ancestor', found$database_name, found$schema_name)
+}
+
+# First reachable, non-empty concept_ancestor -> list(ref, reason = ""); else list(ref = NULL, reason). The search path
+# and the well-known central-vocabulary names are tried first, then any concept_ancestor in any attached catalog.
 .comorb_resolve_concept_ancestor <- function(con) {
   seen_empty <- FALSE
-  for (ref in .comorb_concept_ancestor_candidates) {
+  candidates <- unique(c(.comorb_concept_ancestor_candidates, .comorb_discover_concept_ancestors(con)))
+  for (ref in candidates) {
     probe <- tryCatch(
       DBI::dbGetQuery(con, sprintf("SELECT ancestor_concept_id, descendant_concept_id FROM %s LIMIT 1", ref)),
       error = function(e) if (.comorb_unresolved(e)) NULL else stop(e)
@@ -319,7 +337,7 @@ extract_charlson_index <- function(con,
     "concept_ancestor exists on this connection but is empty"
   } else {
     paste0("concept_ancestor could not be resolved on this connection (looked for ",
-           paste(.comorb_concept_ancestor_candidates, collapse = ", "), ")")
+           paste(.comorb_concept_ancestor_candidates, collapse = ", "), " and every attached catalog)")
   })
 }
 

@@ -116,7 +116,17 @@ test_that("persist_keys: byte-identical key files and reuse instead of resamplin
   expect_equal(cc[, c("subject_id", "visit_occurrence_id")], a[, c("subject_id", "visit_occurrence_id")])
   other <- define(con, random_state = 999)
   expect_false(identical(other$visit_occurrence_id, a$visit_occurrence_id))
-  expect_error(define(con, one_per_patient = FALSE), "one_per_patient")
+  expect_error(define(con, one_per_patient = FALSE, persist_keys = keys), "persist_keys")
+})
+
+test_that("one_per_patient = FALSE returns every eligible stay with stay_rank", {
+  con <- new_cdm(); on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
+  multi_stay(con)
+  one <- define(con)
+  all <- define(con, one_per_patient = FALSE)
+  expect_false("stay_rank" %in% names(one)); expect_true("stay_rank" %in% names(all))
+  expect_gt(nrow(all), nrow(one))
+  expect_setequal(all$visit_occurrence_id[all$stay_rank == 1], one$visit_occurrence_id)
 })
 
 test_that("deleting a key row changes only that patient", {

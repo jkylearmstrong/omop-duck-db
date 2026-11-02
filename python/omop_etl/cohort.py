@@ -570,6 +570,7 @@ class _StudySpec:
     diabetes_drug_ancestors: tuple[int, ...] = ()     # ancestor concept ids for the atc_a10 / rxnorm_cuis rules
     concept_ancestor_ref: str | None = None           # resolved concept_ancestor table for those rules
     metformin_only_pcos: str | None = None            # PCOS concept set of the metformin-only exclusion, or None
+    one_per_patient: bool = True                      # False keeps every eligible stay (adds stay_rank)
 
 
 # ---- identifier / literal helpers -------------------------------------------------------------------
@@ -601,7 +602,6 @@ def _tbl(spec: _StudySpec, name: str) -> str:
 # ---- SQL generators ---------------------------------------------------------------------------------
 
 _STUDY_PINNED_TABLE = "_study_pinned_keys"
-_STUDY_METFORMIN_TABLE = "_study_metformin_only"
 _STUDY_METFORMIN_TABLE = "_study_metformin_only"
 
 
@@ -663,10 +663,37 @@ def _create_metformin_only_table(con, spec: "_StudySpec") -> None:
 
     ca = resolve_concept_ancestor_ref(con, spec.schema)
     if ca is None:
-        warnings.warn("exclude_metformin_only_prediabetes_pcos: no usable concept_ancestor, so the concept sets are limited "
-                      "to the listed ids and source-value patterns.", UserWarning, stacklevel=3)
+        warnings.warn("exclude_metformin_only_prediabetes_pcos: no usable concept_ancestor was found on this connection "
+                      "(including attached vocabulary catalogs), so descendant concepts are not resolved and the concept "
+                      "sets are limited to the listed ids and source-value patterns; the cohort will differ from one "
+                      "built with the vocabulary. Attach or load the vocabulary (e.g. omop_connect()).",
+                      UserWarning, stacklevel=3)
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_STUDY_METFORMIN_TABLE} AS SELECT person_id FROM "
                 f"({metformin_only_sql(spec.metformin_only_pcos, spec.schema, ca)})")
+
+
+def _warn_unmapped_transfer_discharge(con, spec: "_StudySpec") -> None:
+    """Warns when the transfer exclusion is set but no stay carries a transfer concept id (databases built before the
+    ETL mapped discharge status 'IP' to 8717 hold 0, so the exclusion would silently do nothing)."""
+    if not spec.transfer_ids:
+        return
+    vo = _tbl(spec, "visit_occurrence")
+    try:
+        hit = con.execute(
+            f"SELECT 1 FROM {vo} WHERE discharged_to_concept_id IN ({_int_list(spec.transfer_ids)}) LIMIT 1").fetchone()
+        if hit is not None:
+            return
+        unmapped = con.execute(
+            f"SELECT 1 FROM {vo} WHERE COALESCE(discharged_to_concept_id, 0) = 0 "
+            "AND discharged_to_source_value = 'IP' LIMIT 1").fetchone()
+    except duckdb.Error:
+        return
+    if unmapped is not None:
+        warnings.warn(
+            f"transfer_discharge_concept_ids={list(spec.transfer_ids)} matches no stay, but visits with "
+            "discharged_to_source_value = 'IP' have discharged_to_concept_id 0 (the database predates the ETL mapping "
+            "to 8717), so the transfer exclusion removes nothing. Recode them first.",
+            UserWarning, stacklevel=3)
 
 
 def _study_order_by(rule: str, seed: int, pinned: bool = False) -> str:
@@ -767,11 +794,6 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
         conds.append((
             "Not transferred to another acute-care hospital",
             f"COALESCE(v.discharged_to_concept_id, 0) NOT IN ({_int_list(spec.transfer_ids)})",
-        ))
-    if spec.metformin_only_pcos:
-        conds.append((
-            "Not metformin-only prediabetes / PCOS (patient-level)",
-            f"v.person_id NOT IN (SELECT person_id FROM {_STUDY_METFORMIN_TABLE})",
         ))
     if spec.metformin_only_pcos:
         conds.append((
@@ -1002,10 +1024,10 @@ def _study_query_sql(spec: _StudySpec) -> str:
         age_at_index,
         los_days,
         discharged_to_concept_id,
-        {_sql_str(spec.label)} AS target_outcome
+        {_sql_str(spec.label)} AS target_outcome{"" if spec.one_per_patient else ", stay_rank"}
     FROM ranked_stays
-    WHERE stay_rank = 1
-    ORDER BY subject_id, cohort_start_date"""
+    {"WHERE stay_rank = 1" if spec.one_per_patient else ""}
+    ORDER BY subject_id, cohort_start_date, visit_occurrence_id"""
 
 
 def _study_attrition_steps(spec: _StudySpec) -> list[tuple[str, str]]:
@@ -1494,7 +1516,10 @@ def define_study_cohort(
     attrition : bool, default True
         Compute the stepwise patient attrition (via :func:`compute_attrition`) into ``attrs``.
     one_per_patient : bool, default True
-        The engine always selects exactly one index stay per patient; ``False`` is rejected.
+        ``False`` returns every eligible stay per patient with an extra ``stay_rank`` column (1 = the stay
+        ``sampling_rule`` would pick, so the rank-1 rows equal the one-per-patient cohort). Models on such output
+        need patient-grouped cross-validation folds and patient-clustered intervals. Cannot be combined with
+        ``persist_keys``.
     persist_keys : path, optional
         CSV (``subject_id,visit_occurrence_id``, sorted by subject) of the selected index stays. When the file
         exists, the listed stays are preferred over resampling (so selection is identical across re-runs, sites
@@ -1572,8 +1597,9 @@ def define_study_cohort(
     ... )  # doctest: +SKIP
     >>> cohort.attrs["attrition"]  # doctest: +SKIP
     """
-    if not one_per_patient:
-        raise ValueError("define_study_cohort selects exactly one index stay per patient; one_per_patient=False is unsupported.")
+    one_per_patient = _flag(one_per_patient, "one_per_patient")
+    if not one_per_patient and persist_keys is not None:
+        raise ValueError("persist_keys pins one index stay per patient and cannot be combined with one_per_patient=False.")
     visit_ids = _resolve_visit_types(visit_type, "visit_type", allow_none=True)
     study_start, study_end = _resolve_study_window(study_window)
     min_age_n = _whole_number(min_age, "min_age", minimum=0, allow_none=True)
@@ -1677,7 +1703,10 @@ def define_study_cohort(
         verified=verified, evidence=tuple(evidence), rule=rule, seed=seed_n,
         require_diabetes=bool(require_diabetes), diabetes_drug_rule=diabetes_drug_rule,
         diabetes_drug_ancestors=drug_ancestors, concept_ancestor_ref=drug_ca, metformin_only_pcos=mf_pcos,
+        one_per_patient=one_per_patient,
     )
+
+    _warn_unmapped_transfer_discharge(con, spec)
 
     keys_path = Path(persist_keys) if persist_keys is not None else None
     if keys_path is not None and keys_path.exists():
@@ -1717,7 +1746,7 @@ def define_study_cohort(
         _create_metformin_only_table(con, spec)
     try:
         try:
-            df = _run_study_engine(con, spec, _STUDY_COLUMNS, materialise=materialise, table_name=table_name,
+            df = _run_study_engine(con, spec, _STUDY_COLUMNS if one_per_patient else _STUDY_COLUMNS + ", stay_rank", materialise=materialise, table_name=table_name,
                                    materialize_kwargs=mat_kwargs)
         finally:
             if spec.pinned_keys:
@@ -1753,6 +1782,7 @@ def define_study_cohort(
         "diabetes_drug_rule": diabetes_drug_rule,
         "exclude_metformin_only_prediabetes_pcos": mf_pcos,
         "followup_evidence": list(evidence),
+        "one_per_patient": one_per_patient,
         "schema": schema,
     }
     return df

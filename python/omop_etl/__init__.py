@@ -186,6 +186,7 @@ from omop_etl.integrity import (
     vocabulary_preflight,
     generate_site_patient_tokens,
     consortium_patient_overlap,
+    consortium_cross_site_duplicates,
     planned_readmission_filter,
     observation_period_diagnostics,
 )
@@ -629,6 +630,7 @@ __all__ = [
     "vocabulary_preflight",
     "generate_site_patient_tokens",
     "consortium_patient_overlap",
+    "consortium_cross_site_duplicates",
     "planned_readmission_filter",
     "observation_period_diagnostics",
     # Advanced Causal, Calibration, Trajectories, Survival & Synthetic Additions (v0.6.4)
@@ -713,7 +715,7 @@ __all__ = [
     "filter_measurements",
 ]
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 

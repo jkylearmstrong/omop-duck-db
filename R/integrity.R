@@ -806,6 +806,67 @@ consortium_patient_overlap <- function(site_tokens, min_cell_count = 11) {
   do.call(rbind, records)
 }
 
+# HMAC-SHA256 (RFC 2104) of each element of `ids` under `key`, as lowercase hex, computed with DuckDB's sha256().
+#' @keywords internal
+#' @noRd
+.hmac_sha256_hex <- function(ids, key) {
+  ids <- as.character(ids)
+  if (!length(ids)) return(character(0))
+  con <- DBI::dbConnect(duckdb::duckdb(), ":memory:")
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  duckdb::duckdb_register(con, "t_ids", data.frame(id = ids, stringsAsFactors = FALSE))
+  hex <- function(r) paste(sprintf("%02x", as.integer(r)), collapse = "")
+  kb <- charToRaw(key)
+  if (length(kb) > 64L) {
+    h <- DBI::dbGetQuery(con, sprintf("SELECT sha256(encode('%s')) AS h", gsub("'", "''", key)))$h
+    kb <- as.raw(strtoi(substring(h, seq(1, 63, 2), seq(2, 64, 2)), 16L))
+  }
+  kb <- c(kb, as.raw(rep(0L, 64L - length(kb))))
+  ipad <- hex(xor(kb, as.raw(0x36)))
+  opad <- hex(xor(kb, as.raw(0x5c)))
+  res <- DBI::dbGetQuery(con, sprintf(
+    "SELECT id, sha256(unhex('%s') || unhex(sha256(unhex('%s') || encode(id)))) AS token FROM t_ids",
+    opad, ipad))
+  res$token[match(ids, res$id)]
+}
+
+#' Consortium Cross-Site Duplicate Patients
+#'
+#' Reports patients that appear at more than one site, as aggregate counts only. Identifiers are pseudonymised with
+#' HMAC-SHA256 under the consortium-shared secret `key` before any comparison; counts of 1 to `min_cell_count - 1`
+#' are suppressed.
+#'
+#' @param site_identifiers Named list of patient identifier vectors: `list(SiteA = c(...), SiteB = c(...))`.
+#' @param key Shared secret (non-empty string) for the keyed hash.
+#' @param min_cell_count Small-cell threshold (default 11).
+#' @return A data frame of site pairs as in [consortium_patient_overlap()], plus a final row `site_1 == "ALL"` whose
+#'   `n_site_1` is the pooled number of distinct patients and `shared_patients` the number seen at two or more sites.
+#' @export
+consortium_cross_site_duplicates <- function(site_identifiers, key, min_cell_count = 11) {
+  if (!is.character(key) || length(key) != 1L || is.na(key) || !nzchar(key)) {
+    stop("key must be a non-empty secret shared by the consortium.", call. = FALSE)
+  }
+  token <- function(ids) {
+    ids <- trimws(as.character(ids))
+    .hmac_sha256_hex(unique(ids[!is.na(ids) & nzchar(ids)]), key)
+  }
+  site_tokens <- lapply(site_identifiers, token)
+  pairs <- consortium_patient_overlap(site_tokens, min_cell_count = min_cell_count)
+  pairs <- pairs[pairs$site_1 != pairs$site_2, , drop = FALSE]
+  all_tok <- unlist(site_tokens, use.names = FALSE)
+  counts <- table(all_tok)
+  multi <- sum(counts > 1L)
+  suppressed <- multi > 0 && multi < min_cell_count
+  total <- data.frame(
+    site_1 = "ALL", site_2 = "ALL", n_site_1 = length(counts), n_site_2 = length(counts),
+    shared_patients = if (suppressed) sprintf("<%d", as.integer(min_cell_count)) else as.character(multi),
+    overlap_pct = if (length(counts)) round(multi / length(counts), 4) else 0, is_suppressed = suppressed,
+    stringsAsFactors = FALSE)
+  out <- rbind(pairs, total)
+  rownames(out) <- NULL
+  out
+}
+
 # -----------------------------------------------------------------------------
 # 7. Planned-Readmission Filter (CMS Algorithm)
 # -----------------------------------------------------------------------------

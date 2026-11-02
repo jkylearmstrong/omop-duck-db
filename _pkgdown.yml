@@ -366,6 +366,7 @@ reference:
   - compare_feature_tables
   - concept_optimizer
   - consortium_patient_overlap
+  - consortium_cross_site_duplicates
   - consortium_propensity_score
   - consortium_survival_meta_analysis
   - detect_redundant_features

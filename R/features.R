@@ -21,6 +21,10 @@
 #' @param lookahead_days Days after anchor date to include in measurement extraction (default 0).
 #' @param include_measurements Logical. Include measurement counts across lookback windows.
 #' @param format Output format: `"df"` (data.frame), `"arrow"`, or `"sparse"`.
+#' @param index_key `"person_id"` (default; one row per cohort row, keyed by patient) or `"visit_occurrence_id"`
+#'   (rows keyed by stay: the cohort table, e.g. an all-stays `define_study_cohort(one_per_patient = FALSE)` result
+#'   saved with `table_name`, must hold a `visit_occurrence_id` column, which is returned and kept distinct, so several
+#'   stays of one patient never collapse or fan out).
 #' @param ... Additional arguments.
 #' @return A `data.frame`, Arrow Table, or sparse covariate data.frame.
 #' @export
@@ -41,6 +45,7 @@ extract_patient_features <- function(con,
                                      cohort_table = "cohort",
                                      measurement_concept_ids = NULL,
                                      lookahead_days = 0,
+                                     index_key = "person_id",
                                      ...) {
   fmt <- tolower(trimws(format))
   windows <- sort(as.integer(lookback_days))
@@ -49,6 +54,15 @@ extract_patient_features <- function(con,
   pcol <- if ("person_id" %in% cols) "person_id" else "subject_id"
   scol <- if ("cohort_start_date" %in% cols) "cohort_start_date" else if ("visit_start_date" %in% cols) "visit_start_date" else "index_date"
   ecol <- if ("cohort_end_date" %in% cols) "cohort_end_date" else if ("visit_end_date" %in% cols) "visit_end_date" else scol
+  key <- tolower(trimws(as.character(index_key)[1]))
+  if (!key %in% c("person_id", "visit_occurrence_id")) {
+    stop("index_key must be 'person_id' or 'visit_occurrence_id'; got '", index_key, "'.", call. = FALSE)
+  }
+  by_stay <- identical(key, "visit_occurrence_id")
+  if (by_stay && !"visit_occurrence_id" %in% cols) {
+    stop("index_key = 'visit_occurrence_id' needs a visit_occurrence_id column in '", cohort_table,
+         "' (persist an all-stays cohort with define_study_cohort(..., table_name = ...)).", call. = FALSE)
+  }
 
   oa <- tolower(if (!is.null(anchor)) anchor else if (!is.null(offset_anchor) && length(offset_anchor) == 1) offset_anchor else "visit_start_date")
   use_end <- oa %in% c("visit_end_date", "end", "discharge", "cohort_end_date")
@@ -59,6 +73,7 @@ extract_patient_features <- function(con,
   do_demo <- isTRUE(include_demographics) && has_person
 
   select_items <- c(sprintf("c.%s AS subject_id", pcol), sprintf("c.%s AS person_id", pcol), sprintf("c.%s AS cohort_start_date", scol), sprintf("c.%s AS cohort_end_date", ecol))
+  if (by_stay) select_items <- c(select_items, "c.visit_occurrence_id")
   if ("site" %in% cols) {
     select_items <- c(select_items, "c.site")
   }
@@ -150,6 +165,7 @@ extract_patient_features <- function(con,
   }
 
   group_cols <- c(sprintf("c.%s", pcol), sprintf("c.%s", scol), sprintf("c.%s", ecol))
+  if (by_stay) group_cols <- c(group_cols, "c.visit_occurrence_id")
   if ("site" %in% cols) group_cols <- c(group_cols, "c.site")
   if (!is.null(outcome_cohort_id)) group_cols <- c(group_cols, "oc.outcome_flag")
   if (do_demo) {
@@ -165,8 +181,9 @@ extract_patient_features <- function(con,
     %s
     GROUP BY 
         %s
-    ORDER BY c.%s, c.%s;
-  ", select_clause, cohort_table, all_joins, where_clause, group_by_clause, pcol, scol)
+    ORDER BY c.%s, c.%s%s;
+  ", select_clause, cohort_table, all_joins, where_clause, group_by_clause, pcol, scol,
+  if (by_stay) ", c.visit_occurrence_id" else "")
 
   if (!is.null(stream_to_parquet) && nzchar(stream_to_parquet)) {
     p_clause <- ""
@@ -185,7 +202,7 @@ extract_patient_features <- function(con,
   df_dense <- DBI::dbGetQuery(con, dense_sql)
 
   if (fmt == "sparse") {
-    feature_cols <- setdiff(names(df_dense), c("person_id", "subject_id", "cohort_start_date", "cohort_end_date", "y", "site"))
+    feature_cols <- setdiff(names(df_dense), c("person_id", "subject_id", "visit_occurrence_id", "cohort_start_date", "cohort_end_date", "y", "site"))
     sparse_rows <- list()
     for (row_idx in seq_len(nrow(df_dense))) {
       sub_id <- df_dense[[names(df_dense)[1]]][row_idx]

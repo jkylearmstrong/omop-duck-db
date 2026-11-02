@@ -155,8 +155,10 @@ ORDER BY m.person_id
 .create_metformin_only_table <- function(con, spec) {
   ca <- .resolve_concept_ancestor_ref(con, spec$schema)
   if (is.null(ca)) {
-    warning("exclude_metformin_only_prediabetes_pcos: no usable concept_ancestor, so the concept sets are limited to the ",
-            "listed ids and source-value patterns.", call. = FALSE)
+    warning("exclude_metformin_only_prediabetes_pcos: no usable concept_ancestor was found on this connection ",
+            "(including attached vocabulary catalogs), so descendant concepts are not resolved and the concept sets are ",
+            "limited to the listed ids and source-value patterns; the cohort will differ from one built with the ",
+            "vocabulary. Attach or load the vocabulary (e.g. omop_connect()).", call. = FALSE)
   }
   DBI::dbExecute(con, sprintf("CREATE OR REPLACE TEMP TABLE %s AS SELECT person_id FROM (%s)", .STUDY_METFORMIN_TABLE,
                               .metformin_only_sql(spec$metformin_only_pcos, spec$schema, ca)))
