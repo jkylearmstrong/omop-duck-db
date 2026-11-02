@@ -23,6 +23,7 @@ extract_patient_features(
   cohort_table = "cohort",
   measurement_concept_ids = NULL,
   lookahead_days = 0,
+  index_key = "person_id",
   ...
 )
 
@@ -44,6 +45,7 @@ extract_features(
   cohort_table = "cohort",
   measurement_concept_ids = NULL,
   lookahead_days = 0,
+  index_key = "person_id",
   ...
 )
 }
@@ -81,6 +83,11 @@ extract_features(
 \item{measurement_concept_ids}{Specific measurement concept IDs to extract aggregated features for.}
 
 \item{lookahead_days}{Days after anchor date to include in measurement extraction (default 0).}
+
+\item{index_key}{\code{"person_id"} (default; one row per cohort row, keyed by patient) or \code{"visit_occurrence_id"}
+(rows keyed by stay: the cohort table, e.g. an all-stays \code{define_study_cohort(one_per_patient = FALSE)} result
+saved with \code{table_name}, must hold a \code{visit_occurrence_id} column, which is returned and kept distinct, so several
+stays of one patient never collapse or fan out).}
 
 \item{...}{Additional arguments.}
 }

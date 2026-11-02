@@ -11,6 +11,7 @@ from omop_etl.integrity import (
     vocabulary_preflight,
     generate_site_patient_tokens,
     consortium_patient_overlap,
+    consortium_cross_site_duplicates,
     planned_readmission_filter,
     observation_period_diagnostics,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "vocabulary_preflight",
     "generate_site_patient_tokens",
     "consortium_patient_overlap",
+    "consortium_cross_site_duplicates",
     "planned_readmission_filter",
     "observation_period_diagnostics",
 ]

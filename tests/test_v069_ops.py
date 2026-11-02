@@ -94,9 +94,20 @@ def test_deleting_a_key_row_changes_only_that_patient(cdm, tmp_path):
     assert keys.read_text().count("\n") == len(base) + 1  # patient 5 re-added
 
 
-def test_one_per_patient_false_rejected(cdm):
-    with pytest.raises(ValueError, match="one_per_patient"):
-        define_study_cohort(cdm, one_per_patient=False, **SIMPLE)
+def test_one_per_patient_false_returns_all_stays(cdm):
+    _multi_stay_cdm(cdm)
+    one = define_study_cohort(cdm, **SIMPLE)
+    allst = define_study_cohort(cdm, one_per_patient=False, **SIMPLE)
+    assert "stay_rank" not in one.columns and "stay_rank" in allst.columns
+    assert len(allst) >= len(one)
+    top = allst[allst.stay_rank == 1].drop(columns="stay_rank").reset_index(drop=True)
+    assert set(top.visit_occurrence_id) == set(one.visit_occurrence_id)
+    assert allst.groupby("subject_id").stay_rank.min().eq(1).all()
+
+
+def test_one_per_patient_false_rejects_persist_keys(cdm, tmp_path):
+    with pytest.raises(ValueError, match="persist_keys"):
+        define_study_cohort(cdm, one_per_patient=False, persist_keys=tmp_path / "k.csv", **SIMPLE)
 
 
 # ---- C1: plausible date range ----------------------------------------------------------------------------

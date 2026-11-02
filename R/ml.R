@@ -316,6 +316,13 @@ plot.decision_curve_analysis <- function(x, ...) {
 #' @param domain_mapping Optional named character vector mapping feature names to clinical domains.
 #' @param standardize_continuous Logical; whether continuous features are scaled to 1-SD units (default `TRUE`).
 #' @param drop_collinear Logical; whether linearly dependent columns are dropped via QR decomposition (default `TRUE`).
+#' @param cluster_col Optional cluster identifier (typically `subject_id`) for repeated stays per patient: a column name
+#'   of `X` (never used as a predictor) or a vector with one value per row. When given, standard errors, CIs and
+#'   p-values use the patient-clustered (Huber-White) sandwich estimator with the `G/(G-1) * (n-1)/(n-k)`
+#'   small-sample correction.
+#' @param increments Optional named list `list(feature = c(size, label))`, e.g. `list(sbp = list(10, "per 10 mmHg"))`.
+#'   The table gains `std_beta` (beta per 1 SD of the original feature) and, for listed features, `increment`,
+#'   `or_increment`, `or_increment_ci_95_lower` and `or_increment_ci_95_upper` (odds ratio per `size` original units).
 #'
 #' @return An S3 object of class `consortium_risk_factors` with Table 5 data frame, coefficients, standard errors, and methods.
 #' @export
@@ -326,17 +333,35 @@ consortium_multivariable_risk_factors <- function(X,
                                                   alpha = 1.0,
                                                   domain_mapping = NULL,
                                                   standardize_continuous = TRUE,
-                                                  drop_collinear = TRUE) {
+                                                  drop_collinear = TRUE,
+                                                  cluster_col = NULL,
+                                                  increments = NULL) {
   X_df <- as.data.frame(X, stringsAsFactors = FALSE)
   y_vec <- as.numeric(y)
+  cluster_vec <- NULL
+  if (!is.null(cluster_col)) {
+    if (is.character(cluster_col) && length(cluster_col) == 1L && cluster_col %in% names(X_df)) {
+      cluster_vec <- X_df[[cluster_col]]
+      X_df[[cluster_col]] <- NULL
+    } else if (is.character(cluster_col) && length(cluster_col) == 1L && length(y_vec) != 1L) {
+      stop("cluster_col '", cluster_col, "' must be a column of X.", call. = FALSE)
+    } else {
+      cluster_vec <- cluster_col
+    }
+    if (length(cluster_vec) != length(y_vec)) {
+      stop("Length of cluster_col (", length(cluster_vec), ") and y (", length(y_vec), ") must match.", call. = FALSE)
+    }
+  }
 
   if (nrow(X_df) != length(y_vec)) {
     stop("Number of rows in `X` must match length of `y`.", call. = FALSE)
   }
 
   valid_rows <- stats::complete.cases(X_df) & !is.na(y_vec)
+  if (!is.null(cluster_vec)) valid_rows <- valid_rows & !is.na(cluster_vec)
   X_df <- X_df[valid_rows, , drop = FALSE]
   y_vec <- y_vec[valid_rows]
+  if (!is.null(cluster_vec)) cluster_vec <- cluster_vec[valid_rows]
   n_samples <- nrow(X_df)
 
   if (n_samples < 5) {
@@ -359,6 +384,8 @@ consortium_multivariable_risk_factors <- function(X,
   # 2. Standardize continuous columns
   X_proc <- data.frame(row.names = rownames(X_df))
   col_units <- character(0)
+  col_scale <- stats::setNames(rep(1.0, ncol(X_df)), names(X_df))  # SD of the original column when standardised
+  orig_sd <- vapply(names(X_df), function(nm) stats::sd(as.numeric(X_df[[nm]]), na.rm = TRUE), numeric(1))
 
   for (nm in names(X_df)) {
     v <- as.numeric(X_df[[nm]])
@@ -370,6 +397,7 @@ consortium_multivariable_risk_factors <- function(X,
         sd_v <- stats::sd(v, na.rm = TRUE)
         if (!is.na(sd_v) && sd_v > 1e-12) {
           X_proc[[nm]] <- (v - mean(v, na.rm = TRUE)) / sd_v
+          col_scale[nm] <- sd_v
           col_units[nm] <- "Per 1-SD Increase"
         } else {
           X_proc[[nm]] <- v
@@ -458,7 +486,36 @@ consortium_multivariable_risk_factors <- function(X,
     .pseudo_inv(H_fin)
   })
 
+  cov_type <- "model"
+  n_clusters <- NA_integer_
+  if (!is.null(cluster_vec)) {
+    codes <- match(cluster_vec, unique(cluster_vec))
+    n_clusters <- max(codes)
+    scores <- Z * as.vector(y_vec - p_fin)
+    cluster_scores <- rowsum(scores, codes)
+    meat <- crossprod(cluster_scores)
+    corr <- 1.0
+    if (n_clusters > 1 && n_samples > p_dim) {
+      corr <- (n_clusters / (n_clusters - 1.0)) * ((n_samples - 1.0) / (n_samples - p_dim))
+    }
+    cov_mat <- corr * (cov_mat %*% meat %*% cov_mat)
+    cov_type <- "cluster"
+  }
+
   se <- sqrt(pmax(1e-12, diag(cov_mat)))
+
+  increments <- as.list(increments)
+  bad <- setdiff(names(increments), names(X_df))
+  if (length(bad)) {
+    stop("increments names unknown feature(s) ", paste(bad, collapse = ", "), "; features are ",
+         paste(names(X_df), collapse = ", "), ".", call. = FALSE)
+  }
+  for (nm in names(increments)) {
+    v <- unlist(increments[[nm]])
+    if (length(v) != 2L || is.na(suppressWarnings(as.numeric(v[1]))) || as.numeric(v[1]) <= 0) {
+      stop("increments$", nm, " must be list(size > 0, label).", call. = FALSE)
+    }
+  }
 
   feat_betas <- beta[-1]
   feat_se <- se[-1]
@@ -513,6 +570,22 @@ consortium_multivariable_risk_factors <- function(X,
       z_score = z_score,
       stringsAsFactors = FALSE
     )
+    if (length(increments)) {
+      per_unit <- b / col_scale[[fn]]
+      per_unit_se <- s_err / col_scale[[fn]]
+      rows_list[[i]]$std_beta <- per_unit * orig_sd[[fn]]
+      if (fn %in% names(increments)) {
+        sz <- as.numeric(unlist(increments[[fn]])[1])
+        rows_list[[i]]$increment <- as.character(unlist(increments[[fn]])[2])
+        rows_list[[i]]$or_increment <- exp(per_unit * sz)
+        rows_list[[i]]$or_increment_ci_95_lower <- exp((per_unit - 1.96 * per_unit_se) * sz)
+        rows_list[[i]]$or_increment_ci_95_upper <- exp((per_unit + 1.96 * per_unit_se) * sz)
+      } else {
+        rows_list[[i]]$increment <- NA_character_
+        rows_list[[i]]$or_increment <- rows_list[[i]]$or_increment_ci_95_lower <-
+          rows_list[[i]]$or_increment_ci_95_upper <- NA_real_
+      }
+    }
   }
 
   table_df <- do.call(rbind, rows_list)
@@ -530,7 +603,9 @@ consortium_multivariable_risk_factors <- function(X,
       n_features = length(active_cols),
       alpha = alpha,
       regularize = regularize,
-      intercept = beta[1]
+      intercept = beta[1],
+      cov_type = cov_type,
+      n_clusters = n_clusters
     )
   )
   class(res) <- c("consortium_risk_factors", "list")
@@ -593,6 +668,52 @@ plot.consortium_risk_factors <- function(x, ...) {
 # Internal-External Cross-Validation (IECV) Matrix
 # ---------------------------------------------------------------------------
 
+# Fold id per row: whole groups (patients) share a fold; outcome-stratified. A group is positive if any row is;
+# positive and negative groups are shuffled separately (seeded) and dealt round-robin to the folds.
+#' @keywords internal
+#' @noRd
+.grouped_folds <- function(y, groups, n_splits, random_state) {
+  codes <- match(groups, unique(groups))
+  g_pos <- as.logical(tapply(y > 0, codes, any))
+  fold_of_group <- integer(length(g_pos))
+  old <- if (exists(".Random.seed", envir = globalenv())) get(".Random.seed", envir = globalenv()) else NULL
+  on.exit(if (!is.null(old)) assign(".Random.seed", old, envir = globalenv()), add = TRUE)
+  set.seed(as.integer(random_state))
+  for (mask in list(g_pos, !g_pos)) {
+    idx <- which(mask)
+    if (length(idx)) idx <- idx[sample.int(length(idx))]
+    fold_of_group[idx] <- (seq_along(idx) - 1L) %% n_splits
+  }
+  fold_of_group[codes]
+}
+
+# Out-of-fold probabilities from a patient-grouped K-fold with the same ridge logistic model.
+#' @keywords internal
+#' @noRd
+.grouped_oof_probabilities <- function(df, feature_cols, target_col, group_col, n_splits, random_state,
+                                       regularize, alpha) {
+  if (!group_col %in% names(df)) stop("group_col '", group_col, "' not found in the site data.", call. = FALSE)
+  n_splits <- as.integer(n_splits)
+  n_groups <- length(unique(df[[group_col]]))
+  if (is.na(n_splits) || n_splits < 2L || n_splits > n_groups) {
+    stop("n_splits must be between 2 and the number of patients (", n_groups, "); got ", n_splits, ".", call. = FALSE)
+  }
+  X <- as.matrix(df[, feature_cols, drop = FALSE])
+  y <- as.numeric(df[[target_col]])
+  folds <- .grouped_folds(y, df[[group_col]], n_splits, random_state)
+  prob <- rep(NA_real_, length(y))
+  for (k in seq_len(n_splits) - 1L) {
+    test <- folds == k
+    if (!any(test) || all(test)) next
+    rf <- consortium_multivariable_risk_factors(
+      X = X[!test, , drop = FALSE], y = y[!test], regularize = regularize, alpha = alpha,
+      standardize_continuous = FALSE, drop_collinear = FALSE)
+    eta <- rf$metadata$intercept + as.vector(X[test, , drop = FALSE] %*% rf$coefficients[feature_cols])
+    prob[test] <- 1.0 / (1.0 + exp(-pmin(pmax(eta, -30.0), 30.0)))
+  }
+  prob
+}
+
 #' Internal-External Cross-Validation (IECV) Matrix
 #'
 #' @description
@@ -605,6 +726,12 @@ plot.consortium_risk_factors <- function(x, ...) {
 #' @param site_col Name of the site identifier column (default `"site"`).
 #' @param regularize Logical; whether to apply L2 ridge regularization (default `TRUE`).
 #' @param alpha Numeric; L2 penalty parameter (default `1.0`).
+#' @param group_col Optional patient identifier column (e.g. `subject_id`) for data with several stays per patient. The
+#'   diagonal (internal) cell is then the AUROC / Brier of out-of-fold predictions from a patient-grouped,
+#'   outcome-stratified `n_splits`-fold cross-validation, instead of the apparent in-sample performance. Off-diagonal
+#'   cells are unchanged (patients are assumed distinct across sites).
+#' @param n_splits Folds of the grouped cross-validation (default 5, at most the number of patients).
+#' @param random_state Seed of the deterministic group shuffle (default 42).
 #'
 #' @return An S3 object of class `consortium_cross_site_validation` containing `$auroc_matrix`, `$brier_matrix`, and `$summary`.
 #' @export
@@ -613,7 +740,10 @@ consortium_cross_site_validation <- function(site_data,
                                              target_col,
                                              site_col = "site",
                                              regularize = TRUE,
-                                             alpha = 1.0) {
+                                             alpha = 1.0,
+                                             group_col = NULL,
+                                             n_splits = 5,
+                                             random_state = 42) {
   if (is.data.frame(site_data)) {
     if (!site_col %in% names(site_data)) {
       stop(sprintf("Site column '%s' not found in site_data.", site_col), call. = FALSE)
@@ -678,8 +808,13 @@ consortium_cross_site_validation <- function(site_data,
       X_te <- as.matrix(df_te[, feature_cols, drop = FALSE])
       y_te <- as.numeric(df_te[[target_col]])
 
-      eta <- icpt + as.vector(X_te %*% b_vec[feature_cols])
-      prob <- 1.0 / (1.0 + exp(-pmin(pmax(eta, -30.0), 30.0)))
+      if (!is.null(group_col) && i == j) {
+        prob <- .grouped_oof_probabilities(df_te, feature_cols, target_col, group_col, n_splits, random_state,
+                                           regularize, alpha)
+      } else {
+        eta <- icpt + as.vector(X_te %*% b_vec[feature_cols])
+        prob <- 1.0 / (1.0 + exp(-pmin(pmax(eta, -30.0), 30.0)))
+      }
 
       auc_val <- calc_auc_r(y_te, prob)
       brier_val <- mean((y_te - prob)^2)
@@ -727,7 +862,8 @@ consortium_cross_site_validation <- function(site_data,
     summary = site_summary_df,
     consortium_summary = summary_df,
     sites = site_names,
-    metadata = list(alpha = alpha, regularize = regularize)
+    metadata = list(alpha = alpha, regularize = regularize, group_col = group_col,
+                    n_splits = if (is.null(group_col)) NULL else n_splits)
   )
   class(res) <- c("consortium_cross_site_validation", "list")
   res

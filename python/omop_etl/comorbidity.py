@@ -197,10 +197,33 @@ def _find_column(columns: list[str], wanted: Any, param: str, table: str) -> str
     return by_lower[wanted.lower()]
 
 
+def _discover_concept_ancestors(con) -> list[str]:
+    """``catalog.schema.concept_ancestor`` of every table with that name on the connection (any attached catalog,
+    e.g. a central vocabulary shared by several site databases), user catalogs before system ones."""
+    try:
+        rows = con.execute(
+            "SELECT database_name, schema_name FROM duckdb_tables() WHERE table_name = 'concept_ancestor' "
+            "AND database_name NOT IN ('system', 'temp') ORDER BY database_name, schema_name").fetchall()
+        rows += con.execute(
+            "SELECT database_name, schema_name FROM duckdb_views() WHERE view_name = 'concept_ancestor' "
+            "AND NOT internal AND database_name NOT IN ('system') ORDER BY database_name, schema_name").fetchall()
+    except duckdb.Error:
+        return []
+    return [f'"{d}"."{s}".concept_ancestor' for d, s in rows]
+
+
 def _resolve_concept_ancestor(con) -> tuple[str | None, str]:
-    """First reachable, non-empty concept_ancestor -> ``(reference, "")``; else ``(None, reason)``."""
+    """First reachable, non-empty concept_ancestor -> ``(reference, "")``; else ``(None, reason)``.
+
+    The search path and the well-known central-vocabulary names are tried first; then any ``concept_ancestor`` table
+    or view in any attached catalog is used, so a central vocabulary needs no manual view in the main schema.
+    """
     seen_empty = False
-    for ref in _CONCEPT_ANCESTOR_CANDIDATES:
+    candidates = list(_CONCEPT_ANCESTOR_CANDIDATES)
+    for ref in _discover_concept_ancestors(con):
+        if ref not in candidates:
+            candidates.append(ref)
+    for ref in candidates:
         try:
             row = con.execute(f"SELECT ancestor_concept_id, descendant_concept_id FROM {ref} LIMIT 1").fetchone()
         except (duckdb.CatalogException, duckdb.BinderException):
@@ -211,7 +234,7 @@ def _resolve_concept_ancestor(con) -> tuple[str | None, str]:
     if seen_empty:
         return None, "concept_ancestor exists on this connection but is empty"
     return None, ("concept_ancestor could not be resolved on this connection (looked for "
-                  + ", ".join(_CONCEPT_ANCESTOR_CANDIDATES) + ")")
+                  + ", ".join(_CONCEPT_ANCESTOR_CANDIDATES) + " and every attached catalog)")
 
 
 # --------------------------------------------------------------------------------------

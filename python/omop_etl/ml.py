@@ -1042,6 +1042,8 @@ def consortium_multivariable_risk_factors(
     standardize_continuous: bool = True,
     drop_collinear: bool = True,
     feature_names: Sequence[str] | None = None,
+    cluster_col: str | Sequence[Any] | np.ndarray | pd.Series | None = None,
+    increments: dict[str, tuple[float, str]] | None = None,
 ) -> ConsortiumRiskFactors:
     """Calculates robust multivariable Odds Ratios with L2 / Ridge inversion and QR orthogonalization.
 
@@ -1069,6 +1071,15 @@ def consortium_multivariable_risk_factors(
         standardize_continuous: Whether continuous features are standardized to 1-SD units (default True).
         drop_collinear: Whether to eliminate linearly dependent columns via QR decomposition (default True).
         feature_names: Optional column names if X is a raw numpy array.
+        cluster_col: Optional cluster identifier (typically ``subject_id``) for repeated stays per patient: a column
+            name of ``X`` (never used as a predictor) or a vector of the same length as ``y``. When given, standard
+            errors, CIs and p-values use the patient-clustered (Huber-White) sandwich estimator with the usual
+            ``G/(G-1) * (n-1)/(n-k)`` small-sample correction, and normal-approximation p-values.
+        increments: Optional ``{feature: (size, label)}``. The table gains ``std_beta`` (beta per 1 SD of the original
+            feature) and, for each listed feature, ``increment`` (the label) and ``or_increment`` /
+            ``or_increment_ci_95_lower`` / ``or_increment_ci_95_upper`` (odds ratio per ``size`` original units, e.g.
+            ``{"sbp": (10, "per 10 mmHg")}``). The other columns are unchanged, and ``beta`` stays on the scale
+            chosen by ``standardize_continuous``.
 
     Returns:
         ConsortiumRiskFactors: Container holding Table 5 DataFrame, Wald statistics, and plotting methods.
@@ -1077,13 +1088,23 @@ def consortium_multivariable_risk_factors(
         alpha = float(l2_lambda)
 
     target_k = outcome_col or target_col
+    cluster_arr = None
+    cluster_name = None
+    if cluster_col is not None:
+        if isinstance(cluster_col, str):
+            if not isinstance(X, pd.DataFrame) or cluster_col not in X.columns:
+                raise ValueError(f"cluster_col {cluster_col!r} must be a column of the DataFrame X.")
+            cluster_name = cluster_col
+            cluster_arr = X[cluster_col].to_numpy()
+        else:
+            cluster_arr = np.asarray(cluster_col).ravel()
     if y is None and target_k is not None:
         if isinstance(X, pd.DataFrame):
             y = X[target_k].values
             if feature_cols is not None:
                 X_df = X[list(feature_cols)].copy()
             else:
-                X_df = X[[c for c in X.columns if c != target_k]].copy()
+                X_df = X[[c for c in X.columns if c not in (target_k, cluster_name)]].copy()
             feat_names = list(X_df.columns)
         else:
             raise ValueError("When outcome_col/target_col is passed, X must be a pandas DataFrame.")
@@ -1092,7 +1113,7 @@ def consortium_multivariable_risk_factors(
             if feature_cols is not None:
                 X_df = X[list(feature_cols)].copy()
             else:
-                X_df = X.copy()
+                X_df = X[[c for c in X.columns if c != cluster_name]].copy()
             feat_names = list(X_df.columns)
         else:
             X_arr = np.asarray(X, dtype=float)
@@ -1110,11 +1131,18 @@ def consortium_multivariable_risk_factors(
     if len(X_df) != len(y_arr):
         raise ValueError(f"Length of X ({len(X_df)}) and y ({len(y_arr)}) must match.")
 
+    if cluster_arr is not None and len(cluster_arr) != len(y_arr):
+        raise ValueError(f"Length of cluster_col ({len(cluster_arr)}) and y ({len(y_arr)}) must match.")
+
     # Drop missing values
     valid_mask = (~X_df.isna().any(axis=1)) & (~np.isnan(y_arr))
+    if cluster_arr is not None:
+        valid_mask = valid_mask & (~pd.isna(cluster_arr))
     if not valid_mask.all():
         X_df = X_df.loc[valid_mask].reset_index(drop=True)
         y_arr = y_arr[valid_mask]
+        if cluster_arr is not None:
+            cluster_arr = cluster_arr[np.asarray(valid_mask)]
 
     n_samples, n_features = X_df.shape
     if n_samples < 5:
@@ -1133,8 +1161,11 @@ def consortium_multivariable_risk_factors(
     # 2. Standardize continuous columns if requested
     X_proc = pd.DataFrame(index=X_df.index)
     col_units: dict[str, str] = {}
+    col_scale: dict[str, float] = {}  # SD of the original column when the fitted column was standardised, else 1.0
+    orig_sd: dict[str, float] = {c: float(X_df[c].astype(float).std()) for c in X_df.columns}
     for c in X_df.columns:
         s = X_df[c].astype(float)
+        col_scale[c] = 1.0
         if c in binary_set:
             X_proc[c] = s
             col_units[c] = "Presence vs. Absence"
@@ -1143,6 +1174,7 @@ def consortium_multivariable_risk_factors(
                 sd = float(s.std())
                 if sd > 1e-12:
                     X_proc[c] = (s - s.mean()) / sd
+                    col_scale[c] = sd
                     col_units[c] = "Per 1-SD Increase"
                 else:
                     X_proc[c] = s
@@ -1219,6 +1251,21 @@ def consortium_multivariable_risk_factors(
     except np.linalg.LinAlgError:
         cov_matrix = np.linalg.pinv(H_final)
 
+    cov_type = "model"
+    n_clusters = None
+    if cluster_arr is not None:
+        codes, _ = pd.factorize(cluster_arr)
+        n_clusters = int(codes.max()) + 1 if len(codes) else 0
+        scores = Z * (y_arr - p_final)[:, np.newaxis]
+        cluster_scores = np.zeros((n_clusters, p_dim))
+        np.add.at(cluster_scores, codes, scores)
+        meat = cluster_scores.T @ cluster_scores
+        corr = 1.0
+        if n_clusters > 1 and n_samples > p_dim:
+            corr = (n_clusters / (n_clusters - 1.0)) * ((n_samples - 1.0) / (n_samples - p_dim))
+        cov_matrix = corr * (cov_matrix @ meat @ cov_matrix)
+        cov_type = "cluster"
+
     se = np.sqrt(np.maximum(1e-12, np.diag(cov_matrix)))
 
     # 6. Extract Odds Ratios, 95% CIs, and Wald p-values (skip intercept = idx 0)
@@ -1242,6 +1289,14 @@ def consortium_multivariable_risk_factors(
         elif any(fn_l.startswith(k) for k in ("lab_", "measurement_", "val_")) or any(k in fn_l for k in ("creatinine", "glucose", "a1c", "sbp", "dbp", "bmi", "potassium", "sodium")):
             return "Laboratory & Vitals"
         return "Clinical Features"
+
+    increments = dict(increments or {})
+    unknown = [k for k in increments if k not in X_df.columns]
+    if unknown:
+        raise ValueError(f"increments names unknown feature(s) {unknown}; features are {list(X_df.columns)}.")
+    for k, v in increments.items():
+        if not (isinstance(v, (tuple, list)) and len(v) == 2 and float(v[0]) > 0):
+            raise ValueError(f"increments[{k!r}] must be (size > 0, label); got {v!r}.")
 
     rows = []
     for idx, f_name in enumerate(active_cols):
@@ -1274,6 +1329,20 @@ def consortium_multivariable_risk_factors(
             "se": s_err,
             "z_score": z_score,
         })
+        if increments:
+            row = rows[-1]
+            per_unit = b / col_scale[f_name]
+            per_unit_se = s_err / col_scale[f_name]
+            row["std_beta"] = per_unit * orig_sd[f_name]
+            if f_name in increments:
+                size, label = float(increments[f_name][0]), str(increments[f_name][1])
+                row["increment"] = label
+                row["or_increment"] = float(np.exp(per_unit * size))
+                row["or_increment_ci_95_lower"] = float(np.exp((per_unit - 1.96 * per_unit_se) * size))
+                row["or_increment_ci_95_upper"] = float(np.exp((per_unit + 1.96 * per_unit_se) * size))
+            else:
+                row["increment"] = None
+                row["or_increment"] = row["or_increment_ci_95_lower"] = row["or_increment_ci_95_upper"] = np.nan
 
     table_df = pd.DataFrame(rows)
     table_df.sort_values(by=["domain", "p_value"], inplace=True)
@@ -1289,6 +1358,8 @@ def consortium_multivariable_risk_factors(
         "regularize": regularize,
         "intercept": float(beta[0]),
         "converged": True,
+        "cov_type": cov_type,
+        "n_clusters": n_clusters,
     }
 
     return ConsortiumRiskFactors(
@@ -1512,6 +1583,48 @@ def _calc_auroc_pure(y_true: np.ndarray, y_score: np.ndarray) -> float:
     return float(u_stat / (n_pos * n_neg))
 
 
+def _grouped_folds(y: np.ndarray, groups: np.ndarray, n_splits: int, random_state: int) -> np.ndarray:
+    """Fold id per row: whole groups (patients) share a fold; outcome-stratified and deterministic.
+
+    A group counts as positive if any of its rows is; positive and negative groups are shuffled separately and
+    dealt round-robin to the folds, so every fold gets a similar share of each class.
+    """
+    codes, uniques = pd.factorize(groups)
+    g_pos = np.zeros(len(uniques), dtype=bool)
+    np.logical_or.at(g_pos, codes, y > 0)
+    rng = np.random.default_rng(int(random_state))
+    fold_of_group = np.zeros(len(uniques), dtype=int)
+    for mask in (g_pos, ~g_pos):
+        idx = np.flatnonzero(mask)
+        rng.shuffle(idx)
+        fold_of_group[idx] = np.arange(len(idx)) % n_splits
+    return fold_of_group[codes]
+
+
+def _grouped_oof_probabilities(df, feature_cols, target_col, group_col, n_splits, random_state, regularize, alpha):
+    """Out-of-fold predicted probabilities from a patient-grouped K-fold with the same ridge logistic model."""
+    if group_col not in df.columns:
+        raise ValueError(f"group_col {group_col!r} not found in the site data.")
+    n_splits = int(n_splits)
+    n_groups = df[group_col].nunique()
+    if n_splits < 2 or n_splits > n_groups:
+        raise ValueError(f"n_splits must be between 2 and the number of patients ({n_groups}); got {n_splits}.")
+    X = df[feature_cols].values.astype(float)
+    y = df[target_col].values.astype(float)
+    folds = _grouped_folds(y, df[group_col].to_numpy(), n_splits, random_state)
+    prob = np.full(len(df), np.nan)
+    for k in range(n_splits):
+        test = folds == k
+        if not test.any() or test.all():
+            continue
+        rf = consortium_multivariable_risk_factors(
+            X=X[~test], y=y[~test], regularize=regularize, alpha=alpha, standardize_continuous=False,
+            drop_collinear=False, feature_names=feature_cols)
+        eta = rf.metadata["intercept"] + X[test] @ rf.coefficients.values
+        prob[test] = 1.0 / (1.0 + np.exp(-np.clip(eta, -30.0, 30.0)))
+    return prob
+
+
 def consortium_cross_site_validation(
     site_data: dict[str, pd.DataFrame] | pd.DataFrame,
     feature_cols: Sequence[str],
@@ -1521,6 +1634,9 @@ def consortium_cross_site_validation(
     regularize: bool = True,
     alpha: float = 1.0,
     l2_lambda: float | None = None,
+    group_col: str | None = None,
+    n_splits: int = 5,
+    random_state: int = 42,
 ) -> ConsortiumCrossSiteValidation:
     """Performs K x K Internal-External Cross-Validation (IECV) across federated health systems.
 
@@ -1537,6 +1653,13 @@ def consortium_cross_site_validation(
         regularize: Whether to apply L2 ridge regularization to site models.
         alpha: L2 penalty parameter lambda (default 1.0).
         l2_lambda: Optional alias for alpha.
+        group_col: Optional patient identifier column (e.g. ``subject_id``) for data with several stays per patient.
+            The diagonal (internal) cell is then the AUROC / Brier of out-of-fold predictions from a
+            patient-grouped, outcome-stratified ``n_splits``-fold cross-validation (no patient is in both the
+            training and the test fold), instead of the apparent, in-sample performance. Off-diagonal cells are
+            unchanged (patients are assumed distinct across sites).
+        n_splits: Folds for the grouped cross-validation (default 5, at most the number of patients).
+        random_state: Seed of the deterministic group shuffle (default 42).
 
     Returns:
         ConsortiumCrossSiteValidation: Object with AUROC matrix, Brier matrix, and heatmap plot.
@@ -1590,8 +1713,12 @@ def consortium_cross_site_validation(
             X_test = df_test[list(feature_cols)].values
             y_test = df_test[target_col].values.astype(float)
 
-            eta = intercept + X_test @ betas
-            prob = 1.0 / (1.0 + np.exp(-np.clip(eta, -30.0, 30.0)))
+            if group_col is not None and i == j:
+                prob = _grouped_oof_probabilities(
+                    df_test, list(feature_cols), target_col, group_col, n_splits, random_state, regularize, alpha)
+            else:
+                eta = intercept + X_test @ betas
+                prob = 1.0 / (1.0 + np.exp(-np.clip(eta, -30.0, 30.0)))
 
             auc = _calc_auroc_pure(y_test, prob)
             brier = float(np.mean((y_test - prob) ** 2))
@@ -1627,7 +1754,8 @@ def consortium_cross_site_validation(
         brier_matrix=df_brier,
         summary_df=summary_df,
         sites=site_names,
-        metadata={"alpha": alpha, "regularize": regularize},
+        metadata={"alpha": alpha, "regularize": regularize, "group_col": group_col,
+                  "n_splits": n_splits if group_col is not None else None},
     )
 
 

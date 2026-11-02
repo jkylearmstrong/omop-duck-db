@@ -10,7 +10,10 @@ consortium_cross_site_validation(
   target_col,
   site_col = "site",
   regularize = TRUE,
-  alpha = 1
+  alpha = 1,
+  group_col = NULL,
+  n_splits = 5,
+  random_state = 42
 )
 }
 \arguments{
@@ -25,6 +28,15 @@ consortium_cross_site_validation(
 \item{regularize}{Logical; whether to apply L2 ridge regularization (default \code{TRUE}).}
 
 \item{alpha}{Numeric; L2 penalty parameter (default \code{1.0}).}
+
+\item{group_col}{Optional patient identifier column (e.g. \code{subject_id}) for data with several stays per patient. The
+diagonal (internal) cell is then the AUROC / Brier of out-of-fold predictions from a patient-grouped,
+outcome-stratified \code{n_splits}-fold cross-validation, instead of the apparent in-sample performance. Off-diagonal
+cells are unchanged (patients are assumed distinct across sites).}
+
+\item{n_splits}{Folds of the grouped cross-validation (default 5, at most the number of patients).}
+
+\item{random_state}{Seed of the deterministic group shuffle (default 42).}
 }
 \value{
 An S3 object of class \code{consortium_cross_site_validation} containing \verb{$auroc_matrix}, \verb{$brier_matrix}, and \verb{$summary}.

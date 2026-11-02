@@ -32,6 +32,7 @@ def extract_patient_features(
     cohort_table: str = "cohort",
     measurement_concept_ids: Sequence[int] | None = None,
     lookahead_days: int = 0,
+    index_key: str = "person_id",
     **kwargs: Any,
 ) -> Any:
     """Extracts ML-ready patient features anchored to cohort milestone dates (T0).
@@ -54,6 +55,10 @@ def extract_patient_features(
         cohort_table: Table name containing cohort entries (default 'cohort').
         measurement_concept_ids: Specific measurement concept IDs to extract aggregated features for.
         lookahead_days: Days after anchor date to include in measurement extraction (default 0).
+        index_key: 'person_id' (default; one row per cohort row, keyed by patient) or 'visit_occurrence_id' (rows are
+            keyed by stay: the cohort table, e.g. an all-stays ``define_study_cohort(one_per_patient=False)`` result
+            persisted with ``table_name``, must hold a ``visit_occurrence_id`` column, which is returned and kept
+            distinct, so several stays of one patient never collapse or fan out).
         
     Returns:
         pd.DataFrame, pyarrow.Table, polars.DataFrame, or sparse DataFrame.
@@ -64,6 +69,12 @@ def extract_patient_features(
     cols = [r[0].lower() for r in con.execute(f"DESCRIBE SELECT * FROM {cohort_table}").fetchall()]
     pcol = "person_id" if "person_id" in cols else "subject_id"
     scol = "cohort_start_date" if "cohort_start_date" in cols else ("visit_start_date" if "visit_start_date" in cols else "index_date")
+    key = str(index_key).lower().strip()
+    if key not in ("person_id", "visit_occurrence_id"):
+        raise ValueError(f"index_key must be 'person_id' or 'visit_occurrence_id'; got {index_key!r}.")
+    if key == "visit_occurrence_id" and "visit_occurrence_id" not in cols:
+        raise ValueError(f"index_key='visit_occurrence_id' needs a visit_occurrence_id column in {cohort_table!r} "
+                         "(persist an all-stays cohort with define_study_cohort(..., table_name=...)).")
     ecol = "cohort_end_date" if "cohort_end_date" in cols else ("visit_end_date" if "visit_end_date" in cols else scol)
 
     oa = (anchor or offset_anchor or "visit_start_date").lower().strip()
@@ -148,6 +159,8 @@ def extract_patient_features(
         f"c.{scol} AS cohort_start_date",
         f"c.{ecol} AS cohort_end_date",
     ]
+    if key == "visit_occurrence_id":
+        select_items.append("c.visit_occurrence_id")
     if "site" in cols:
         select_items.append("c.site")
     if outcome_cohort_id is not None:
@@ -171,6 +184,8 @@ def extract_patient_features(
     where_sql = f"WHERE {' AND '.join(where_items)}" if where_items else ""
 
     group_by_items = [f"c.{pcol}", f"c.{scol}", f"c.{ecol}"]
+    if key == "visit_occurrence_id":
+        group_by_items.append("c.visit_occurrence_id")
     if "site" in cols:
         group_by_items.append("c.site")
     if outcome_cohort_id is not None:
@@ -186,7 +201,7 @@ def extract_patient_features(
         {where_sql}
         GROUP BY 
             {', '.join(group_by_items)}
-        ORDER BY c.{pcol}, c.{scol}
+        ORDER BY c.{pcol}, c.{scol}{', c.visit_occurrence_id' if key == 'visit_occurrence_id' else ''}
     """
 
     if stream_to_parquet:
@@ -205,7 +220,7 @@ def extract_patient_features(
         # Returns standard OHDSI (row_id, covariate_id, covariate_value)
         df_dense = con.execute(dense_sql).df()
         sparse_rows = []
-        feature_cols = [col for col in df_dense.columns if col not in ("subject_id", "person_id", "cohort_start_date", "cohort_end_date", "y", "site")]
+        feature_cols = [col for col in df_dense.columns if col not in ("subject_id", "person_id", "visit_occurrence_id", "cohort_start_date", "cohort_end_date", "y", "site")]
 
         for row_id, (_, row) in enumerate(df_dense.iterrows(), start=1):
             for col_idx, col_name in enumerate(feature_cols, start=101):

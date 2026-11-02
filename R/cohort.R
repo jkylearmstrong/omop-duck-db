@@ -524,7 +524,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                             evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42,
                             pinned_keys = FALSE, require_diabetes = FALSE, transfer_ids = integer(0),
                             diabetes_drug_rule = "names", diabetes_drug_ancestors = integer(0),
-                            concept_ancestor_ref = NULL, metformin_only_pcos = NULL) {
+                            concept_ancestor_ref = NULL, metformin_only_pcos = NULL,
+                            one_per_patient = TRUE) {
   list(cohort_id = cohort_id, outcome = outcome, label = label, schema = schema, visit_ids = visit_ids,
        outcome_visit_ids = outcome_visit_ids, study_start = study_start, study_end = study_end,
        min_age = min_age, age_method = age_method, min_los_days = min_los_days, washin_days = washin_days,
@@ -533,7 +534,7 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
        rule = rule, seed = seed, pinned_keys = pinned_keys, require_diabetes = require_diabetes,
        transfer_ids = transfer_ids, diabetes_drug_rule = diabetes_drug_rule,
        diabetes_drug_ancestors = diabetes_drug_ancestors, concept_ancestor_ref = concept_ancestor_ref,
-       metformin_only_pcos = metformin_only_pcos)
+       metformin_only_pcos = metformin_only_pcos, one_per_patient = one_per_patient)
 }
 
 # ---- identifier / literal helpers --------------------------------------------------------------------
@@ -928,10 +929,12 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
         age_at_index,
         los_days,
         discharged_to_concept_id,
-        %s AS target_outcome
+        %s AS target_outcome%s
     FROM ranked_stays
-    WHERE stay_rank = 1
-    ORDER BY subject_id, cohort_start_date", .sql_int(spec$cohort_id), .sql_str(spec$label))
+    %s
+    ORDER BY subject_id, cohort_start_date, visit_occurrence_id", .sql_int(spec$cohort_id), .sql_str(spec$label),
+    if (isFALSE(spec$one_per_patient)) ", stay_rank" else "",
+    if (isFALSE(spec$one_per_patient)) "" else "WHERE stay_rank = 1")
   paste0(.study_ctes(spec), "
     ", final_select)
 }
@@ -1033,6 +1036,28 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
         WHERE outcome_flag = 1;
       ", t_cohort, oid, tmp))
     }
+  }
+  invisible(NULL)
+}
+
+# Warns when the transfer exclusion is set but no stay carries a transfer concept id while 'IP' discharges hold 0
+# (databases built before the ETL mapped discharge status 'IP' to 8717).
+#' @keywords internal
+#' @noRd
+.warn_unmapped_transfer_discharge <- function(con, spec) {
+  if (!length(spec$transfer_ids)) return(invisible(NULL))
+  vo <- .study_tbl(spec, "visit_occurrence")
+  unmapped <- tryCatch({
+    hit <- DBI::dbGetQuery(con, sprintf("SELECT 1 FROM %s WHERE discharged_to_concept_id IN (%s) LIMIT 1",
+                                        vo, .int_list(spec$transfer_ids)))
+    if (nrow(hit)) FALSE else nrow(DBI::dbGetQuery(con, sprintf(
+      "SELECT 1 FROM %s WHERE COALESCE(discharged_to_concept_id, 0) = 0 AND discharged_to_source_value = 'IP' LIMIT 1", vo))) > 0
+  }, error = function(e) FALSE)
+  if (unmapped) {
+    warning("transfer_discharge_concept_ids = ", paste(spec$transfer_ids, collapse = ", "),
+            " matches no stay, but visits with discharged_to_source_value = 'IP' have discharged_to_concept_id 0 ",
+            "(the database predates the ETL mapping to 8717), so the transfer exclusion removes nothing. Recode them first.",
+            call. = FALSE)
   }
   invisible(NULL)
 }
@@ -1387,7 +1412,9 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #' @param table_name Optional table name (up to three dot-separated plain identifiers) to persist the full result.
 #' @param schema Optional schema (or `catalog.schema`) holding the CDM tables; default resolved via the search
 #'   path.
-#' @param one_per_patient The engine always selects exactly one index stay per patient; `FALSE` is rejected.
+#' @param one_per_patient `FALSE` returns every eligible stay per patient with an extra `stay_rank` column (1 = the
+#'   stay `sampling_rule` would pick, so the rank-1 rows equal the one-per-patient cohort). Models on such output need
+#'   patient-grouped cross-validation folds and patient-clustered intervals. Cannot be combined with `persist_keys`.
 #' @param persist_keys Path of a CSV (`subject_id,visit_occurrence_id`, sorted by subject) of the selected index
 #'   stays. When the file exists the listed stays are preferred over resampling, so selection is identical across
 #'   re-runs and sites sharing the file; patients missing from it are sampled by `sampling_rule` and the file is
@@ -1468,8 +1495,11 @@ define_study_cohort <- function(con,
                                 diabetes_drug_rule = "names",
                                 diabetes_rxnorm_cuis = NULL,
                                 exclude_metformin_only_prediabetes_pcos = FALSE) {
-  if (!isTRUE(one_per_patient)) {
-    stop("define_study_cohort selects exactly one index stay per patient; one_per_patient = FALSE is unsupported.", call. = FALSE)
+  if (!(isTRUE(one_per_patient) || isFALSE(one_per_patient))) {
+    stop("one_per_patient must be TRUE or FALSE.", call. = FALSE)
+  }
+  if (isFALSE(one_per_patient) && !is.null(persist_keys)) {
+    stop("persist_keys pins one index stay per patient and cannot be combined with one_per_patient = FALSE.", call. = FALSE)
   }
   visit_ids <- .resolve_visit_types(visit_type, "visit_type", allow_null = TRUE)
   win <- .resolve_study_window(study_window)
@@ -1571,8 +1601,10 @@ define_study_cohort <- function(con,
     death_ids = death_ids, death_sources = sources, window_days = window, gap_days = gap_n, verified = verified,
     evidence = evidence, rule = rule, seed = seed_n, require_diabetes = isTRUE(require_diabetes),
     transfer_ids = transfer_ids, diabetes_drug_rule = diabetes_drug_rule,
-    diabetes_drug_ancestors = drug$ancestors, concept_ancestor_ref = drug$ca, metformin_only_pcos = mf_pcos
+    diabetes_drug_ancestors = drug$ancestors, concept_ancestor_ref = drug$ca, metformin_only_pcos = mf_pcos,
+    one_per_patient = one_per_patient
   )
+  .warn_unmapped_transfer_discharge(con, spec)
 
   if (!is.null(persist_keys) && file.exists(persist_keys)) {
     pinned <- utils::read.csv(persist_keys, stringsAsFactors = FALSE)
@@ -1604,7 +1636,7 @@ define_study_cohort <- function(con,
 
   name <- cohort_name %||% "Study Cohort"
   df <- .run_study_engine(
-    con, spec, .STUDY_COLUMNS, materialise = materialise, table_name = table_name,
+    con, spec, if (one_per_patient) .STUDY_COLUMNS else paste0(.STUDY_COLUMNS, ", stay_rank"), materialise = materialise, table_name = table_name,
     materialize_args = list(
       name = name,
       description = cohort_description %||% .describe_study(spec),
@@ -1645,6 +1677,7 @@ define_study_cohort <- function(con,
     exclude_metformin_only_prediabetes_pcos = mf_pcos,
     death_sources = sources,
     followup_evidence = evidence,
+    one_per_patient = one_per_patient,
     schema = schema
   )
   df

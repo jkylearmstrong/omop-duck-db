@@ -910,6 +910,65 @@ def consortium_patient_overlap(
     return pd.DataFrame(records)
 
 
+def consortium_cross_site_duplicates(
+    site_identifiers: Dict[str, Iterable[Any]],
+    key: str | bytes,
+    min_cell_count: int = 11,
+) -> pd.DataFrame:
+    """Reports patients that appear at more than one site, as aggregate counts only.
+
+    Identifiers are pseudonymised with HMAC-SHA256 under the consortium-shared secret ``key`` before any comparison,
+    so raw identifiers never enter the comparison and cannot be reversed without the key. Only counts are returned;
+    counts of 1 to ``min_cell_count - 1`` are suppressed. Run it on each site's identifier list (for example
+    name, date of birth and sex combined into one string) only where the sites may share that list under the
+    consortium agreement; sites that cannot may hash locally with the same key and pass the tokens to
+    :func:`consortium_patient_overlap`.
+
+    Parameters
+    ----------
+    site_identifiers : dict
+        ``{site: iterable of patient identifiers}``.
+    key : str or bytes
+        Shared secret for the keyed hash. Must be non-empty.
+    min_cell_count : int
+        Small-cell suppression threshold (default 11).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per site pair as in :func:`consortium_patient_overlap`, plus a final row ``site_1 = 'ALL'`` with
+        ``n_site_1`` the pooled distinct patients and ``shared_patients`` the patients seen at two or more sites.
+    """
+    import hashlib
+    import hmac
+
+    secret = key.encode("utf-8") if isinstance(key, str) else bytes(key)
+    if not secret:
+        raise ValueError("key must be a non-empty secret shared by the consortium.")
+
+    def token(value: Any) -> str:
+        return hmac.new(secret, str(value).strip().encode("utf-8"), hashlib.sha256).hexdigest()
+
+    site_tokens = {s: {token(v) for v in ids if v is not None and str(v).strip() != ""}
+                   for s, ids in site_identifiers.items()}
+    pairs = consortium_patient_overlap(site_tokens, min_cell_count=min_cell_count)
+    pairs = pairs[pairs["site_1"] != pairs["site_2"]].reset_index(drop=True)
+
+    seen: Dict[str, int] = {}
+    for toks in site_tokens.values():
+        for t in toks:
+            seen[t] = seen.get(t, 0) + 1
+    multi = sum(1 for c in seen.values() if c > 1)
+    suppressed = 0 < multi < min_cell_count
+    total = pd.DataFrame([{
+        "site_1": "ALL", "site_2": "ALL", "n_site_1": len(seen), "n_site_2": len(seen),
+        "shared_patients": f"<{min_cell_count}" if suppressed else str(multi),
+        "overlap_pct": round(multi / len(seen), 4) if seen else 0.0,
+        "is_suppressed": suppressed,
+    }])
+    return pd.concat([pairs, total], ignore_index=True)
+
+
 # -----------------------------------------------------------------------------
 # 7. Planned-Readmission Filter (CMS Algorithm)
 # -----------------------------------------------------------------------------

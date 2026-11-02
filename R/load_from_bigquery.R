@@ -65,14 +65,26 @@ load_from_bigquery <- function(billing_project = NULL,
     df <- bigrquery::bq_table_download(bq_tbl, billing = billing_project, bigint = "integer64")
     cat("  ->", nrow(df), "rows fetched from BigQuery\n")
 
-    if (tbl %in% existing_tables) {
-      if (mode == "overwrite") {
-        DBI::dbExecute(con, paste0("DELETE FROM ", tbl))
+    # integer64 columns go through text and an explicit CAST: duckdb's R client (1.5.x) writes a bit64 vector as a DOUBLE
+    # reinterpretation of the 64-bit pattern, which silently turns every id into garbage.
+    is64 <- vapply(df, function(col) inherits(col, "integer64"), logical(1))
+    for (nm in names(df)[is64]) df[[nm]] <- as.character(df[[nm]])
+    quoted <- DBI::dbQuoteIdentifier(con, names(df))
+    select_list <- ifelse(is64, sprintf("CAST(%s AS BIGINT) AS %s", quoted, quoted), quoted)
+    stage <- "_bq_stage"
+    duckdb::duckdb_register(con, stage, df)
+    tryCatch({
+      if (tbl %in% existing_tables) {
+        if (mode == "overwrite") {
+          DBI::dbExecute(con, paste0("DELETE FROM ", tbl))
+        }
+        DBI::dbExecute(con, sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", DBI::dbQuoteIdentifier(con, tbl),
+                                    paste(quoted, collapse = ", "), paste(select_list, collapse = ", "), stage))
+      } else {
+        DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s", DBI::dbQuoteIdentifier(con, tbl),
+                                    paste(select_list, collapse = ", "), stage))
       }
-      DBI::dbAppendTable(con, tbl, df)
-    } else {
-      DBI::dbWriteTable(con, tbl, df, overwrite = TRUE)
-    }
+    }, finally = duckdb::duckdb_unregister(con, stage))
     cat("  -> loaded into local table", tbl, "\n")
   }
 

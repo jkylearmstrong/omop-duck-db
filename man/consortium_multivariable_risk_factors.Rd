@@ -12,7 +12,9 @@ consortium_multivariable_risk_factors(
   alpha = 1,
   domain_mapping = NULL,
   standardize_continuous = TRUE,
-  drop_collinear = TRUE
+  drop_collinear = TRUE,
+  cluster_col = NULL,
+  increments = NULL
 )
 }
 \arguments{
@@ -31,6 +33,15 @@ consortium_multivariable_risk_factors(
 \item{standardize_continuous}{Logical; whether continuous features are scaled to 1-SD units (default \code{TRUE}).}
 
 \item{drop_collinear}{Logical; whether linearly dependent columns are dropped via QR decomposition (default \code{TRUE}).}
+
+\item{cluster_col}{Optional cluster identifier (typically \code{subject_id}) for repeated stays per patient: a column name
+of \code{X} (never used as a predictor) or a vector with one value per row. When given, standard errors, CIs and
+p-values use the patient-clustered (Huber-White) sandwich estimator with the \code{G/(G-1) * (n-1)/(n-k)}
+small-sample correction.}
+
+\item{increments}{Optional named list \code{list(feature = c(size, label))}, e.g. \code{list(sbp = list(10, "per 10 mmHg"))}.
+The table gains \code{std_beta} (beta per 1 SD of the original feature) and, for listed features, \code{increment},
+\code{or_increment}, \code{or_increment_ci_95_lower} and \code{or_increment_ci_95_upper} (odds ratio per \code{size} original units).}
 }
 \value{
 An S3 object of class \code{consortium_risk_factors} with Table 5 data frame, coefficients, standard errors, and methods.

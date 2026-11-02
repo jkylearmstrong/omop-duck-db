@@ -140,7 +140,9 @@ path.}
 
 \item{attrition}{Compute the stepwise patient attrition via \code{\link[=compute_attrition]{compute_attrition()}} (default \code{TRUE}).}
 
-\item{one_per_patient}{The engine always selects exactly one index stay per patient; \code{FALSE} is rejected.}
+\item{one_per_patient}{\code{FALSE} returns every eligible stay per patient with an extra \code{stay_rank} column (1 = the
+stay \code{sampling_rule} would pick, so the rank-1 rows equal the one-per-patient cohort). Models on such output need
+patient-grouped cross-validation folds and patient-clustered intervals. Cannot be combined with \code{persist_keys}.}
 
 \item{persist_keys}{Path of a CSV (\verb{subject_id,visit_occurrence_id}, sorted by subject) of the selected index
 stays. When the file exists the listed stays are preferred over resampling, so selection is identical across
