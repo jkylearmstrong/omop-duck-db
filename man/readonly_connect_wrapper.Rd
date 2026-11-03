@@ -25,6 +25,6 @@ A function that returns the connection after attaching.
 \description{
 DatabaseConnector cannot \code{ATTACH} on connect, and HADES opens several connections per run. This returns a function
 with the same arguments as \code{connect} that opens the connection and then runs each statement of
-\code{\link[=readonly_attach_sql]{readonly_attach_sql()}} on it. \code{cohorts/run_plp_readonly_example.R} patches \code{DatabaseConnector::connect} with it for
+\code{\link[=readonly_attach_sql]{readonly_attach_sql()}} on it. \code{inst/cohorts/run_plp_readonly_example.R} patches \code{DatabaseConnector::connect} with it for
 one R session.
 }

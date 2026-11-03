@@ -14,7 +14,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from omop_etl import build_schema, define_study_cohort, run_dqd  # noqa: E402
+from omop_etl import build_schema, cohort_attrition, define_study_cohort, run_dqd  # noqa: E402
 from omop_etl.cli import main as cli_main  # noqa: E402
 from omop_etl.run_manifest import ManifestVerificationError, RunManifest, verify_manifest  # noqa: E402
 from omop_etl.temporal_split import split_by_date  # noqa: E402
@@ -108,12 +108,12 @@ def test_one_per_patient_false_returns_all_stays(cdm):
 def test_all_stays_attrition_counts_stays(cdm):
     _multi_stay_cdm(cdm)
     allst = define_study_cohort(cdm, one_per_patient=False, **{**SIMPLE, "attrition": True})
-    att = allst.attrs["attrition"]
+    att = cohort_attrition(allst)
     assert {"stays_retained", "stays_dropped"} <= set(att.columns)
     assert att["stays_dropped"].iloc[0] == 0
     assert (att["stays_retained"].diff().dropna() <= 0).all()
     one = define_study_cohort(cdm, **{**SIMPLE, "attrition": True})
-    assert "stays_retained" not in one.attrs["attrition"].columns
+    assert "stays_retained" not in cohort_attrition(one).columns
 
 
 def test_one_per_patient_false_rejects_persist_keys(cdm, tmp_path):

@@ -27,6 +27,7 @@ from omop_etl.build_omop_cdm import (
 )
 from omop_etl.cohort import (
     ConsortAttrition,
+    cohort_attrition,
     build_ederri_diabetes_cohort,
     build_end_of_life_cohort,
     build_mortality_cohort,
@@ -441,6 +442,7 @@ __all__ = [
     "checkpoint_database",
     "build_observation_period",
     "cap_observation_period",
+    "cohort_attrition",
     "materialize_vocabulary",
     "build_drug_era",
     "build_condition_era",

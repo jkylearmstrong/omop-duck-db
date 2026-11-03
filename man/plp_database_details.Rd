@@ -34,7 +34,7 @@ otherwise the file name.}
 
 \item{preflight}{Run \code{\link[=hades_preflight]{hades_preflight()}} first and stop on failure (default \code{TRUE}).}
 
-\item{integer64}{\code{"auto"} (default) sets \code{databaseConnectorInteger64AsNumeric = FALSE} only when the CDM holds ids >= 2^53 (see \code{\link[=hades_needs_integer64]{hades_needs_integer64()}}); \code{"always"} sets it unconditionally, \code{"never"} leaves it alone.}
+\item{integer64}{\code{"auto"} (default) sets \code{databaseConnectorInteger64AsNumeric = FALSE} only when the CDM holds ids= 2^53 (see hades_needs_integer64()); "always" sets it unconditionally, "never" leaves it alone.}
 }
 \value{
 A \code{databaseDetails} object from PatientLevelPrediction.

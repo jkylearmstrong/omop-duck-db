@@ -4,7 +4,7 @@
 \alias{remap_discharge_status}
 \title{Recode transfer discharges in a database built before the ETL mapped 'IP' to 8717}
 \usage{
-remap_discharge_status(con, schema = NULL, concept_id = 8717L)
+remap_discharge_status(con, schema = NULL, concept_id = 8717L, dry_run = FALSE)
 }
 \arguments{
 \item{con}{DuckDB connection.}
@@ -12,11 +12,14 @@ remap_discharge_status(con, schema = NULL, concept_id = 8717L)
 \item{schema}{Optional schema holding \code{visit_occurrence}.}
 
 \item{concept_id}{Concept id to write (default 8717, 'Inpatient Hospital').}
+
+\item{dry_run}{If \code{TRUE}, only count the visits that would be recoded (works on a read-only connection).}
 }
 \value{
-The number of visits recoded, invisibly.
+The number of visits recoded (or that would be), invisibly.
 }
 \description{
 Sets \code{discharged_to_concept_id} to \code{concept_id} for visits whose \code{discharged_to_source_value} is \code{IP}
-(case-insensitive, whitespace ignored) and whose concept id is \code{NULL} or 0. Idempotent; needs write access.
+(case-insensitive, whitespace ignored) and whose concept id is \code{NULL} or 0. Idempotent; needs write access
+except with \code{dry_run = TRUE}.
 }

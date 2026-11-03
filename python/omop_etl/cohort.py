@@ -1567,7 +1567,7 @@ def define_study_cohort(
         One row per patient, ordered by ``subject_id``: ``cohort_definition_id, subject_id, cohort_start_date``
         (index visit start), ``cohort_end_date`` (index visit end), ``visit_occurrence_id, visit_concept_id,
         outcome_flag, outcome_date, followup_verified, age_at_index, los_days, discharged_to_concept_id,
-        target_outcome``. ``attrs['attrition']`` holds the :func:`compute_attrition` table (CONSORT steps, in the
+        target_outcome``. ``attrs['attrition']`` holds the :func:`compute_attrition` rows as a list of dicts (:func:`cohort_attrition` gives a DataFrame) (CONSORT steps, in the
         order: visit type, study window, age, length of stay, wash-in, in-hospital death, verified follow-up),
         ``attrs['summary']`` the :func:`get_cohort_summary` row when materialised into the default schema, and
         ``attrs['definition']`` a dict of the resolved settings.
@@ -1790,7 +1790,7 @@ def define_study_cohort(
 
         if attrition:
             df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec),
-                                                    count_stays=not one_per_patient)
+                                                    count_stays=not one_per_patient).to_dict("records")   # list of dicts: a DataFrame in attrs breaks pd.concat (O5)
     finally:
         if spec.metformin_only_pcos:
             con.execute(f"DROP TABLE IF EXISTS {_STUDY_METFORMIN_TABLE}")
@@ -2202,6 +2202,18 @@ def prepare_competing_risks_data(
     return df, summary
 
 
+def cohort_attrition(cohort: pd.DataFrame) -> pd.DataFrame:
+    """Returns the attrition table stored on a :func:`define_study_cohort` result as a DataFrame.
+
+    ``cohort.attrs['attrition']`` is a list of dicts (so ``pd.concat`` of cohort frames works); this converts it.
+    Empty when the cohort was built with ``attrition=False``.
+    """
+    att = cohort.attrs.get("attrition")
+    if att is None:
+        return pd.DataFrame()
+    return att.copy() if isinstance(att, pd.DataFrame) else pd.DataFrame(att)
+
+
 class ConsortAttrition:
     """Represents a CONSORT/STROBE participant attrition flow with multi-format exporters."""
 
@@ -2374,7 +2386,7 @@ def generate_consort_attrition(
 
     if isinstance(cohort_data, pd.DataFrame):
         if "attrition" in getattr(cohort_data, "attrs", {}):
-            return ConsortAttrition(cohort_data.attrs["attrition"])
+            return ConsortAttrition(cohort_attrition(cohort_data))
         if "step_name" in cohort_data.columns and "subjects_retained" in cohort_data.columns:
             return ConsortAttrition(cohort_data)
 

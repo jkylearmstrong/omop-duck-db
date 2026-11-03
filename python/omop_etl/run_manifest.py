@@ -111,7 +111,7 @@ class RunManifest:
         self.attrition.append({"step": str(step), "n": int(n), **detail})
 
     def add_attrition(self, attrition: Any) -> None:
-        """Takes the DataFrame from ``define_study_cohort(...).attrs['attrition']`` (or a list of dicts)."""
+        """Takes ``define_study_cohort(...).attrs['attrition']`` (a list of dicts) or the equivalent DataFrame."""
         rows = attrition.to_dict("records") if hasattr(attrition, "to_dict") else list(attrition)
         for r in rows:
             step = r.get("step") or r.get("step_name") or r.get("name") or str(len(self.attrition))

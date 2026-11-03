@@ -64,4 +64,10 @@ Checks: \code{cdmTable}, \code{cdmField}, \code{isRequired}, \code{isPrimaryKey}
 limits of \code{measurement.value_as_number}; the latter apply only to rows whose \code{unit_concept_id} matches a limit, so an ETL that
 leaves it 0 gets \code{NOT_APPLICABLE} (use \code{\link[=sanitize_measurements]{sanitize_measurements()}} there). Not run: the per-concept checks of the official list
 (\code{plausibleGender}, \code{plausibleUnitConceptIds}, ...); report the subset when you cite the result.
+
+Checked against the official DataQualityDashboard (2.9.1) on a planted fixture: the violated-row counts agree for every check both tools
+run on the same table and field. Differences by design: an empty clinical table is \code{NOT_APPLICABLE} for \code{measurePersonCompleteness} here
+(the official run counts all persons as missing, with a per-table threshold); the NULL-with-a-source-value cases the official
+concept-record check adds for a few fields are not counted; the official plausible-value checks have per-concept thresholds that this
+catalog does not.
 }

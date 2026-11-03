@@ -340,6 +340,10 @@ consortium_multivariable_risk_factors <- function(X,
   y_vec <- as.numeric(y)
   cluster_vec <- NULL
   if (!is.null(cluster_col)) {
+    if (isTRUE(regularize)) {
+      warning("cluster_col with regularize = TRUE gives clustered standard errors for a ridge fit; they match an ",
+              "unpenalised clustered logit only with regularize = FALSE.", call. = FALSE)
+    }
     if (is.character(cluster_col) && length(cluster_col) == 1L && cluster_col %in% names(X_df)) {
       cluster_vec <- X_df[[cluster_col]]
       X_df[[cluster_col]] <- NULL

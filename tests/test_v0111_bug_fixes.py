@@ -90,3 +90,19 @@ def test_cap_observation_period():
     assert con.execute("SELECT COUNT(*) FROM observation_period").fetchone()[0] == 3
     assert cap_observation_period(con, "2026-09-30") == {"shortened": 1, "deleted": 1}
     assert con.execute("SELECT MAX(observation_period_end_date)::VARCHAR, COUNT(*) FROM observation_period").fetchone() == ("2026-09-30", 2)
+
+
+def test_o7b_features_do_not_multiply_across_tables():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE cohort AS SELECT * FROM (VALUES (1, 1, DATE '2020-03-01', DATE '2020-03-05')) "
+                "t(cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)")
+    con.execute("CREATE TABLE condition_occurrence AS SELECT i AS condition_occurrence_id, 1 AS person_id, DATE '2020-02-01' AS condition_start_date FROM range(1, 21) t(i)")
+    con.execute("CREATE TABLE drug_exposure AS SELECT i AS drug_exposure_id, 1 AS person_id, DATE '2020-02-10' AS drug_exposure_start_date FROM range(1, 8) t(i)")
+    con.execute("CREATE TABLE measurement AS SELECT * FROM (VALUES (1, 1, 3001, DATE '2020-02-15', 10.0), (2, 1, 3001, DATE '2020-02-16', 20.0))"
+                " t(measurement_id, person_id, measurement_concept_id, measurement_date, value_as_number)")
+    df = extract_patient_features(con, cohort_id=1, lookback_days=[30, 90], include_demographics=False,
+                                  measurement_concept_ids=[3001])
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["condition_count_30d"] == 20 and row["drug_count_30d"] == 7
+    assert row["mean_measurement_3001"] == 15.0      # not weighted by the 20 x 7 other-table rows

@@ -185,7 +185,7 @@ class CohortExtractor:
         attrition_df = pd.DataFrame(attrition_records)
         self.attrition = ConsortAttrition(attrition_df)
         self.cohort_df = df.reset_index(drop=True)
-        self.cohort_df.attrs["attrition"] = attrition_df
+        self.cohort_df.attrs["attrition"] = attrition_df.to_dict("records")
         return self
 
     def to_mermaid(self) -> str:

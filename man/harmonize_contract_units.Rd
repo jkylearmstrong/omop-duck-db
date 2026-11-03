@@ -4,8 +4,12 @@
 \alias{harmonize_contract_units}
 \title{Rescale flagged features to the contract units}
 \usage{
-harmonize_contract_units(features, sanity = NULL, reference_medians = NULL,
-  recompute_derived = TRUE)
+harmonize_contract_units(
+  features,
+  sanity = NULL,
+  reference_medians = NULL,
+  recompute_derived = TRUE
+)
 }
 \arguments{
 \item{features}{data.frame of features.}

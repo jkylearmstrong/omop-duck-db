@@ -105,74 +105,62 @@ extract_patient_features <- function(con,
     demo_join <- ""
   }
 
+  # Each clinical table is aggregated on its own per cohort row and the aggregates are joined back, so the events of
+  # one table never multiply with those of another (a stay with many conditions and many drugs used to produce their
+  # product before COUNT(DISTINCT)). The widest window goes into each aggregate's join.
   lookback_joins <- character(0)
+  gkeys <- c(pcol, scol, ecol, if (by_stay) "visit_occurrence_id", if ("site" %in% cols) "site")
+  base_where <- if (!is.null(cohort_id) && "cohort_definition_id" %in% cols) sprintf("WHERE c.cohort_definition_id = %d", as.integer(cohort_id)) else ""
+  key_sql <- paste(sprintf("c.%s", gkeys), collapse = ", ")
+  add_aggregate <- function(alias, table, tbl, on_cond, inner, is_count) {
+    agg_sql <- paste(sprintf("%s AS %s", inner, names(inner)), collapse = ", ")
+    lookback_joins <<- c(lookback_joins, sprintf(
+      "LEFT JOIN (SELECT %s, %s FROM base c JOIN %s %s ON %s %s GROUP BY %s) %s ON %s",
+      key_sql, agg_sql, table, tbl, on_cond, base_where, key_sql, alias,
+      paste(sprintf("%s.%s IS NOT DISTINCT FROM c.%s", alias, gkeys, gkeys), collapse = " AND ")))
+    sprintf(if (is_count) "COALESCE(%s.%s, 0) AS %s" else "%s.%s AS %s", alias, names(inner), names(inner))
+  }
+  count_windows <- function(alias, table, tbl, date_col, id_col, label) {
+    inner <- sprintf("COUNT(DISTINCT CASE WHEN %s.%s BETWEEN c.%s - %d AND c.%s - 1 THEN %s.%s END)",
+                     tbl, date_col, anchor_col, windows, anchor_col, tbl, id_col)
+    names(inner) <- sprintf("%s_count_%dd", label, windows)
+    on <- sprintf("c.%s = %s.person_id AND %s.%s BETWEEN c.%s - %d AND c.%s - 1", pcol, tbl, tbl, date_col, anchor_col, maxw, anchor_col)
+    select_items <<- c(select_items, add_aggregate(alias, table, tbl, on, inner, TRUE))
+  }
 
   if (isTRUE(include_conditions) && "condition_occurrence" %in% existing_tables) {
-    cond_cols <- sprintf(
-      "COUNT(DISTINCT CASE WHEN co.condition_start_date BETWEEN c.%s - %d AND c.%s - 1 THEN co.condition_occurrence_id END) AS condition_count_%dd",
-      anchor_col, windows, anchor_col, windows
-    )
-    select_items <- c(select_items, cond_cols)
-    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN condition_occurrence co ON c.%s = co.person_id AND co.condition_start_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
+    count_windows("a_cond", "condition_occurrence", "co", "condition_start_date", "condition_occurrence_id", "condition")
   }
-
   if (isTRUE(include_drugs) && "drug_exposure" %in% existing_tables) {
-    drug_cols <- sprintf(
-      "COUNT(DISTINCT CASE WHEN de.drug_exposure_start_date BETWEEN c.%s - %d AND c.%s - 1 THEN de.drug_exposure_id END) AS drug_count_%dd",
-      anchor_col, windows, anchor_col, windows
-    )
-    select_items <- c(select_items, drug_cols)
-    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN drug_exposure de ON c.%s = de.person_id AND de.drug_exposure_start_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
+    count_windows("a_drug", "drug_exposure", "de", "drug_exposure_start_date", "drug_exposure_id", "drug")
   }
-
   if (isTRUE(include_procedures) && "procedure_occurrence" %in% existing_tables) {
-    proc_cols <- sprintf(
-      "COUNT(DISTINCT CASE WHEN po.procedure_date BETWEEN c.%s - %d AND c.%s - 1 THEN po.procedure_occurrence_id END) AS procedure_count_%dd",
-      anchor_col, windows, anchor_col, windows
-    )
-    select_items <- c(select_items, proc_cols)
-    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN procedure_occurrence po ON c.%s = po.person_id AND po.procedure_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
+    count_windows("a_proc", "procedure_occurrence", "po", "procedure_date", "procedure_occurrence_id", "procedure")
   }
-
   if ("measurement" %in% existing_tables) {
     if (!is.null(measurement_concept_ids) && length(measurement_concept_ids) > 0) {
-      meas_items <- character(0)
+      inner <- character(0); out_names <- character(0)
       for (cid in measurement_concept_ids) {
         for (w in windows) {
-          meas_items <- c(meas_items, sprintf(
-            "AVG(CASE WHEN m.measurement_concept_id = %d AND m.measurement_date BETWEEN c.%s - %d AND c.%s + %d THEN m.value_as_number END) AS mean_measurement_%d",
-            as.integer(cid), anchor_col, w, anchor_col, as.integer(lookahead_days), as.integer(cid)
-          ))
+          nm <- sprintf("mm_%d_%d", as.integer(cid), w)
+          inner[nm] <- sprintf(
+            "AVG(CASE WHEN m.measurement_concept_id = %d AND m.measurement_date BETWEEN c.%s - %d AND c.%s + %d THEN m.value_as_number END)",
+            as.integer(cid), anchor_col, w, anchor_col, as.integer(lookahead_days))
+          out_names[nm] <- sprintf("mean_measurement_%d", as.integer(cid))
         }
       }
-      select_items <- c(select_items, meas_items)
-      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id AND m.measurement_date BETWEEN c.%s - %d AND c.%s + %d", pcol, anchor_col, maxw, anchor_col, as.integer(lookahead_days)))
+      on <- sprintf("c.%s = m.person_id AND m.measurement_date BETWEEN c.%s - %d AND c.%s + %d", pcol, anchor_col, maxw, anchor_col, as.integer(lookahead_days))
+      items <- add_aggregate("a_meas", "measurement", "m", on, inner, FALSE)
+      select_items <- c(select_items, mapply(function(it, nm) sub(" AS .*$", paste0(" AS ", out_names[[nm]]), it), items, names(inner), USE.NAMES = FALSE))
     } else if (isTRUE(include_measurements)) {
-      meas_cols <- sprintf(
-        "COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.%s - %d AND c.%s - 1 THEN m.measurement_id END) AS measurement_count_%dd",
-        anchor_col, windows, anchor_col, windows
-      )
-      select_items <- c(select_items, meas_cols)
-      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id AND m.measurement_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
+      count_windows("a_meas", "measurement", "m", "measurement_date", "measurement_id", "measurement")
     }
   }
 
   select_clause <- paste(select_items, collapse = ",\n        ")
   all_joins <- paste(c(demo_join, outcome_join, lookback_joins)[nchar(c(demo_join, outcome_join, lookback_joins)) > 0], collapse = "\n    ")
 
-  where_clause <- ""
-  if (!is.null(cohort_id) && "cohort_definition_id" %in% cols) {
-    where_clause <- sprintf("WHERE c.cohort_definition_id = %d", as.integer(cohort_id))
-  }
-
-  group_cols <- c(sprintf("c.%s", pcol), sprintf("c.%s", scol), sprintf("c.%s", ecol))
-  if (by_stay) group_cols <- c(group_cols, "c.visit_occurrence_id")
-  if ("site" %in% cols) group_cols <- c(group_cols, "c.site")
-  if (!is.null(outcome_cohort_id)) group_cols <- c(group_cols, "oc.outcome_flag")
-  if (do_demo) {
-    group_cols <- c(group_cols, "p.year_of_birth", "p.month_of_birth", "p.day_of_birth", "p.gender_concept_id", "p.race_concept_id", "p.ethnicity_concept_id")
-  }
-  group_by_clause <- paste(group_cols, collapse = ", ")
+  where_clause <- base_where
 
   # TIMESTAMP date columns (for example from a data.frame POSIXct column) are cast to DATE so the date arithmetic binds
   date_cols <- unique(c(scol, ecol))
@@ -180,15 +168,14 @@ extract_patient_features <- function(con,
                         paste(sprintf("CAST(%s AS DATE) AS %s", date_cols, date_cols), collapse = ", "), cohort_table)
 
   dense_sql <- sprintf("
-    SELECT 
+    WITH base AS %s
+    SELECT DISTINCT
         %s
-    FROM %s c
+    FROM base c
     %s
     %s
-    GROUP BY 
-        %s
     ORDER BY c.%s, c.%s%s;
-  ", select_clause, cohort_src, all_joins, where_clause, group_by_clause, pcol, scol,
+  ", cohort_src, select_clause, all_joins, where_clause, pcol, scol,
   if (by_stay) ", c.visit_occurrence_id" else "")
 
   if (!is.null(stream_to_parquet) && nzchar(stream_to_parquet)) {

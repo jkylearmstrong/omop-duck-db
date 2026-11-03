@@ -880,3 +880,7 @@ rest with an error naming the construct; see `OHDSI_INTEGRATION.md` for what was
   `pip install omop-duck-db[bigquery]`); the R connector remains the route for other BigQuery tables. The Python
   BigQuery sync and the Oracle cohort-SQL translation are unit-tested only (fake Arrow reader, generated SQL); neither
   has been run against a live BigQuery project or an Oracle database.
+- `translate_cohort_sql(..., "oracle")` raises on constructs it cannot translate, but the translated SQL has never been
+  executed on Oracle. The R functions that mirror the Python ones (the cohort, consortium and feature functions) are
+  tested on small synthetic databases in both languages; the field tests on production databases so far ran the Python
+  side only, so R behaviour on production-size data is not yet verified.

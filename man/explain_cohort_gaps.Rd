@@ -48,7 +48,7 @@ Gives every patient of a reference list the first step that keeps them out of a 
 \details{
 Reasons, in the order they are checked: \code{in_cohort}; \code{not_in_cdm} (the identifier maps to no person); \code{no_observation_period};
 \code{no_entry_event} (no event of the entry criteria, including their concept sets, age and values); \code{failed_entry_correlated_criteria};
-\code{entry_outside_observation_window}; \code{failed_inclusion_rule} (one row per rule, named in \code{detail}); \code{in_definition_not_in_cohort} (the
+\code{entry_outside_observation_window}; \code{failed_additional_criteria}; \code{failed_inclusion_rule} (one row per rule, named in \code{detail}); \code{in_definition_not_in_cohort} (the
 definition keeps them but the cohort table does not); \code{not_in_cohort_no_definition_given}. The report is counts by reason; patient-level
 rows are returned only with \code{include_person_rows = TRUE} and stay on the machine that ran the function.
 }

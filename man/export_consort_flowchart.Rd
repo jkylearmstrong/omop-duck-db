@@ -21,7 +21,8 @@ export_consort_flowchart(
 
 \item{dpi}{Resolution for raster formats.}
 
-\item{terminal_split}{Optional named numeric (label = N) drawn as a row of branching outcome boxes under the last step, each with its percentage of the split total.}
+\item{terminal_split}{Optional named numeric (label = N, e.g. \code{c(Readmitted = 31560, "No readmission" = 238393)}) drawn as a
+row of branching outcome boxes under the last step, each with its percentage of the split total.}
 }
 \value{
 \code{out_path}, invisibly.

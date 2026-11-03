@@ -366,7 +366,7 @@ compute_attrition <- function(con, cohort_id, steps, count_stays = FALSE) {
     if (isTRUE(count_stays) && "VISIT_OCCURRENCE_ID" %in% names(step_actual_cols)) {
       stays_retained[i] <- as.integer(DBI::dbGetQuery(con, sprintf(
         "SELECT COUNT(DISTINCT \"%s\") AS cnt FROM _step_current", step_actual_cols[["VISIT_OCCURRENCE_ID"]]))$cnt[1])
-      stays_dropped[i] <- if (i == 1) 0L else max(0L, stays_retained[i - 1] - stays_retained[i])
+      stays_dropped[i] <- if (i == 1) 0L else max(0L, stays_retained[i - 1] - stays_retained[i], na.rm = TRUE)
     }
 
     if (i == 1) {
@@ -1057,18 +1057,20 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #' Recode transfer discharges in a database built before the ETL mapped 'IP' to 8717
 #'
 #' Sets `discharged_to_concept_id` to `concept_id` for visits whose `discharged_to_source_value` is `IP`
-#' (case-insensitive, whitespace ignored) and whose concept id is `NULL` or 0. Idempotent; needs write access.
+#' (case-insensitive, whitespace ignored) and whose concept id is `NULL` or 0. Idempotent; needs write access
+#' except with `dry_run = TRUE`.
 #'
 #' @param con DuckDB connection.
 #' @param schema Optional schema holding `visit_occurrence`.
 #' @param concept_id Concept id to write (default 8717, 'Inpatient Hospital').
-#' @return The number of visits recoded, invisibly.
+#' @param dry_run If `TRUE`, only count the visits that would be recoded (works on a read-only connection).
+#' @return The number of visits recoded (or that would be), invisibly.
 #' @export
-remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L) {
+remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_run = FALSE) {
   vo <- if (is.null(schema)) "visit_occurrence" else paste0(schema, ".visit_occurrence")
   where <- "COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP'"
   n <- as.integer(DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", vo, where))$n[1])
-  if (n > 0L) DBI::dbExecute(con, sprintf("UPDATE %s SET discharged_to_concept_id = %d WHERE %s", vo, as.integer(concept_id), where))
+  if (n > 0L && !isTRUE(dry_run)) DBI::dbExecute(con, sprintf("UPDATE %s SET discharged_to_concept_id = %d WHERE %s", vo, as.integer(concept_id), where))
   invisible(n)
 }
 

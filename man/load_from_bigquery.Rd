@@ -48,4 +48,8 @@ First run needs an interactive R session (not \code{Rscript}) to complete the
 subsequent non-interactive runs reuse the cached token. \code{billing_project}
 is required even for public datasets -- BigQuery needs a project to
 attribute query cost/quota to.
+
+Tables are downloaded whole into R memory (64-bit ids are kept exact as \code{integer64}), so very large tables such as
+\code{concept_relationship} may not fit; use the Python \code{sync_vocabulary_from_bigquery()} (Arrow streaming) for a full
+Athena release.
 }

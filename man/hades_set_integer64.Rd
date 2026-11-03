@@ -13,6 +13,7 @@ The previous value of the option, invisibly.
 Visit and event ids are 63-bit BIGINTs (above 2^53), which R doubles cannot hold exactly. With the default
 \code{databaseConnectorInteger64AsNumeric = TRUE}, \code{DatabaseConnector::querySql()} stops with "The data contains
 integers >= 2^53" (for example when PatientLevelPrediction fetches cohorts). This sets the option to \code{FALSE}
-so such columns come back as \code{integer64}. \code{plp_database_details()} and \code{cm_database_details()} call it for you only when the database really holds ids that large (\code{integer64 = "auto"}), because \code{integer64} columns make
+so such columns come back as \code{integer64}. \code{\link[=plp_database_details]{plp_database_details()}} and \code{\link[=cm_database_details]{cm_database_details()}} call it for you
+only when the database really holds ids that large (\code{integer64 = "auto"}), because \code{integer64} columns make
 the rest of the HADES stack do more work and crash some Windows setups when no id needs it.
 }

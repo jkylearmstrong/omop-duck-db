@@ -18,5 +18,5 @@ Invisibly, \code{NULL}.
 }
 \description{
 Uses OHDSI's SqlRender (\code{render()} -> \code{translate(targetDialect = "duckdb")} -> \code{splitSql()}), the reference
-implementation for the OHDSI SQL in \verb{cohorts/}.
+implementation for the OHDSI SQL in \verb{inst/cohorts/}.
 }
