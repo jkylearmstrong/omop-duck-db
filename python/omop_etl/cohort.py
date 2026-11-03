@@ -393,6 +393,7 @@ def compute_attrition(
     prev_count = None
     initial_count = None
 
+    prev_stays = None
     for i, (step_name, step_query) in enumerate(steps, start=1):
         if i == 1:
             con.execute(f"CREATE TEMPORARY TABLE _step_current AS {step_query};")
@@ -430,7 +431,7 @@ def compute_attrition(
         })
         if stays is not None:
             records[-1]["stays_retained"] = stays
-            records[-1]["stays_dropped"] = 0 if i == 1 else max(0, prev_stays - stays)
+            records[-1]["stays_dropped"] = 0 if i == 1 or prev_stays is None else max(0, prev_stays - stays)
         prev_stays = stays
 
     con.execute("DROP TABLE IF EXISTS _step_current;")

@@ -55,3 +55,18 @@ def test_remap_discharge_status_with_schema():
     con.execute("CREATE TABLE cdm.visit_occurrence AS SELECT 1 AS visit_occurrence_id, 0 AS discharged_to_concept_id, 'IP' AS discharged_to_source_value")
     assert remap_discharge_status(con, schema="cdm", concept_id=1) == 1
     assert con.execute("SELECT discharged_to_concept_id FROM cdm.visit_occurrence").fetchone() == (1,)
+
+
+def test_o1b_pooled_row_withheld_when_a_pair_is_suppressed():
+    ids = {"A": list(range(0, 507)), "B": list(range(500, 1000)) + list(range(2000, 2007)),
+           "C": list(range(2000, 2493)) + list(range(5000, 5100))}
+    out = consortium_cross_site_duplicates(ids, key="k", min_cell_count=11)
+    pairs = out[out.site_1 != "ALL"]
+    assert pairs.is_suppressed.any()
+    total = out[out.site_1 == "ALL"].iloc[0]
+    assert total.is_suppressed and total.shared_patients == "withheld" and total.overlap_pct != total.overlap_pct
+
+
+def test_o1b_pooled_row_shown_when_no_pair_suppressed():
+    out = consortium_cross_site_duplicates({"A": list(range(100)), "B": list(range(50, 150))}, key="k")
+    assert out.iloc[-1].shared_patients == "50"

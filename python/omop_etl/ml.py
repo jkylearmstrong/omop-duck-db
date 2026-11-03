@@ -1093,6 +1093,11 @@ def consortium_multivariable_risk_factors(
     cluster_arr = None
     cluster_name = None
     if cluster_col is not None:
+        if regularize:
+            import warnings
+            warnings.warn("cluster_col with regularize=True gives clustered standard errors for a ridge fit; they match "
+                          "an unpenalised clustered logit (e.g. statsmodels) only with regularize=False.",
+                          UserWarning, stacklevel=2)
         if isinstance(cluster_col, str):
             if not isinstance(X, pd.DataFrame) or cluster_col not in X.columns:
                 raise ValueError(f"cluster_col {cluster_col!r} must be a column of the DataFrame X.")
