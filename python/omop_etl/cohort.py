@@ -711,18 +711,19 @@ def _warn_unmapped_transfer_discharge(con, spec: "_StudySpec") -> None:
 
 
 def remap_discharge_status(con: duckdb.DuckDBPyConnection, schema: str | None = None,
-                           concept_id: int = 8717) -> int:
+                           concept_id: int = 8717, dry_run: bool = False) -> int:
     """Recodes transfer visits in a database built before the PCORnet ETL mapped discharge status 'IP' to 8717.
 
     Sets ``discharged_to_concept_id`` to ``concept_id`` for visits whose ``discharged_to_source_value`` is 'IP'
-    (case-insensitive, whitespace ignored) and whose concept id is NULL or 0. Idempotent. Needs write access.
+    (case-insensitive, whitespace ignored) and whose concept id is NULL or 0. Idempotent. Needs write access, except
+    with ``dry_run=True``, which only counts the visits that would be recoded and works on a read-only connection.
 
-    Returns the number of visits recoded.
+    Returns the number of visits recoded (or, with ``dry_run``, that would be).
     """
     vo = f"{schema}.visit_occurrence" if schema else "visit_occurrence"
     where = ("COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP'")
     n = con.execute(f"SELECT COUNT(*) FROM {vo} WHERE {where}").fetchone()[0]
-    if n:
+    if n and not dry_run:
         con.execute(f"UPDATE {vo} SET discharged_to_concept_id = {int(concept_id)} WHERE {where}")
     return int(n)
 

@@ -70,3 +70,23 @@ def test_o1b_pooled_row_withheld_when_a_pair_is_suppressed():
 def test_o1b_pooled_row_shown_when_no_pair_suppressed():
     out = consortium_cross_site_duplicates({"A": list(range(100)), "B": list(range(50, 150))}, key="k")
     assert out.iloc[-1].shared_patients == "50"
+
+
+def test_remap_discharge_status_dry_run_changes_nothing():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE visit_occurrence AS SELECT * FROM (VALUES (1, 0, 'IP'), (2, 0, 'HOME'))"
+                " t(visit_occurrence_id, discharged_to_concept_id, discharged_to_source_value)")
+    assert remap_discharge_status(con, dry_run=True) == 1
+    assert con.execute("SELECT SUM(discharged_to_concept_id) FROM visit_occurrence").fetchone()[0] == 0
+
+
+def test_cap_observation_period():
+    from omop_etl import cap_observation_period
+    con = duckdb.connect()
+    con.execute("CREATE TABLE observation_period AS SELECT * FROM (VALUES (1, DATE '2020-01-01', DATE '2026-10-23'),"
+                " (2, DATE '2026-10-23', DATE '2026-10-23'), (3, DATE '2020-01-01', DATE '2020-06-01'))"
+                " t(observation_period_id, observation_period_start_date, observation_period_end_date)")
+    assert cap_observation_period(con, "2026-09-30", dry_run=True) == {"shortened": 1, "deleted": 1}
+    assert con.execute("SELECT COUNT(*) FROM observation_period").fetchone()[0] == 3
+    assert cap_observation_period(con, "2026-09-30") == {"shortened": 1, "deleted": 1}
+    assert con.execute("SELECT MAX(observation_period_end_date)::VARCHAR, COUNT(*) FROM observation_period").fetchone() == ("2026-09-30", 2)
