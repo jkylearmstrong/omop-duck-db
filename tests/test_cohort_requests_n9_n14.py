@@ -107,8 +107,8 @@ def test_n12_cluster_robust_errors_are_wider_with_repeated_stays():
 
 def test_n12_cluster_vector_matches_column_name():
     df = _repeated_stays()
-    a = consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="pid")
-    b = consortium_multivariable_risk_factors(df.drop(columns="pid"), outcome_col="y", cluster_col=df["pid"].values)
+    a = consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="pid", regularize=False)
+    b = consortium_multivariable_risk_factors(df.drop(columns="pid"), outcome_col="y", cluster_col=df["pid"].values, regularize=False)
     assert np.allclose(a.standard_errors.values, b.standard_errors.values)
 
 
