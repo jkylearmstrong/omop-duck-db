@@ -7,7 +7,7 @@
 build_observation_period(
   con,
   min_date = "1900-01-02",
-  max_date = NULL,
+  max_date = "auto",
   use_enrollment = FALSE,
   enrollment_type_concept_id = 0L
 )
@@ -17,8 +17,9 @@ build_observation_period(
 
 \item{min_date}{Earliest plausible event date (default \code{"1900-01-02"}).}
 
-\item{max_date}{Latest plausible event date; default \code{NULL} is today (the extraction date). Pass the source's data
-cutoff when events are filled with the build date, or \code{"auto"} for the latest event dated before today.}
+\item{max_date}{Latest plausible event date; default \code{"auto"} is the latest event dated before today, so events
+filled with the build date do not set period ends. Pass the source's data cutoff as an ISO date, or \code{NULL} for today
+(the extraction date).}
 
 \item{use_enrollment}{Logical. If \code{TRUE} (needs \verb{_enrollment_spans} from \code{\link[=load_enrollment_spans]{load_enrollment_spans()}}), write each
 person's real enrolment spans with \code{period_type_concept_id = enrollment_type_concept_id} and keep the event-span
