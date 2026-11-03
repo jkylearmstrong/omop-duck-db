@@ -795,7 +795,7 @@ consortium_patient_overlap <- function(site_tokens, min_cell_count = 11) {
         n_site_1 = n1,
         n_site_2 = n2,
         shared_patients = display_count,
-        overlap_pct = pct,
+        overlap_pct = if (suppressed) NA_real_ else pct,
         is_suppressed = suppressed,
         stringsAsFactors = FALSE
       )
@@ -860,7 +860,8 @@ consortium_cross_site_duplicates <- function(site_identifiers, key, min_cell_cou
   total <- data.frame(
     site_1 = "ALL", site_2 = "ALL", n_site_1 = length(counts), n_site_2 = length(counts),
     shared_patients = if (suppressed) sprintf("<%d", as.integer(min_cell_count)) else as.character(multi),
-    overlap_pct = if (length(counts)) round(multi / length(counts), 4) else 0, is_suppressed = suppressed,
+    overlap_pct = if (suppressed) NA_real_ else if (length(counts)) round(multi / length(counts), 4) else 0,
+    is_suppressed = suppressed,
     stringsAsFactors = FALSE)
   out <- rbind(pairs, total)
   rownames(out) <- NULL

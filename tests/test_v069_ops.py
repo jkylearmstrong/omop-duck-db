@@ -105,6 +105,17 @@ def test_one_per_patient_false_returns_all_stays(cdm):
     assert allst.groupby("subject_id").stay_rank.min().eq(1).all()
 
 
+def test_all_stays_attrition_counts_stays(cdm):
+    _multi_stay_cdm(cdm)
+    allst = define_study_cohort(cdm, one_per_patient=False, **{**SIMPLE, "attrition": True})
+    att = allst.attrs["attrition"]
+    assert {"stays_retained", "stays_dropped"} <= set(att.columns)
+    assert att["stays_dropped"].iloc[0] == 0
+    assert (att["stays_retained"].diff().dropna() <= 0).all()
+    one = define_study_cohort(cdm, **{**SIMPLE, "attrition": True})
+    assert "stays_retained" not in one.attrs["attrition"].columns
+
+
 def test_one_per_patient_false_rejects_persist_keys(cdm, tmp_path):
     with pytest.raises(ValueError, match="persist_keys"):
         define_study_cohort(cdm, one_per_patient=False, persist_keys=tmp_path / "k.csv", **SIMPLE)

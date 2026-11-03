@@ -49,6 +49,7 @@ extract_patient_features <- function(con,
                                      ...) {
   fmt <- tolower(trimws(format))
   windows <- sort(as.integer(lookback_days))
+  maxw <- max(windows)   # widest window goes into each join so a stay only meets events inside its own window
 
   cols <- tolower(DBI::dbGetQuery(con, sprintf("DESCRIBE SELECT * FROM %s", cohort_table))$column_name)
   pcol <- if ("person_id" %in% cols) "person_id" else "subject_id"
@@ -112,7 +113,7 @@ extract_patient_features <- function(con,
       anchor_col, windows, anchor_col, windows
     )
     select_items <- c(select_items, cond_cols)
-    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN condition_occurrence co ON c.%s = co.person_id", pcol))
+    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN condition_occurrence co ON c.%s = co.person_id AND co.condition_start_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
   }
 
   if (isTRUE(include_drugs) && "drug_exposure" %in% existing_tables) {
@@ -121,7 +122,7 @@ extract_patient_features <- function(con,
       anchor_col, windows, anchor_col, windows
     )
     select_items <- c(select_items, drug_cols)
-    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN drug_exposure de ON c.%s = de.person_id", pcol))
+    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN drug_exposure de ON c.%s = de.person_id AND de.drug_exposure_start_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
   }
 
   if (isTRUE(include_procedures) && "procedure_occurrence" %in% existing_tables) {
@@ -130,7 +131,7 @@ extract_patient_features <- function(con,
       anchor_col, windows, anchor_col, windows
     )
     select_items <- c(select_items, proc_cols)
-    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN procedure_occurrence po ON c.%s = po.person_id", pcol))
+    lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN procedure_occurrence po ON c.%s = po.person_id AND po.procedure_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
   }
 
   if ("measurement" %in% existing_tables) {
@@ -145,14 +146,14 @@ extract_patient_features <- function(con,
         }
       }
       select_items <- c(select_items, meas_items)
-      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id", pcol))
+      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id AND m.measurement_date BETWEEN c.%s - %d AND c.%s + %d", pcol, anchor_col, maxw, anchor_col, as.integer(lookahead_days)))
     } else if (isTRUE(include_measurements)) {
       meas_cols <- sprintf(
         "COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.%s - %d AND c.%s - 1 THEN m.measurement_id END) AS measurement_count_%dd",
         anchor_col, windows, anchor_col, windows
       )
       select_items <- c(select_items, meas_cols)
-      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id", pcol))
+      lookback_joins <- c(lookback_joins, sprintf("LEFT JOIN measurement m ON c.%s = m.person_id AND m.measurement_date BETWEEN c.%s - %d AND c.%s - 1", pcol, anchor_col, maxw, anchor_col))
     }
   }
 
@@ -173,6 +174,11 @@ extract_patient_features <- function(con,
   }
   group_by_clause <- paste(group_cols, collapse = ", ")
 
+  # TIMESTAMP date columns (for example from a data.frame POSIXct column) are cast to DATE so the date arithmetic binds
+  date_cols <- unique(c(scol, ecol))
+  cohort_src <- sprintf("(SELECT * REPLACE (%s) FROM %s)",
+                        paste(sprintf("CAST(%s AS DATE) AS %s", date_cols, date_cols), collapse = ", "), cohort_table)
+
   dense_sql <- sprintf("
     SELECT 
         %s
@@ -182,7 +188,7 @@ extract_patient_features <- function(con,
     GROUP BY 
         %s
     ORDER BY c.%s, c.%s%s;
-  ", select_clause, cohort_table, all_joins, where_clause, group_by_clause, pcol, scol,
+  ", select_clause, cohort_src, all_joins, where_clause, group_by_clause, pcol, scol,
   if (by_stay) ", c.visit_occurrence_id" else "")
 
   if (!is.null(stream_to_parquet) && nzchar(stream_to_parquet)) {

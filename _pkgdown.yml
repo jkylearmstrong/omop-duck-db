@@ -72,6 +72,7 @@ reference:
   desc: Retroactively update existing CDM tables to new vocabulary concepts.
   contents:
   - remap_cdm_table
+  - remap_discharge_status
   - remap_all
 - title: Cohorts and concept algebra
   desc: Parameterized cohort builders, set operations, and transitive hierarchy algebra.

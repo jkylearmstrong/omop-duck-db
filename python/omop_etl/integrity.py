@@ -903,7 +903,8 @@ def consortium_patient_overlap(
                 "n_site_1": n1,
                 "n_site_2": n2,
                 "shared_patients": display_count,
-                "overlap_pct": pct,
+                # the percentage would reveal the suppressed count, so it is withheld too
+                "overlap_pct": float("nan") if suppressed else pct,
                 "is_suppressed": suppressed,
             })
 
@@ -963,7 +964,7 @@ def consortium_cross_site_duplicates(
     total = pd.DataFrame([{
         "site_1": "ALL", "site_2": "ALL", "n_site_1": len(seen), "n_site_2": len(seen),
         "shared_patients": f"<{min_cell_count}" if suppressed else str(multi),
-        "overlap_pct": round(multi / len(seen), 4) if seen else 0.0,
+        "overlap_pct": float("nan") if suppressed else (round(multi / len(seen), 4) if seen else 0.0),
         "is_suppressed": suppressed,
     }])
     return pd.concat([pairs, total], ignore_index=True)

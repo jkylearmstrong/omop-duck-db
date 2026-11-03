@@ -371,9 +371,13 @@ def compute_attrition(
     con: duckdb.DuckDBPyConnection,
     cohort_id: int,
     steps: Sequence[tuple[str, str]],
+    count_stays: bool = False,
 ) -> pd.DataFrame:
     """Tracks patient attrition across sequential CONSORT inclusion/exclusion steps.
-    
+
+    With ``count_stays=True`` (used for ``define_study_cohort(one_per_patient=False)``) and steps that return a
+    ``visit_occurrence_id`` column, ``stays_retained`` and ``stays_dropped`` are added beside the patient counts.
+
     Args:
         con: Active DuckDB connection.
         cohort_id: Cohort ID being evaluated.
@@ -402,6 +406,11 @@ def compute_attrition(
         subj_col = actual_cols.get("SUBJECT_ID", actual_cols.get("PERSON_ID", actual_cols.get("PATID", cols_info[0][0])))
         current_count = con.execute(f'SELECT COUNT(DISTINCT "{subj_col}") FROM _step_current').fetchone()[0]
 
+        stays = None
+        if count_stays and "VISIT_OCCURRENCE_ID" in actual_cols:
+            stays = con.execute(
+                f'SELECT COUNT(DISTINCT "{actual_cols["VISIT_OCCURRENCE_ID"]}") FROM _step_current').fetchone()[0]
+
         if i == 1:
             initial_count = current_count
             prev_count = current_count
@@ -419,6 +428,10 @@ def compute_attrition(
             "subjects_dropped": dropped,
             "percent_retained": pct,
         })
+        if stays is not None:
+            records[-1]["stays_retained"] = stays
+            records[-1]["stays_dropped"] = 0 if i == 1 else max(0, prev_stays - stays)
+        prev_stays = stays
 
     con.execute("DROP TABLE IF EXISTS _step_current;")
     return pd.DataFrame(records)
@@ -685,15 +698,32 @@ def _warn_unmapped_transfer_discharge(con, spec: "_StudySpec") -> None:
             return
         unmapped = con.execute(
             f"SELECT 1 FROM {vo} WHERE COALESCE(discharged_to_concept_id, 0) = 0 "
-            "AND discharged_to_source_value = 'IP' LIMIT 1").fetchone()
+            "AND UPPER(TRIM(discharged_to_source_value)) = 'IP' LIMIT 1").fetchone()
     except duckdb.Error:
         return
     if unmapped is not None:
         warnings.warn(
             f"transfer_discharge_concept_ids={list(spec.transfer_ids)} matches no stay, but visits with "
             "discharged_to_source_value = 'IP' have discharged_to_concept_id 0 (the database predates the ETL mapping "
-            "to 8717), so the transfer exclusion removes nothing. Recode them first.",
+            "to 8717), so the transfer exclusion removes nothing. Run remap_discharge_status(con) to recode them.",
             UserWarning, stacklevel=3)
+
+
+def remap_discharge_status(con: duckdb.DuckDBPyConnection, schema: str | None = None,
+                           concept_id: int = 8717) -> int:
+    """Recodes transfer visits in a database built before the PCORnet ETL mapped discharge status 'IP' to 8717.
+
+    Sets ``discharged_to_concept_id`` to ``concept_id`` for visits whose ``discharged_to_source_value`` is 'IP'
+    (case-insensitive, whitespace ignored) and whose concept id is NULL or 0. Idempotent. Needs write access.
+
+    Returns the number of visits recoded.
+    """
+    vo = f"{schema}.visit_occurrence" if schema else "visit_occurrence"
+    where = ("COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP'")
+    n = con.execute(f"SELECT COUNT(*) FROM {vo} WHERE {where}").fetchone()[0]
+    if n:
+        con.execute(f"UPDATE {vo} SET discharged_to_concept_id = {int(concept_id)} WHERE {where}")
+    return int(n)
 
 
 def _study_order_by(rule: str, seed: int, pinned: bool = False) -> str:
@@ -1514,7 +1544,9 @@ def define_study_cohort(
     schema : str, optional
         Schema (or ``catalog.schema``) holding the CDM tables. Default: resolved through the search path.
     attrition : bool, default True
-        Compute the stepwise patient attrition (via :func:`compute_attrition`) into ``attrs``.
+        Compute the stepwise patient attrition (via :func:`compute_attrition`) into ``attrs``. With
+        ``one_per_patient=False`` it also has ``stays_retained`` / ``stays_dropped``. It is a DataFrame, so set
+        ``df.attrs = {}`` before ``pd.concat`` of several cohort frames (pandas compares ``attrs`` and raises).
     one_per_patient : bool, default True
         ``False`` returns every eligible stay per patient with an extra ``stay_rank`` column (1 = the stay
         ``sampling_rule`` would pick, so the rank-1 rows equal the one-per-patient cohort). Models on such output
@@ -1755,7 +1787,8 @@ def define_study_cohort(
             _write_index_keys(df, keys_path)
 
         if attrition:
-            df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec))
+            df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec),
+                                                    count_stays=not one_per_patient)
     finally:
         if spec.metformin_only_pcos:
             con.execute(f"DROP TABLE IF EXISTS {_STUDY_METFORMIN_TABLE}")
