@@ -86,6 +86,20 @@ class FederatedNode:
         ll = float(self._blur(np.asarray(ll)))
         return {"n": len(y), "ll": ll, "grad": self._blur(X.T @ (y - p)), "hess": self._blur((X * w[:, None]).T @ X)}
 
+    def binary_cells(self, covariates: Sequence[str], outcome: str) -> dict[str, np.ndarray]:
+        """Pooled-safe separation screen: for each 0/1 covariate the 2 x 2 counts [[x=0,y=0],[x=0,y=1],[x=1,y=0],[x=1,y=1]].
+
+        Only covariates whose values are all 0 or 1 are returned. The caller sums the counts over sites and reports
+        nothing but whether a pooled cell is empty.
+        """
+        y = self._df[outcome].to_numpy(dtype=float)
+        out = {}
+        for c in covariates:
+            x = self._matrix([c])[:, 0]
+            if np.isin(x, (0.0, 1.0)).all():
+                out[c] = np.array([((x == a) & (y == b)).sum() for a in (0, 1) for b in (0, 1)], dtype=float)
+        return out
+
     def n_events(self, event: str) -> int:
         return int((self._df[event] == 1).sum())
 
@@ -164,6 +178,25 @@ def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str
     terms = ["(Intercept)", *covariates]
     pen = np.diag([0.0] + [float(l2)] * len(covariates))
     beta = np.zeros(len(terms))
+    if float(l2) == 0.0 and noise_scale <= 0 and covariates:
+        # Separation screen before fitting: a 0/1 covariate with an empty pooled cell (one level never has an event, or
+        # always has one) makes the maximum-likelihood estimate nonexistent. Only pooled counts are used, and the screen
+        # is skipped when noise_scale > 0 so the noisy fit never sees exact counts. Continuous covariates are still
+        # caught only after non-convergence below.
+        pooled: dict[str, np.ndarray] = {}
+        for n in nodes:
+            for c, cells in n.binary_cells(covariates, outcome).items():
+                pooled[c] = pooled.get(c, 0.0) + cells
+        bad = [c for c, k in pooled.items() if k[[0, 1]].sum() > 0 and k[[2, 3]].sum() > 0 and (k == 0).any()]
+        if bad:
+            warnings.warn(f"complete or quasi-complete separation: covariate(s) {bad} have an empty outcome cell in the "
+                          "pooled data, so the maximum-likelihood estimate does not exist; coefficients are NaN. "
+                          "Drop or combine the covariate or set l2 > 0.", UserWarning, stacklevel=2)
+            nan = pd.DataFrame({"term": terms})
+            for col in ("estimate", "std_error", "z", "p_value", "odds_ratio", "odds_ratio_lower", "odds_ratio_upper"):
+                nan[col] = np.nan
+            return FederatedFitResult("logistic", nan, False, 0, float("nan"), sum(len(n) for n in nodes), None,
+                                      {n.name: len(n) for n in nodes}, [], np.full((len(terms), len(terms)), np.nan), True)
     exact = all(n._noise <= 0 for n in nodes)    # step-halving needs an exact log-likelihood
 
     def evaluate(b):

@@ -10,7 +10,8 @@ load_enrollment_spans(
   site_id = NULL,
   disambiguate_patids = FALSE,
   min_date = "1900-01-02",
-  max_date = NULL
+  max_date = NULL,
+  open_end = NULL
 )
 }
 \arguments{
@@ -21,6 +22,10 @@ load_enrollment_spans(
 \item{site_id, disambiguate_patids}{As in \code{\link[=etl_pcornet]{etl_pcornet()}}.}
 
 \item{min_date, max_date}{Clip bounds; see \code{\link[=build_observation_period]{build_observation_period()}}.}
+
+\item{open_end}{Optional date given to spans with no end date instead of \code{max_date}; \code{\link[=etl_pcornet]{etl_pcornet()}} passes the data
+cutoff here under \code{data_cutoff = "auto"}, so an ongoing enrolment is not extended to the build date while recorded end
+dates are kept.}
 }
 \value{
 The number of merged spans (0, and no table, when the source has no ENROLLMENT file), invisibly.

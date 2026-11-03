@@ -235,4 +235,4 @@ def test_o9_warns_when_clustering_a_ridge_fit():
     rng = np.random.default_rng(1)
     df = pd.DataFrame({"pid": np.repeat(np.arange(40), 3), "sbp": rng.normal(size=120), "y": rng.integers(0, 2, 120)})
     with pytest.warns(UserWarning, match="regularize=False"):
-        consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="pid")
+        consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="pid", regularize=True)

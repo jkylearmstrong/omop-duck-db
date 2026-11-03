@@ -973,6 +973,33 @@ run_dqd_catalog(con)
 The same functions exist in Python (`from omop_etl import ...`). The native Circe compiler evaluates a subset of Circe and refuses the
 rest with an error naming the construct; see `OHDSI_INTEGRATION.md` for what was checked against the official engines.
 
+## Disclosure policy for aggregate helpers
+
+Consortium helpers return aggregates, and an aggregate can leak through what sits next to it (complementary
+disclosure). The rules that hold today:
+
+- Counts from 1 to `min_cell_count - 1` (default 11) are shown as `<11`, and the percentage next to a suppressed count
+  is withheld (`overlap_pct` is NA).
+- `consortium_cross_site_duplicates()` withholds the pooled `ALL` row, including its pooled `n_site_1` / `n_site_2`,
+  whenever any pair or the pooled count is suppressed: the sum of the site sizes minus the pooled distinct count is
+  the number of patients seen at several sites. Use `consortium_duplicate_report()` (Python) to get pairs, pooled row
+  and this policy in one object; publish it whole and never recompute pooled totals from the pair rows.
+- Only the duplicate and overlap helpers were audited for this. Other helpers that print group sizes beside
+  suppressed cells have not been audited; treat their output the same way before publishing.
+
+## Verification status
+
+What the project's own tests cover and what they do not:
+
+- Python: the unit tests run on small synthetic DuckDB databases (`pytest tests`). R: the testthat suite runs on small
+  synthetic databases.
+- Field-tested on five production databases: the v0.11.0 cohort equivalence (Python). The 0.11.1 and later changes
+  (per-table feature aggregates, `cap_observation_period`, `remap_discharge_status`, the attrition list) were checked on
+  synthetic data only, and the R half of 0.11.1 and later only by reading.
+- Oracle (`translate_cohort_sql`) and the BigQuery sync are unit-tested only. `extract_patient_features` timing
+  on production-size cohorts: `scripts/benchmark_features.py` (synthetic fixture: 1.1M stays in about 4 s; a production
+  run will differ with the number of events per patient).
+
 ## Known limitations
 
 - Athena vocabulary downloads do not include CPT4 concept names (AMA

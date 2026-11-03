@@ -36,6 +36,7 @@ from omop_etl.cohort import (
     combine_cohorts,
     compute_attrition,
     remap_discharge_status,
+    check_observation_period_ends,
     create_cohort,
     define_study_cohort,
     persist_index_visits,
@@ -190,6 +191,7 @@ from omop_etl.integrity import (
     generate_site_patient_tokens,
     consortium_patient_overlap,
     consortium_cross_site_duplicates,
+    consortium_duplicate_report,
     planned_readmission_filter,
     observation_period_diagnostics,
 )
@@ -637,6 +639,8 @@ __all__ = [
     "generate_site_patient_tokens",
     "consortium_patient_overlap",
     "consortium_cross_site_duplicates",
+    "consortium_duplicate_report",
+    "check_observation_period_ends",
     "planned_readmission_filter",
     "observation_period_diagnostics",
     # Advanced Causal, Calibration, Trajectories, Survival & Synthetic Additions (v0.6.4)

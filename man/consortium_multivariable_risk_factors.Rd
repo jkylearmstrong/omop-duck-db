@@ -8,7 +8,7 @@ consortium_multivariable_risk_factors(
   X,
   y,
   binary_cols = NULL,
-  regularize = TRUE,
+  regularize = NULL,
   alpha = 1,
   domain_mapping = NULL,
   standardize_continuous = TRUE,
@@ -24,7 +24,8 @@ consortium_multivariable_risk_factors(
 
 \item{binary_cols}{Optional character vector of binary column names. If \code{NULL}, auto-detected.}
 
-\item{regularize}{Logical; whether to apply L2 ridge regularization (default \code{TRUE}).}
+\item{regularize}{Logical; whether to apply L2 ridge regularization. Default \code{NULL} means \code{TRUE}, except \code{FALSE} when
+\code{cluster_col} is given, so clustered standard errors are those of an unpenalised fit.}
 
 \item{alpha}{Numeric; L2 regularization penalty parameter lambda (default \code{1.0}).}
 

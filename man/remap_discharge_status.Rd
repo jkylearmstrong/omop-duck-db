@@ -4,7 +4,14 @@
 \alias{remap_discharge_status}
 \title{Recode transfer discharges in a database built before the ETL mapped 'IP' to 8717}
 \usage{
-remap_discharge_status(con, schema = NULL, concept_id = 8717L, dry_run = FALSE)
+remap_discharge_status(
+  con,
+  schema = NULL,
+  concept_id = 8717L,
+  dry_run = FALSE,
+  as_view = FALSE,
+  view_name = "visit_occurrence_recoded"
+)
 }
 \arguments{
 \item{con}{DuckDB connection.}
@@ -14,6 +21,10 @@ remap_discharge_status(con, schema = NULL, concept_id = 8717L, dry_run = FALSE)
 \item{concept_id}{Concept id to write (default 8717, 'Inpatient Hospital').}
 
 \item{dry_run}{If \code{TRUE}, only count the visits that would be recoded (works on a read-only connection).}
+
+\item{as_view}{If \code{TRUE}, create a TEMP view instead of updating the table.}
+
+\item{view_name}{Name of that view.}
 }
 \value{
 The number of visits recoded (or that would be), invisibly.
@@ -21,5 +32,6 @@ The number of visits recoded (or that would be), invisibly.
 \description{
 Sets \code{discharged_to_concept_id} to \code{concept_id} for visits whose \code{discharged_to_source_value} is \code{IP}
 (case-insensitive, whitespace ignored) and whose concept id is \code{NULL} or 0. Idempotent; needs write access
-except with \code{dry_run = TRUE}.
+except with \code{dry_run = TRUE}. With \code{as_view = TRUE} nothing is written: a TEMP view \code{view_name} (default
+\code{visit_occurrence_recoded}) carries the recoded concept id, for read-only production databases; \code{view_name = "visit_occurrence"} makes it shadow the table for unqualified queries on this connection.
 }

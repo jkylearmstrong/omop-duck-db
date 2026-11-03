@@ -63,6 +63,8 @@ def extract_patient_features(
     Returns:
         pd.DataFrame, pyarrow.Table, polars.DataFrame, or sparse DataFrame.
     """
+    from .cohort import check_observation_period_ends
+    check_observation_period_ends(con)
     fmt = format.lower().strip()
     windows = [int(lookback_days)] if isinstance(lookback_days, (int, float)) else sorted([int(w) for w in lookback_days])
 

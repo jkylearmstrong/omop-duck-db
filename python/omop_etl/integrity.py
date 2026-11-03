@@ -939,8 +939,9 @@ def consortium_cross_site_duplicates(
     pandas.DataFrame
         One row per site pair as in :func:`consortium_patient_overlap`, plus a final row ``site_1 = 'ALL'`` with
         ``n_site_1`` the pooled distinct patients and ``shared_patients`` the patients seen at two or more sites. That row is withheld
-        (``shared_patients = 'withheld'``, ``overlap_pct`` NaN) when any pair is suppressed, since the difference
-        between it and the visible pairs would reveal the suppressed count.
+        (``shared_patients = 'withheld'``, ``n_site_1``, ``n_site_2`` and ``overlap_pct`` NaN) when any pair is
+        suppressed, since the difference between it and the visible pairs, or between the pooled count and the sum
+        of the site sizes, would reveal the suppressed count.
     """
     import hashlib
     import hmac
@@ -967,13 +968,42 @@ def consortium_cross_site_duplicates(
     # so the pooled row is withheld whenever any pair is suppressed.
     withheld = bool(pairs["is_suppressed"].any()) and not small
     suppressed = small or withheld
+    # The pooled distinct count is withheld with the row: the sum of the site sizes minus it is the number of
+    # patients seen at several sites, so leaving it visible would recover a suppressed pair.
+    n_pooled = float("nan") if suppressed else len(seen)
     total = pd.DataFrame([{
-        "site_1": "ALL", "site_2": "ALL", "n_site_1": len(seen), "n_site_2": len(seen),
+        "site_1": "ALL", "site_2": "ALL", "n_site_1": n_pooled, "n_site_2": n_pooled,
         "shared_patients": "withheld" if withheld else (f"<{min_cell_count}" if small else str(multi)),
         "overlap_pct": float("nan") if suppressed else (round(multi / len(seen), 4) if seen else 0.0),
         "is_suppressed": suppressed,
     }])
     return pd.concat([pairs, total], ignore_index=True)
+
+
+DUPLICATE_REPORT_POLICY = (
+    "Every count from 1 to min_cell_count - 1 is suppressed. A suppressed pair withholds the pooled row, including its "
+    "pooled n_site_1 / n_site_2 (the sum of the site sizes minus the pooled distinct count is the number of patients seen "
+    "at several sites). Pair rows show per-site sizes, which are not secret by themselves. Publish this object as a whole; "
+    "do not recompute pooled totals from the pair rows."
+)
+
+
+def consortium_duplicate_report(
+    site_identifiers: Dict[str, Iterable[Any]],
+    key: str | bytes,
+    min_cell_count: int = 11,
+) -> Dict[str, Any]:
+    """Cross-site duplicate patients as one object that holds only safe aggregates (F3).
+
+    Wraps :func:`consortium_cross_site_duplicates` and returns a dict with ``pairs`` (one row per site pair),
+    ``pooled`` (the one-row pooled result, withheld as described there), ``withheld`` (True when the pooled row is
+    withheld or suppressed) and ``policy`` (the disclosure rule, :data:`DUPLICATE_REPORT_POLICY`). Raw identifiers and
+    their tokens are not part of the result.
+    """
+    out = consortium_cross_site_duplicates(site_identifiers, key, min_cell_count=min_cell_count)
+    pooled = out[out["site_1"] == "ALL"].reset_index(drop=True)
+    return {"pairs": out[out["site_1"] != "ALL"].reset_index(drop=True), "pooled": pooled,
+            "withheld": bool(pooled["is_suppressed"].iloc[0]), "policy": DUPLICATE_REPORT_POLICY}
 
 
 # -----------------------------------------------------------------------------

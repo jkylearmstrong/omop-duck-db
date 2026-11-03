@@ -841,8 +841,9 @@ consortium_patient_overlap <- function(site_tokens, min_cell_count = 11) {
 #' @param min_cell_count Small-cell threshold (default 11).
 #' @return A data frame of site pairs as in [consortium_patient_overlap()], plus a final row `site_1 == "ALL"` whose
 #'   `n_site_1` is the pooled number of distinct patients and `shared_patients` the number seen at two or more sites.
-#'   That row is withheld (`shared_patients == "withheld"`, `overlap_pct` `NA`) when any pair is suppressed, since its
-#'   difference from the visible pairs would reveal the suppressed count.
+#'   That row is withheld (`shared_patients == "withheld"`, `n_site_1`, `n_site_2` and `overlap_pct` `NA`) when any
+#'   pair is suppressed, since its difference from the visible pairs, or the pooled count's difference from the sum
+#'   of the site sizes, would reveal the suppressed count.
 #' @export
 consortium_cross_site_duplicates <- function(site_identifiers, key, min_cell_count = 11) {
   if (!is.character(key) || length(key) != 1L || is.na(key) || !nzchar(key)) {
@@ -862,8 +863,10 @@ consortium_cross_site_duplicates <- function(site_identifiers, key, min_cell_cou
   # complementary disclosure: the pooled count minus the visible pairs would recover a suppressed pair
   withheld <- !small && any(pairs$is_suppressed)
   suppressed <- small || withheld
+  # the pooled distinct count goes with the row: site sizes minus it is the number of patients seen at several sites
+  n_pooled <- if (suppressed) NA_integer_ else length(counts)
   total <- data.frame(
-    site_1 = "ALL", site_2 = "ALL", n_site_1 = length(counts), n_site_2 = length(counts),
+    site_1 = "ALL", site_2 = "ALL", n_site_1 = n_pooled, n_site_2 = n_pooled,
     shared_patients = if (withheld) "withheld" else if (small) sprintf("<%d", as.integer(min_cell_count)) else as.character(multi),
     overlap_pct = if (suppressed) NA_real_ else if (length(counts)) round(multi / length(counts), 4) else 0,
     is_suppressed = suppressed,

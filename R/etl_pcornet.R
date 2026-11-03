@@ -40,7 +40,7 @@
 #'   file when the source has one ([load_enrollment_spans()]); people without an enrolment record keep the
 #'   event-span period. `TRUE` fails if no usable ENROLLMENT file exists.
 #' @param enrollment_type_concept_id `period_type_concept_id` for enrolment-derived periods (default 0).
-#' @param data_cutoff `NULL` (default, today), an ISO date or `"auto"`: caps `observation_period` ends. `"auto"` uses the
+#' @param data_cutoff `"auto"` (default), an ISO date or `NULL` (today): caps `observation_period` ends. `"auto"` uses the
 #'   latest event dated before today, so events filled with the build date do not set period ends.
 #' @return Invisibly, `db_path`.
 #' @export
@@ -62,7 +62,7 @@ etl_pcornet <- function(
     key_check_callback = NULL,
     use_enrollment = "auto",
     enrollment_type_concept_id = 0L,
-    data_cutoff = NULL,
+    data_cutoff = "auto",
     mode = c("full", "append"),
     since = NULL
 ) {
@@ -135,8 +135,11 @@ etl_pcornet <- function(
   cutoff <- .resolve_max_date(con, data_cutoff)
   enrolled <- FALSE
   if (!isFALSE(use_enrollment)) {
+    # an inferred cutoff only replaces the build-date fill of open-ended spans; recorded end dates are kept
+    inferred <- identical(tolower(as.character(data_cutoff)), "auto")
     enrolled <- load_enrollment_spans(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids,
-                                      max_date = cutoff) > 0
+                                      max_date = if (inferred) NULL else cutoff,
+                                      open_end = if (inferred) cutoff else NULL) > 0
     if (isTRUE(use_enrollment) && !enrolled) {
       stop("use_enrollment = TRUE but ", source_dir, " has no ENROLLMENT file with usable rows.")
     }
@@ -1333,15 +1336,16 @@ cap_observation_period <- function(con, cutoff, dry_run = FALSE) {
 #'
 #' @param con Active DuckDB connection
 #' @param min_date Earliest plausible event date (default `"1900-01-02"`).
-#' @param max_date Latest plausible event date; default `NULL` is today (the extraction date). Pass the source's data
-#'   cutoff when events are filled with the build date, or `"auto"` for the latest event dated before today.
+#' @param max_date Latest plausible event date; default `"auto"` is the latest event dated before today, so events
+#'   filled with the build date do not set period ends. Pass the source's data cutoff as an ISO date, or `NULL` for today
+#'   (the extraction date).
 #' @param use_enrollment Logical. If `TRUE` (needs `_enrollment_spans` from [load_enrollment_spans()]), write each
 #'   person's real enrolment spans with `period_type_concept_id = enrollment_type_concept_id` and keep the event-span
 #'   rule only for people with no enrolment record.
 #' @param enrollment_type_concept_id `period_type_concept_id` for enrolment-derived periods (default 0: set your
 #'   site's concept).
 #' @export
-build_observation_period <- function(con, min_date = "1900-01-02", max_date = NULL, use_enrollment = FALSE,
+build_observation_period <- function(con, min_date = "1900-01-02", max_date = "auto", use_enrollment = FALSE,
                                       enrollment_type_concept_id = 0L) {
   as_iso <- function(x, nm) {
     d <- tryCatch(as.Date(x), error = function(e) NA)
@@ -1425,10 +1429,13 @@ build_observation_period <- function(con, min_date = "1900-01-02", max_date = NU
 #' @param source_dir Directory of PCORnet source files.
 #' @param site_id,disambiguate_patids As in [etl_pcornet()].
 #' @param min_date,max_date Clip bounds; see [build_observation_period()].
+#' @param open_end Optional date given to spans with no end date instead of `max_date`; [etl_pcornet()] passes the data
+#'   cutoff here under `data_cutoff = "auto"`, so an ongoing enrolment is not extended to the build date while recorded end
+#'   dates are kept.
 #' @return The number of merged spans (0, and no table, when the source has no ENROLLMENT file), invisibly.
 #' @export
 load_enrollment_spans <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE,
-                                  min_date = "1900-01-02", max_date = NULL) {
+                                  min_date = "1900-01-02", max_date = NULL, open_end = NULL) {
   path <- find_source_file(source_dir, "enrollment")
   if (is.null(path)) return(invisible(0L))
   as_iso <- function(x, nm) {
@@ -1438,6 +1445,7 @@ load_enrollment_spans <- function(con, source_dir, site_id = NULL, disambiguate_
   }
   lo <- as_iso(min_date, "min_date")
   hi <- if (is.null(max_date)) "CURRENT_DATE" else sprintf("DATE '%s'", as_iso(max_date, "max_date"))
+  open_hi <- if (is.null(open_end)) hi else sprintf("DATE '%s'", as_iso(open_end, "open_end"))
   prepare_source_view(con, "_temp_enrollment", path, c("PATID", "ENR_START_DATE", "ENR_END_DATE"))
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
   DBI::dbExecute(con, "DROP TABLE IF EXISTS _enrollment_spans;")
@@ -1461,7 +1469,7 @@ load_enrollment_spans <- function(con, source_dir, site_id = NULL, disambiguate_
     grouped AS (SELECT *, SUM(new_span) OVER (PARTITION BY person_id ORDER BY s, e) AS span_id FROM marked)
     SELECT person_id, MIN(s) AS start_date, MAX(e) AS end_date
     FROM grouped GROUP BY person_id, span_id;
-  ", lo, hi, hi, patid_expr))
+  ", lo, open_hi, hi, patid_expr))
   n <- as.integer(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM _enrollment_spans")$n)
   cat(sprintf("  -> %d enrolment spans from %s\n", n, basename(path)))
   invisible(n)

@@ -1058,18 +1058,34 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #'
 #' Sets `discharged_to_concept_id` to `concept_id` for visits whose `discharged_to_source_value` is `IP`
 #' (case-insensitive, whitespace ignored) and whose concept id is `NULL` or 0. Idempotent; needs write access
-#' except with `dry_run = TRUE`.
+#' except with `dry_run = TRUE`. With `as_view = TRUE` nothing is written: a TEMP view `view_name` (default
+#' `visit_occurrence_recoded`) carries the recoded concept id, for read-only production databases; `view_name =
+#' "visit_occurrence"` makes it shadow the table for unqualified queries on this connection.
 #'
 #' @param con DuckDB connection.
 #' @param schema Optional schema holding `visit_occurrence`.
 #' @param concept_id Concept id to write (default 8717, 'Inpatient Hospital').
 #' @param dry_run If `TRUE`, only count the visits that would be recoded (works on a read-only connection).
+#' @param as_view If `TRUE`, create a TEMP view instead of updating the table.
+#' @param view_name Name of that view.
 #' @return The number of visits recoded (or that would be), invisibly.
 #' @export
-remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_run = FALSE) {
+remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_run = FALSE, as_view = FALSE,
+                                   view_name = "visit_occurrence_recoded") {
   vo <- if (is.null(schema)) "visit_occurrence" else paste0(schema, ".visit_occurrence")
   where <- "COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP'"
   n <- as.integer(DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", vo, where))$n[1])
+  if (isTRUE(as_view)) {
+    if (isTRUE(dry_run)) return(invisible(n))
+    if (!grepl("^[A-Za-z_][A-Za-z0-9_]*$", view_name)) stop("`view_name` must be a plain identifier.", call. = FALSE)
+    base <- if (is.null(schema)) {
+      cs <- DBI::dbGetQuery(con, "SELECT current_database() AS d, current_schema() AS s")
+      sprintf('"%s"."%s".visit_occurrence', cs$d, cs$s)    # qualified, so a view named visit_occurrence does not refer to itself
+    } else vo
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TEMP VIEW %s AS SELECT * REPLACE (CASE WHEN %s THEN %d ELSE discharged_to_concept_id END AS discharged_to_concept_id) FROM %s",
+                                view_name, where, as.integer(concept_id), base))
+    return(invisible(n))
+  }
   if (n > 0L && !isTRUE(dry_run)) DBI::dbExecute(con, sprintf("UPDATE %s SET discharged_to_concept_id = %d WHERE %s", vo, as.integer(concept_id), where))
   invisible(n)
 }
