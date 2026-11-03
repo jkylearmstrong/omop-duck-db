@@ -32,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from omop_etl import (  # noqa: E402
+    ConsortAttrition,
     cohort_attrition,
     build_end_of_life_cohort,
     build_readmission_cohort,
@@ -1283,3 +1284,21 @@ def test_o5_cohort_frames_concat_with_attrition(cdm):
     both = pd.concat([a, b], ignore_index=True)       # used to raise: truth value of a DataFrame is ambiguous
     assert len(both) == 2 * len(a)
     assert isinstance(a.attrs["attrition"], list) and "step_name" in cohort_attrition(a).columns
+
+
+def test_cohort_attrition_helper_branches():
+    assert cohort_attrition(pd.DataFrame({"a": [1]})).empty                      # no attrition stored
+    frame = pd.DataFrame({"step_name": ["x"], "subjects_retained": [3]})
+    legacy = pd.DataFrame({"a": [1]})
+    legacy.attrs["attrition"] = frame                                            # DataFrame stored by older code
+    assert cohort_attrition(legacy).equals(frame) and cohort_attrition(legacy) is not frame
+    assert ConsortAttrition(cohort_attrition(legacy)).to_dataframe().equals(frame)
+
+
+def test_o13_compute_attrition_first_step_without_stays():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE person AS SELECT * FROM (VALUES (1), (2)) t(person_id)")
+    steps = [("everyone", "SELECT person_id AS subject_id FROM person"),
+             ("with stay", "SELECT person_id AS subject_id, person_id AS visit_occurrence_id FROM person")]
+    out = compute_attrition(con, 1, steps, count_stays=True)
+    assert out["stays_dropped"].tolist() == [None, 0] or out["stays_dropped"].iloc[-1] == 0
