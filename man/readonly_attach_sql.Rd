@@ -25,5 +25,5 @@ A character vector of \verb{ATTACH ... (READ_ONLY)} statements.
 Site files often expose \code{concept} and the other vocabulary tables as views into a catalog named \code{central_vocab}.
 Those views only resolve when the vocabulary file is attached under exactly that name. HADES opens several
 connections per run and DatabaseConnector cannot ATTACH on connect, so run these statements on each new connection
-(see \code{inst/cohorts/run_plp_readonly_example.R}). Nothing is written to either file.
+(see \verb{cohorts/run_plp_readonly_example.R}). Nothing is written to either file.
 }

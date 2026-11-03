@@ -6,8 +6,6 @@
 \title{Resolve FHIR codes to standard OMOP concept ids}
 \usage{
 resolve_fhir_codes(vocab_con, codes)
-
-resolve_codes(vocab_con, codes)
 }
 \arguments{
 \item{vocab_con}{A DBI connection holding the OMOP vocabulary tables.}
