@@ -144,6 +144,17 @@ def test_f1b_small_share_pileup_is_flagged():
     assert res["flagged"] and res["periods"] == 33 and res["periods"] < 0.01 * res["total"]
 
 
+def test_f4_cap_preview_by_end_date():
+    from omop_etl import cap_observation_period
+    con = duckdb.connect()
+    con.execute("CREATE TABLE observation_period AS SELECT * FROM (VALUES (1, DATE '2020-01-01', DATE '2026-10-23'),"
+                " (2, DATE '2020-01-01', DATE '2026-10-23'), (3, DATE '2020-01-01', DATE '2026-10-05'))"
+                " t(observation_period_id, observation_period_start_date, observation_period_end_date)")
+    res = cap_observation_period(con, "2026-09-30", dry_run=True, by_end_date=True)
+    assert res["shortened"] == 3 and [n for _, n in res["by_end_date"]] == [2, 1]
+    assert "by_end_date" not in cap_observation_period(con, "2026-09-30", dry_run=True)
+
+
 # -- F3 ----------------------------------------------------------------------------------------------------------
 def test_f3_duplicate_report_is_one_safe_object():
     ids = {"A": list(range(1000)), "B": list(range(993, 1993)), "C": list(range(5000, 6000))}
