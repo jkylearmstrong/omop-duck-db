@@ -47,6 +47,7 @@ extract_patient_features <- function(con,
                                      lookahead_days = 0,
                                      index_key = "person_id",
                                      ...) {
+  check_observation_period_ends(con)
   fmt <- tolower(trimws(format))
   windows <- sort(as.integer(lookback_days))
   maxw <- max(windows)   # widest window goes into each join so a stay only meets events inside its own window

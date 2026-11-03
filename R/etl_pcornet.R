@@ -1310,10 +1310,16 @@ load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_pat
 #'
 #' @param con Active DuckDB connection.
 #' @param cutoff Data cutoff, a date like `"2026-09-30"`.
+#' Unlike `max_date = "auto"` at build time, which caps only open-ended enrollment spans and keeps recorded end dates,
+#' this shortens every period ending after `cutoff`, recorded ends included; `"auto"` also picks its cutoff
+#' heuristically (latest event before today), while here the cutoff is the one you pass.
+#'
 #' @param dry_run If `TRUE`, only count what would change.
-#' @return A list with `shortened` and `deleted` counts.
+#' @param by_end_date If `TRUE` with `dry_run = TRUE`, also return `by_end_date`, a data frame of the end dates (at most
+#'   20, most common first) of the periods that would be shortened, for planning a cap. Empty after a real run.
+#' @return A list with `shortened` and `deleted` counts (and `by_end_date` when requested).
 #' @export
-cap_observation_period <- function(con, cutoff, dry_run = FALSE) {
+cap_observation_period <- function(con, cutoff, dry_run = FALSE, by_end_date = FALSE) {
   d <- tryCatch(as.Date(cutoff), error = function(e) NA)
   if (length(d) != 1L || is.na(d)) stop("`cutoff` must be a date like '2026-09-30'.", call. = FALSE)
   hi <- format(d, "%Y-%m-%d")
@@ -1325,7 +1331,14 @@ cap_observation_period <- function(con, cutoff, dry_run = FALSE) {
     DBI::dbExecute(con, sprintf("DELETE FROM observation_period WHERE observation_period_start_date > DATE '%s'", hi))
     DBI::dbExecute(con, sprintf("UPDATE observation_period SET observation_period_end_date = DATE '%s' WHERE observation_period_end_date > DATE '%s'", hi, hi))
   }
-  list(shortened = shortened, deleted = deleted)
+  out <- list(shortened = shortened, deleted = deleted)
+  if (isTRUE(by_end_date)) {
+    out$by_end_date <- if (isTRUE(dry_run)) DBI::dbGetQuery(con, sprintf(
+      "SELECT observation_period_end_date AS end_date, COUNT(*) AS periods FROM observation_period
+       WHERE observation_period_start_date <= DATE '%s' AND observation_period_end_date > DATE '%s'
+       GROUP BY 1 ORDER BY periods DESC, 1 LIMIT 20", hi, hi)) else data.frame(end_date = as.Date(character()), periods = integer())
+  }
+  out
 }
 
 #' Synthesize Observation Period envelopes

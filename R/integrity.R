@@ -876,6 +876,29 @@ consortium_cross_site_duplicates <- function(site_identifiers, key, min_cell_cou
   out
 }
 
+#' Cross-site duplicate patients as one object that holds only safe aggregates
+#'
+#' Wraps [consortium_cross_site_duplicates()] and returns a list with `pairs` (one row per site pair), `pooled` (the
+#' one-row pooled result, withheld as described there), `withheld` (`TRUE` when the pooled row is withheld or
+#' suppressed) and `policy` (the disclosure rule). Raw identifiers and their tokens are not part of the result.
+#'
+#' @inheritParams consortium_cross_site_duplicates
+#' @return A list with `pairs`, `pooled`, `withheld` and `policy`.
+#' @export
+consortium_duplicate_report <- function(site_identifiers, key, min_cell_count = 11) {
+  out <- consortium_cross_site_duplicates(site_identifiers, key, min_cell_count = min_cell_count)
+  pooled <- out[out$site_1 == "ALL", , drop = FALSE]
+  rownames(pooled) <- NULL
+  pairs <- out[out$site_1 != "ALL", , drop = FALSE]
+  rownames(pairs) <- NULL
+  list(pairs = pairs, pooled = pooled, withheld = isTRUE(pooled$is_suppressed[1]),
+       policy = paste0(
+         "Every count from 1 to min_cell_count - 1 is suppressed. A suppressed pair withholds the pooled row, including its ",
+         "pooled n_site_1 / n_site_2 (the sum of the site sizes minus the pooled distinct count is the number of patients seen ",
+         "at several sites). Pair rows show per-site sizes, which are not secret by themselves. Publish this object as a whole; ",
+         "do not recompute pooled totals from the pair rows."))
+}
+
 # -----------------------------------------------------------------------------
 # 7. Planned-Readmission Filter (CMS Algorithm)
 # -----------------------------------------------------------------------------

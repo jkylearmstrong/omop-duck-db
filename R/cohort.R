@@ -1054,6 +1054,43 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
   invisible(NULL)
 }
 
+#' Flag observation periods that pile up on one end date
+#'
+#' The signature of events filled with the build date. The latest period-end date is compared with the median number of
+#' periods ending per day over the preceding 30 days that have any. It is flagged when at least `min_periods` periods end
+#' on it and the count is `min_ratio` times that median (a genuine data cutoff holds about one ordinary day of ends). The
+#' share of all periods is deliberately not tested: 33 ends against a typical day of 1 is unmistakable even when it is
+#' 0.015% of 200,000 periods. [define_study_cohort()] and [extract_patient_features()] call this.
+#'
+#' @param con Active DuckDB connection.
+#' @param warn If `TRUE`, a flagged result also raises a warning naming [cap_observation_period()].
+#' @param min_ratio Times the typical daily count the latest end date must reach.
+#' @param min_periods Fewest periods that must end on the latest date.
+#' @return A list with `flagged`, and when a table is found `end_date`, `periods`, `total` and `typical_daily`. Never
+#'   errors: a database without `observation_period` returns `list(flagged = FALSE)`.
+#' @export
+check_observation_period_ends <- function(con, warn = TRUE, min_ratio = 10, min_periods = 5) {
+  res <- tryCatch({
+    total <- as.numeric(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM observation_period")$n[1])
+    rows <- DBI::dbGetQuery(con, "SELECT observation_period_end_date AS d, COUNT(*) AS n FROM observation_period
+                                  WHERE observation_period_end_date IS NOT NULL GROUP BY 1 ORDER BY 1 DESC LIMIT 31")
+    list(total = total, rows = rows)
+  }, error = function(e) NULL)
+  if (is.null(res) || nrow(res$rows) == 0L || !isTRUE(res$total > 0)) return(list(flagged = FALSE))
+  last <- res$rows$d[1]
+  n_last <- as.numeric(res$rows$n[1])
+  prior <- sort(as.numeric(res$rows$n[-1]))
+  typical <- if (length(prior)) prior[floor(length(prior) / 2) + 1L] else 0
+  flagged <- n_last >= min_periods && n_last >= min_ratio * max(typical, 1)
+  if (flagged && isTRUE(warn)) {
+    warning(sprintf(paste0("%d of %d observation periods end on %s, about %.0f times a typical day, which usually means ",
+                           "source events were filled with the build date. Follow-up and lookback windows are unreliable ",
+                           "at that end; cap them with cap_observation_period(con, cutoff)."),
+                    as.integer(n_last), as.integer(res$total), format(last), n_last / max(typical, 1)), call. = FALSE)
+  }
+  list(flagged = flagged, end_date = last, periods = as.integer(n_last), total = as.integer(res$total), typical_daily = typical)
+}
+
 #' Recode transfer discharges in a database built before the ETL mapped 'IP' to 8717
 #'
 #' Sets `discharged_to_concept_id` to `concept_id` for visits whose `discharged_to_source_value` is `IP`
@@ -1655,6 +1692,7 @@ define_study_cohort <- function(con,
     one_per_patient = one_per_patient
   )
   .warn_unmapped_transfer_discharge(con, spec)
+  check_observation_period_ends(con)
 
   if (!is.null(persist_keys) && file.exists(persist_keys)) {
     pinned <- utils::read.csv(persist_keys, stringsAsFactors = FALSE)

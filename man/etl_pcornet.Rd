@@ -22,7 +22,7 @@ etl_pcornet(
   key_check_callback = NULL,
   use_enrollment = "auto",
   enrollment_type_concept_id = 0L,
-  data_cutoff = NULL,
+  data_cutoff = "auto",
   mode = c("full", "append"),
   since = NULL
 )
@@ -76,7 +76,7 @@ event-span period. \code{TRUE} fails if no usable ENROLLMENT file exists.}
 
 \item{enrollment_type_concept_id}{\code{period_type_concept_id} for enrolment-derived periods (default 0).}
 
-\item{data_cutoff}{\code{NULL} (default, today), an ISO date or \code{"auto"}: caps \code{observation_period} ends. \code{"auto"} uses the
+\item{data_cutoff}{\code{"auto"} (default), an ISO date or \code{NULL} (today): caps \code{observation_period} ends. \code{"auto"} uses the
 latest event dated before today, so events filled with the build date do not set period ends.}
 
 \item{mode}{\code{"full"} (default) or \code{"append"}: add only newly arrived rows to an existing database. Patients, providers and
