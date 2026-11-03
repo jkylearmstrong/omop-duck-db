@@ -1487,12 +1487,19 @@ def resolve_max_date(con, max_date=None, min_date="1900-01-02"):
     return _iso_date(max_date, "max_date")
 
 
-def cap_observation_period(con, cutoff, dry_run=False):
+def cap_observation_period(con, cutoff, dry_run=False, by_end_date=False):
     """Caps observation periods of an already-built database at a data cutoff (N2).
 
     For databases built before ``max_date="auto"``/``data_cutoff`` was used, whose periods end on the build date.
     Periods ending after ``cutoff`` (ISO date) are shortened to it; periods starting after it are deleted. Returns
     ``{"shortened": n, "deleted": m}``; with ``dry_run=True`` returns the same counts and changes nothing.
+
+    Unlike ``data_cutoff="auto"`` at build time, which caps only open-ended enrollment spans and keeps recorded end
+    dates, this shortens every period ending after ``cutoff``, recorded ends included. ``"auto"`` also picks the cutoff
+    heuristically (latest event before today); here the cutoff is the one you pass.
+
+    ``by_end_date=True`` adds ``"by_end_date"``, a list of ``(end_date, periods)`` for the periods that would be shortened
+    (most common first, at most 20), for planning a cap before running it. It is filled only with ``dry_run=True`` (empty after a real run, which has already changed them).
     """
     hi = _iso_date(cutoff, "cutoff")
     short = con.execute(f"""SELECT COUNT(*) FROM observation_period WHERE observation_period_start_date <= DATE '{hi}'
@@ -1502,7 +1509,13 @@ def cap_observation_period(con, cutoff, dry_run=False):
         con.execute(f"DELETE FROM observation_period WHERE observation_period_start_date > DATE '{hi}'")
         con.execute(f"""UPDATE observation_period SET observation_period_end_date = DATE '{hi}'
                         WHERE observation_period_end_date > DATE '{hi}'""")
-    return {"shortened": int(short), "deleted": int(gone)}
+    out = {"shortened": int(short), "deleted": int(gone)}
+    if by_end_date:
+        out["by_end_date"] = [(d, int(n)) for d, n in con.execute(
+            f"""SELECT observation_period_end_date, COUNT(*) n FROM observation_period
+                WHERE observation_period_start_date <= DATE '{hi}' AND observation_period_end_date > DATE '{hi}'
+                GROUP BY 1 ORDER BY n DESC, 1 LIMIT 20""").fetchall()] if dry_run else []
+    return out
 
 
 def load_enrollment_spans(con, source_dir, site_id=None, disambiguate_patids=False,

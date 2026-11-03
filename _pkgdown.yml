@@ -73,6 +73,8 @@ reference:
   contents:
   - remap_cdm_table
   - remap_discharge_status
+  - cap_observation_period
+  - check_observation_period_ends
   - remap_all
 - title: Cohorts and concept algebra
   desc: Parameterized cohort builders, set operations, and transitive hierarchy algebra.
@@ -368,6 +370,7 @@ reference:
   - concept_optimizer
   - consortium_patient_overlap
   - consortium_cross_site_duplicates
+  - consortium_duplicate_report
   - consortium_propensity_score
   - consortium_survival_meta_analysis
   - detect_redundant_features

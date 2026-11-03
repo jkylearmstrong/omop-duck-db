@@ -982,7 +982,7 @@ disclosure). The rules that hold today:
   is withheld (`overlap_pct` is NA).
 - `consortium_cross_site_duplicates()` withholds the pooled `ALL` row, including its pooled `n_site_1` / `n_site_2`,
   whenever any pair or the pooled count is suppressed: the sum of the site sizes minus the pooled distinct count is
-  the number of patients seen at several sites. Use `consortium_duplicate_report()` (Python) to get pairs, pooled row
+  the number of patients seen at several sites. Use `consortium_duplicate_report()` to get pairs, pooled row
   and this policy in one object; publish it whole and never recompute pooled totals from the pair rows.
 - Only the duplicate and overlap helpers were audited for this. Other helpers that print group sizes beside
   suppressed cells have not been audited; treat their output the same way before publishing.
@@ -995,7 +995,7 @@ What the project's own tests cover and what they do not:
   synthetic databases.
 - Field-tested on five production databases: the v0.11.0 cohort equivalence (Python). The 0.11.1 and later changes
   (per-table feature aggregates, `cap_observation_period`, `remap_discharge_status`, the attrition list) were checked on
-  synthetic data only, and the R half of 0.11.1 and later only by reading.
+  synthetic data only, and the R half of 0.11.1 and later on small synthetic databases only (the 0.11.2 R ports were run with testthat, not on production data).
 - Oracle (`translate_cohort_sql`) and the BigQuery sync are unit-tested only. `extract_patient_features` timing
   on production-size cohorts: `scripts/benchmark_features.py` (synthetic fixture: 1.1M stays in about 4 s; a production
   run will differ with the number of events per patient).

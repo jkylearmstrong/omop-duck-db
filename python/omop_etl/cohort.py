@@ -715,8 +715,9 @@ def check_observation_period_ends(con: duckdb.DuckDBPyConnection, warn: bool = T
     """Flags observation periods that pile up on one end date, the signature of events filled with the build date.
 
     The latest period-end date is compared with the median number of periods ending per day over the preceding 30 days
-    that have any. It is flagged when at least ``min_periods`` periods end on it, they are at least 1% of all periods,
-    and the count is ``min_ratio`` times that median (a genuine data cutoff holds about one ordinary day of ends). Returns
+    that have any. It is flagged when at least ``min_periods`` periods end on it and the count is ``min_ratio`` times that
+    median (a genuine data cutoff holds about one ordinary day of ends). The share of all periods is deliberately not
+    tested: 33 ends against a typical day of 1 is unmistakable even when it is 0.015% of 200,000 periods. Returns
     ``{"flagged": bool, "end_date": ..., "periods": n, "total": N, "typical_daily": m}``; with ``warn=True`` a flagged
     result also raises a ``UserWarning`` naming :func:`omop_etl.build_omop_cdm.cap_observation_period`. Never raises:
     a database without ``observation_period`` returns ``{"flagged": False}``.
@@ -732,7 +733,7 @@ def check_observation_period_ends(con: duckdb.DuckDBPyConnection, warn: bool = T
     last, n_last = rows[0]
     prior = sorted(n for _, n in rows[1:])
     typical = float(prior[len(prior) // 2]) if prior else 0.0
-    flagged = bool(n_last >= min_periods and n_last >= 0.01 * total and n_last >= min_ratio * max(typical, 1.0))
+    flagged = bool(n_last >= min_periods and n_last >= min_ratio * max(typical, 1.0))
     if flagged and warn:
         warnings.warn(f"{n_last} of {total} observation periods end on {last}, about {n_last / max(typical, 1.0):.0f} times "
                       "a typical day, which usually means source events were filled with the build date. Follow-up and "

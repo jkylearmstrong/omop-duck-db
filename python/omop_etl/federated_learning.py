@@ -172,6 +172,9 @@ def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str
     ``sites`` is ``{name: DataFrame}`` (or a list of DataFrames / ``FederatedNode``). ``l2`` is a ridge penalty on the
     slopes (never the intercept). Equals the pooled maximum-likelihood fit when ``noise_scale == 0``. On detected separation the
     coefficients are NaN and ``separated`` is True (set ``l2 > 0`` for a penalised fit).
+
+    Limits of the separation check: the pre-fit screen covers 0/1 covariates only, and is skipped when ``noise_scale > 0``
+    or ``l2 > 0``. A continuous covariate that separates the outcome is detected only after the fit fails to converge.
     """
     nodes = _nodes(sites, min_site_n, noise_scale, seed)
     covariates = list(covariates)

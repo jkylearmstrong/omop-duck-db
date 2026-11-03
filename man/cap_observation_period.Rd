@@ -4,17 +4,23 @@
 \alias{cap_observation_period}
 \title{Cap observation periods of an already-built database at a data cutoff}
 \usage{
-cap_observation_period(con, cutoff, dry_run = FALSE)
+cap_observation_period(con, cutoff, dry_run = FALSE, by_end_date = FALSE)
 }
 \arguments{
 \item{con}{Active DuckDB connection.}
 
-\item{cutoff}{Data cutoff, a date like \code{"2026-09-30"}.}
+\item{cutoff}{Data cutoff, a date like \code{"2026-09-30"}.
+Unlike \code{max_date = "auto"} at build time, which caps only open-ended enrollment spans and keeps recorded end dates,
+this shortens every period ending after \code{cutoff}, recorded ends included; \code{"auto"} also picks its cutoff
+heuristically (latest event before today), while here the cutoff is the one you pass.}
 
 \item{dry_run}{If \code{TRUE}, only count what would change.}
+
+\item{by_end_date}{If \code{TRUE} with \code{dry_run = TRUE}, also return \code{by_end_date}, a data frame of the end dates (at most
+20, most common first) of the periods that would be shortened, for planning a cap. Empty after a real run.}
 }
 \value{
-A list with \code{shortened} and \code{deleted} counts.
+A list with \code{shortened} and \code{deleted} counts (and \code{by_end_date} when requested).
 }
 \description{
 For databases built before \code{max_date = "auto"} was used, whose periods end on the build date. Periods ending after
