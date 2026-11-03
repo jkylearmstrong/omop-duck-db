@@ -1506,18 +1506,21 @@ def cap_observation_period(con, cutoff, dry_run=False):
 
 
 def load_enrollment_spans(con, source_dir, site_id=None, disambiguate_patids=False,
-                          min_date="1900-01-02", max_date=None):
+                          min_date="1900-01-02", max_date=None, open_end=None):
     """Builds ``_enrollment_spans(person_id, start_date, end_date)`` from the PCORnet ENROLLMENT file (FR-C10).
 
     Returns the number of merged enrolment spans (0 and no table when the source has no ENROLLMENT file). Spans are
     clipped to ``[min_date, max_date]`` (default: today), dropped when empty, and merged when they overlap or touch,
-    so each row is one continuous enrolment. Persons are matched on ``person_source_value``.
+    so each row is one continuous enrolment. Persons are matched on ``person_source_value``. ``open_end`` (ISO date)
+    is the end given to spans with no end date, instead of ``max_date``; the ETL passes the data cutoff here under
+    ``data_cutoff="auto"``, so an ongoing enrolment is not extended to the build date while recorded end dates are kept.
     """
     path = find_source_file(source_dir, "enrollment")
     if path is None:
         return 0
     lo = _iso_date(min_date, "min_date")
     hi = f"DATE '{_iso_date(max_date, 'max_date')}'" if max_date is not None else "CURRENT_DATE"
+    open_hi = f"DATE '{_iso_date(open_end, 'open_end')}'" if open_end is not None else hi
     prepare_source_view(con, "_temp_enrollment", path, ["PATID", "ENR_START_DATE", "ENR_END_DATE"])
     patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
     con.execute("DROP TABLE IF EXISTS _enrollment_spans;")
@@ -1526,7 +1529,7 @@ def load_enrollment_spans(con, source_dir, site_id=None, disambiguate_patids=Fal
         WITH raw AS (
             SELECT p.person_id,
                    GREATEST(CAST(parse_omop_date(src.ENR_START_DATE) AS DATE), DATE '{lo}') AS s,
-                   LEAST(COALESCE(CAST(parse_omop_date(src.ENR_END_DATE) AS DATE), {hi}), {hi}) AS e
+                   LEAST(COALESCE(CAST(parse_omop_date(src.ENR_END_DATE) AS DATE), {open_hi}), {hi}) AS e
             FROM _temp_enrollment src
             JOIN person p ON p.person_source_value = {patid_expr}
             WHERE parse_omop_date(src.ENR_START_DATE) IS NOT NULL
@@ -1547,16 +1550,16 @@ def load_enrollment_spans(con, source_dir, site_id=None, disambiguate_patids=Fal
     return int(n)
 
 
-def build_observation_period(con, min_date="1900-01-02", max_date=None, use_enrollment=False,
+def build_observation_period(con, min_date="1900-01-02", max_date="auto", use_enrollment=False,
                              enrollment_type_concept_id=0):
     """Synthesizes patient observation envelopes across all clinical event tables (FR-C10).
 
     The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events
     dated before ``min_date`` (default 1900-01-02: SAS/Excel zero dates such as 1840-12-31 and 1899-12-30 and
-    ``1900-01-01`` placeholders) or after ``max_date`` (default: today, the extraction date) are ignored. A person
-    with no plausible event gets no observation period. Pass the source's real data cutoff as ``max_date`` when events
-    are filled with the build date, which today's date cannot distinguish from a genuine event; ``max_date="auto"``
-    uses the latest event dated before today (see :func:`resolve_max_date`).
+    ``1900-01-01`` placeholders) or after ``max_date`` are ignored. A person with no plausible event gets no
+    observation period. The default ``max_date="auto"`` uses the latest event dated before today (see
+    :func:`resolve_max_date`), so events a source fills with the build date do not set period ends; pass an ISO date
+    for the source's real data cutoff, or ``max_date=None`` for the old behaviour (today, the extraction date).
 
     ``use_enrollment=True`` (needs ``_enrollment_spans`` from :func:`load_enrollment_spans`) writes each person's real
     enrolment spans with ``period_type_concept_id = enrollment_type_concept_id`` (default 0: set your site's concept)
@@ -1831,7 +1834,7 @@ def etl_pcornet(
     key_check_callback=None,
     use_enrollment="auto",
     enrollment_type_concept_id=0,
-    data_cutoff=None,
+    data_cutoff="auto",
     mode="full",
     since=None,
 ):
@@ -1851,8 +1854,8 @@ def etl_pcornet(
     ``use_enrollment`` ('auto' | True | False) builds ``observation_period`` from the PCORnet ENROLLMENT file when the
     source has one (see ``build_observation_period``); people without an enrolment record keep the event-span period.
 
-    ``data_cutoff`` (None | ISO date | ``"auto"``) caps observation-period ends (N2): None keeps today, ``"auto"`` uses
-    the latest event dated before today, so build-date placeholders do not set period ends.
+    ``data_cutoff`` (``"auto"`` | ISO date | None) caps observation-period ends (N2): ``"auto"`` (default) uses the
+    latest event dated before today, so build-date placeholders do not set period ends; None keeps today.
 
     ``auto_resources=True`` sizes DuckDB to the host (see ``omop_etl.resources.configure_resources``);
     explicit ``memory_limit`` / ``threads`` / ``temp_dir`` still win over the detected values.
@@ -1930,11 +1933,20 @@ def etl_pcornet(
     cutoff = resolve_max_date(con, data_cutoff)
     enrolled = False
     if use_enrollment in ("auto", True):
+        # an inferred cutoff only replaces the build-date fill of open-ended spans; recorded end dates are kept
+        inferred = str(data_cutoff).lower() == "auto"
         enrolled = load_enrollment_spans(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids,
-                                         max_date=cutoff) > 0
+                                         max_date=None if inferred else cutoff,
+                                         open_end=cutoff if inferred else None) > 0
         if use_enrollment is True and not enrolled:
             raise FileNotFoundError(f"use_enrollment=True but {source_dir} has no ENROLLMENT file with usable rows.")
     build_observation_period(con, max_date=cutoff, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
+    if cutoff is not None:
+        print(f"  -> observation periods capped at the data cutoff {cutoff}"
+              + (" (data_cutoff='auto': latest event before today)" if str(data_cutoff).lower() == "auto" else ""))
+    else:
+        print("  -> observation periods not capped (data_cutoff=None): periods may end on the build date; "
+              "cap_observation_period(con, cutoff) caps them afterwards")
     build_drug_era(con)
     build_condition_era(con)
     if not append:

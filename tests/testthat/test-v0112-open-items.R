@@ -53,3 +53,23 @@ test_that("extract_patient_features does not multiply events across tables", {
   expect_equal(as.integer(df$drug_count_30d), 7L)
   expect_equal(unname(unlist(df[1, names(df) == "mean_measurement_3001"])), c(15, 15))
 })
+
+test_that("remap_discharge_status as_view recodes in a temp view on a read-only database", {
+  db <- tempfile(fileext = ".duckdb")
+  w <- DBI::dbConnect(duckdb::duckdb(), dbdir = db)
+  DBI::dbExecute(w, "CREATE TABLE visit_occurrence AS SELECT * FROM (VALUES (1, 0, 'IP'), (2, 0, 'HOME'), (3, 8536, 'ip')) t(visit_occurrence_id, discharged_to_concept_id, discharged_to_source_value)")
+  DBI::dbDisconnect(w, shutdown = TRUE)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db, read_only = TRUE)
+  on.exit({DBI::dbDisconnect(con, shutdown = TRUE); unlink(db)})
+  expect_equal(remap_discharge_status(con, as_view = TRUE), 1L)
+  expect_equal(DBI::dbGetQuery(con, "SELECT discharged_to_concept_id AS c FROM visit_occurrence_recoded ORDER BY visit_occurrence_id")$c, c(8717, 0, 8536))
+  expect_equal(remap_discharge_status(con, as_view = TRUE, view_name = "visit_occurrence"), 1L)
+  expect_equal(DBI::dbGetQuery(con, "SELECT discharged_to_concept_id AS c FROM visit_occurrence WHERE visit_occurrence_id = 1")$c, 8717)
+  expect_error(remap_discharge_status(con, as_view = TRUE, view_name = "x; DROP"), "identifier")
+})
+
+test_that("cluster_col defaults to an unpenalised fit", {
+  set.seed(2)
+  df <- data.frame(pid = rep(1:40, each = 3), sbp = rnorm(120), y = rbinom(120, 1, 0.4))
+  expect_no_warning(consortium_multivariable_risk_factors(df[, c("pid", "sbp")], df$y, cluster_col = "pid"))
+})

@@ -980,6 +980,32 @@ def consortium_cross_site_duplicates(
     return pd.concat([pairs, total], ignore_index=True)
 
 
+DUPLICATE_REPORT_POLICY = (
+    "Every count from 1 to min_cell_count - 1 is suppressed. A suppressed pair withholds the pooled row, including its "
+    "pooled n_site_1 / n_site_2 (the sum of the site sizes minus the pooled distinct count is the number of patients seen "
+    "at several sites). Pair rows show per-site sizes, which are not secret by themselves. Publish this object as a whole; "
+    "do not recompute pooled totals from the pair rows."
+)
+
+
+def consortium_duplicate_report(
+    site_identifiers: Dict[str, Iterable[Any]],
+    key: str | bytes,
+    min_cell_count: int = 11,
+) -> Dict[str, Any]:
+    """Cross-site duplicate patients as one object that holds only safe aggregates (F3).
+
+    Wraps :func:`consortium_cross_site_duplicates` and returns a dict with ``pairs`` (one row per site pair),
+    ``pooled`` (the one-row pooled result, withheld as described there), ``withheld`` (True when the pooled row is
+    withheld or suppressed) and ``policy`` (the disclosure rule, :data:`DUPLICATE_REPORT_POLICY`). Raw identifiers and
+    their tokens are not part of the result.
+    """
+    out = consortium_cross_site_duplicates(site_identifiers, key, min_cell_count=min_cell_count)
+    pooled = out[out["site_1"] == "ALL"].reset_index(drop=True)
+    return {"pairs": out[out["site_1"] != "ALL"].reset_index(drop=True), "pooled": pooled,
+            "withheld": bool(pooled["is_suppressed"].iloc[0]), "policy": DUPLICATE_REPORT_POLICY}
+
+
 # -----------------------------------------------------------------------------
 # 7. Planned-Readmission Filter (CMS Algorithm)
 # -----------------------------------------------------------------------------

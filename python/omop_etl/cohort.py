@@ -710,19 +710,71 @@ def _warn_unmapped_transfer_discharge(con, spec: "_StudySpec") -> None:
             UserWarning, stacklevel=3)
 
 
+def check_observation_period_ends(con: duckdb.DuckDBPyConnection, warn: bool = True, min_ratio: float = 10.0,
+                                  min_periods: int = 5) -> dict:
+    """Flags observation periods that pile up on one end date, the signature of events filled with the build date.
+
+    The latest period-end date is compared with the median number of periods ending per day over the preceding 30 days
+    that have any. It is flagged when at least ``min_periods`` periods end on it, they are at least 1% of all periods,
+    and the count is ``min_ratio`` times that median (a genuine data cutoff holds about one ordinary day of ends). Returns
+    ``{"flagged": bool, "end_date": ..., "periods": n, "total": N, "typical_daily": m}``; with ``warn=True`` a flagged
+    result also raises a ``UserWarning`` naming :func:`omop_etl.build_omop_cdm.cap_observation_period`. Never raises:
+    a database without ``observation_period`` returns ``{"flagged": False}``.
+    """
+    try:
+        total = con.execute("SELECT COUNT(*) FROM observation_period").fetchone()[0]
+        rows = con.execute("""SELECT observation_period_end_date d, COUNT(*) n FROM observation_period
+                              WHERE observation_period_end_date IS NOT NULL GROUP BY 1 ORDER BY 1 DESC LIMIT 31""").fetchall()
+    except duckdb.Error:
+        return {"flagged": False}
+    if not rows or not total:
+        return {"flagged": False}
+    last, n_last = rows[0]
+    prior = sorted(n for _, n in rows[1:])
+    typical = float(prior[len(prior) // 2]) if prior else 0.0
+    flagged = bool(n_last >= min_periods and n_last >= 0.01 * total and n_last >= min_ratio * max(typical, 1.0))
+    if flagged and warn:
+        warnings.warn(f"{n_last} of {total} observation periods end on {last}, about {n_last / max(typical, 1.0):.0f} times "
+                      "a typical day, which usually means source events were filled with the build date. Follow-up and "
+                      "lookback windows are unreliable at that end; cap them with "
+                      "omop_etl.build_omop_cdm.cap_observation_period(con, cutoff).", UserWarning, stacklevel=3)
+    return {"flagged": flagged, "end_date": last, "periods": int(n_last), "total": int(total), "typical_daily": typical}
+
+
 def remap_discharge_status(con: duckdb.DuckDBPyConnection, schema: str | None = None,
-                           concept_id: int = 8717, dry_run: bool = False) -> int:
+                           concept_id: int = 8717, dry_run: bool = False, as_view: bool = False,
+                           view_name: str = "visit_occurrence_recoded") -> int:
     """Recodes transfer visits in a database built before the PCORnet ETL mapped discharge status 'IP' to 8717.
 
     Sets ``discharged_to_concept_id`` to ``concept_id`` for visits whose ``discharged_to_source_value`` is 'IP'
     (case-insensitive, whitespace ignored) and whose concept id is NULL or 0. Idempotent. Needs write access, except
     with ``dry_run=True``, which only counts the visits that would be recoded and works on a read-only connection.
 
-    Returns the number of visits recoded (or, with ``dry_run``, that would be).
+    ``as_view=True`` writes nothing to the database: it creates a TEMP view ``view_name`` (default
+    ``visit_occurrence_recoded``) with the same columns as ``visit_occurrence`` and the recoded concept id, for read-only
+    production databases. Pass ``view_name="visit_occurrence"`` to make the view shadow the table for unqualified
+    queries on this connection (``define_study_cohort`` then sees the recode); the view disappears with the connection.
+
+    Returns the number of visits recoded (or, with ``dry_run`` or ``as_view``, that are or would be recoded).
     """
     vo = f"{schema}.visit_occurrence" if schema else "visit_occurrence"
     where = ("COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP'")
     n = con.execute(f"SELECT COUNT(*) FROM {vo} WHERE {where}").fetchone()[0]
+    if as_view:
+        if dry_run:
+            return int(n)
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(view_name)):
+            raise ValueError(f"view_name must be a plain identifier, got {view_name!r}.")
+        if schema:
+            base = vo
+        else:    # fully qualified, so a view named visit_occurrence does not refer to itself
+            cat, sch = con.execute("SELECT current_database(), current_schema()").fetchone()
+            base = f'"{cat}"."{sch}".visit_occurrence'
+        con.execute(f"""CREATE OR REPLACE TEMP VIEW {view_name} AS
+                        SELECT * REPLACE (CASE WHEN {where} THEN {int(concept_id)} ELSE discharged_to_concept_id END
+                                          AS discharged_to_concept_id)
+                        FROM {base}""")
+        return int(n)
     if n and not dry_run:
         con.execute(f"UPDATE {vo} SET discharged_to_concept_id = {int(concept_id)} WHERE {where}")
     return int(n)
@@ -1741,6 +1793,7 @@ def define_study_cohort(
     )
 
     _warn_unmapped_transfer_discharge(con, spec)
+    check_observation_period_ends(con)
 
     keys_path = Path(persist_keys) if persist_keys is not None else None
     if keys_path is not None and keys_path.exists():
@@ -1789,8 +1842,8 @@ def define_study_cohort(
             _write_index_keys(df, keys_path)
 
         if attrition:
-            df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec),
-                                                    count_stays=not one_per_patient).to_dict("records")   # list of dicts: a DataFrame in attrs breaks pd.concat (O5)
+            df.attrs["attrition"] = AttritionRecords(compute_attrition(
+                con, cohort_id, _study_attrition_steps(spec), count_stays=not one_per_patient).to_dict("records"))   # list of dicts: a DataFrame in attrs breaks pd.concat (O5)
     finally:
         if spec.metformin_only_pcos:
             con.execute(f"DROP TABLE IF EXISTS {_STUDY_METFORMIN_TABLE}")
@@ -2202,6 +2255,32 @@ def prepare_competing_risks_data(
     return df, summary
 
 
+class AttritionRecords(list):
+    """The attrition rows as a list of dicts, with a deprecated DataFrame-style access path.
+
+    Before 0.11.1 ``cohort.attrs['attrition']`` was a DataFrame. Scripts that still index it by column name or call
+    DataFrame methods on it keep working and get a ``FutureWarning``; use :func:`cohort_attrition` for a DataFrame.
+    """
+
+    def _frame(self, what):
+        warnings.warn(f"cohort.attrs['attrition'] is a list of dicts since 0.11.1; {what} is deprecated on it. "
+                      "Use omop_etl.cohort.cohort_attrition(cohort) to get the DataFrame.", FutureWarning, stacklevel=3)
+        return pd.DataFrame(list(self))
+
+    def __getitem__(self, item):
+        if isinstance(item, str):
+            return self._frame(f"indexing by column name {item!r}")[item]
+        return super().__getitem__(item)
+
+    def __getattr__(self, name):
+        if name.startswith("_") or not hasattr(pd.DataFrame, name):
+            raise AttributeError(name)
+        return getattr(self._frame(f"'.{name}'"), name)
+
+    def copy(self):
+        return AttritionRecords(super().copy())
+
+
 def cohort_attrition(cohort: pd.DataFrame) -> pd.DataFrame:
     """Returns the attrition table stored on a :func:`define_study_cohort` result as a DataFrame.
 
@@ -2211,7 +2290,7 @@ def cohort_attrition(cohort: pd.DataFrame) -> pd.DataFrame:
     att = cohort.attrs.get("attrition")
     if att is None:
         return pd.DataFrame()
-    return att.copy() if isinstance(att, pd.DataFrame) else pd.DataFrame(att)
+    return att.copy() if isinstance(att, pd.DataFrame) else pd.DataFrame(list(att))
 
 
 class ConsortAttrition:

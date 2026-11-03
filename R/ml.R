@@ -311,7 +311,8 @@ plot.decision_curve_analysis <- function(x, ...) {
 #' @param X Data frame or numeric matrix of predictors.
 #' @param y Binary numeric vector of outcome indicators (0 or 1).
 #' @param binary_cols Optional character vector of binary column names. If `NULL`, auto-detected.
-#' @param regularize Logical; whether to apply L2 ridge regularization (default `TRUE`).
+#' @param regularize Logical; whether to apply L2 ridge regularization. Default `NULL` means `TRUE`, except `FALSE` when
+#'   `cluster_col` is given, so clustered standard errors are those of an unpenalised fit.
 #' @param alpha Numeric; L2 regularization penalty parameter lambda (default `1.0`).
 #' @param domain_mapping Optional named character vector mapping feature names to clinical domains.
 #' @param standardize_continuous Logical; whether continuous features are scaled to 1-SD units (default `TRUE`).
@@ -329,13 +330,14 @@ plot.decision_curve_analysis <- function(x, ...) {
 consortium_multivariable_risk_factors <- function(X,
                                                   y,
                                                   binary_cols = NULL,
-                                                  regularize = TRUE,
+                                                  regularize = NULL,
                                                   alpha = 1.0,
                                                   domain_mapping = NULL,
                                                   standardize_continuous = TRUE,
                                                   drop_collinear = TRUE,
                                                   cluster_col = NULL,
                                                   increments = NULL) {
+  if (is.null(regularize)) regularize <- is.null(cluster_col)
   X_df <- as.data.frame(X, stringsAsFactors = FALSE)
   y_vec <- as.numeric(y)
   cluster_vec <- NULL

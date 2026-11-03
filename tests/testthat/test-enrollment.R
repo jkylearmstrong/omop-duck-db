@@ -53,7 +53,7 @@ test_that("data_cutoff = 'auto' caps observation_period ends at the latest event
   }
   expect_null(omopduckdb:::.resolve_max_date(con, NULL))
   expect_equal(omopduckdb:::.resolve_max_date(con, "auto"), "2023-04-01")
-  capture.output(build_observation_period(con))
+  capture.output(build_observation_period(con, max_date = NULL))
   expect_equal(as.character(DBI::dbGetQuery(con, "SELECT max(observation_period_end_date) AS e FROM observation_period")$e),
                format(Sys.Date()))
   capture.output(build_observation_period(con, max_date = "auto"))

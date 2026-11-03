@@ -69,9 +69,9 @@ def create_parser() -> argparse.ArgumentParser:
                               help="Build observation_period from the PCORnet ENROLLMENT file.")
     build_parser.add_argument("--enrollment-type-concept-id", type=int, default=0,
                               help="period_type_concept_id for enrolment-derived periods.")
-    build_parser.add_argument("--data-cutoff", default=None, metavar="YYYY-MM-DD|auto",
-                              help="Cap observation_period ends: an ISO date, or 'auto' for the latest event before today "
-                                   "(default: today).")
+    build_parser.add_argument("--data-cutoff", default="auto", metavar="YYYY-MM-DD|auto|today",
+                              help="Cap observation_period ends: an ISO date, 'auto' for the latest event before today "
+                                   "(default), or 'today' to keep the extraction date.")
     build_parser.add_argument("--mode", choices=["full", "append"], default="full",
                               help="'append' adds newly arrived rows to an existing --target database (needs --since).")
     build_parser.add_argument("--since", default=None, metavar="YYYY-MM-DD",
@@ -495,7 +495,7 @@ def handle_build(args: argparse.Namespace) -> int:
             key_check=args.key_check,
             use_enrollment={"auto": "auto", "true": True, "false": False}[args.use_enrollment],
             enrollment_type_concept_id=args.enrollment_type_concept_id,
-            data_cutoff=args.data_cutoff,
+            data_cutoff=None if str(args.data_cutoff).lower() == "today" else args.data_cutoff,
             key_check_callback=lambda report: [
                 m.add_step(f"key_check:{r['table']}.{r['id_column']}", r["distinct_ids"], distinct_keys=r["distinct_keys"],
                            lost=r["lost"], ok=r["ok"], cdm_table=r["cdm_table"], cdm_rows=r["cdm_rows"])

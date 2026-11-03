@@ -235,7 +235,7 @@ def test_observation_period_ignores_placeholder_and_future_dates():
     for vid, pid, s, e in visits:
         con.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,"
                     f" visit_end_date, visit_type_concept_id) VALUES ({vid}, {pid}, 9201, DATE '{s}', DATE '{e}', 0)")
-    build_observation_period(con)
+    build_observation_period(con, max_date=None)
     rows = con.execute("SELECT person_id, observation_period_start_date, observation_period_end_date"
                        " FROM observation_period ORDER BY person_id").fetchall()
     assert [(r[0], str(r[1]), str(r[2])) for r in rows] == [(1, "2020-01-01", "2020-03-01"), (2, "2021-05-01", "2021-05-01")]

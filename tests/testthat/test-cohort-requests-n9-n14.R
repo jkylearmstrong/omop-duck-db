@@ -121,5 +121,5 @@ test_that("N14: group_col gives patient-grouped internal performance", {
 test_that("O9: clustering a ridge fit warns", {
   set.seed(1)
   df <- data.frame(pid = rep(1:40, each = 3), sbp = rnorm(120), y = rbinom(120, 1, 0.5))
-  expect_warning(consortium_multivariable_risk_factors(df[, c("pid", "sbp")], df$y, cluster_col = "pid"), "regularize")
+  expect_warning(consortium_multivariable_risk_factors(df[, c("pid", "sbp")], df$y, cluster_col = "pid", regularize = TRUE), "regularize")
 })

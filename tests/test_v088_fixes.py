@@ -143,7 +143,7 @@ def test_observation_period_data_cutoff_n2():
                     f"visit_end_date, visit_type_concept_id) VALUES ({vid}, 1, 9201, DATE '{d}', DATE '{d}', 0)")
     assert resolve_max_date(con, "auto") == "2023-04-01"
     assert resolve_max_date(con, None) is None
-    build_observation_period(con)
+    build_observation_period(con, max_date=None)
     assert con.execute("SELECT max(observation_period_end_date) FROM observation_period").fetchone()[0].isoformat() == today
     build_observation_period(con, max_date="auto")
     assert con.execute("SELECT max(observation_period_end_date) FROM observation_period").fetchone()[0].isoformat() == "2023-04-01"

@@ -1035,7 +1035,7 @@ def consortium_multivariable_risk_factors(
     target_col: str | None = None,
     feature_cols: Sequence[str] | None = None,
     binary_cols: Sequence[str] | None = None,
-    regularize: bool = True,
+    regularize: bool | None = None,
     alpha: float = 1.0,
     l2_lambda: float | None = None,
     domain_mapping: dict[str, str] | None = None,
@@ -1064,7 +1064,8 @@ def consortium_multivariable_risk_factors(
         target_col: Optional alias for outcome_col.
         feature_cols: Optional list of predictor columns to subset from X.
         binary_cols: List of column names that are binary indicators. If None, auto-detected.
-        regularize: Whether to apply L2 ridge regularization (default True).
+        regularize: Whether to apply L2 ridge regularization. Default ``None`` means True, except False when
+            ``cluster_col`` is given, so the clustered standard errors are those of an unpenalised fit.
         alpha: L2 penalty parameter lambda (default 1.0).
         l2_lambda: Optional alias for alpha.
         domain_mapping: Optional dictionary mapping feature names to clinical domains.
@@ -1089,6 +1090,8 @@ def consortium_multivariable_risk_factors(
     if l2_lambda is not None:
         alpha = float(l2_lambda)
 
+    if regularize is None:
+        regularize = cluster_col is None
     target_k = outcome_col or target_col
     cluster_arr = None
     cluster_name = None
