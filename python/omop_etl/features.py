@@ -109,7 +109,9 @@ def extract_patient_features(
         """
         demo_join = f"LEFT JOIN person p ON c.{pcol} = p.person_id"
 
-    # Aggregated lookback windows
+    # Aggregated lookback windows. The widest window is pushed into each join condition so a cohort row only meets
+    # the events inside its own window, instead of every event the person ever had.
+    maxw = max(windows)
     lookback_selects = []
     lookback_joins = []
 
@@ -119,7 +121,7 @@ def extract_patient_features(
             for w in windows
         )
         lookback_selects.append(cond_cols)
-        lookback_joins.append(f"LEFT JOIN condition_occurrence co ON c.{pcol} = co.person_id")
+        lookback_joins.append(f"LEFT JOIN condition_occurrence co ON c.{pcol} = co.person_id AND co.condition_start_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
 
     if include_drugs and "drug_exposure" in existing_tables:
         drug_cols = ", ".join(
@@ -127,7 +129,7 @@ def extract_patient_features(
             for w in windows
         )
         lookback_selects.append(drug_cols)
-        lookback_joins.append(f"LEFT JOIN drug_exposure de ON c.{pcol} = de.person_id")
+        lookback_joins.append(f"LEFT JOIN drug_exposure de ON c.{pcol} = de.person_id AND de.drug_exposure_start_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
 
     if include_procedures and "procedure_occurrence" in existing_tables:
         proc_cols = ", ".join(
@@ -135,7 +137,7 @@ def extract_patient_features(
             for w in windows
         )
         lookback_selects.append(proc_cols)
-        lookback_joins.append(f"LEFT JOIN procedure_occurrence po ON c.{pcol} = po.person_id")
+        lookback_joins.append(f"LEFT JOIN procedure_occurrence po ON c.{pcol} = po.person_id AND po.procedure_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
 
     if "measurement" in existing_tables:
         if measurement_concept_ids:
@@ -144,14 +146,14 @@ def extract_patient_features(
                     lookback_selects.append(
                         f"AVG(CASE WHEN m.measurement_concept_id = {int(cid)} AND m.measurement_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} + {int(lookahead_days)} THEN m.value_as_number END) AS mean_measurement_{int(cid)}"
                     )
-            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id")
+            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id AND m.measurement_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} + {int(lookahead_days)}")
         elif include_measurements:
             meas_cols = ", ".join(
                 f"COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN m.measurement_id END) AS measurement_count_{w}d"
                 for w in windows
             )
             lookback_selects.append(meas_cols)
-            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id")
+            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id AND m.measurement_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
 
     select_items = [
         f"c.{pcol} AS subject_id",
@@ -193,10 +195,15 @@ def extract_patient_features(
     if do_demo:
         group_by_items.extend(["p.year_of_birth", "p.month_of_birth", "p.day_of_birth", "p.gender_concept_id", "p.race_concept_id", "p.ethnicity_concept_id"])
 
+    # TIMESTAMP date columns (for example from a pandas datetime64 column) are cast to DATE so the date arithmetic binds
+    date_cols = list(dict.fromkeys([scol, ecol]))
+    replace = ", ".join(f"CAST({d} AS DATE) AS {d}" for d in date_cols)
+    cohort_src = f"(SELECT * REPLACE ({replace}) FROM {cohort_table})"
+
     dense_sql = f"""
         SELECT 
             {select_clause}
-        FROM {cohort_table} c
+        FROM {cohort_src} c
         {all_joins}
         {where_sql}
         GROUP BY 

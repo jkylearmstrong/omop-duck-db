@@ -1074,7 +1074,9 @@ def consortium_multivariable_risk_factors(
         cluster_col: Optional cluster identifier (typically ``subject_id``) for repeated stays per patient: a column
             name of ``X`` (never used as a predictor) or a vector of the same length as ``y``. When given, standard
             errors, CIs and p-values use the patient-clustered (Huber-White) sandwich estimator with the usual
-            ``G/(G-1) * (n-1)/(n-k)`` small-sample correction, and normal-approximation p-values.
+            ``G/(G-1) * (n-1)/(n-k)`` small-sample correction, and normal-approximation p-values. They match an
+            unpenalised analysis (e.g. ``statsmodels`` clustered logit) only with ``regularize=False``; the default ridge
+            fit shrinks coefficients and changes the reported SEs.
         increments: Optional ``{feature: (size, label)}``. The table gains ``std_beta`` (beta per 1 SD of the original
             feature) and, for each listed feature, ``increment`` (the label) and ``or_increment`` /
             ``or_increment_ci_95_lower`` / ``or_increment_ci_95_upper`` (odds ratio per ``size`` original units, e.g.

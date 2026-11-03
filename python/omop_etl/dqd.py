@@ -259,7 +259,7 @@ def run_dqd(
                 """).fetchone()[0]
                 pct = round((mismatch_count / linked_total * 100.0), 2)
                 results.append({
-                    "check_id": f"FIELD_FK_PERSON_VISIT_{tbl.upper()}",
+                    "check_id": f"FIELD_FK_PERSON_VISIT_CONSISTENCY_{tbl.upper()}",
                     "check_name": "fkPersonVisitConsistency",
                     "check_level": "FIELD",
                     "cdm_table_name": tbl,

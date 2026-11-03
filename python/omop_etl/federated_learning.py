@@ -44,11 +44,12 @@ class FederatedFitResult:
     sites: dict[str, int]
     trace: list[dict[str, float]] = field(default_factory=list)
     covariance: np.ndarray | None = None
+    separated: bool = False             # True when complete/quasi-complete separation made the estimates meaningless
 
     def to_dict(self) -> dict[str, Any]:
         return {"model": self.model, "converged": self.converged, "n_iter": self.n_iter,
                 "log_likelihood": self.log_likelihood, "n_obs": self.n_obs, "n_events": self.n_events,
-                "sites": self.sites, "coefficients": self.coefficients.to_dict("records")}
+                "sites": self.sites, "separated": self.separated, "coefficients": self.coefficients.to_dict("records")}
 
 
 class FederatedNode:
@@ -155,7 +156,8 @@ def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str
     """Newton-Raphson logistic regression across sites; sites share only (log-likelihood, gradient, Hessian).
 
     ``sites`` is ``{name: DataFrame}`` (or a list of DataFrames / ``FederatedNode``). ``l2`` is a ridge penalty on the
-    slopes (never the intercept). Equals the pooled maximum-likelihood fit when ``noise_scale == 0``.
+    slopes (never the intercept). Equals the pooled maximum-likelihood fit when ``noise_scale == 0``. On detected separation the
+    coefficients are NaN and ``separated`` is True (set ``l2 > 0`` for a penalised fit).
     """
     nodes = _nodes(sites, min_site_n, noise_scale, seed)
     covariates = list(covariates)
@@ -191,6 +193,7 @@ def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str
         if np.max(np.abs(scale * step)) < tol:
             converged = True
             break
+    separated = False
     if not converged:
         separated = float(l2) == 0.0 and (np.max(np.abs(beta)) > 15 or ll > -1e-6 * max(1, sum(p["n"] for p in parts)))
         warnings.warn("federated logistic regression did not converge in " + str(it) + " iterations"
@@ -198,8 +201,11 @@ def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str
                          "(a covariate predicts the outcome perfectly). Drop or combine that covariate or set l2 > 0."
                          if separated else "") + "; estimates and standard errors are unreliable.", UserWarning, stacklevel=2)
     cov = np.linalg.inv(hess)
-    return FederatedFitResult("logistic", _summarise(terms, beta, cov, "odds_ratio", alpha), converged, it, ll,
-                              sum(p["n"] for p in parts), None, {n.name: len(n) for n in nodes}, trace, cov)
+    coefs = _summarise(terms, beta, cov, "odds_ratio", alpha)
+    if separated:     # the maximum-likelihood estimate does not exist; report NaN rather than a meaningless huge number
+        coefs.loc[:, coefs.columns != "term"] = np.nan
+    return FederatedFitResult("logistic", coefs, converged, it, ll,
+                              sum(p["n"] for p in parts), None, {n.name: len(n) for n in nodes}, trace, cov, separated)
 
 
 def federated_cox(sites, covariates: Sequence[str], time: str, event: str, *, max_iter: int = 50, tol: float = 1e-8,

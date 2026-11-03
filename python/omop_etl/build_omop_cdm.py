@@ -1600,6 +1600,15 @@ def build_observation_period(con, min_date="1900-01-02", max_date=None, use_enro
         FROM envelopes
         {"WHERE person_id NOT IN (SELECT person_id FROM _enrollment_spans)" if use_enrollment else ""};
     """)
+    if cutoff is None:
+        total, at_build = con.execute(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE observation_period_end_date = CURRENT_DATE) "
+            "FROM observation_period").fetchone()
+        if at_build and at_build >= max(1, 0.01 * total):
+            warnings.warn(
+                f"{at_build} of {total} observation periods end on the build date, which usually means "
+                "source events were filled with the extraction date. Pass data_cutoff='auto' (or an ISO date) to "
+                "cap period ends at the real data cutoff.", UserWarning, stacklevel=2)
 
 
 def build_drug_era(con):

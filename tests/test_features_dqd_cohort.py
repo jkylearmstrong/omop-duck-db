@@ -202,7 +202,7 @@ def test_dqd_person_visit_consistency(fresh_cdm):
     """)
     
     dqd_clean = run_dqd(con, check_levels=["FIELD"])
-    chk_clean = [c for c in dqd_clean["CheckResults"] if c["check_id"] == "FIELD_FK_PERSON_VISIT_MEASUREMENT"]
+    chk_clean = [c for c in dqd_clean["CheckResults"] if c["check_id"] == "FIELD_FK_PERSON_VISIT_CONSISTENCY_MEASUREMENT"]
     assert len(chk_clean) == 1
     assert chk_clean[0]["failed"] is False
     assert chk_clean[0]["num_violated_rows"] == 0
@@ -214,7 +214,7 @@ def test_dqd_person_visit_consistency(fresh_cdm):
     """)
 
     dqd_corrupt = run_dqd(con, check_levels=["FIELD"])
-    chk_corrupt = [c for c in dqd_corrupt["CheckResults"] if c["check_id"] == "FIELD_FK_PERSON_VISIT_MEASUREMENT"]
+    chk_corrupt = [c for c in dqd_corrupt["CheckResults"] if c["check_id"] == "FIELD_FK_PERSON_VISIT_CONSISTENCY_MEASUREMENT"]
     assert len(chk_corrupt) == 1
     assert chk_corrupt[0]["failed"] is True
     assert chk_corrupt[0]["num_violated_rows"] == 1

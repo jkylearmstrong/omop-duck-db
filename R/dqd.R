@@ -227,7 +227,7 @@ run_dqd <- function(con,
         ", tbl))$n[1])
         pct <- round((mismatch_count / linked_total * 100.0), 2)
         results[[length(results) + 1]] <- list(
-          check_id = sprintf("FIELD_FK_PERSON_VISIT_%s", toupper(tbl)),
+          check_id = sprintf("FIELD_FK_PERSON_VISIT_CONSISTENCY_%s", toupper(tbl)),
           check_name = "fkPersonVisitConsistency",
           check_level = "FIELD",
           cdm_table_name = tbl,
