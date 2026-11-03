@@ -10,7 +10,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from omop_etl import build_schema, load_location, load_person
+from omop_etl import cohort_attrition, build_schema, load_location, load_person
 from omop_etl.build_omop_cdm import load_macros
 from omop_etl.geography import (
     RUCA_MISSING, SDI_LABELS, SDI_MISSING, assign_sdi_quintile, derive_geography_features, fit_sdi_cut_points,
@@ -234,7 +234,7 @@ def test_transfer_exclusion_is_opt_in_and_keeps_ama():
     assert sorted(default["subject_id"]) == [1, 2, 3]                       # unchanged unless asked
     out = define_study_cohort(_transfer_cdm(), transfer_discharge_concept_ids=(8717,), **kw)
     assert sorted(out["subject_id"]) == [1, 3]                              # transfer dropped, AMA kept
-    steps = out.attrs["attrition"].step_name.tolist()
+    steps = cohort_attrition(out).step_name.tolist()
     assert "Not transferred to another acute-care hospital" in steps
     keep = define_study_cohort(_transfer_cdm(), transfer_discharge_concept_ids=(), **kw)
     assert sorted(keep["subject_id"]) == [1, 2, 3]

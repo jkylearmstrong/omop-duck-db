@@ -109,51 +109,56 @@ def extract_patient_features(
         """
         demo_join = f"LEFT JOIN person p ON c.{pcol} = p.person_id"
 
-    # Aggregated lookback windows. The widest window is pushed into each join condition so a cohort row only meets
-    # the events inside its own window, instead of every event the person ever had.
+    # Aggregated lookback windows. Each clinical table is aggregated on its own per cohort row and the aggregates are
+    # joined back, so the events of one table never multiply with those of another (a stay with many conditions and
+    # many drugs used to produce their product before COUNT(DISTINCT)). The widest window is pushed into each
+    # aggregate's join so a cohort row only meets the events inside its own window.
     maxw = max(windows)
+    gkeys = [pcol, scol, ecol] + (["visit_occurrence_id"] if key == "visit_occurrence_id" else []) + (["site"] if "site" in cols else [])
+    base_where = [f"c.cohort_definition_id = {int(cohort_id)}"] if cohort_id is not None and "cohort_definition_id" in cols else []
     lookback_selects = []
     lookback_joins = []
 
+    def add_aggregate(alias, table, tbl_alias, on_cond, aggs, counts):
+        """aggs: [(inner_name, agg_sql)]; counts: names whose NULL (no events) becomes 0."""
+        key_sql = ", ".join(f"c.{k}" for k in gkeys)
+        agg_sql = ", ".join(f"{expr} AS {name}" for name, expr in aggs)
+        where = f"WHERE {' AND '.join(base_where)}" if base_where else ""
+        lookback_joins.append(
+            f"LEFT JOIN (SELECT {key_sql}, {agg_sql} FROM base c JOIN {table} {tbl_alias} ON {on_cond} {where} "
+            f"GROUP BY {key_sql}) {alias} ON " + " AND ".join(f"{alias}.{k} IS NOT DISTINCT FROM c.{k}" for k in gkeys))
+        return [(name, f"COALESCE({alias}.{name}, 0)" if name in counts else f"{alias}.{name}") for name, _ in aggs]
+
+    def count_windows(alias, table, tbl_alias, date_col, id_col, label):
+        aggs = [(f"{label}_count_{w}d",
+                 f"COUNT(DISTINCT CASE WHEN {tbl_alias}.{date_col} BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN {tbl_alias}.{id_col} END)")
+                for w in windows]
+        on = f"c.{pcol} = {tbl_alias}.person_id AND {tbl_alias}.{date_col} BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1"
+        for name, expr in add_aggregate(alias, table, tbl_alias, on, aggs, {n for n, _ in aggs}):
+            lookback_selects.append(f"{expr} AS {name}")
+
     if include_conditions and "condition_occurrence" in existing_tables:
-        cond_cols = ", ".join(
-            f"COUNT(DISTINCT CASE WHEN co.condition_start_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN co.condition_occurrence_id END) AS condition_count_{w}d"
-            for w in windows
-        )
-        lookback_selects.append(cond_cols)
-        lookback_joins.append(f"LEFT JOIN condition_occurrence co ON c.{pcol} = co.person_id AND co.condition_start_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
+        count_windows("a_cond", "condition_occurrence", "co", "condition_start_date", "condition_occurrence_id", "condition")
 
     if include_drugs and "drug_exposure" in existing_tables:
-        drug_cols = ", ".join(
-            f"COUNT(DISTINCT CASE WHEN de.drug_exposure_start_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN de.drug_exposure_id END) AS drug_count_{w}d"
-            for w in windows
-        )
-        lookback_selects.append(drug_cols)
-        lookback_joins.append(f"LEFT JOIN drug_exposure de ON c.{pcol} = de.person_id AND de.drug_exposure_start_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
+        count_windows("a_drug", "drug_exposure", "de", "drug_exposure_start_date", "drug_exposure_id", "drug")
 
     if include_procedures and "procedure_occurrence" in existing_tables:
-        proc_cols = ", ".join(
-            f"COUNT(DISTINCT CASE WHEN po.procedure_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN po.procedure_occurrence_id END) AS procedure_count_{w}d"
-            for w in windows
-        )
-        lookback_selects.append(proc_cols)
-        lookback_joins.append(f"LEFT JOIN procedure_occurrence po ON c.{pcol} = po.person_id AND po.procedure_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
+        count_windows("a_proc", "procedure_occurrence", "po", "procedure_date", "procedure_occurrence_id", "procedure")
 
     if "measurement" in existing_tables:
         if measurement_concept_ids:
+            aggs, outer = [], []
             for cid in measurement_concept_ids:
                 for w in windows:
-                    lookback_selects.append(
-                        f"AVG(CASE WHEN m.measurement_concept_id = {int(cid)} AND m.measurement_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} + {int(lookahead_days)} THEN m.value_as_number END) AS mean_measurement_{int(cid)}"
-                    )
-            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id AND m.measurement_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} + {int(lookahead_days)}")
+                    inner = f"mm_{int(cid)}_{w}"
+                    aggs.append((inner, f"AVG(CASE WHEN m.measurement_concept_id = {int(cid)} AND m.measurement_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} + {int(lookahead_days)} THEN m.value_as_number END)"))
+                    outer.append((inner, f"mean_measurement_{int(cid)}"))
+            on = f"c.{pcol} = m.person_id AND m.measurement_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} + {int(lookahead_days)}"
+            exprs = dict(add_aggregate("a_meas", "measurement", "m", on, aggs, set()))
+            lookback_selects.extend(f"{exprs[inner]} AS {out}" for inner, out in outer)
         elif include_measurements:
-            meas_cols = ", ".join(
-                f"COUNT(DISTINCT CASE WHEN m.measurement_date BETWEEN c.{anchor_col} - {w} AND c.{anchor_col} - 1 THEN m.measurement_id END) AS measurement_count_{w}d"
-                for w in windows
-            )
-            lookback_selects.append(meas_cols)
-            lookback_joins.append(f"LEFT JOIN measurement m ON c.{pcol} = m.person_id AND m.measurement_date BETWEEN c.{anchor_col} - {maxw} AND c.{anchor_col} - 1")
+            count_windows("a_meas", "measurement", "m", "measurement_date", "measurement_id", "measurement")
 
     select_items = [
         f"c.{pcol} AS subject_id",
@@ -185,29 +190,18 @@ def extract_patient_features(
         where_items.append(f"c.cohort_definition_id = {int(cohort_id)}")
     where_sql = f"WHERE {' AND '.join(where_items)}" if where_items else ""
 
-    group_by_items = [f"c.{pcol}", f"c.{scol}", f"c.{ecol}"]
-    if key == "visit_occurrence_id":
-        group_by_items.append("c.visit_occurrence_id")
-    if "site" in cols:
-        group_by_items.append("c.site")
-    if outcome_cohort_id is not None:
-        group_by_items.append("oc.outcome_flag")
-    if do_demo:
-        group_by_items.extend(["p.year_of_birth", "p.month_of_birth", "p.day_of_birth", "p.gender_concept_id", "p.race_concept_id", "p.ethnicity_concept_id"])
-
     # TIMESTAMP date columns (for example from a pandas datetime64 column) are cast to DATE so the date arithmetic binds
     date_cols = list(dict.fromkeys([scol, ecol]))
     replace = ", ".join(f"CAST({d} AS DATE) AS {d}" for d in date_cols)
     cohort_src = f"(SELECT * REPLACE ({replace}) FROM {cohort_table})"
 
     dense_sql = f"""
-        SELECT 
+        WITH base AS {cohort_src}
+        SELECT DISTINCT
             {select_clause}
-        FROM {cohort_src} c
+        FROM base c
         {all_joins}
         {where_sql}
-        GROUP BY 
-            {', '.join(group_by_items)}
         ORDER BY c.{pcol}, c.{scol}{', c.visit_occurrence_id' if key == 'visit_occurrence_id' else ''}
     """
 

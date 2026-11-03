@@ -7,6 +7,7 @@ from omop_etl.build_omop_cdm import (
     attach_read_only,
     checkpoint_database,
     build_observation_period,
+    cap_observation_period,
     materialize_vocabulary,
     build_safe_source_view,
     build_schema,
@@ -26,6 +27,7 @@ from omop_etl.build_omop_cdm import (
 )
 from omop_etl.cohort import (
     ConsortAttrition,
+    cohort_attrition,
     build_ederri_diabetes_cohort,
     build_end_of_life_cohort,
     build_mortality_cohort,
@@ -439,6 +441,8 @@ __all__ = [
     "attach_read_only",
     "checkpoint_database",
     "build_observation_period",
+    "cap_observation_period",
+    "cohort_attrition",
     "materialize_vocabulary",
     "build_drug_era",
     "build_condition_era",
@@ -717,7 +721,7 @@ __all__ = [
     "filter_measurements",
 ]
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 

@@ -102,13 +102,13 @@ def test_n12_cluster_robust_errors_are_wider_with_repeated_stays():
     b = consortium_multivariable_risk_factors(one, outcome_col="y", feature_cols=["sbp", "male"], regularize=False)
     assert np.allclose(a.standard_errors.values, b.standard_errors.values, rtol=0.25)
     with pytest.raises(ValueError, match="cluster_col"):
-        consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="missing")
+        consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="missing", regularize=False)
 
 
 def test_n12_cluster_vector_matches_column_name():
     df = _repeated_stays()
-    a = consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="pid")
-    b = consortium_multivariable_risk_factors(df.drop(columns="pid"), outcome_col="y", cluster_col=df["pid"].values)
+    a = consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="pid", regularize=False)
+    b = consortium_multivariable_risk_factors(df.drop(columns="pid"), outcome_col="y", cluster_col=df["pid"].values, regularize=False)
     assert np.allclose(a.standard_errors.values, b.standard_errors.values)
 
 
@@ -211,10 +211,10 @@ def test_metformin_exclusion_warns_without_concept_ancestor():
 def test_n12_n13_n14_argument_validation():
     df = _repeated_stays(patients=30)
     with pytest.raises(ValueError, match="Length of cluster_col"):
-        consortium_multivariable_risk_factors(df[["sbp", "male"]], y=df["y"].values, cluster_col=np.arange(5))
+        consortium_multivariable_risk_factors(df[["sbp", "male"]], y=df["y"].values, cluster_col=np.arange(5), regularize=False)
     with pytest.raises(ValueError, match="increments"):
         consortium_multivariable_risk_factors(df[["sbp"]], y=df["y"].values, increments={"sbp": (0, "bad")})
-    plain = consortium_multivariable_risk_factors(df[["pid", "sbp", "male"]], y=df["y"].values, cluster_col=df["pid"].values)
+    plain = consortium_multivariable_risk_factors(df[["pid", "sbp", "male"]], y=df["y"].values, cluster_col=df["pid"].values, regularize=False)
     assert "pid" in plain.table["variable"].tolist() and plain.metadata["cov_type"] == "cluster"
     df["site"] = np.where(df["pid"] % 2 == 0, "A", "B")
     with pytest.raises(ValueError, match="n_splits"):
@@ -229,3 +229,10 @@ def test_discovery_handles_a_connection_without_catalog_functions():
             raise duckdb.Error("no catalog functions")
 
     assert _discover_concept_ancestors(Broken()) == []
+
+
+def test_o9_warns_when_clustering_a_ridge_fit():
+    rng = np.random.default_rng(1)
+    df = pd.DataFrame({"pid": np.repeat(np.arange(40), 3), "sbp": rng.normal(size=120), "y": rng.integers(0, 2, 120)})
+    with pytest.warns(UserWarning, match="regularize=False"):
+        consortium_multivariable_risk_factors(df, outcome_col="y", cluster_col="pid")

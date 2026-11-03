@@ -74,7 +74,7 @@ test_that("N12: cluster-robust errors widen with repeated stays and match for on
   a <- consortium_multivariable_risk_factors(one[, c("sbp", "male")], one$y, regularize = FALSE, cluster_col = one$pid)
   b <- consortium_multivariable_risk_factors(one[, c("sbp", "male")], one$y, regularize = FALSE)
   expect_equal(unname(a$standard_errors), unname(b$standard_errors), tolerance = 0.25)
-  expect_error(consortium_multivariable_risk_factors(df[, c("sbp", "male")], df$y, cluster_col = "missing"), "cluster_col")
+  expect_error(consortium_multivariable_risk_factors(df[, c("sbp", "male")], df$y, regularize = FALSE, cluster_col = "missing"), "cluster_col")
   base <- consortium_multivariable_risk_factors(df[, c("sbp", "male")], df$y)
   expect_equal(base$metadata$cov_type, "model"); expect_false("std_beta" %in% names(base$table))
 })
@@ -116,4 +116,10 @@ test_that("N14: group_col gives patient-grouped internal performance", {
   folds <- omopduckdb:::.grouped_folds(y, groups, 5, 42)
   expect_true(all(tapply(folds, groups, function(f) length(unique(f))) == 1))
   expect_equal(sort(unique(folds)), 0:4)
+})
+
+test_that("O9: clustering a ridge fit warns", {
+  set.seed(1)
+  df <- data.frame(pid = rep(1:40, each = 3), sbp = rnorm(120), y = rbinom(120, 1, 0.5))
+  expect_warning(consortium_multivariable_risk_factors(df[, c("pid", "sbp")], df$y, cluster_col = "pid"), "regularize")
 })

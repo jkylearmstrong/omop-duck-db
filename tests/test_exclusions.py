@@ -9,7 +9,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from omop_etl import build_schema
+from omop_etl import build_schema, cohort_attrition
 from omop_etl.exclusions import find_metformin_only_prediabetes_pcos, metformin_only_sql
 
 MET, MET_BRAND, GLIPIZIDE_MET, INSULIN, SU = 1503297, 1000001, 1000002, 1000003, 1000004
@@ -115,7 +115,7 @@ def test_metformin_only_exclusion_in_the_cohort_and_attrition():
     assert {1, 2, 5, 7, 8}.issubset(set(base["subject_id"]))                   # metformin users qualify through the drug arm
     out = _ederri(c, exclude_metformin_only_prediabetes_pcos=True)
     assert set(base["subject_id"]) - set(out["subject_id"]) == {1, 2, 9} & set(base["subject_id"])
-    assert "Not metformin-only prediabetes / PCOS (patient-level)" in out.attrs["attrition"].step_name.tolist()
+    assert "Not metformin-only prediabetes / PCOS (patient-level)" in cohort_attrition(out).step_name.tolist()
     both = _ederri(c, exclude_metformin_only_prediabetes_pcos="both")
     assert 7 not in set(both["subject_id"]) and 7 in set(out["subject_id"])
     assert c.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = '_study_metformin_only'").fetchone()[0] == 0

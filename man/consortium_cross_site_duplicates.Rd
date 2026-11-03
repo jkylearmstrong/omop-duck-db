@@ -16,6 +16,8 @@ consortium_cross_site_duplicates(site_identifiers, key, min_cell_count = 11)
 \value{
 A data frame of site pairs as in \code{\link[=consortium_patient_overlap]{consortium_patient_overlap()}}, plus a final row \code{site_1 == "ALL"} whose
 \code{n_site_1} is the pooled number of distinct patients and \code{shared_patients} the number seen at two or more sites.
+That row is withheld (\code{shared_patients == "withheld"}, \code{overlap_pct} \code{NA}) when any pair is suppressed, since its
+difference from the visible pairs would reveal the suppressed count.
 }
 \description{
 Reports patients that appear at more than one site, as aggregate counts only. Identifiers are pseudonymised with

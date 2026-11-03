@@ -55,3 +55,54 @@ def test_remap_discharge_status_with_schema():
     con.execute("CREATE TABLE cdm.visit_occurrence AS SELECT 1 AS visit_occurrence_id, 0 AS discharged_to_concept_id, 'IP' AS discharged_to_source_value")
     assert remap_discharge_status(con, schema="cdm", concept_id=1) == 1
     assert con.execute("SELECT discharged_to_concept_id FROM cdm.visit_occurrence").fetchone() == (1,)
+
+
+def test_o1b_pooled_row_withheld_when_a_pair_is_suppressed():
+    ids = {"A": list(range(0, 507)), "B": list(range(500, 1000)) + list(range(2000, 2007)),
+           "C": list(range(2000, 2493)) + list(range(5000, 5100))}
+    out = consortium_cross_site_duplicates(ids, key="k", min_cell_count=11)
+    pairs = out[out.site_1 != "ALL"]
+    assert pairs.is_suppressed.any()
+    total = out[out.site_1 == "ALL"].iloc[0]
+    assert total.is_suppressed and total.shared_patients == "withheld" and total.overlap_pct != total.overlap_pct
+
+
+def test_o1b_pooled_row_shown_when_no_pair_suppressed():
+    out = consortium_cross_site_duplicates({"A": list(range(100)), "B": list(range(50, 150))}, key="k")
+    assert out.iloc[-1].shared_patients == "50"
+
+
+def test_remap_discharge_status_dry_run_changes_nothing():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE visit_occurrence AS SELECT * FROM (VALUES (1, 0, 'IP'), (2, 0, 'HOME'))"
+                " t(visit_occurrence_id, discharged_to_concept_id, discharged_to_source_value)")
+    assert remap_discharge_status(con, dry_run=True) == 1
+    assert con.execute("SELECT SUM(discharged_to_concept_id) FROM visit_occurrence").fetchone()[0] == 0
+
+
+def test_cap_observation_period():
+    from omop_etl import cap_observation_period
+    con = duckdb.connect()
+    con.execute("CREATE TABLE observation_period AS SELECT * FROM (VALUES (1, DATE '2020-01-01', DATE '2026-10-23'),"
+                " (2, DATE '2026-10-23', DATE '2026-10-23'), (3, DATE '2020-01-01', DATE '2020-06-01'))"
+                " t(observation_period_id, observation_period_start_date, observation_period_end_date)")
+    assert cap_observation_period(con, "2026-09-30", dry_run=True) == {"shortened": 1, "deleted": 1}
+    assert con.execute("SELECT COUNT(*) FROM observation_period").fetchone()[0] == 3
+    assert cap_observation_period(con, "2026-09-30") == {"shortened": 1, "deleted": 1}
+    assert con.execute("SELECT MAX(observation_period_end_date)::VARCHAR, COUNT(*) FROM observation_period").fetchone() == ("2026-09-30", 2)
+
+
+def test_o7b_features_do_not_multiply_across_tables():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE cohort AS SELECT * FROM (VALUES (1, 1, DATE '2020-03-01', DATE '2020-03-05')) "
+                "t(cohort_definition_id, subject_id, cohort_start_date, cohort_end_date)")
+    con.execute("CREATE TABLE condition_occurrence AS SELECT i AS condition_occurrence_id, 1 AS person_id, DATE '2020-02-01' AS condition_start_date FROM range(1, 21) t(i)")
+    con.execute("CREATE TABLE drug_exposure AS SELECT i AS drug_exposure_id, 1 AS person_id, DATE '2020-02-10' AS drug_exposure_start_date FROM range(1, 8) t(i)")
+    con.execute("CREATE TABLE measurement AS SELECT * FROM (VALUES (1, 1, 3001, DATE '2020-02-15', 10.0), (2, 1, 3001, DATE '2020-02-16', 20.0))"
+                " t(measurement_id, person_id, measurement_concept_id, measurement_date, value_as_number)")
+    df = extract_patient_features(con, cohort_id=1, lookback_days=[30, 90], include_demographics=False,
+                                  measurement_concept_ids=[3001])
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["condition_count_30d"] == 20 and row["drug_count_30d"] == 7
+    assert row["mean_measurement_3001"] == 15.0      # not weighted by the 20 x 7 other-table rows

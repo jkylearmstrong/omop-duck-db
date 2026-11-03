@@ -1300,6 +1300,31 @@ load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_pat
   format(d, "%Y-%m-%d")
 }
 
+#' Cap observation periods of an already-built database at a data cutoff
+#'
+#' For databases built before `max_date = "auto"` was used, whose periods end on the build date. Periods ending after
+#' `cutoff` are shortened to it; periods starting after it are deleted.
+#'
+#' @param con Active DuckDB connection.
+#' @param cutoff Data cutoff, a date like `"2026-09-30"`.
+#' @param dry_run If `TRUE`, only count what would change.
+#' @return A list with `shortened` and `deleted` counts.
+#' @export
+cap_observation_period <- function(con, cutoff, dry_run = FALSE) {
+  d <- tryCatch(as.Date(cutoff), error = function(e) NA)
+  if (length(d) != 1L || is.na(d)) stop("`cutoff` must be a date like '2026-09-30'.", call. = FALSE)
+  hi <- format(d, "%Y-%m-%d")
+  n <- function(cond) as.integer(DBI::dbGetQuery(con, sprintf(
+    "SELECT COUNT(*) AS n FROM observation_period WHERE %s", cond))$n[1])
+  shortened <- n(sprintf("observation_period_start_date <= DATE '%s' AND observation_period_end_date > DATE '%s'", hi, hi))
+  deleted <- n(sprintf("observation_period_start_date > DATE '%s'", hi))
+  if (!isTRUE(dry_run)) {
+    DBI::dbExecute(con, sprintf("DELETE FROM observation_period WHERE observation_period_start_date > DATE '%s'", hi))
+    DBI::dbExecute(con, sprintf("UPDATE observation_period SET observation_period_end_date = DATE '%s' WHERE observation_period_end_date > DATE '%s'", hi, hi))
+  }
+  list(shortened = shortened, deleted = deleted)
+}
+
 #' Synthesize Observation Period envelopes
 #'
 #' The period is the span from a person's first to last *plausible* event, not a real enrolment window. Events dated

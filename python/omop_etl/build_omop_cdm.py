@@ -1487,6 +1487,24 @@ def resolve_max_date(con, max_date=None, min_date="1900-01-02"):
     return _iso_date(max_date, "max_date")
 
 
+def cap_observation_period(con, cutoff, dry_run=False):
+    """Caps observation periods of an already-built database at a data cutoff (N2).
+
+    For databases built before ``max_date="auto"``/``data_cutoff`` was used, whose periods end on the build date.
+    Periods ending after ``cutoff`` (ISO date) are shortened to it; periods starting after it are deleted. Returns
+    ``{"shortened": n, "deleted": m}``; with ``dry_run=True`` returns the same counts and changes nothing.
+    """
+    hi = _iso_date(cutoff, "cutoff")
+    short = con.execute(f"""SELECT COUNT(*) FROM observation_period WHERE observation_period_start_date <= DATE '{hi}'
+                            AND observation_period_end_date > DATE '{hi}'""").fetchone()[0]
+    gone = con.execute(f"SELECT COUNT(*) FROM observation_period WHERE observation_period_start_date > DATE '{hi}'").fetchone()[0]
+    if not dry_run:
+        con.execute(f"DELETE FROM observation_period WHERE observation_period_start_date > DATE '{hi}'")
+        con.execute(f"""UPDATE observation_period SET observation_period_end_date = DATE '{hi}'
+                        WHERE observation_period_end_date > DATE '{hi}'""")
+    return {"shortened": int(short), "deleted": int(gone)}
+
+
 def load_enrollment_spans(con, source_dir, site_id=None, disambiguate_patids=False,
                           min_date="1900-01-02", max_date=None):
     """Builds ``_enrollment_spans(person_id, start_date, end_date)`` from the PCORnet ENROLLMENT file (FR-C10).

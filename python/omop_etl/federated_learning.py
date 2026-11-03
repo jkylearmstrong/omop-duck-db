@@ -204,6 +204,7 @@ def federated_logistic_regression(sites, covariates: Sequence[str], outcome: str
     coefs = _summarise(terms, beta, cov, "odds_ratio", alpha)
     if separated:     # the maximum-likelihood estimate does not exist; report NaN rather than a meaningless huge number
         coefs.loc[:, coefs.columns != "term"] = np.nan
+        cov = np.full_like(cov, np.nan)      # the information matrix at a diverged iterate is not a valid covariance
     return FederatedFitResult("logistic", coefs, converged, it, ll,
                               sum(p["n"] for p in parts), None, {n.name: len(n) for n in nodes}, trace, cov, separated)
 

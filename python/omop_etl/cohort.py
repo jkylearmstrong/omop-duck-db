@@ -393,6 +393,7 @@ def compute_attrition(
     prev_count = None
     initial_count = None
 
+    prev_stays = None
     for i, (step_name, step_query) in enumerate(steps, start=1):
         if i == 1:
             con.execute(f"CREATE TEMPORARY TABLE _step_current AS {step_query};")
@@ -430,7 +431,7 @@ def compute_attrition(
         })
         if stays is not None:
             records[-1]["stays_retained"] = stays
-            records[-1]["stays_dropped"] = 0 if i == 1 else max(0, prev_stays - stays)
+            records[-1]["stays_dropped"] = 0 if i == 1 or prev_stays is None else max(0, prev_stays - stays)
         prev_stays = stays
 
     con.execute("DROP TABLE IF EXISTS _step_current;")
@@ -710,18 +711,19 @@ def _warn_unmapped_transfer_discharge(con, spec: "_StudySpec") -> None:
 
 
 def remap_discharge_status(con: duckdb.DuckDBPyConnection, schema: str | None = None,
-                           concept_id: int = 8717) -> int:
+                           concept_id: int = 8717, dry_run: bool = False) -> int:
     """Recodes transfer visits in a database built before the PCORnet ETL mapped discharge status 'IP' to 8717.
 
     Sets ``discharged_to_concept_id`` to ``concept_id`` for visits whose ``discharged_to_source_value`` is 'IP'
-    (case-insensitive, whitespace ignored) and whose concept id is NULL or 0. Idempotent. Needs write access.
+    (case-insensitive, whitespace ignored) and whose concept id is NULL or 0. Idempotent. Needs write access, except
+    with ``dry_run=True``, which only counts the visits that would be recoded and works on a read-only connection.
 
-    Returns the number of visits recoded.
+    Returns the number of visits recoded (or, with ``dry_run``, that would be).
     """
     vo = f"{schema}.visit_occurrence" if schema else "visit_occurrence"
     where = ("COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP'")
     n = con.execute(f"SELECT COUNT(*) FROM {vo} WHERE {where}").fetchone()[0]
-    if n:
+    if n and not dry_run:
         con.execute(f"UPDATE {vo} SET discharged_to_concept_id = {int(concept_id)} WHERE {where}")
     return int(n)
 
@@ -1565,7 +1567,7 @@ def define_study_cohort(
         One row per patient, ordered by ``subject_id``: ``cohort_definition_id, subject_id, cohort_start_date``
         (index visit start), ``cohort_end_date`` (index visit end), ``visit_occurrence_id, visit_concept_id,
         outcome_flag, outcome_date, followup_verified, age_at_index, los_days, discharged_to_concept_id,
-        target_outcome``. ``attrs['attrition']`` holds the :func:`compute_attrition` table (CONSORT steps, in the
+        target_outcome``. ``attrs['attrition']`` holds the :func:`compute_attrition` rows as a list of dicts (:func:`cohort_attrition` gives a DataFrame) (CONSORT steps, in the
         order: visit type, study window, age, length of stay, wash-in, in-hospital death, verified follow-up),
         ``attrs['summary']`` the :func:`get_cohort_summary` row when materialised into the default schema, and
         ``attrs['definition']`` a dict of the resolved settings.
@@ -1788,7 +1790,7 @@ def define_study_cohort(
 
         if attrition:
             df.attrs["attrition"] = compute_attrition(con, cohort_id, _study_attrition_steps(spec),
-                                                    count_stays=not one_per_patient)
+                                                    count_stays=not one_per_patient).to_dict("records")   # list of dicts: a DataFrame in attrs breaks pd.concat (O5)
     finally:
         if spec.metformin_only_pcos:
             con.execute(f"DROP TABLE IF EXISTS {_STUDY_METFORMIN_TABLE}")
@@ -2200,6 +2202,18 @@ def prepare_competing_risks_data(
     return df, summary
 
 
+def cohort_attrition(cohort: pd.DataFrame) -> pd.DataFrame:
+    """Returns the attrition table stored on a :func:`define_study_cohort` result as a DataFrame.
+
+    ``cohort.attrs['attrition']`` is a list of dicts (so ``pd.concat`` of cohort frames works); this converts it.
+    Empty when the cohort was built with ``attrition=False``.
+    """
+    att = cohort.attrs.get("attrition")
+    if att is None:
+        return pd.DataFrame()
+    return att.copy() if isinstance(att, pd.DataFrame) else pd.DataFrame(att)
+
+
 class ConsortAttrition:
     """Represents a CONSORT/STROBE participant attrition flow with multi-format exporters."""
 
@@ -2372,7 +2386,7 @@ def generate_consort_attrition(
 
     if isinstance(cohort_data, pd.DataFrame):
         if "attrition" in getattr(cohort_data, "attrs", {}):
-            return ConsortAttrition(cohort_data.attrs["attrition"])
+            return ConsortAttrition(cohort_attrition(cohort_data))
         if "step_name" in cohort_data.columns and "subjects_retained" in cohort_data.columns:
             return ConsortAttrition(cohort_data)
 

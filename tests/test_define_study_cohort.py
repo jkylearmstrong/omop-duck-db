@@ -32,6 +32,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from omop_etl import (  # noqa: E402
+    ConsortAttrition,
+    cohort_attrition,
     build_end_of_life_cohort,
     build_readmission_cohort,
     build_schema,
@@ -534,7 +536,7 @@ def test_rfc_example_runs_verbatim_on_the_randomized_cdm(cdm):
     assert cohort.cohort_start_date.between("2017-01-01", "2020-12-31").all()
     assert (cohort.age_at_index >= 18).all() and (cohort.los_days >= 1).all()
     assert cohort.outcome_flag.isin([0, 1]).all() and cohort.followup_verified.eq(1).all()
-    attrition = cohort.attrs["attrition"]
+    attrition = cohort_attrition(cohort)
     assert list(attrition.subjects_retained) == RFC_ATTRITION_SUBJECTS
     assert attrition.subjects_retained.iloc[-1] == len(cohort)
     assert list(attrition.columns) == ["step_number", "step_name", "subjects_retained", "subjects_dropped",
@@ -998,7 +1000,7 @@ def test_materialise_true_writes_cohort_definition_and_outcome_cohorts():
     assert defs[0][1] == "It's a study" and defs[1][1] == "It's a study - Outcome (all_cause_readmission)"
     assert "outcome all_cause_readmission" in defs[0][2] and "sampling first" in defs[0][2]
     assert int(df.attrs["summary"].total_subjects.iloc[0]) == 2
-    assert df.attrs["attrition"].subjects_retained.tolist()[-1] == 2
+    assert cohort_attrition(df).subjects_retained.tolist()[-1] == 2
 
 
 def test_mortality_outcome_cohort_is_a_point_event_on_the_outcome_date():
@@ -1060,7 +1062,7 @@ def test_read_only_connection_supports_materialise_false_but_not_writing(tmp_pat
     try:
         df = define_study_cohort(ro, materialise=False, washin_days=0, sampling_rule="first")
         assert df.subject_id.tolist() == [1, 2] and df.outcome_flag.tolist() == [1, 0]
-        assert df.attrs["attrition"].subjects_retained.tolist()[-1] == 2   # attrition also works read-only
+        assert cohort_attrition(df).subjects_retained.tolist()[-1] == 2   # attrition also works read-only
         with pytest.raises(RuntimeError, match="read-only"):
             define_study_cohort(ro, materialise=True, washin_days=0)
         with pytest.raises(RuntimeError, match="read-only"):
@@ -1113,7 +1115,7 @@ def test_attrition_steps_follow_the_active_criteria_and_end_at_the_cohort_size(c
     df = define_study_cohort(cdm, materialise=False, visit_type=["inpatient", "emergency"], study_window=(None, "2019-12-31"),
                              min_age=None, min_los_days=None, washin_days=0, target_outcome="mortality",
                              mortality_type="post_discharge", cohort_definition_id=5)
-    steps = df.attrs["attrition"]
+    steps = cohort_attrition(df)
     assert steps.step_name.tolist() == [
         "Index visit type in (9201, 9203)",
         "Index visit start on or before 2019-12-31",
@@ -1273,4 +1275,30 @@ def test_legacy_builders_store_apostrophes_in_cohort_names_verbatim():
 def test_compute_attrition_helper_is_reused_not_reimplemented(cdm):
     df = define_study_cohort(cdm, materialise=False, washin_days=0)
     direct = compute_attrition(cdm, 1, [("everyone", "SELECT person_id AS subject_id FROM person")])
-    assert list(df.attrs["attrition"].columns) == list(direct.columns)
+    assert list(cohort_attrition(df).columns) == list(direct.columns)
+
+
+def test_o5_cohort_frames_concat_with_attrition(cdm):
+    a = define_study_cohort(cdm, materialise=False, washin_days=0)
+    b = define_study_cohort(cdm, materialise=False, washin_days=0)
+    both = pd.concat([a, b], ignore_index=True)       # used to raise: truth value of a DataFrame is ambiguous
+    assert len(both) == 2 * len(a)
+    assert isinstance(a.attrs["attrition"], list) and "step_name" in cohort_attrition(a).columns
+
+
+def test_cohort_attrition_helper_branches():
+    assert cohort_attrition(pd.DataFrame({"a": [1]})).empty                      # no attrition stored
+    frame = pd.DataFrame({"step_name": ["x"], "subjects_retained": [3]})
+    legacy = pd.DataFrame({"a": [1]})
+    legacy.attrs["attrition"] = frame                                            # DataFrame stored by older code
+    assert cohort_attrition(legacy).equals(frame) and cohort_attrition(legacy) is not frame
+    assert ConsortAttrition(cohort_attrition(legacy)).to_dataframe().equals(frame)
+
+
+def test_o13_compute_attrition_first_step_without_stays():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE person AS SELECT * FROM (VALUES (1), (2)) t(person_id)")
+    steps = [("everyone", "SELECT person_id AS subject_id FROM person"),
+             ("with stay", "SELECT person_id AS subject_id, person_id AS visit_occurrence_id FROM person")]
+    out = compute_attrition(con, 1, steps, count_stays=True)
+    assert out["stays_dropped"].tolist() == [None, 0] or out["stays_dropped"].iloc[-1] == 0
