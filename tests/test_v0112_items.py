@@ -134,6 +134,16 @@ def test_f1_build_date_pileup_is_flagged_and_normal_data_is_not():
     assert check_observation_period_ends(duckdb.connect()) == {"flagged": False}
 
 
+def test_f1b_small_share_pileup_is_flagged():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE observation_period (person_id INT, observation_period_end_date DATE)")
+    con.execute("INSERT INTO observation_period SELECT i, DATE '2026-09-01' + (i % 30)::INT FROM range(30) t(i)")
+    con.execute("INSERT INTO observation_period SELECT 1000 + i, DATE '2020-01-01' FROM range(30000) t(i)")
+    con.execute("INSERT INTO observation_period SELECT 100000 + i, DATE '2026-10-23' FROM range(33) t(i)")
+    res = check_observation_period_ends(con, warn=False)
+    assert res["flagged"] and res["periods"] == 33 and res["periods"] < 0.01 * res["total"]
+
+
 # -- F3 ----------------------------------------------------------------------------------------------------------
 def test_f3_duplicate_report_is_one_safe_object():
     ids = {"A": list(range(1000)), "B": list(range(993, 1993)), "C": list(range(5000, 6000))}

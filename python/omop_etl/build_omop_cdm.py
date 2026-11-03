@@ -1493,6 +1493,10 @@ def cap_observation_period(con, cutoff, dry_run=False):
     For databases built before ``max_date="auto"``/``data_cutoff`` was used, whose periods end on the build date.
     Periods ending after ``cutoff`` (ISO date) are shortened to it; periods starting after it are deleted. Returns
     ``{"shortened": n, "deleted": m}``; with ``dry_run=True`` returns the same counts and changes nothing.
+
+    Unlike ``data_cutoff="auto"`` at build time, which caps only open-ended enrollment spans and keeps recorded end
+    dates, this shortens every period ending after ``cutoff``, recorded ends included. ``"auto"`` also picks the cutoff
+    heuristically (latest event before today); here the cutoff is the one you pass.
     """
     hi = _iso_date(cutoff, "cutoff")
     short = con.execute(f"""SELECT COUNT(*) FROM observation_period WHERE observation_period_start_date <= DATE '{hi}'
