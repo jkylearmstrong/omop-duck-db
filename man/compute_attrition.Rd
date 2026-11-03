@@ -4,7 +4,7 @@
 \alias{compute_attrition}
 \title{Track Patient Attrition Across Phenotyping Rules (CONSORT Flowchart)}
 \usage{
-compute_attrition(con, cohort_id, steps)
+compute_attrition(con, cohort_id, steps, count_stays = FALSE)
 }
 \arguments{
 \item{con}{Active DuckDB DBI connection.}
@@ -13,6 +13,9 @@ compute_attrition(con, cohort_id, steps)
 
 \item{steps}{A list of named steps, each containing \code{step_name} (character) and \code{step_query} (character SQL).
 Each query after step 1 can query \verb{_step_current} to filter down from the previous step.}
+
+\item{count_stays}{If \code{TRUE} and the steps return \code{visit_occurrence_id}, adds \code{stays_retained} and \code{stays_dropped}
+(used by \code{define_study_cohort(one_per_patient = FALSE)}).}
 }
 \value{
 A data.frame with columns: \code{step_number}, \code{step_name}, \code{subjects_retained}, \code{subjects_dropped}, \code{percent_retained}.

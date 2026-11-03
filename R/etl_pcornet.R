@@ -1379,6 +1379,15 @@ build_observation_period <- function(con, min_date = "1900-01-02", max_date = NU
     FROM envelopes
     %s;
   ", lo, hi, if (isTRUE(use_enrollment)) "WHERE person_id NOT IN (SELECT person_id FROM _enrollment_spans)" else ""))
+  if (is.null(cutoff)) {
+    chk <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE observation_period_end_date = CURRENT_DATE) AS at_build FROM observation_period")
+    if (chk$at_build > 0 && chk$at_build >= max(1, 0.01 * chk$total)) {
+      warning(chk$at_build, " of ", chk$total, " observation periods end on the build date, which usually means source ",
+              "events were filled with the extraction date. Pass data_cutoff = 'auto' (or an ISO date) to cap period ends ",
+              "at the real data cutoff.", call. = FALSE)
+    }
+  }
+  invisible(NULL)
 }
 
 #' Build enrolment spans from the PCORnet ENROLLMENT file

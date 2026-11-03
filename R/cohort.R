@@ -326,9 +326,11 @@ create_cohort <- function(con,
 #' @param cohort_id Integer cohort ID being evaluated.
 #' @param steps A list of named steps, each containing `step_name` (character) and `step_query` (character SQL).
 #'   Each query after step 1 can query `_step_current` to filter down from the previous step.
+#' @param count_stays If `TRUE` and the steps return `visit_occurrence_id`, adds `stays_retained` and `stays_dropped`
+#'   (used by `define_study_cohort(one_per_patient = FALSE)`).
 #' @return A data.frame with columns: `step_number`, `step_name`, `subjects_retained`, `subjects_dropped`, `percent_retained`.
 #' @export
-compute_attrition <- function(con, cohort_id, steps) {
+compute_attrition <- function(con, cohort_id, steps, count_stays = FALSE) {
   tryCatch(DBI::dbExecute(con, "DROP TABLE IF EXISTS _step_current;"), error = function(e) NULL)
 
   step_numbers <- integer(length(steps))
@@ -336,6 +338,8 @@ compute_attrition <- function(con, cohort_id, steps) {
   subjects_retained <- integer(length(steps))
   subjects_dropped <- integer(length(steps))
   percent_retained <- numeric(length(steps))
+  stays_retained <- rep(NA_integer_, length(steps))
+  stays_dropped <- rep(NA_integer_, length(steps))
 
   initial_count <- NULL
   prev_count <- NULL
@@ -359,6 +363,11 @@ compute_attrition <- function(con, cohort_id, steps) {
 
     cnt_res <- DBI::dbGetQuery(con, sprintf("SELECT COUNT(DISTINCT \"%s\") AS cnt FROM _step_current", step_subj))
     cur_count <- as.integer(cnt_res$cnt[1])
+    if (isTRUE(count_stays) && "VISIT_OCCURRENCE_ID" %in% names(step_actual_cols)) {
+      stays_retained[i] <- as.integer(DBI::dbGetQuery(con, sprintf(
+        "SELECT COUNT(DISTINCT \"%s\") AS cnt FROM _step_current", step_actual_cols[["VISIT_OCCURRENCE_ID"]]))$cnt[1])
+      stays_dropped[i] <- if (i == 1) 0L else max(0L, stays_retained[i - 1] - stays_retained[i])
+    }
 
     if (i == 1) {
       initial_count <- cur_count
@@ -380,7 +389,7 @@ compute_attrition <- function(con, cohort_id, steps) {
 
   tryCatch(DBI::dbExecute(con, "DROP TABLE IF EXISTS _step_current;"), error = function(e) NULL)
 
-  data.frame(
+  out <- data.frame(
     step_number = step_numbers,
     step_name = step_names,
     subjects_retained = subjects_retained,
@@ -388,6 +397,11 @@ compute_attrition <- function(con, cohort_id, steps) {
     percent_retained = percent_retained,
     stringsAsFactors = FALSE
   )
+  if (isTRUE(count_stays) && !anyNA(stays_retained)) {
+    out$stays_retained <- stays_retained
+    out$stays_dropped <- stays_dropped
+  }
+  out
 }
 
 #' Combine Cohorts via Set Operations
@@ -1040,6 +1054,24 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
   invisible(NULL)
 }
 
+#' Recode transfer discharges in a database built before the ETL mapped 'IP' to 8717
+#'
+#' Sets `discharged_to_concept_id` to `concept_id` for visits whose `discharged_to_source_value` is `IP`
+#' (case-insensitive, whitespace ignored) and whose concept id is `NULL` or 0. Idempotent; needs write access.
+#'
+#' @param con DuckDB connection.
+#' @param schema Optional schema holding `visit_occurrence`.
+#' @param concept_id Concept id to write (default 8717, 'Inpatient Hospital').
+#' @return The number of visits recoded, invisibly.
+#' @export
+remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L) {
+  vo <- if (is.null(schema)) "visit_occurrence" else paste0(schema, ".visit_occurrence")
+  where <- "COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP'"
+  n <- as.integer(DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM %s WHERE %s", vo, where))$n[1])
+  if (n > 0L) DBI::dbExecute(con, sprintf("UPDATE %s SET discharged_to_concept_id = %d WHERE %s", vo, as.integer(concept_id), where))
+  invisible(n)
+}
+
 # Warns when the transfer exclusion is set but no stay carries a transfer concept id while 'IP' discharges hold 0
 # (databases built before the ETL mapped discharge status 'IP' to 8717).
 #' @keywords internal
@@ -1051,12 +1083,12 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
     hit <- DBI::dbGetQuery(con, sprintf("SELECT 1 FROM %s WHERE discharged_to_concept_id IN (%s) LIMIT 1",
                                         vo, .int_list(spec$transfer_ids)))
     if (nrow(hit)) FALSE else nrow(DBI::dbGetQuery(con, sprintf(
-      "SELECT 1 FROM %s WHERE COALESCE(discharged_to_concept_id, 0) = 0 AND discharged_to_source_value = 'IP' LIMIT 1", vo))) > 0
+      "SELECT 1 FROM %s WHERE COALESCE(discharged_to_concept_id, 0) = 0 AND UPPER(TRIM(discharged_to_source_value)) = 'IP' LIMIT 1", vo))) > 0
   }, error = function(e) FALSE)
   if (unmapped) {
     warning("transfer_discharge_concept_ids = ", paste(spec$transfer_ids, collapse = ", "),
             " matches no stay, but visits with discharged_to_source_value = 'IP' have discharged_to_concept_id 0 ",
-            "(the database predates the ETL mapping to 8717), so the transfer exclusion removes nothing. Recode them first.",
+            "(the database predates the ETL mapping to 8717), so the transfer exclusion removes nothing. Run remap_discharge_status(con) to recode them.",
             call. = FALSE)
   }
   invisible(NULL)
@@ -1651,7 +1683,7 @@ define_study_cohort <- function(con,
   if (!is.null(persist_keys)) .write_index_keys(df, persist_keys)
 
   if (attrition) {
-    attr(df, "attrition") <- compute_attrition(con, cohort_id, .study_attrition_steps(spec))
+    attr(df, "attrition") <- compute_attrition(con, cohort_id, .study_attrition_steps(spec), count_stays = !one_per_patient)
   }
   if (materialise && is.null(schema)) {
     attr(df, "summary") <- get_cohort_summary(con, cohort_id)
