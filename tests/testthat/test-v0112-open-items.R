@@ -8,6 +8,15 @@ test_that("pooled duplicate row is withheld when a pair is suppressed", {
   expect_true(is.na(total$overlap_pct))
   ok <- consortium_cross_site_duplicates(list(A = 1:100, B = 51:150), key = "k")
   expect_equal(ok$shared_patients[ok$site_1 == "ALL"], "50")
+  expect_equal(ok$n_site_1[ok$site_1 == "ALL"], 150)
+})
+
+test_that("pooled n_site is withheld with the pooled row (sum of sizes minus pooled would reveal the pair)", {
+  ids <- list(A = 1:1000, B = 994:1993, C = 5001:6000)
+  out <- consortium_cross_site_duplicates(ids, key = "k", min_cell_count = 11)
+  total <- out[out$site_1 == "ALL", ]
+  expect_true(total$is_suppressed)
+  expect_true(is.na(total$n_site_1) && is.na(total$n_site_2))
 })
 
 test_that("remap_discharge_status dry_run changes nothing", {

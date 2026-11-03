@@ -70,6 +70,23 @@ def test_o1b_pooled_row_withheld_when_a_pair_is_suppressed():
 def test_o1b_pooled_row_shown_when_no_pair_suppressed():
     out = consortium_cross_site_duplicates({"A": list(range(100)), "B": list(range(50, 150))}, key="k")
     assert out.iloc[-1].shared_patients == "50"
+    assert out.iloc[-1].n_site_1 == 150
+
+
+def test_o1c_pooled_n_withheld_so_sum_of_sizes_cannot_recover_suppressed_pair():
+    # three sites of 1,000 sharing 7 patients: sizes 3,000 minus pooled 2,993 would reveal the 7
+    ids = {"A": list(range(1000)), "B": list(range(993, 1993)), "C": list(range(5000, 6000))}
+    out = consortium_cross_site_duplicates(ids, key="k", min_cell_count=11)
+    total = out[out.site_1 == "ALL"].iloc[0]
+    assert total.is_suppressed and total.shared_patients in ("withheld", "<11")
+    assert total.n_site_1 != total.n_site_1 and total.n_site_2 != total.n_site_2
+    assert not out.astype(str).apply(lambda col: col.str.contains("2993")).any().any()
+
+
+def test_o1c_pooled_n_withheld_when_total_overlap_is_small():
+    out = consortium_cross_site_duplicates({"A": list(range(100)), "B": list(range(95, 195))}, key="k")
+    total = out.iloc[-1]
+    assert total.is_suppressed and total.n_site_1 != total.n_site_1
 
 
 def test_remap_discharge_status_dry_run_changes_nothing():
@@ -106,3 +123,55 @@ def test_o7b_features_do_not_multiply_across_tables():
     row = df.iloc[0]
     assert row["condition_count_30d"] == 20 and row["drug_count_30d"] == 7
     assert row["mean_measurement_3001"] == 15.0      # not weighted by the 20 x 7 other-table rows
+
+
+def _multi_table_fixture(n_persons, events_per_person):
+    con = duckdb.connect()
+    con.execute(f"""
+        CREATE TABLE person AS SELECT i person_id, 1950 + (i % 50) year_of_birth, 1 month_of_birth, 1 day_of_birth,
+            8507 gender_concept_id, 8527 race_concept_id, 0 ethnicity_concept_id FROM range({n_persons}) t(i);
+        CREATE TABLE cohort AS SELECT 1 cohort_definition_id, p.i subject_id, p.i person_id,
+            DATE '2020-01-01' + CAST(s * 200 + p.i % 30 AS INT) cohort_start_date,
+            DATE '2020-01-06' + CAST(s * 200 + p.i % 30 AS INT) cohort_end_date,
+            p.i * 10 + s visit_occurrence_id FROM range({n_persons}) p(i), range(3) q(s);
+    """)
+    for tbl, idc, dc in [("condition_occurrence", "condition_occurrence_id", "condition_start_date"),
+                         ("drug_exposure", "drug_exposure_id", "drug_exposure_start_date"),
+                         ("procedure_occurrence", "procedure_occurrence_id", "procedure_date"),
+                         ("measurement", "measurement_id", "measurement_date")]:
+        extra = ", 3 + (i % 7) measurement_concept_id, (i % 100) * 1.5 value_as_number" if tbl == "measurement" else ""
+        con.execute(f"CREATE TABLE {tbl} AS SELECT i {idc}, i % {n_persons} person_id, "
+                    f"DATE '2020-01-01' + CAST(hash(i) % 700 AS INT) {dc}{extra} FROM range({n_persons * events_per_person}) t(i)")
+    return con
+
+
+def test_o7b_features_equal_independent_per_table_reference():
+    # every table has many events per stay; the reference counts each table on its own with a correlated subquery,
+    # so it cannot share the row multiplication that the per-table aggregates avoid
+    con = _multi_table_fixture(60, 30)
+    df = extract_patient_features(con, cohort_id=1, index_key="visit_occurrence_id", lookback_days=(30, 365),
+                                  measurement_concept_ids=[3, 4]).sort_values("visit_occurrence_id").reset_index(drop=True)
+    ref = con.execute("""
+        SELECT c.visit_occurrence_id,
+            (SELECT COUNT(*) FROM condition_occurrence t WHERE t.person_id = c.person_id AND t.condition_start_date BETWEEN c.cohort_start_date - 30 AND c.cohort_start_date - 1) AS condition_count_30d,
+            (SELECT COUNT(*) FROM drug_exposure t WHERE t.person_id = c.person_id AND t.drug_exposure_start_date BETWEEN c.cohort_start_date - 365 AND c.cohort_start_date - 1) AS drug_count_365d,
+            (SELECT COUNT(*) FROM procedure_occurrence t WHERE t.person_id = c.person_id AND t.procedure_date BETWEEN c.cohort_start_date - 365 AND c.cohort_start_date - 1) AS procedure_count_365d,
+            (SELECT AVG(value_as_number) FROM measurement t WHERE t.person_id = c.person_id AND t.measurement_concept_id = 3 AND t.measurement_date BETWEEN c.cohort_start_date - 30 AND c.cohort_start_date) AS mean_measurement_3
+        FROM cohort c ORDER BY c.visit_occurrence_id""").df()
+    assert len(df) == len(ref) == 180
+    for col in ("condition_count_30d", "drug_count_365d", "procedure_count_365d"):
+        assert (df[col].to_numpy() == ref[col].to_numpy()).all(), col
+    assert ref.drug_count_365d.sum() > 0
+    # with several windows the output columns repeat the name; the first (pandas keeps it as is) is the smallest window
+    both_nan = df.mean_measurement_3.isna() & ref.mean_measurement_3.isna()
+    assert (both_nan | ((df.mean_measurement_3 - ref.mean_measurement_3).abs() < 1e-9)).all()
+
+
+def test_r1_features_timing_multi_table_stays():
+    # 900 stays, 12,000 events in each of four tables: about 0.1 s now; PR #40 code needed about 40 s here
+    import time
+    con = _multi_table_fixture(300, 40)
+    start = time.time()
+    df = extract_patient_features(con, cohort_id=1, index_key="visit_occurrence_id")
+    assert len(df) == 900
+    assert time.time() - start < 20

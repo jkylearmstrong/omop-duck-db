@@ -939,8 +939,9 @@ def consortium_cross_site_duplicates(
     pandas.DataFrame
         One row per site pair as in :func:`consortium_patient_overlap`, plus a final row ``site_1 = 'ALL'`` with
         ``n_site_1`` the pooled distinct patients and ``shared_patients`` the patients seen at two or more sites. That row is withheld
-        (``shared_patients = 'withheld'``, ``overlap_pct`` NaN) when any pair is suppressed, since the difference
-        between it and the visible pairs would reveal the suppressed count.
+        (``shared_patients = 'withheld'``, ``n_site_1``, ``n_site_2`` and ``overlap_pct`` NaN) when any pair is
+        suppressed, since the difference between it and the visible pairs, or between the pooled count and the sum
+        of the site sizes, would reveal the suppressed count.
     """
     import hashlib
     import hmac
@@ -967,8 +968,11 @@ def consortium_cross_site_duplicates(
     # so the pooled row is withheld whenever any pair is suppressed.
     withheld = bool(pairs["is_suppressed"].any()) and not small
     suppressed = small or withheld
+    # The pooled distinct count is withheld with the row: the sum of the site sizes minus it is the number of
+    # patients seen at several sites, so leaving it visible would recover a suppressed pair.
+    n_pooled = float("nan") if suppressed else len(seen)
     total = pd.DataFrame([{
-        "site_1": "ALL", "site_2": "ALL", "n_site_1": len(seen), "n_site_2": len(seen),
+        "site_1": "ALL", "site_2": "ALL", "n_site_1": n_pooled, "n_site_2": n_pooled,
         "shared_patients": "withheld" if withheld else (f"<{min_cell_count}" if small else str(multi)),
         "overlap_pct": float("nan") if suppressed else (round(multi / len(seen), 4) if seen else 0.0),
         "is_suppressed": suppressed,
