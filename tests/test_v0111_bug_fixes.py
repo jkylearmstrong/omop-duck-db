@@ -47,3 +47,11 @@ def test_features_accept_timestamp_cohort_dates():
                 " TIMESTAMP '2020-01-12 08:00:00' AS cohort_end_date")
     df = extract_patient_features(con, cohort_table="cohort", lookback_days=[30])
     assert int(df["condition_count_30d"].iloc[0]) == 1
+
+
+def test_remap_discharge_status_with_schema():
+    con = duckdb.connect()
+    con.execute("CREATE SCHEMA cdm")
+    con.execute("CREATE TABLE cdm.visit_occurrence AS SELECT 1 AS visit_occurrence_id, 0 AS discharged_to_concept_id, 'IP' AS discharged_to_source_value")
+    assert remap_discharge_status(con, schema="cdm", concept_id=1) == 1
+    assert con.execute("SELECT discharged_to_concept_id FROM cdm.visit_occurrence").fetchone() == (1,)
