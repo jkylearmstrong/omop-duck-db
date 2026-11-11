@@ -1018,7 +1018,7 @@ gdrive_download_latest()    # pull the latest snapshot instead of rebuilding
 Configure the target Drive folder in `config/gdrive.yml` (copy from
 `config/gdrive.yml.example`).
 
-## Study-design features: add your own person-level features (v0.13.0, Python and R)
+## Study-design features: add your own person-level features (v0.14.0, Python and R)
 
 A protocol often needs something OMOP does not define: the rural-urban code of the home ZIP, an area deprivation index, ACS median
 household income. A `feature_set` collects such *study-design features*, computes them for the index stays (the address in effect at
