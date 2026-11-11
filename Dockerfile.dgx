@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1.6
+#
+# GPU image for deep models (SARD / multimodal transformer) on an NVIDIA DGX Spark (GB10 Grace-Blackwell, aarch64).
+# Python side only: omop-duck-db feature/tensor extraction + training. The R package image stays in ./Dockerfile.
+#
+# Build on the Spark itself, so the arm64 variant of the base image is pulled (see "Build context" below).
+# Run:
+#   docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+#       -v /workspace/ederri:/workspace/ederri omop-duck-db:dgx \
+#       python pipeline/train_clinical_deep_dgx.py --tensors-file /workspace/ederri/data/ederri_federated_tensors_track1.pt ...
+#
+# Build context: this Dockerfile lives in omop-duck-db/, but SARD (omop-learn) and the training scripts live in the
+# parent eDerri_data project. Build from the PARENT directory so all three are in the context:
+#   docker build -f omop-duck-db/Dockerfile.dgx -t omop-duck-db:dgx .
+#
+# Base image: the NGC PyTorch container is the supported way to get a CUDA build of torch for GB10 (sm_121). Pin the tag
+# you have verified on the device; `nvidia-smi` and `python -c "import torch; print(torch.cuda.get_device_capability())"`
+# inside the container must both work before any long job. Do NOT pip-install torch over the NGC build.
+ARG NGC_TAG=25.01-py3
+FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+WORKDIR /workspace/ederri
+
+# omop-duck-db with the extras the deep path needs:
+#   deep    -> torch (already provided by NGC; pip sees it as satisfied) + pyarrow
+#   oracle  -> sqlalchemy>=2 + oracledb (thin mode: no Oracle Instant Client needed)
+#   bundle / zarr -> model bundles and zarr output of extract_multimodal_deep_dataset
+#   sklearn -> downstream modelling
+# The torch constraint keeps pip from replacing the NGC build with a CPU wheel.
+RUN python -c "import torch; print('NGC torch', torch.__version__)" \
+    && python -c "import torch,sys; open('/tmp/torch-constraint.txt','w').write('torch==' + torch.__version__.split('+')[0] + '\n')"
+
+COPY omop-duck-db/pyproject.toml omop-duck-db/README.md /workspace/ederri/omop-duck-db/
+COPY omop-duck-db/python /workspace/ederri/omop-duck-db/python
+COPY omop-duck-db/inst /workspace/ederri/omop-duck-db/inst
+RUN pip install -c /tmp/torch-constraint.txt -e "/workspace/ederri/omop-duck-db[deep,oracle,bundle,zarr,sklearn,ml]" \
+    && pip install -c /tmp/torch-constraint.txt xgboost shap statsmodels
+
+# omop-learn provides VisitTransformer / VisitClassifier used by pipeline/ederri_sard_deep_model.py (not on PyPI).
+COPY omop-learn-repo /workspace/ederri/omop-learn-repo
+RUN pip install -c /tmp/torch-constraint.txt --no-deps -e /workspace/ederri/omop-learn-repo || true
+ENV PYTHONPATH=/workspace/ederri:/workspace/ederri/omop-learn-repo/src:/workspace/ederri/omop-duck-db/python
+
+# Training and extraction scripts
+COPY pipeline /workspace/ederri/pipeline
+
+# Build-time smoke test: imports only (no GPU is visible during `docker build`).
+RUN python - <<'EOF'
+import torch, duckdb, oracledb, sqlalchemy
+import omop_etl
+from omop_etl import extract_sard_visit_tensors, extract_benchmark_features
+from omop_etl.deep_dataset import extract_multimodal_deep_dataset
+from omop_etl.extract import from_sql
+print("omop_etl", omop_etl.__version__, "| torch", torch.__version__, "| duckdb", duckdb.__version__,
+      "| oracledb", oracledb.__version__, "| sqlalchemy", sqlalchemy.__version__)
+EOF
+
+# Runtime GPU check (fails fast if the container was started without --gpus all)
+RUN printf '#!/usr/bin/env bash\npython - <<PY\nimport torch\nassert torch.cuda.is_available(), "CUDA not visible: run with --gpus all"\nprint(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))\nPY\n' > /usr/local/bin/gpu-check \
+    && chmod +x /usr/local/bin/gpu-check
+
+CMD ["bash"]
