@@ -40,7 +40,7 @@ from omop_etl.geography import (
 )
 
 __all__ = ["StudyFeature", "FeatureSet", "StudyContext", "stays_from_cohort", "ruca_feature", "sdi_feature", "area_feature",
-           "sql_feature", "custom_feature", "register_feature_factory", "available_features", "make_feature", "feature_list",
+           "sql_feature", "custom_feature", "concept_feature", "register_feature_factory", "available_features", "make_feature", "feature_list",
            "FEATURE_LISTS", "MANIFEST_FORMAT"]
 
 MANIFEST_FORMAT = "omop-duck-db/study-feature-set"
@@ -81,6 +81,24 @@ class StudyContext:
     def __init__(self, con: duckdb.DuckDBPyConnection, stays: pd.DataFrame, *, address_table: str | None = "auto") -> None:
         self.con, self.stays, self.address_table = con, stays, address_table
         self._zip: pd.DataFrame | None = None
+        self._zip3: pd.DataFrame | None = None
+
+    def zip3(self) -> pd.DataFrame:
+        """One row per stay (``person_id, stay_id, zip3``): the first three digits of the residence ZIP at admission.
+
+        De-identified OMOP extracts often hold only 3-digit ZIPs in ``location.zip``; those are used when no 5-digit ZIP
+        resolves for a stay (the address-history rule is applied first).
+        """
+        if self._zip3 is None:
+            z = self.zip5()[["person_id", "stay_id", "zip5"]].copy()
+            z["zip3"] = z["zip5"].str[:3]
+            if z["zip3"].isna().any() and _has_table(self.con, "location") and _has_table(self.con, "person"):
+                raw = self.con.execute("""SELECT p.person_id, nullif(regexp_extract(CAST(l.zip AS VARCHAR), '(\\d{3})', 1), '') AS z3
+                                          FROM person p JOIN location l ON l.location_id = p.location_id""").df()
+                z = z.merge(raw.drop_duplicates("person_id"), on="person_id", how="left")
+                z["zip3"] = z["zip3"].fillna(z["z3"])
+            self._zip3 = z[["person_id", "stay_id", "zip3"]]
+        return self._zip3
 
     def zip5(self) -> pd.DataFrame:
         if self._zip is None:
@@ -370,7 +388,7 @@ def sdi_feature(table: Any, cut_points: Sequence[float] | None = None, *, name: 
 
 def area_feature(name: str, table: Any, value_column: str | None = None, *, key_column: str | None = None, transform: str = "none",
                  impute: bool = False, missing_indicator: bool = True, description: str = "", label: str | None = None,
-                 state: Mapping[str, Any] | None = None) -> StudyFeature:
+                 state: Mapping[str, Any] | None = None, geography: str = "zip5") -> StudyFeature:
     """Any ZIP-keyed area-level numeric (ACS median household income, % below poverty, ADI ...) as a patient feature.
 
     ``table`` is a CSV path or DataFrame with a ZIP/ZCTA column (``key_column``, default the first of zip5 / zcta / zip /
@@ -383,6 +401,9 @@ def area_feature(name: str, table: Any, value_column: str | None = None, *, key_
     """
     if transform not in _TRANSFORMS:
         raise ValueError(f"transform must be one of {_TRANSFORMS}.")
+    if geography not in ("zip5", "zip3"):
+        raise ValueError("geography must be 'zip5' or 'zip3' (zip3 matches 3-digit ZIPs, as kept by de-identified extracts).")
+    nd = 5 if geography == "zip5" else 3
     df = table.copy() if isinstance(table, pd.DataFrame) else pd.read_csv(Path(table), dtype=str)
     lower = {c.lower(): c for c in df.columns}
     key = key_column or next((lower[k] for k in ("zip5", "zcta5_fips", "zcta5", "zcta", "zipcode", "zip_code", "zip") if k in lower), None)
@@ -391,7 +412,7 @@ def area_feature(name: str, table: Any, value_column: str | None = None, *, key_
     val = value_column or (df.columns.drop(key)[0] if len(df.columns) == 2 else None)
     if val is None or val not in df.columns:
         raise ValueError("pass value_column: the table has more than one candidate column.")
-    area = pd.DataFrame({"zip5": df[key].astype("string").str.strip().str.zfill(5).str.extract(r"(\d{5})", expand=False),
+    area = pd.DataFrame({"zip5": df[key].astype("string").str.strip().str.zfill(nd).str.extract(rf"(\d{{{nd}}})", expand=False),
                          "raw": pd.to_numeric(df[val], errors="coerce")}).dropna(subset=["zip5"]).drop_duplicates("zip5")
     cols = (name, f"{name}_missing") if missing_indicator else (name,)
 
@@ -406,7 +427,7 @@ def area_feature(name: str, table: Any, value_column: str | None = None, *, key_
         return x
 
     def compute(ctx: StudyContext, st: dict, fit: bool) -> pd.DataFrame:
-        g = ctx.zip5().merge(area, on="zip5", how="left")
+        g = (ctx.zip5() if geography == "zip5" else ctx.zip3()).rename(columns={geography: "zip5"}).merge(area, on="zip5", how="left")
         raw = g["raw"].astype(float)
         if fit:                      # learn from the stays of the training cohort, on the raw scale
             ok = raw.dropna()
@@ -433,7 +454,7 @@ def area_feature(name: str, table: Any, value_column: str | None = None, *, key_
                         requires=("person",), labels={name: label or f"{name} ({transform}) of the residence ZIP at admission",
                                                       f"{name}_missing": f"{name} unavailable (1 = ZIP not in the area table)"},
                         params={"transform": transform, "impute": bool(impute), "missing_indicator": bool(missing_indicator),
-                                "value_column": val},
+                                "value_column": val, "geography": geography},
                         state=dict(state or {}))
 
 
@@ -470,11 +491,92 @@ def custom_feature(name: str, columns: Sequence[str], fn: Callable[[duckdb.DuckD
                         params=dict(params or {}))
 
 
+_CONCEPT_DOMAINS = {   # domain -> (table, concept column, date column, value column or None)
+    "measurement": ("measurement", "measurement_concept_id", "measurement_date", "value_as_number"),
+    "observation": ("observation", "observation_concept_id", "observation_date", "value_as_number"),
+    "condition": ("condition_occurrence", "condition_concept_id", "condition_start_date", None),
+    "drug": ("drug_exposure", "drug_concept_id", "drug_exposure_start_date", None),
+    "procedure": ("procedure_occurrence", "procedure_concept_id", "procedure_date", None),
+}
+_VALUE_AGGS = {"last": "arg_max(v.val, v.dt)", "first": "arg_min(v.val, v.dt)", "mean": "avg(v.val)", "min": "min(v.val)",
+               "max": "max(v.val)", "count": "count(*)", "any": "1.0"}
+
+
+def concept_feature(name: str, concept_sets: Mapping[str, Sequence[int]], *, domain: str = "measurement", agg: str = "last",
+                    lookback_days: int = 365, include_descendants: bool = False, missing_indicator: bool = False,
+                    labels: Mapping[str, str] | None = None) -> StudyFeature:
+    """Concept sets mapped to clinical feature columns: ``{"lab_glucose": [3004501, 3000483], "vital_bmi": [3038553]}``.
+
+    Each key becomes one column holding ``agg`` of the records of any concept in its set that are dated in
+    ``[admit - lookback_days, admit)`` (strictly before the admission, so nothing leaks from the stay). ``domain`` is
+    measurement / observation (numeric ``value_as_number``; ``agg`` last, first, mean, min, max, count, any) or condition /
+    drug / procedure (``agg`` count or any). ``count`` / ``any`` are 0 for stays with no record, value aggregates NaN
+    (``missing_indicator`` adds ``<column>_missing``). ``include_descendants`` expands each set through ``concept_ancestor``.
+
+    >>> concept_feature("labs", {"lab_glucose": [3004501], "lab_creatinine": [3016723]}, agg="last")   # doctest: +SKIP
+    """
+    if domain not in _CONCEPT_DOMAINS:
+        raise ValueError(f"domain must be one of {sorted(_CONCEPT_DOMAINS)}.")
+    table, ccol, dcol, vcol = _CONCEPT_DOMAINS[domain]
+    if agg not in _VALUE_AGGS or (vcol is None and agg not in ("count", "any")):
+        raise ValueError(f"agg {agg!r} is not available for the {domain!r} domain.")
+    if not concept_sets or any(not len(v) for v in concept_sets.values()):
+        raise ValueError("concept_sets needs at least one concept id per column.")
+    sets = {str(k): [int(c) for c in v] for k, v in concept_sets.items()}
+    for k in sets:
+        if not k.replace("_", "").isalnum():
+            raise ValueError(f"column name {k!r} must be letters, digits and underscores.")
+    cols = tuple(sets) + (tuple(f"{k}_missing" for k in sets) if missing_indicator else ())
+    count_like = agg in ("count", "any")
+
+    def compute(ctx: StudyContext, state: dict, fit: bool) -> pd.DataFrame:
+        con = ctx.con
+        cmap = pd.DataFrame([(k, c) for k, v in sets.items() for c in v], columns=["feature", "concept_id"])
+        if include_descendants and _has_table(con, "concept_ancestor"):
+            con.register("_cf_seed", cmap)
+            try:
+                cmap = con.execute("""SELECT DISTINCT s.feature, a.descendant_concept_id AS concept_id FROM _cf_seed s
+                                      JOIN concept_ancestor a ON a.ancestor_concept_id = s.concept_id""").df()
+                cmap = pd.concat([cmap, pd.DataFrame([(k, c) for k, v in sets.items() for c in v], columns=["feature", "concept_id"])]
+                                 ).drop_duplicates()
+            finally:
+                con.unregister("_cf_seed")
+        val = f"m.{vcol}" if vcol else "NULL"
+        need_val = "" if count_like or not vcol else f"AND m.{vcol} IS NOT NULL AND isfinite(m.{vcol})"
+        con.register("_cf_stays", ctx.stays)
+        con.register("_cf_map", cmap)
+        try:
+            long = con.execute(f"""
+                SELECT s.stay_id, v.feature, {_VALUE_AGGS[agg]} AS v
+                FROM _cf_stays s
+                JOIN (SELECT m.person_id, k.feature, CAST(m.{dcol} AS DATE) AS dt0, CAST(m.{dcol} AS TIMESTAMP) AS dt,
+                             CAST({val} AS DOUBLE) AS val
+                      FROM {table} m JOIN _cf_map k ON k.concept_id = m.{ccol} WHERE TRUE {need_val}) v
+                  ON v.person_id = s.person_id AND v.dt0 < CAST(s.admit_date AS DATE)
+                 AND v.dt0 >= CAST(s.admit_date AS DATE) - INTERVAL ({int(lookback_days)}) DAY
+                GROUP BY s.stay_id, v.feature""").df()
+        finally:
+            con.unregister("_cf_stays")
+            con.unregister("_cf_map")
+        wide = long.pivot(index="stay_id", columns="feature", values="v").reindex(index=ctx.stays["stay_id"], columns=list(sets))
+        if count_like:
+            wide = wide.fillna(0.0)
+        out = wide.astype(float)
+        if missing_indicator:
+            for k in sets:
+                out[f"{k}_missing"] = wide[k].isna().astype(float)
+        return out.reset_index()
+    lab = {c: (labels or {}).get(c, f"{c} ({agg} of concept set, {domain}, {lookback_days} d before admission)") for c in cols}
+    return StudyFeature(name, cols, compute, f"Concept-set {domain} features ({agg})", requires=(table, "person"), labels=lab,
+                        params={"concept_sets": sets, "domain": domain, "agg": agg, "lookback_days": int(lookback_days),
+                                "include_descendants": bool(include_descendants), "missing_indicator": bool(missing_indicator)})
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Registry of feature factories and named feature lists
 # ---------------------------------------------------------------------------------------------------------------------
 _FACTORIES: dict[str, Callable[..., StudyFeature]] = {"ruca": ruca_feature, "sdi": sdi_feature, "area": area_feature,
-                                                      "sql": sql_feature, "custom": custom_feature}
+                                                      "sql": sql_feature, "custom": custom_feature, "concept": concept_feature}
 FEATURE_LISTS: dict[str, tuple[str, ...]] = {"geography": ("ruca", "sdi")}
 
 

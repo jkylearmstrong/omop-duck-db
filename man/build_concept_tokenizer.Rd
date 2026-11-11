@@ -4,14 +4,20 @@
 \alias{build_concept_tokenizer}
 \title{Build a concept tokenizer (omop-learn layout)}
 \usage{
-build_concept_tokenizer(concept_tokens)
+build_concept_tokenizer(concept_tokens, mask_token = FALSE)
 }
 \arguments{
 \item{concept_tokens}{character vector of concept token strings (for example \code{"201826 - condition - T2DM"}).}
+
+\item{mask_token}{reserve the fixed \verb{[MASK]} id 5.}
 }
 \value{
-A list with \code{concept_list}, \code{concept_map} (named integer ids) and \code{vocab_size}.
+A list with \code{concept_list}, \code{concept_map} (named integer ids), \code{vocab_size}, \code{n_special_tokens} and
+\code{mask_token_id}.
 }
 \description{
 Ids 0-4 are \verb{[BOS] [EOS] [SEP] [PAD] [UNK]} (PAD = 3); the concept tokens follow, sorted and de-duplicated.
+With \code{mask_token = TRUE} id 5 is a fixed \verb{[MASK]} (concepts start at 6) so the special-token embedding rows line up
+across vocabularies and sites; without it \verb{[MASK]} is \code{vocab_size} (legacy layout). Both load with
+\code{\link[=import_concept_vocabulary]{import_concept_vocabulary()}}.
 }

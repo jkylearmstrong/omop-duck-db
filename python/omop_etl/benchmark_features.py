@@ -202,6 +202,8 @@ def extract_benchmark_features(
     impute: str | None = None,
     impute_values: Mapping[str, float] | None = None,
     vocabulary_db: str | os.PathLike | None = "auto",
+    feature_set: Any = None,
+    feature_fit: bool | Sequence[str] = False,
 ) -> pd.DataFrame:
     """Leakage-free modelling table, one row per cohort row, in cohort order.
 
@@ -381,7 +383,21 @@ def extract_benchmark_features(
             add("sdoh", pd.DataFrame({"sdi_quintile": q, "ruca_category": geo["ruca_category"].to_numpy(),
                                       "sdoh_missing": pd.isna(q).astype("int8")}))
 
+    if feature_set is not None:
+        # study-design features (ACS income, concept-set labs, RUCA/SDI ...) computed for the same stays, appended as one group
+        stays = pd.DataFrame({"person_id": cohort["subject_id"].to_numpy(), "stay_id": cohort["row_id"].to_numpy(),
+                              "admit_date": cohort["cohort_start_date"].to_numpy()})
+        sf = feature_set.compute(con, stays, fit=feature_fit)
+        sf = sf.set_index("stay_id").reindex(cohort["row_id"].to_numpy())
+        clash = [c for c in feature_set.columns if c in out.columns or any(c in b.columns for b in blocks)]
+        if clash:
+            raise ValueError(f"feature_set columns {clash} already exist in the benchmark table; rename them.")
+        add("study_features", sf[feature_set.columns].reset_index(drop=True))
+        feature_attrs = {"feature_state": sf.attrs.get("feature_state"), "feature_provenance": sf.attrs.get("feature_provenance")}
+    else:
+        feature_attrs = {}
     out = pd.concat([out, *blocks], axis=1)
+    out.attrs.update(feature_attrs)
     imputation: dict[str, float] = {}
     if impute is not None or impute_values is not None:
         method = (impute or "median").lower()

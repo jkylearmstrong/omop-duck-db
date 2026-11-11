@@ -6,18 +6,26 @@
 
 .VOCAB_FORMAT <- "omop-duck-db/concept-vocabulary"
 .SPECIAL_TOKENS <- c("[BOS]", "[EOS]", "[SEP]", "[PAD]", "[UNK]")
+.SPECIAL_TOKENS_MASK <- c(.SPECIAL_TOKENS, "[MASK]")
 
 .vocab_digest <- function(tokens) digest::digest(paste(tokens, collapse = "\n"), algo = "sha256", serialize = FALSE)
 
 #' Build a concept tokenizer (omop-learn layout)
 #'
 #' Ids 0-4 are `[BOS] [EOS] [SEP] [PAD] [UNK]` (PAD = 3); the concept tokens follow, sorted and de-duplicated.
+#' With `mask_token = TRUE` id 5 is a fixed `[MASK]` (concepts start at 6) so the special-token embedding rows line up
+#' across vocabularies and sites; without it `[MASK]` is `vocab_size` (legacy layout). Both load with
+#' [import_concept_vocabulary()].
 #' @param concept_tokens character vector of concept token strings (for example `"201826 - condition - T2DM"`).
-#' @return A list with `concept_list`, `concept_map` (named integer ids) and `vocab_size`.
+#' @param mask_token reserve the fixed `[MASK]` id 5.
+#' @return A list with `concept_list`, `concept_map` (named integer ids), `vocab_size`, `n_special_tokens` and
+#'   `mask_token_id`.
 #' @export
-build_concept_tokenizer <- function(concept_tokens) {
-  lst <- c(.SPECIAL_TOKENS, sort(unique(as.character(concept_tokens)), method = "radix"))
-  list(concept_list = lst, concept_map = stats::setNames(seq_along(lst) - 1L, lst), vocab_size = length(lst))
+build_concept_tokenizer <- function(concept_tokens, mask_token = FALSE) {
+  specials <- if (isTRUE(mask_token)) .SPECIAL_TOKENS_MASK else .SPECIAL_TOKENS
+  lst <- c(specials, sort(unique(as.character(concept_tokens)), method = "radix"))
+  list(concept_list = lst, concept_map = stats::setNames(seq_along(lst) - 1L, lst), vocab_size = length(lst),
+       n_special_tokens = length(specials), mask_token_id = if (isTRUE(mask_token)) 5L else length(lst))
 }
 
 #' Freeze and share a tokenizer
@@ -33,13 +41,16 @@ build_concept_tokenizer <- function(concept_tokens) {
 #' @export
 export_concept_vocabulary <- function(tokenizer, path, name = "history") {
   tokens <- as.character(tokenizer$concept_list)
-  if (!identical(tokens[seq_along(.SPECIAL_TOKENS)], .SPECIAL_TOKENS)) {
-    stop("Unexpected special tokens; expected ", paste(.SPECIAL_TOKENS, collapse = " "), ".", call. = FALSE)
+  fixed <- identical(tokens[seq_along(.SPECIAL_TOKENS_MASK)], .SPECIAL_TOKENS_MASK)
+  specials <- if (fixed) .SPECIAL_TOKENS_MASK else .SPECIAL_TOKENS
+  if (!identical(tokens[seq_along(specials)], specials)) {
+    stop("Unexpected special tokens; expected ", paste(specials, collapse = " "), ".", call. = FALSE)
   }
-  manifest <- list(format = .VOCAB_FORMAT, format_version = 1L, name = name,
+  manifest <- list(format = .VOCAB_FORMAT, format_version = 2L, name = name,
                    omop_duck_db_version = as.character(utils::packageVersion("omopduckdb")),
-                   vocab_size = length(tokens), n_special_tokens = length(.SPECIAL_TOKENS), pad_token_idx = 3L,
-                   unk_token_idx = 4L, mask_token_id = length(tokens), sha256 = .vocab_digest(tokens), tokens = as.list(tokens))
+                   vocab_size = length(tokens), n_special_tokens = length(specials), pad_token_idx = 3L,
+                   unk_token_idx = 4L, mask_token_id = if (fixed) 5L else length(tokens),
+                   mask_layout = if (fixed) "fixed" else "vocab_size", sha256 = .vocab_digest(tokens), tokens = as.list(tokens))
   writeLines(jsonlite::toJSON(manifest, auto_unbox = TRUE, pretty = TRUE), path, useBytes = TRUE)
   invisible(manifest)
 }
@@ -53,7 +64,8 @@ import_concept_vocabulary <- function(path) {
   if (!identical(.vocab_digest(tokens), m$sha256) || length(tokens) != m$vocab_size) {
     stop(sprintf("'%s' is corrupted: the token list does not match its checksum.", path), call. = FALSE)
   }
-  tok <- build_concept_tokenizer(tokens[-seq_along(.SPECIAL_TOKENS)])
+  n_special <- if (is.null(m$n_special_tokens)) length(.SPECIAL_TOKENS) else as.integer(m$n_special_tokens)
+  tok <- build_concept_tokenizer(tokens[-seq_len(n_special)], mask_token = n_special > length(.SPECIAL_TOKENS))
   if (!identical(tok$concept_list, tokens)) stop("The rebuilt tokenizer assigns different token ids than the manifest; refusing to continue.", call. = FALSE)
   tok
 }

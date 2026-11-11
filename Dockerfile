@@ -38,7 +38,8 @@ RUN R_LIBS=/rlib R CMD INSTALL --no-multiarch --with-keep.source --install-tests
 RUN cd /build/tests && R_LIBS=/rlib Rscript testthat.R
 
 RUN python3 -m venv /pyvenv \
-    && /pyvenv/bin/pip install --no-cache-dir "/build[dev,bundle]" \
+    && /pyvenv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.0" \
+    && /pyvenv/bin/pip install --no-cache-dir "/build[dev,bundle,deep]" \
     && R_LIBS=/rlib PATH="/pyvenv/bin:$PATH" /pyvenv/bin/python -m pytest /build/tests -v
 
 # Stage 2: final runtime
