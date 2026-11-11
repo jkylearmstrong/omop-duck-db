@@ -60,6 +60,8 @@ def test_sample_stay_rule(con):
     first = define_study_cohort(con, materialise=False, sample_stay_rule="earliest", **COHORT)
     last = define_study_cohort(con, materialise=False, sample_stay_rule="latest", **COHORT)
     assert (first["cohort_start_date"].to_numpy() <= last["cohort_start_date"].to_numpy()).all()
+    alias = define_study_cohort(con, materialise=False, sample_stay_rule="first", **COHORT)
+    assert alias["visit_occurrence_id"].tolist() == first["visit_occurrence_id"].tolist()
     r1 = define_study_cohort(con, materialise=False, sample_stay_rule="random", random_seed=7, **COHORT)
     r2 = define_study_cohort(con, materialise=False, sample_stay_rule="random", random_seed=7, **COHORT)
     assert r1["visit_occurrence_id"].tolist() == r2["visit_occurrence_id"].tolist()
@@ -487,3 +489,11 @@ def test_to_torch_casts_y_float_and_ids_long_without_torch(monkeypatch):
     assert out["concept_tensor"].dtype == "long"
     assert out["dense_covariates"].dtype == "float32"
     assert list(out["site"]) == ["a", "b"]
+
+
+def test_loso_hist_gbm_drops_all_nan_column():
+    pytest.importorskip("sklearn")
+    df = _sites()
+    df["sdi_quintile"] = np.nan                                                      # SDoH fallback column, NaN everywhere
+    res = evaluate_loso_transport(df, "site_anon", model_type="hist_gbm", n_bootstraps=0, model_params={"max_iter": 40})
+    assert (res.per_site["auroc"] > 0.65).all()
