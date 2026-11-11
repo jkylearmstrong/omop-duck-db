@@ -781,6 +781,9 @@ def remap_discharge_status(con: duckdb.DuckDBPyConnection, schema: str | None = 
     return int(n)
 
 
+_SAMPLE_STAY_RULES = {"random": "stable_random", "earliest": "first", "latest": "last", "all": "stable_random"}
+
+
 def _study_order_by(rule: str, seed: int, pinned: bool = False) -> str:
     pin = (f"(f.visit_occurrence_id IN (SELECT visit_occurrence_id FROM {_STUDY_PINNED_TABLE})) DESC, "
            if pinned else "")
@@ -1477,6 +1480,10 @@ def define_study_cohort(
     diabetes_drug_rule: str = "names",
     diabetes_rxnorm_cuis: Sequence[str | int] | str | os.PathLike | None = None,
     exclude_metformin_only_prediabetes_pcos: bool | str = False,
+    min_admit_date: Any = None,
+    max_admit_date: Any = None,
+    sample_stay_rule: str | None = None,
+    random_seed: int | None = None,
 ) -> pd.DataFrame:
     r"""Defines a leak-free index-stay study cohort (one stay per patient) with an optional outcome.
 
@@ -1567,6 +1574,20 @@ def define_study_cohort(
         (see :func:`omop_etl.exclusions.find_metformin_only_prediabetes_pcos`). ``True`` means ``"icd10"`` (PCOS = ICD-10
         E28.2 / "Polycystic ovary syndrome"); ``"snomed"`` uses SNOMED 69878008 / "Polycystic ovary". Adds the attrition
         step "Not metformin-only prediabetes / PCOS (patient-level)".
+    min_admit_date, max_admit_date : str, date or None, default None
+        Calendar bounds on the index admission date (inclusive), e.g. ``min_admit_date="2010-01-01"``,
+        ``max_admit_date="2022-09-30"``. They are shorthand for ``study_window=(min_admit_date, max_admit_date)`` and are
+        counted in the same attrition step ("study window"), so dropped stays appear in the CONSORT table. Combining them
+        with a ``study_window`` that disagrees raises ``ValueError``; a ``study_window`` bound that is ``None`` takes the
+        value of the matching argument.
+    sample_stay_rule : {"random", "earliest", "latest", "all"} or None, default None
+        Protocol-level name for the stay-per-patient choice (``None`` keeps ``sampling_rule`` / ``one_per_patient``
+        unchanged, so existing calls do not change). ``"random"`` is the **MD5-based** ``stable_random`` rule, identical
+        across DuckDB versions and sites for a given ``random_seed``; ``"earliest"`` = ``first``; ``"latest"`` = ``last``;
+        ``"all"`` keeps every eligible stay (``one_per_patient=False``; ``stay_rank`` follows the stable random order).
+        When given it overrides ``sampling_rule`` and ``one_per_patient``.
+    random_seed : int, optional
+        Seed of the random rule; when given it overrides ``random_state``.
     death_sources : {"death_table", "discharge_disposition"} or sequence, optional
         Where a patient's death date comes from: the ``death`` table and / or the end date of any visit
         discharged to a death concept. Default: ``death_table`` only for readmission / cohort-only, both for
@@ -1684,6 +1705,23 @@ def define_study_cohort(
     ... )  # doctest: +SKIP
     >>> cohort.attrs["attrition"]  # doctest: +SKIP
     """
+    if sample_stay_rule is not None:
+        stay_rule = str(sample_stay_rule).strip().lower()
+        if stay_rule not in _SAMPLE_STAY_RULES:
+            raise ValueError(f"Unsupported sample_stay_rule '{sample_stay_rule}'. Use 'random', 'earliest', 'latest' or 'all'.")
+        sampling_rule = _SAMPLE_STAY_RULES[stay_rule]
+        one_per_patient = stay_rule != "all"
+    if random_seed is not None:
+        random_state = random_seed
+    if min_admit_date is not None or max_admit_date is not None:
+        lo, hi = _resolve_study_window(study_window) if study_window is not None else (None, None)
+        new_lo = _iso_date(min_admit_date, "min_admit_date")
+        new_hi = _iso_date(max_admit_date, "max_admit_date")
+        if lo is not None and new_lo is not None and lo != new_lo:
+            raise ValueError(f"min_admit_date ({new_lo}) disagrees with study_window start ({lo}).")
+        if hi is not None and new_hi is not None and hi != new_hi:
+            raise ValueError(f"max_admit_date ({new_hi}) disagrees with study_window end ({hi}).")
+        study_window = (lo or new_lo, hi or new_hi)
     one_per_patient = _flag(one_per_patient, "one_per_patient")
     if not one_per_patient and persist_keys is not None:
         raise ValueError("persist_keys pins one index stay per patient and cannot be combined with one_per_patient=False.")

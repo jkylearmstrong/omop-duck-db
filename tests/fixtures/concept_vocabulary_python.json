@@ -1,0 +1,22 @@
+{
+ "format": "omop-duck-db/concept-vocabulary",
+ "format_version": 1,
+ "name": "history",
+ "omop_duck_db_version": "0.13.0",
+ "vocab_size": 8,
+ "n_special_tokens": 5,
+ "pad_token_idx": 3,
+ "unk_token_idx": 4,
+ "mask_token_id": 8,
+ "sha256": "94dc26f3a73a23e6b40e10aaffbf96dff5bd90e5e62d9c14ded8efdec4059458",
+ "tokens": [
+  "[BOS]",
+  "[EOS]",
+  "[SEP]",
+  "[PAD]",
+  "[UNK]",
+  "1516766 - drug - Insulin X",
+  "201826 - condition - Type 2 diabetes",
+  "4 - procedure"
+ ]
+}
