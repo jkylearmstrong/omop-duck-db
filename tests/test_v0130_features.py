@@ -458,3 +458,33 @@ def test_loso_sklearn_models(model):
     res = evaluate_loso_transport(df, "site_anon", model_type=model, n_bootstraps=0,
                                   model_params={"max_iter": 40} if model == "hist_gbm" else {"n_estimators": 40})
     assert (res.per_site["auroc"] > 0.65).all()
+
+
+# ---- v0.14 deep-dataset additions ------------------------------------------------------------------------------------------
+
+def test_torch_y_is_float_and_targets(con, features):
+    torch = import_or_skip("torch")
+    f = features.assign(los=3.5, tte=10.0, ev=1)
+    ds = extract_multimodal_deep_dataset(con, f, max_visits=3, max_tokens_per_visit=4, output_format="torch_dict",
+                                         target_cols={"los_days": "los", "time_to_event": "tte", "event_observed": "ev"})
+    assert ds["y"].dtype == torch.float32
+    torch.nn.BCEWithLogitsLoss()(torch.zeros(len(f)), ds["y"])           # used to raise on int64
+    assert ds["los_days"].shape == (len(f),) and float(ds["event_observed"][0]) == 1.0
+    with pytest.raises(ValueError, match="target_cols"):
+        extract_multimodal_deep_dataset(con, features, target_cols={"a": "nope"})
+
+
+def test_time_deltas_and_ragged_and_measurements(con, features):
+    ds = extract_multimodal_deep_dataset(con, features, max_visits=5, max_tokens_per_visit=8, domains=("condition",),
+                                         time_deltas=True, ragged=True, include_intra_measurements=True)
+    d = ds["visit_days_before_index"]
+    np.testing.assert_allclose(ds["years_before_index"], np.where(d < 0, 0, d / 365.25), rtol=1e-5)
+    assert (ds["delta_years"] >= 0).all() and (ds["delta_years"][d < 0] == 0).all()
+    ct = ds["concept_tensor"]
+    assert len(ds["ragged_tokens"]) == int((ct != 3).sum()) and ds["ragged_row_offsets"][-1] == len(ds["ragged_tokens"])
+    assert ds["intra_obs"].shape[0] == len(features) and "intra_obs_concepts" in ds
+
+
+def test_ragged_rejects_streaming_formats(con, features, tmp_path):
+    with pytest.raises(ValueError, match="ragged"):
+        extract_multimodal_deep_dataset(con, features, output_format="memmap", output_dir=tmp_path, ragged=True)

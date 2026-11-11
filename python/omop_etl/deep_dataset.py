@@ -30,7 +30,7 @@ from omop_etl.ml_features import (
 )
 
 __all__ = ["extract_multimodal_deep_dataset", "extract_intra_stay_tokens", "extract_intra_stay_measurements", "export_concept_vocabulary",
-           "import_concept_vocabulary", "make_pretraining_targets"]
+           "import_concept_vocabulary", "make_pretraining_targets", "make_ragged", "make_time_deltas"]
 
 VOCABULARY_FORMAT = "omop-duck-db/concept-vocabulary"
 _BLOCK = 1024            # rows per random-number block: makes masks independent of the chunk size
@@ -289,6 +289,42 @@ def _dense_matrix(features_df: pd.DataFrame, dense_columns: Sequence[str] | None
     return arr, list(dense_columns)
 
 
+_TORCH_LONG = {"concept_tensor", "masked_concept_tensor", "mlm_labels", "intra_tensor", "person_id", "ragged_tokens", "ragged_row_offsets"}
+_TORCH_FLOAT = {"y"}
+
+
+def make_ragged(concept_tensor: np.ndarray, pad_token_idx: int = PAD_TOKEN_IDX) -> dict[str, np.ndarray]:
+    """Padding-free (ragged) copy of ``concept_tensor`` (N, V, L): no PAD positions are stored.
+
+    Returns ``ragged_tokens`` (all non-PAD ids in row / visit / position order), ``ragged_counts`` (N, V) tokens per visit
+    and ``ragged_row_offsets`` (N + 1) so row ``i`` is ``ragged_tokens[offsets[i]:offsets[i+1]]``. Rebuild a padded
+    row with the counts; or feed a PyTorch jagged tensor via
+    ``torch.nested.nested_tensor_from_jagged(values, offsets)``.
+    """
+    valid = concept_tensor != pad_token_idx
+    counts = valid.sum(axis=2).astype("int32")
+    offsets = np.zeros(len(concept_tensor) + 1, dtype="int64")
+    np.cumsum(counts.sum(axis=1), out=offsets[1:])
+    return {"ragged_tokens": concept_tensor[valid], "ragged_counts": counts, "ragged_row_offsets": offsets}
+
+
+def make_time_deltas(visit_days_before_index: np.ndarray) -> dict[str, np.ndarray]:
+    """Continuous time features in fractional years (days / 365.25), 0 at padding slots.
+
+    ``years_before_index`` (N, V): age of each visit relative to the admission. ``delta_years`` (N, V): gap to the
+    neighbouring visit in the previous slot (0 for the first visit and for padding). Both are float32 and well scaled
+    for transformer time embeddings; use ``n_visits`` for the padding mask.
+    """
+    d = np.asarray(visit_days_before_index, dtype="float64")
+    pad = d < 0
+    yrs = np.where(pad, 0.0, d / 365.25)
+    gap = np.zeros_like(yrs)
+    gap[:, 1:] = np.abs(yrs[:, 1:] - yrs[:, :-1])
+    gap[pad] = 0.0
+    gap[:, 1:][pad[:, :-1]] = 0.0
+    return {"years_before_index": yrs.astype("float32"), "delta_years": gap.astype("float32")}
+
+
 def _to_torch(d: dict[str, Any]) -> dict[str, Any]:
     try:
         import torch
@@ -298,7 +334,12 @@ def _to_torch(d: dict[str, Any]) -> dict[str, Any]:
     for k, v in d.items():
         if isinstance(v, np.ndarray) and v.dtype != object:
             t = torch.from_numpy(np.ascontiguousarray(v))
-            out[k] = t.long() if k in ("concept_tensor", "masked_concept_tensor", "mlm_labels", "intra_tensor", "person_id") else t
+            if k in _TORCH_LONG:
+                out[k] = t.long()
+            elif k in _TORCH_FLOAT:
+                out[k] = t.float()          # losses (BCEWithLogits, MSE, Cox) need floating targets
+            else:
+                out[k] = t
         else:
             out[k] = v
     return out
@@ -324,6 +365,11 @@ def extract_multimodal_deep_dataset(
     tokenizer: Any = None,
     min_patient_freq: int = 1,
     include_intra_stay: bool = False,
+    include_intra_measurements: bool = False,
+    intra_measurement_args: dict[str, Any] | None = None,
+    time_deltas: bool = False,
+    target_cols: dict[str, str] | None = None,
+    ragged: bool = False,
     intra_max_days: int = 14,
     intra_max_tokens_per_day: int = 30,
     intra_tokenizer: Any = None,
@@ -349,6 +395,19 @@ def extract_multimodal_deep_dataset(
         A frozen vocabulary (:func:`import_concept_vocabulary`): concepts outside it are dropped, so token ids match across sites.
     include_intra_stay : bool
         Adds ``intra_tensor`` / ``intra_day`` / ``intra_lengths`` (see :func:`extract_intra_stay_tokens`).
+    include_intra_measurements : bool
+        Adds ``intra_obs`` / ``intra_obs_mask`` (continuous vitals / labs, :func:`extract_intra_stay_measurements`);
+        ``intra_measurement_args`` are passed to it (``concept_ids``, ``normalization``, ...). Needs ``discharge_date``.
+        With chunked output pass ``concept_ids`` so every chunk uses the same measurement set.
+    time_deltas : bool
+        Adds ``years_before_index`` and ``delta_years`` (fractional years, :func:`make_time_deltas`).
+    target_cols : dict, optional
+        Extra supervised targets ``{output_name: features_df column}`` exported as float32 arrays beside ``y``, e.g.
+        ``{"y_readmission": "readmit", "y_mortality": "died", "los_days": "los", "time_to_event": "tte",
+        "event_observed": "event"}`` for multi-task and survival losses. Missing values stay NaN.
+    ragged : bool
+        ``numpy_dict`` / ``torch_dict`` only: adds the padding-free ``ragged_tokens`` / ``ragged_counts`` /
+        ``ragged_row_offsets`` (:func:`make_ragged`) so the dense ``(N, V, L)`` tensor can be dropped from GPU memory.
     pretraining_targets : bool
         Adds ``masked_concept_tensor``, ``mlm_labels``, ``next_visit_flag`` (:func:`make_pretraining_targets`).
     output_format : {"numpy_dict", "torch_dict", "memmap", "arrow", "zarr"}
@@ -380,8 +439,14 @@ def extract_multimodal_deep_dataset(
         raise ValueError(f"features_df is missing {sorted(need)}.")
     if fmt in ("memmap", "arrow", "zarr") and output_dir is None:
         raise ValueError(f"output_format={fmt!r} needs output_dir.")
-    if include_intra_stay and "discharge_date" not in features_df.columns:
-        raise ValueError("include_intra_stay=True needs a discharge_date column.")
+    if (include_intra_stay or include_intra_measurements) and "discharge_date" not in features_df.columns:
+        raise ValueError("include_intra_stay / include_intra_measurements need a discharge_date column.")
+    if ragged and fmt not in ("numpy_dict", "torch_dict"):
+        raise ValueError("ragged=True is available for 'numpy_dict' and 'torch_dict' only (row lengths vary).")
+    target_cols = dict(target_cols or {})
+    bad = [c for c in target_cols.values() if c not in features_df.columns]
+    if bad:
+        raise ValueError(f"target_cols columns not in features_df: {bad}")
     n = len(features_df)
     features_df = features_df.reset_index(drop=True)
     dense, dense_cols = _dense_matrix(features_df, dense_columns, label_col)
@@ -389,6 +454,7 @@ def extract_multimodal_deep_dataset(
     dense = np.nan_to_num(dense, nan=0.0).astype("float32")
     y = features_df[label_col].to_numpy() if label_col and label_col in features_df.columns else None
     person = features_df["person_id"].to_numpy("int64")
+    extra_y = {k: features_df[c].astype("float32").to_numpy() for k, c in target_cols.items()}
     chunk = max(_BLOCK, -(-int(chunk_size) // _BLOCK) * _BLOCK) if fmt in ("memmap", "arrow", "zarr") else max(_BLOCK, -(-n // _BLOCK) * _BLOCK)
 
     sard_kw = dict(lookback_days=lookback_days, min_patient_freq=min_patient_freq, domains=tuple(domains),
@@ -422,6 +488,14 @@ def extract_multimodal_deep_dataset(
                                                   tokenizer=intra_tokenizer)
                 block.update({k: intra[k] for k in ("intra_tensor", "intra_day", "intra_lengths")})
                 block["_intra_tokenizer"] = intra["tokenizer"]
+            if include_intra_measurements:
+                meas = extract_intra_stay_measurements(con, sub, **(intra_measurement_args or {}))
+                block.update({k: meas[k] for k in ("intra_obs", "intra_obs_mask")})
+                block["_measurement_meta"] = {"concepts": meas["concepts"], "normalization": meas["normalization"]}
+            if time_deltas:
+                block.update(make_time_deltas(block["visit_days_before_index"]))
+            if ragged:
+                block.update(make_ragged(block["concept_tensor"]))
             if pretraining_targets:
                 block.update(make_pretraining_targets(block["concept_tensor"], block["n_visits"], vocab_size=nonlocal_tok.vocab_size,
                                                       mask_prob=mask_prob, seed=seed, row_offset=start))
@@ -433,6 +507,8 @@ def extract_multimodal_deep_dataset(
             block["person_id"] = person[sl]
             if y is not None:
                 block["y"] = y[sl]
+            for k, v in extra_y.items():
+                block[k] = v[sl]
             return block
 
         meta_common = {"max_visits": max_visits, "max_tokens_per_visit": max_tokens_per_visit, "lookback_days": lookback_days,
@@ -444,10 +520,13 @@ def extract_multimodal_deep_dataset(
                 raise ValueError("features_df is empty.")
             tok = block.pop("_tokenizer")
             itok = block.pop("_intra_tokenizer", None)
+            mmeta = block.pop("_measurement_meta", None)
             out = _attach(block, slice(0, n))
             out.update({"dense_columns": dense_cols, "tokenizer": tok, "vocab_size": tok.vocab_size, "mask_token_id": tok.vocab_size})
             if itok is not None:
                 out["intra_tokenizer"] = itok
+            if mmeta is not None:
+                out.update({"intra_obs_concepts": mmeta["concepts"], "intra_obs_normalization": mmeta["normalization"]})
             return _to_torch(out) if fmt == "torch_dict" else out
 
         out_dir = Path(output_dir)
@@ -459,6 +538,7 @@ def extract_multimodal_deep_dataset(
             sl = slice(start, min(start + chunk, n))
             block = _attach(_chunk(start), sl)
             tok, itok = block.pop("_tokenizer"), block.pop("_intra_tokenizer", itok)
+            block.pop("_measurement_meta", None)
             if fmt == "zarr":
                 import zarr
                 for k, v in block.items():
