@@ -490,7 +490,8 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 # ------------------------------------------------------------------------------------------------------
 
 .STUDY_VISIT_TYPES <- c(inpatient = 9201, emergency = 9203, outpatient = 9202)
-.STUDY_SAMPLING_RULES <- c("first", "last", "random")
+.STUDY_SAMPLING_RULES <- c("first", "last", "random", "stable_random")
+.STUDY_SAMPLE_STAY_RULES <- c(random = "stable_random", earliest = "first", latest = "last", all = "stable_random")
 .STUDY_AGE_METHODS <- c("year_difference", "completed_years")
 .STUDY_DEATH_SOURCES <- c("death_table", "discharge_disposition")
 .STUDY_FOLLOWUP_EVIDENCE <- c("observation_period", "visit", "measurement", "condition", "drug", "death")
@@ -604,6 +605,9 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 .study_order_by_rule <- function(rule, seed) {
   if (rule == "random") {
     sprintf("hash(f.visit_occurrence_id, %s), f.visit_occurrence_id", .sql_int(seed))
+  } else if (rule == "stable_random") {
+    # MD5 is specified by RFC 1321 and identical across DuckDB versions, unlike hash()
+    sprintf("md5_number_lower(CAST(f.visit_occurrence_id AS VARCHAR) || ':%s'), f.visit_occurrence_id", .sql_int(seed))
   } else if (rule == "first") {
     "f.visit_start_date ASC, f.visit_occurrence_id ASC"
   } else if (rule == "last") {
@@ -1449,6 +1453,12 @@ remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_r
 #' @param gap_days Gap `G` between the window anchor and the start of the outcome window (`grace_days` in
 #'   [build_readmission_cohort()], `gap_days` in [build_end_of_life_cohort()]). Must be smaller than
 #'   `followup_days`.
+#' @param min_admit_date,max_admit_date `NULL` or an inclusive calendar bound on the index admission date (shorthand for
+#'   `study_window`; counted in the same attrition step). A bound that disagrees with `study_window` is an error.
+#' @param sample_stay_rule `NULL` (default, `sampling_rule` / `one_per_patient` unchanged), or `"random"` (MD5-based
+#'   `stable_random`, identical across DuckDB versions and sites), `"earliest"`, `"latest"` or `"all"` (every eligible
+#'   stay, `one_per_patient = FALSE`). Overrides `sampling_rule` and `one_per_patient`.
+#' @param random_seed `NULL`, or the seed of the random rule (overrides `random_state`).
 #' @param sampling_rule `"random"` (default), `"first"` or `"last"`: which eligible stay represents a patient --
 #'   the stay minimising `hash(visit_occurrence_id, random_state)` (ties by id), the earliest start, or the latest
 #'   start.
@@ -1581,7 +1591,33 @@ define_study_cohort <- function(con,
                                 require_diabetes = FALSE,
                                 diabetes_drug_rule = "names",
                                 diabetes_rxnorm_cuis = NULL,
-                                exclude_metformin_only_prediabetes_pcos = FALSE) {
+                                exclude_metformin_only_prediabetes_pcos = FALSE,
+                                min_admit_date = NULL,
+                                max_admit_date = NULL,
+                                sample_stay_rule = NULL,
+                                random_seed = NULL) {
+  if (!is.null(sample_stay_rule)) {
+    stay_rule <- tolower(trimws(as.character(sample_stay_rule)))
+    if (length(stay_rule) != 1L || !stay_rule %in% names(.STUDY_SAMPLE_STAY_RULES)) {
+      stop(sprintf("Unsupported sample_stay_rule '%s'. Use 'random', 'earliest', 'latest' or 'all'.",
+                   paste(sample_stay_rule, collapse = " ")), call. = FALSE)
+    }
+    sampling_rule <- unname(.STUDY_SAMPLE_STAY_RULES[[stay_rule]])
+    one_per_patient <- !identical(stay_rule, "all")
+  }
+  if (!is.null(random_seed)) random_state <- random_seed
+  if (!is.null(min_admit_date) || !is.null(max_admit_date)) {
+    cur <- .resolve_study_window(study_window)
+    new_lo <- if (is.null(min_admit_date)) NULL else .iso_date(min_admit_date, "min_admit_date")
+    new_hi <- if (is.null(max_admit_date)) NULL else .iso_date(max_admit_date, "max_admit_date")
+    if (!is.null(cur$start) && !is.null(new_lo) && !identical(cur$start, new_lo)) {
+      stop(sprintf("min_admit_date (%s) disagrees with study_window start (%s).", new_lo, cur$start), call. = FALSE)
+    }
+    if (!is.null(cur$end) && !is.null(new_hi) && !identical(cur$end, new_hi)) {
+      stop(sprintf("max_admit_date (%s) disagrees with study_window end (%s).", new_hi, cur$end), call. = FALSE)
+    }
+    study_window <- list(cur$start %||% new_lo, cur$end %||% new_hi)
+  }
   if (!(isTRUE(one_per_patient) || isFALSE(one_per_patient))) {
     stop("one_per_patient must be TRUE or FALSE.", call. = FALSE)
   }
@@ -1602,7 +1638,7 @@ define_study_cohort <- function(con,
 
   rule <- tolower(trimws(as.character(sampling_rule)))
   if (length(rule) != 1L || !rule %in% .STUDY_SAMPLING_RULES) {
-    stop(sprintf("Unsupported sampling_rule '%s'. Use 'first', 'last', or 'random'.",
+    stop(sprintf("Unsupported sampling_rule '%s'. Use 'first', 'last', 'random' or 'stable_random'.",
                  paste(sampling_rule, collapse = " ")), call. = FALSE)
   }
   method <- tolower(trimws(as.character(age_method)))

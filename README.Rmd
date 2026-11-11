@@ -806,6 +806,35 @@ fg <- fine_gray_estimator(surv_df, time_col = "time_days", status_col = "status"
 summary(fg)
 ```
 
+## Benchmark features, deep-learning datasets and leave-one-site-out evaluation (v0.13.0)
+
+Python, with R versions of the cohort arguments, `extract_benchmark_features()`, recalibration / capacity / leave-one-site-out and the vocabulary manifest (not the tensor dataset). All of it was tested on synthetic data; nothing here has been run on a production-size database.
+
+```python
+from omop_etl import (define_study_cohort, extract_benchmark_features, extract_multimodal_deep_dataset,
+                      export_concept_vocabulary, import_concept_vocabulary, evaluate_loso_transport,
+                      capacity_risk_tiers, map_risk_tiers)
+
+# 1. Cohort: calendar bounds (logged in the attrition table), one stay per patient drawn by a seeded MD5 rule
+cohort = define_study_cohort(con, min_admit_date="2010-01-01", max_admit_date="2022-09-30",
+                             sample_stay_rule="random", random_seed=20261104, table_name="cohort")
+
+# 2. One call for the leakage-free modelling table (labs: index-admission mean and latest in-stay value)
+df = extract_benchmark_features(con, "cohort", include_sdoh=False)       # df.attrs["feature_groups"] lists the groups
+
+# 3. Multimodal tensors; a lead site freezes the vocabulary, other sites import it so token ids match
+ds = extract_multimodal_deep_dataset(con, df, max_visits=20, max_tokens_per_visit=30, lookback_days=365,
+                                     output_format="torch_dict", include_intra_stay=True, pretraining_targets=True)
+export_concept_vocabulary(ds["tokenizer"], "vocabulary.json")
+tok = import_concept_vocabulary("vocabulary.json")                         # at the other sites: pass tokenizer=tok
+# big cohorts: output_format="memmap", "arrow" or "zarr" with output_dir=..., chunk_size=50_000 streams to disk
+
+# 4. Leave-one-site-out transport: balanced training on N-1 sites, natural-prevalence scoring of the held-out site
+res = evaluate_loso_transport(df, site_col="site_anon", model_type="xgboost", balance_ratio=1.0, n_bootstraps=100)
+res.per_site                                                                # AUROC, Brier, O/E, top-10% PPV with 95% CIs
+tiers = capacity_risk_tiers(res.predictions["p"], top_fraction=0.10)       # "the riskiest 10% get a care-management call"
+```
+
 ## Disclosure control, CONSORT counts, parity audit & site summary packages (v0.12.0)
 
 Everything below works on synthetic or aggregate data and has no study-, site- or cohort-specific content. Python

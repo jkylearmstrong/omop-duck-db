@@ -38,7 +38,11 @@ define_study_cohort(
   require_diabetes = FALSE,
   diabetes_drug_rule = "names",
   diabetes_rxnorm_cuis = NULL,
-  exclude_metformin_only_prediabetes_pcos = FALSE
+  exclude_metformin_only_prediabetes_pcos = FALSE,
+  min_admit_date = NULL,
+  max_admit_date = NULL,
+  sample_stay_rule = NULL,
+  random_seed = NULL
 )
 }
 \arguments{
@@ -162,6 +166,15 @@ need the vocabulary on the connection.}
 \item{exclude_metformin_only_prediabetes_pcos}{\code{FALSE} (default), \code{TRUE} (= \code{"icd10"}), \code{"icd10"}, \code{"snomed"} or \code{"both"}:
 drop patients whose only diabetes drug is metformin and who have prediabetes or PCOS and no diabetes diagnosis (see
 \code{\link[=find_metformin_only_prediabetes_pcos]{find_metformin_only_prediabetes_pcos()}}). Adds the attrition step "Not metformin-only prediabetes / PCOS (patient-level)".}
+
+\item{min_admit_date, max_admit_date}{\code{NULL} or an inclusive calendar bound on the index admission date (shorthand for
+\code{study_window}; counted in the same attrition step). A bound that disagrees with \code{study_window} is an error.}
+
+\item{sample_stay_rule}{\code{NULL} (default, \code{sampling_rule} / \code{one_per_patient} unchanged), or \code{"random"} (MD5-based
+\code{stable_random}, identical across DuckDB versions and sites), \code{"earliest"}, \code{"latest"} or \code{"all"} (every eligible
+stay, \code{one_per_patient = FALSE}). Overrides \code{sampling_rule} and \code{one_per_patient}.}
+
+\item{random_seed}{\code{NULL}, or the seed of the random rule (overrides \code{random_state}).}
 }
 \value{
 A \code{data.frame}, one row per patient ordered by \code{subject_id}, with columns \code{cohort_definition_id},
