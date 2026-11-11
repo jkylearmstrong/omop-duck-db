@@ -21,6 +21,15 @@ INCOME = pd.DataFrame({"zcta": ["19104", "15213", "08101"], "median_income": [30
 TRAIN_INCOME = pd.DataFrame({"zcta": [f"{10000 + i}" for i in range(50)], "median_income": np.linspace(20000, 200000, 50)})
 
 
+def _wide_con():
+    """Ten stays, one per person, ZIPs 19100-19109 (enough mapped stays to fit a transform)."""
+    addr = [(i, 100 + i, f"{19099 + i:05d}", "2010-01-01", None, "N") for i in range(1, 11)]
+    c = _con(addr, [(i, i, "2016-06-01") for i in range(1, 11)])
+    for pid in range(3, 11):
+        c.execute(f"INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id) VALUES ({pid}, 8507, 1980, 0, 0)")
+    return c
+
+
 @pytest.fixture()
 def con():
     return _con(ADDR, VISITS)
@@ -121,3 +130,95 @@ def test_feature_list_geography(con):
     assert fs.names == ["ruca", "sdi"] and len(fs.compute(con)) == 2
     with pytest.raises(ValueError, match="needs arguments"):
         feature_list("geography", ruca={"crosswalk": RUCA})
+
+
+def test_zscore_cohort_stays_manifest_and_registry(con, tmp_path):
+    from omop_etl import stays_from_cohort
+    from omop_etl.study_features import (FEATURE_LISTS, MANIFEST_FORMAT, StudyFeature, available_features, make_feature,
+                                         register_feature_factory)
+    con.execute("CREATE TABLE cohort_x AS SELECT 1 AS cohort_definition_id, person_id AS subject_id, visit_start_date AS cohort_start_date, "
+                "visit_end_date AS cohort_end_date, visit_occurrence_id FROM visit_occurrence")
+    stays = stays_from_cohort(con, "cohort_x", cohort_id=1)
+    assert stays["stay_id"].tolist() == [1, 2] and list(stays.columns) == ["person_id", "stay_id", "admit_date"]
+    with pytest.raises(ValueError, match="invalid cohort table"):
+        stays_from_cohort(con, "x; DROP")
+    con.execute("CREATE TABLE bad_cohort (a INT)")
+    with pytest.raises(ValueError, match="needs subject_id"):
+        stays_from_cohort(con, "bad_cohort")
+
+    tbl = pd.DataFrame({"zcta": ["19104", "15213"], "v": [10.0, 30.0]})
+    big = pd.DataFrame({"zip5": [f"{i:05d}" for i in range(19100, 19110)] + ["15213"], "value": np.arange(11.0)})
+    z = area_feature("zv", big, "value", transform="zscore", missing_indicator=False)
+    fs = FeatureSet([z])
+    wide_con = _wide_con()
+    stays = wide_con.execute("SELECT person_id, visit_occurrence_id AS stay_id, visit_start_date AS admit_date FROM visit_occurrence").df()
+    with pytest.raises(ValueError, match="training fit"):
+        fs.compute(wide_con, stays)
+    out = fs.compute(wide_con, stays, fit=["zv"])
+    assert set(fs.state()["zv"]) == {"mean", "sd"} and out.attrs["feature_state"] == fs.state()
+    path = tmp_path / "m.json"
+    m = fs.export_manifest(path)
+    assert m["format"] == MANIFEST_FORMAT and json.loads(path.read_text())["features"][0]["name"] == "zv"
+    other = FeatureSet([area_feature("zv", big, "value", transform="zscore", missing_indicator=False)]).load_state(path)
+    assert other.compute(wide_con, stays)["zv"].tolist() == out["zv"].tolist()
+    with pytest.raises(ValueError, match="unknown features"):
+        fs.compute(con, stays, fit=["nope"])
+    with pytest.raises(KeyError):
+        fs.remove("nope")
+    assert "zv" in fs and len(fs) == 1 and [f.name for f in fs] == ["zv"] and fs["zv"].name == "zv"
+
+    # constructor / argument validation
+    with pytest.raises(ValueError, match="letters, digits"):
+        StudyFeature("bad name", ("c",), lambda *a: None)
+    with pytest.raises(ValueError, match="distinct column"):
+        StudyFeature("f", ("c", "c"), lambda *a: None)
+    with pytest.raises(ValueError, match="unknown columns"):
+        StudyFeature("f", ("c",), lambda *a: None, concept_ids={"d": 1})
+    with pytest.raises(ValueError, match="transform must be"):
+        area_feature("a", tbl, "v", transform="sqrt")
+    with pytest.raises(ValueError, match="ZIP column"):
+        area_feature("a", pd.DataFrame({"x": [1], "v": [2]}), "v")
+    with pytest.raises(ValueError, match="value_column"):
+        area_feature("a", pd.DataFrame({"zip": ["1"], "u": [1], "v": [2]}))
+    with pytest.raises(ValueError, match="stays is missing"):
+        FeatureSet([z]).compute(con, pd.DataFrame({"person_id": [1]}))
+    with pytest.raises(ValueError, match="unique"):
+        FeatureSet([z]).compute(con, pd.DataFrame({"person_id": [1, 2], "stay_id": [1, 1], "admit_date": ["2016-01-01"] * 2}))
+    with pytest.raises(ValueError, match="invalid address table"):
+        FeatureSet([z]).compute(con, stays, address_table="x; DROP", fit=True)
+    bad = custom_feature("bad", ["b"], lambda c, s: pd.DataFrame({"stay_id": s["stay_id"]}))
+    with pytest.raises(ValueError, match="returned"):
+        FeatureSet([bad]).compute(con, stays)
+    dup = custom_feature("dup", ["d"], lambda c, s: pd.DataFrame({"stay_id": [1, 1], "d": [0.0, 1.0]}))
+    with pytest.raises(ValueError, match="more than one row"):
+        FeatureSet([dup]).compute(con, stays)
+    with pytest.raises(ValueError, match="required OMOP table"):
+        FeatureSet([sql_feature("x", "SELECT 1", ["x"], requires=("no_such",))]).compute(con, stays)
+    with pytest.raises(ValueError, match="missing column"):
+        fs.write(con, stays)
+
+    # registry
+    with pytest.raises(ValueError, match="already registered"):
+        register_feature_factory("ruca", ruca_feature)
+    register_feature_factory("mine", lambda: custom_feature("mine", ["m"], lambda c, s: pd.DataFrame({"stay_id": s["stay_id"], "m": 1.0})))
+    assert "mine" in available_features() and make_feature("mine").name == "mine"
+    with pytest.raises(KeyError):
+        make_feature("nope")
+    with pytest.raises(KeyError):
+        feature_list("nope")
+    FEATURE_LISTS["tmp_list"] = ("mine",)
+    assert feature_list("tmp_list", mine={}).names == ["mine"]
+    del FEATURE_LISTS["tmp_list"]
+
+
+def test_person_location_fallback_and_sdi_fit(tmp_path):
+    c = _con([], VISITS, location_zip="19104")                   # person 2 only has person.location_id
+    sdi = pd.DataFrame({"zip": [f"{i:05d}" for i in range(19100, 19110)], "sdi": np.arange(10.0, 110.0, 10)})
+    fs = FeatureSet([sdi_feature(sdi)])
+    c.execute("INSERT INTO location (location_id, zip) SELECT 1000 + i, printf('%05d', 19099 + i) FROM range(1, 11) t(i)")
+    for pid in range(3, 11):
+        c.execute(f"INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id, location_id) VALUES ({pid}, 8507, 1980, 0, 0, {1000 + pid})")
+        c.execute("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, "
+                  f"visit_type_concept_id) VALUES ({pid}, {pid}, 9201, DATE '2016-06-01', DATE '2016-06-02', 0)")
+    out = fs.compute(c, fit=True)
+    assert len(fs.state()["sdi"]["cut_points"]) == 4 and len(out) == 10

@@ -460,3 +460,11 @@ def test_loso_sklearn_models(model):
     res = evaluate_loso_transport(df, "site_anon", model_type=model, n_bootstraps=0,
                                   model_params={"max_iter": 40} if model == "hist_gbm" else {"n_estimators": 40})
     assert (res.per_site["auroc"] > 0.65).all()
+
+
+def test_loso_hist_gbm_drops_all_nan_column():
+    pytest.importorskip("sklearn")
+    df = _sites()
+    df["sdi_quintile"] = np.nan                                                      # SDoH fallback column, NaN everywhere
+    res = evaluate_loso_transport(df, "site_anon", model_type="hist_gbm", n_bootstraps=0, model_params={"max_iter": 40})
+    assert (res.per_site["auroc"] > 0.65).all()
