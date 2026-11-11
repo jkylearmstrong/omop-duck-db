@@ -459,3 +459,31 @@ def test_loso_sklearn_models(model):
     res = evaluate_loso_transport(df, "site_anon", model_type=model, n_bootstraps=0,
                                   model_params={"max_iter": 40} if model == "hist_gbm" else {"n_estimators": 40})
     assert (res.per_site["auroc"] > 0.65).all()
+
+
+def test_to_torch_casts_y_float_and_ids_long_without_torch(monkeypatch):
+    """Exercises _to_torch with a stub torch module so the dtype rules are covered even where PyTorch is not installed."""
+    import sys
+    import types
+    import numpy as np
+    from omop_etl.deep_dataset import _to_torch
+
+    class FakeTensor:
+        def __init__(self, arr, dtype=None):
+            self.arr, self.dtype = arr, dtype or str(arr.dtype)
+
+        def long(self):
+            return FakeTensor(self.arr, "long")
+
+        def float(self):
+            return FakeTensor(self.arr, "float32")
+
+    fake = types.ModuleType("torch")
+    fake.from_numpy = FakeTensor
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    out = _to_torch({"y": np.array([0, 1], dtype="int32"), "concept_tensor": np.zeros((2, 1, 1), "int32"),
+                     "dense_covariates": np.zeros((2, 1), "float32"), "site": np.array(["a", "b"], dtype=object)})
+    assert out["y"].dtype == "float32"
+    assert out["concept_tensor"].dtype == "long"
+    assert out["dense_covariates"].dtype == "float32"
+    assert list(out["site"]) == ["a", "b"]
