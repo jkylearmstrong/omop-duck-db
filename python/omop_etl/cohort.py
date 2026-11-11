@@ -2294,11 +2294,35 @@ def cohort_attrition(cohort: pd.DataFrame) -> pd.DataFrame:
     return att.copy() if isinstance(att, pd.DataFrame) else pd.DataFrame(list(att))
 
 
-class ConsortAttrition:
-    """Represents a CONSORT/STROBE participant attrition flow with multi-format exporters."""
+def _hidden(v: Any) -> bool:
+    return v is None or (isinstance(v, float) and v != v) or v is pd.NA
 
-    def __init__(self, df: pd.DataFrame):
+
+def _cnt(v: Any, min_cell: int | None) -> str:
+    """A shown count with thousands separators, or ``<min_cell`` for a suppressed (NaN) one."""
+    return f"<{min_cell or 11}" if _hidden(v) else f"{int(v):,}"
+
+
+def _pct_txt(v: Any) -> str:
+    return "" if _hidden(v) else f"{float(v):.1f}%"
+
+
+class ConsortAttrition:
+    """Represents a CONSORT/STROBE participant attrition flow with multi-format exporters.
+
+    A table suppressed for release (:func:`omop_etl.disclosure.suppress_attrition_table`) has NaN where a count is
+    hidden; every exporter writes those as ``<min_cell`` (default 11) and never prints a hidden percentage.
+    """
+
+    def __init__(self, df: pd.DataFrame, min_cell: int | None = None):
         self.df = df.copy()
+        self.min_cell = min_cell
+
+    def to_csv(self, path: str | Path, *, digits: int = 1) -> Path:
+        """Writes the table as CSV, suppressed counts as ``<min_cell``."""
+        from omop_etl.consort import consort_table_to_csv
+
+        return consort_table_to_csv(self.df, path, min_cell=self.min_cell or (11 if "suppressed" in self.df.columns else None), digits=digits)
 
     @property
     def summary_table(self) -> pd.DataFrame:
@@ -2325,16 +2349,17 @@ class ConsortAttrition:
         for _, row in self.df.iterrows():
             idx = int(row["step_number"])
             name = str(row["step_name"]).replace('"', "'")
-            retained = int(row["subjects_retained"])
-            pct = float(row.get("percent_retained", 100.0))
-            dropped = int(row.get("subjects_dropped", 0))
+            retained = _cnt(row["subjects_retained"], self.min_cell)
+            pct = _pct_txt(row.get("percent_retained", 100.0))
+            dropped_raw = row.get("subjects_dropped", 0)
+            dropped = 1 if _hidden(dropped_raw) else int(dropped_raw)
 
-            lines.append(f'    S{idx}["{idx}. {name}<br/>(N = {retained:,}, {pct:.1f}%)"]')
+            lines.append(f'    S{idx}["{idx}. {name}<br/>(N = {retained}{", " + pct if pct else ""})"]')
             if idx > 1:
                 prev = idx - 1
                 lines.append(f"    S{prev} --> S{idx}")
                 if dropped > 0:
-                    lines.append(f'    E{idx}["Excluded: {dropped:,}"]')
+                    lines.append(f'    E{idx}["Excluded: {_cnt(dropped_raw, self.min_cell)}"]')
                     lines.append(f"    S{prev} -.-> E{idx}")
         return "\n".join(lines)
 
@@ -2364,23 +2389,24 @@ class ConsortAttrition:
         for _, row in self.df.iterrows():
             idx = int(row["step_number"])
             name = str(row["step_name"]).replace('"', '\\"')
-            retained = int(row["subjects_retained"])
-            pct = float(row.get("percent_retained", 100.0))
-            dropped = int(row.get("subjects_dropped", 0))
+            retained = _cnt(row["subjects_retained"], self.min_cell)
+            pct = _pct_txt(row.get("percent_retained", 100.0))
+            dropped_raw = row.get("subjects_dropped", 0)
+            dropped = 1 if _hidden(dropped_raw) else int(dropped_raw)
 
             if idx > 1:
                 lines.append("    #v(6pt)")
                 lines.append("    #text(12pt)[$arrow.b$]")
                 lines.append("    #v(6pt)")
 
-            box_content = f"[*Step {idx}: {name}*\\ \n    (N = {retained:,}, {pct:.1f}%)]"
+            box_content = f"[*Step {idx}: {name}*\\ \n    (N = {retained}{', ' + pct if pct else ''})]"
             lines.append(
                 f'    #rect(width: 85%, inset: 8pt, radius: 4pt, stroke: 0.75pt + rgb("204060"), fill: rgb("f4f7fa"))'
                 f"{box_content}"
             )
             if dropped > 0:
                 reason = str(row.get("exclusion_reason", "Excluded criteria not met")).replace('"', '\\"')
-                excl_content = f"[_Excluded (N = {dropped:,})_\\ \n    {reason}]"
+                excl_content = f"[_Excluded (N = {_cnt(dropped_raw, self.min_cell)})_\\ \n    {reason}]"
                 lines.append(
                     f'    #v(3pt)\n    #rect(width: 70%, inset: 6pt, radius: 3pt, stroke: (dash: "dashed", paint: rgb("b03030")), fill: rgb("fff5f5"))'
                     f"{excl_content}"
@@ -2411,12 +2437,13 @@ class ConsortAttrition:
         for _, row in self.df.iterrows():
             idx = int(row["step_number"])
             name = str(row["step_name"]).replace("_", "\\_").replace("&", "\\&").replace("%", "\\%")
-            retained = int(row["subjects_retained"])
-            pct = float(row.get("percent_retained", 100.0))
-            dropped = int(row.get("subjects_dropped", 0))
+            retained = _cnt(row["subjects_retained"], self.min_cell)
+            pct = _pct_txt(row.get("percent_retained", 100.0))
+            dropped_raw = row.get("subjects_dropped", 0)
+            dropped = 1 if _hidden(dropped_raw) else int(dropped_raw)
 
             node_id = f"step{idx}"
-            node_label = f"\\textbf{{{idx}. {name}}}\\\\(N = {retained:,}, {pct:.1f}\\%)"
+            node_label = f"\\textbf{{{idx}. {name}}}\\\\(N = {retained}{', ' + pct.replace('%', chr(92) + '%') if pct else ''})"
 
             if idx == 1:
                 lines.append(f"  \\node [box] ({node_id}) {{{node_label}}};")
@@ -2427,7 +2454,7 @@ class ConsortAttrition:
                 if dropped > 0:
                     excl_id = f"excl{idx}"
                     reason = str(row.get("exclusion_reason", "Excluded criteria not met")).replace("_", "\\_").replace("&", "\\&").replace("%", "\\%")
-                    excl_label = f"\\textit{{Excluded (N = {dropped:,})}}\\\\{reason}"
+                    excl_label = f"\\textit{{Excluded (N = {_cnt(dropped_raw, self.min_cell)})}}\\\\{reason}"
                     lines.append(f"  \\node [exclude, right of={prev_node}, node distance=6.5cm, yshift=-0.9cm] ({excl_id}) {{{excl_label}}};")
                     lines.append(f"  \\path [arrow, dashed, draw=red!70!black] ({prev_node}.south) |- ({excl_id}.west);")
 
@@ -2445,38 +2472,75 @@ def generate_consort_attrition(
     cohort_data: Any = None,
     cohort_id: int = 1,
     steps: Sequence[tuple[str, str]] | None = None,
+    *,
+    initial_n: int | None = None,
+    exclusions: Any = None,
+    sites: Any = None,
+    initial_label: str = "Source population",
+    min_cell: int | None = None,
 ) -> ConsortAttrition:
-    """Generate CONSORT attrition flowchart object with Mermaid and LaTeX exporters.
+    """Generate CONSORT attrition flowchart object with Mermaid, LaTeX, Typst, TikZ, CSV and PNG/SVG/PDF exporters.
 
-    Args:
-        con: Active DuckDB connection (required if steps are provided).
-        cohort_data: Either a DataFrame with an 'attrition' attribute, an existing
-            attrition DataFrame, or a Cohort object.
-        cohort_id: Cohort ID evaluated when evaluating raw steps.
-        steps: Optional list of (step_name, query) tuples evaluated via compute_attrition.
+    Four ways in, checked in this order:
+
+    * ``steps`` (+ ``con``): list of (step_name, query) tuples evaluated via ``compute_attrition``.
+    * ``initial_n`` + ``exclusions``: raw counts for one site - the source population and what each step removed
+      (``[("Washout", 120), ("Age < 18", 40), ("Died in hospital", 31), ("Transferred out", 9)]``); see
+      :func:`omop_etl.consort.consort_from_counts`.
+    * ``sites``: ``{site_label: attrition table | ConsortAttrition | {"initial_n": ..., "exclusions": ...}}`` pooled by
+      summing the counts per step (:func:`omop_etl.consort.pool_consort_tables`). Pooled output is suppressed
+      with ``min_cell`` (default 11) because it leaves the site.
+    * ``cohort_data``: a DataFrame carrying an ``attrition`` attribute, an attrition DataFrame or a Cohort object.
+
+    ``min_cell`` suppresses counts from 1 to ``min_cell - 1`` (and anything they could be recovered from by subtraction);
+    the exporters then print ``<min_cell``. It is ``None`` (exact counts) for single-site input unless you pass it.
 
     Returns:
-        ConsortAttrition: Object with .to_mermaid(), .to_latex(), .to_markdown(), and .to_dataframe().
+        ConsortAttrition: Object with .to_mermaid(), .to_latex(), .to_markdown(), .to_csv() and .to_dataframe().
     """
+    from omop_etl.consort import consort_from_counts, pool_consort_tables
+    from omop_etl.disclosure import DEFAULT_MIN_CELL, suppress_attrition_table
+
     if steps is not None:
         if con is None:
             raise ValueError("Must provide active DuckDB connection `con` when `steps` is provided.")
         df = compute_attrition(con, cohort_id, steps)
-        return ConsortAttrition(df)
+        return ConsortAttrition(suppress_attrition_table(df, min_cell) if min_cell else df, min_cell)
+
+    if initial_n is not None:
+        if exclusions is None:
+            raise ValueError("`exclusions` is required with `initial_n`")
+        return ConsortAttrition(consort_from_counts(initial_n, exclusions, initial_label=initial_label, min_cell=min_cell), min_cell)
+
+    if sites is not None:
+        tables = {}
+        for name, t in dict(sites).items():
+            if isinstance(t, dict):
+                t = consort_from_counts(t["initial_n"], t.get("exclusions", []), initial_label=t.get("initial_label", initial_label))
+            elif hasattr(t, "to_dataframe"):
+                t = t.to_dataframe()
+            tables[str(name)] = t
+        mc = DEFAULT_MIN_CELL if min_cell is None else min_cell
+        return ConsortAttrition(pool_consort_tables(tables, min_cell=mc), mc)
 
     if isinstance(cohort_data, pd.DataFrame):
         if "attrition" in getattr(cohort_data, "attrs", {}):
-            return ConsortAttrition(cohort_attrition(cohort_data))
-        if "step_name" in cohort_data.columns and "subjects_retained" in cohort_data.columns:
-            return ConsortAttrition(cohort_data)
+            df = cohort_attrition(cohort_data)
+        elif "step_name" in cohort_data.columns and "subjects_retained" in cohort_data.columns:
+            df = cohort_data
+        else:
+            df = None
+        if df is not None:
+            return ConsortAttrition(suppress_attrition_table(df, min_cell) if min_cell else df, min_cell)
 
     if hasattr(cohort_data, "attrition"):
         att = getattr(cohort_data, "attrition")
         if isinstance(att, pd.DataFrame):
-            return ConsortAttrition(att)
+            return ConsortAttrition(suppress_attrition_table(att, min_cell) if min_cell else att, min_cell)
 
     raise ValueError(
-        "Could not extract attrition data. Provide `steps` with `con`, or a cohort DataFrame with an 'attrition' attribute."
+        "Could not extract attrition data. Provide `steps` with `con`, `initial_n` with `exclusions`, `sites`, "
+        "or a cohort DataFrame with an 'attrition' attribute."
     )
 
 
@@ -2506,10 +2570,11 @@ def export_consort_flowchart(attrition: Any, out_path: str | Path = "figure1.png
     if df.empty:
         raise ValueError("The attrition table has no steps.")
     df = df.reset_index(drop=True)
-    retained = [int(v) for v in df["subjects_retained"]]
-    dropped = ([max(int(v), 0) for v in df["subjects_dropped"]] if "subjects_dropped" in df.columns else
+    mc = getattr(attrition, "min_cell", None) or (11 if "suppressed" in df.columns else None)
+    retained = [v if _hidden(v) else int(v) for v in df["subjects_retained"]]
+    dropped = ([v if _hidden(v) else max(int(v), 0) for v in df["subjects_dropped"]] if "subjects_dropped" in df.columns else
                [0] + [max(a - b, 0) for a, b in zip(retained, retained[1:])])
-    pct = [float(v) for v in df["percent_retained"]] if "percent_retained" in df.columns else \
+    pct = [float("nan") if _hidden(v) else float(v) for v in df["percent_retained"]] if "percent_retained" in df.columns else \
         [100.0 * n / retained[0] if retained[0] else 0.0 for n in retained]
     reasons = [str(v).strip() if isinstance(v, str) and v.strip() else "" for v in df["exclusion_reason"]]         if "exclusion_reason" in df.columns else [""] * len(df)
     n = len(df)
@@ -2522,15 +2587,15 @@ def export_consort_flowchart(attrition: Any, out_path: str | Path = "figure1.png
     box = dict(boxstyle="round,pad=0.4", fc="white", ec="black", lw=1.2)
     for i in range(n):
         y = (n - i) * 2 - 0.5
-        label = f"{df['step_name'].iloc[i]}\nN = {retained[i]:,} ({pct[i]:.1f}%)"
+        label = f"{df['step_name'].iloc[i]}\nN = {_cnt(retained[i], mc)}" + ("" if _hidden(pct[i]) else f" ({pct[i]:.1f}%)")
         ax.text(3.6, y, label, ha="center", va="center", fontsize=10, bbox=box)
         if i > 0:
             ax.annotate("", xy=(3.6, y + 0.26), xytext=(3.6, y + 2 - 0.26),
                         arrowprops=dict(arrowstyle="-|>", lw=1.2, shrinkA=0, shrinkB=0))
-            if dropped[i] > 0:
+            if _hidden(dropped[i]) or dropped[i] > 0:
                 ym = y + 1
                 ax.annotate("", xy=(7.65, ym), xytext=(3.6, ym), arrowprops=dict(arrowstyle="-|>", lw=1.0, shrinkA=0, shrinkB=0))
-                ax.text(8.1, ym, (f"Excluded: {reasons[i]}\nn = {dropped[i]:,}" if reasons[i] else f"Excluded\nn = {dropped[i]:,}"), ha="center", va="center", fontsize=9,
+                ax.text(8.1, ym, (f"Excluded: {reasons[i]}\nn = {_cnt(dropped[i], mc)}" if reasons[i] else f"Excluded\nn = {_cnt(dropped[i], mc)}"), ha="center", va="center", fontsize=9,
                         bbox=dict(boxstyle="round,pad=0.4", fc="#f2f2f2", ec="black", lw=1.0))
     if terminal_split:
         total = sum(int(v) for v in terminal_split.values())

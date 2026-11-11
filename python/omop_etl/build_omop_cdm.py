@@ -1031,11 +1031,39 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
     con.execute("DROP VIEW IF EXISTS _temp_lab_result;")
 
 
-def load_vital(con, source_dir, site_id=None, disambiguate_patids=False):
+#: PCORnet VITAL column -> (LOINC code, standard OMOP concept used when the vocabulary tables cannot resolve the LOINC code,
+#: UCUM unit string, unit concept). 3004249 = systolic BP, 3012888 = diastolic BP (OMOP CDM v5.4 standard concepts).
+VITAL_ANALYTES = {
+    "HT": ("8302-2", 3036277, "[in_us]", 9326),
+    "WT": ("29463-7", 3025315, "[lb_av]", 8739),
+    "BMI": ("39156-5", 3038553, "kg/m2", 9531),
+    "SYSTOLIC": ("8480-6", 3004249, "mm[Hg]", 8876),
+    "DIASTOLIC": ("8462-4", 3012888, "mm[Hg]", 8876),
+}
+#: Physiologic limits in the units PCORnet stores (inches, pounds, kg/m2, mm Hg) for ``load_vital(plausible_ranges=True)``.
+DEFAULT_VITAL_RANGES = {"HT": (10, 100), "WT": (1, 1500), "BMI": (5, 200), "SYSTOLIC": (40, 300), "DIASTOLIC": (20, 200)}
+
+
+def load_vital(con, source_dir, site_id=None, disambiguate_patids=False, derive_bmi=True, plausible_ranges=None):
+    """Loads PCORnet ``vital.csv`` into ``measurement`` (height, weight, BMI, systolic and diastolic BP) and ``observation`` (smoking).
+
+    Each analyte becomes a standard LOINC-based concept: the vocabulary lookup (source_to_concept_map, then 'Maps to', then a
+    standard LOINC concept) is tried first, and when it finds nothing - an ETL run before the vocabulary is loaded, or a
+    trimmed vocabulary - the fixed OMOP concept in :data:`VITAL_ANALYTES` is used (3004249 systolic BP, 3012888 diastolic BP,
+    3036277 height, 3025315 weight, 3038553 BMI), never 0.
+
+    ``derive_bmi`` (default True) adds a BMI measurement (703 x lb / in^2) for rows that have height and weight but no BMI.
+    ``plausible_ranges`` (``True`` for :data:`DEFAULT_VITAL_RANGES`, or ``{"SYSTOLIC": (40, 300), ...}``) drops values outside
+    the range instead of loading them; the counts are returned. Zero and negative values are always dropped.
+
+    Returns ``{"rows_loaded": {analyte: n}, "rows_dropped_implausible": {analyte: n}}`` (empty when there is no vital file).
+    """
     path = find_source_file(source_dir, "vital")
     if path is None:
         print("Skipping VITAL - no vital.csv found (optional table)")
-        return
+        return {"rows_loaded": {}, "rows_dropped_implausible": {}}
+    ranges = dict(DEFAULT_VITAL_RANGES) if plausible_ranges is True else dict(plausible_ranges or {})
+    summary = {"rows_loaded": {}, "rows_dropped_implausible": {}}
 
     prepare_source_view(
         con,
@@ -1051,24 +1079,36 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False):
 
     # Staged, single-analyte inserts (FR-C5) avoid DuckDB memory access violations
     # on massive vital files by avoiding a single massive 5-way UNION ALL with sort.
-    analytes = [
-        ("HT", "8302-2", "TRY_CAST(HT AS DOUBLE)", "[in_us]", 9326, "HT IS NOT NULL AND TRY_CAST(HT AS DOUBLE) IS NOT NULL AND TRY_CAST(HT AS DOUBLE) > 0"),
-        ("WT", "29463-7", "TRY_CAST(WT AS DOUBLE)", "[lb_av]", 8739, "WT IS NOT NULL AND TRY_CAST(WT AS DOUBLE) IS NOT NULL AND TRY_CAST(WT AS DOUBLE) > 0"),
-        ("BMI", "39156-5", "TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE)", "kg/m2", 9531, "COALESCE(ORIGINAL_BMI, BMI) IS NOT NULL AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) IS NOT NULL AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) > 0"),
-        ("SYSTOLIC", "8480-6", "TRY_CAST(SYSTOLIC AS DOUBLE)", "mm[Hg]", 8876, "SYSTOLIC IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) > 0"),
-        ("DIASTOLIC", "8462-4", "TRY_CAST(DIASTOLIC AS DOUBLE)", "mm[Hg]", 8876, "DIASTOLIC IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) > 0"),
-    ]
-    for tag, loinc_code, val_expr, unit_str, unit_cid, where_cond in analytes:
+    bmi_col = "TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE)"
+    ht_col, wt_col = "TRY_CAST(HT AS DOUBLE)", "TRY_CAST(WT AS DOUBLE)"
+    stages = [(tag, tag, f"TRY_CAST({tag} AS DOUBLE)") for tag in ("HT", "WT")]
+    stages.append(("BMI", "BMI", bmi_col))
+    stages += [(tag, tag, f"TRY_CAST({tag} AS DOUBLE)") for tag in ("SYSTOLIC", "DIASTOLIC")]
+    if derive_bmi:
+        stages.append(("BMI_DERIVED", "BMI", f"ROUND(703.0 * {wt_col} / ({ht_col} * {ht_col}), 2)"))
+    for tag, analyte, val_expr in stages:
+        loinc_code, fallback_cid, unit_str, unit_cid = VITAL_ANALYTES[analyte]
+        where_cond = f"{val_expr} IS NOT NULL AND {val_expr} > 0"
+        if tag == "BMI_DERIVED":
+            where_cond = f"{bmi_col} IS NULL AND {ht_col} > 0 AND {wt_col} > 0"
+        if analyte in ranges:
+            lo, hi = ranges[analyte]
+            bad = con.execute(f"SELECT COUNT(*) FROM _temp_vital WHERE {where_cond} AND NOT ({val_expr} BETWEEN {float(lo)} AND {float(hi)})").fetchone()[0]
+            summary["rows_dropped_implausible"][tag] = int(bad)
+            where_cond += f" AND {val_expr} BETWEEN {float(lo)} AND {float(hi)}"
+        before = con.execute("SELECT COUNT(*) FROM measurement").fetchone()[0]
         run_insert(con, f"MEASUREMENT (from VITAL - {tag})", f"""
             INSERT INTO measurement
             SELECT
                 ROW_NUMBER() OVER () + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
                 COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
                 COALESCE(
-                    stcm.target_concept_id,
-                    cr.concept_id_2,
-                    CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
-                    0
+                    NULLIF(COALESCE(
+                        stcm.target_concept_id,
+                        cr.concept_id_2,
+                        CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END
+                    ), 0),
+                    {fallback_cid}
                 ) AS measurement_concept_id,
                 parse_omop_date(src.MEASURE_DATE) AS measurement_date,
                 parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS measurement_datetime,
@@ -1117,6 +1157,7 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False):
             WHERE {where_cond}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID, '{tag}') = 1;
         """)
+        summary["rows_loaded"][tag] = int(con.execute("SELECT COUNT(*) FROM measurement").fetchone()[0]) - int(before)
     # PCORnet VITAL.SMOKING -> OBSERVATION "Tobacco smoking status" (LOINC 72166-2, concept 43054909) with the
     # matching LOINC answer concept in value_as_concept_id. NI/UN/OT and unrecognized codes carry no status.
     run_insert(con, "OBSERVATION (smoking status from VITAL)", f"""
@@ -1154,6 +1195,7 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False):
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_vital;")
+    return summary
 
 
 def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False):

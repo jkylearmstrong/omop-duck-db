@@ -8,7 +8,11 @@ generate_consort_attrition(
   con = NULL,
   cohort_data = NULL,
   cohort_id = 1L,
-  steps = NULL
+  steps = NULL,
+  initial_n = NULL,
+  exclusions = NULL,
+  sites = NULL,
+  min_cell = NULL
 )
 }
 \arguments{
@@ -19,10 +23,17 @@ generate_consort_attrition(
 \item{cohort_id}{Evaluated cohort definition ID.}
 
 \item{steps}{Optional list of \code{list(step_name, query)} pairs.}
+
+\item{initial_n, exclusions}{Raw counts for one site: the source population and what each step removed.}
+
+\item{sites}{Named list of per-site attrition tables (or \code{list(initial_n, exclusions)}) to pool.}
+
+\item{min_cell}{Suppress counts from 1 to \code{min_cell - 1} (default \code{NULL}: exact counts; pooled \code{sites} default to 11).}
 }
 \value{
 An object of class \code{consort_attrition} with methods \code{to_mermaid()}, \code{to_latex()}, \code{to_markdown()}.
 }
 \description{
-Generate CONSORT Attrition Flowchart Object
+Four ways in, checked in this order: \code{steps} (with \code{con}), raw counts (\code{initial_n} with \code{exclusions}), pooled \code{sites},
+or \code{cohort_data} carrying attrition. The count and \code{sites} paths forward to \code{\link[=summarize_attrition_consort]{summarize_attrition_consort()}}.
 }

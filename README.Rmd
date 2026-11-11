@@ -806,6 +806,56 @@ fg <- fine_gray_estimator(surv_df, time_col = "time_days", status_col = "status"
 summary(fg)
 ```
 
+## Disclosure control, CONSORT counts, parity audit & site summary packages (v0.12.0)
+
+Everything below works on synthetic or aggregate data and has no study-, site- or cohort-specific content. Python
+functions are in `omop_etl`; R has the disclosure helpers, `summarize_attrition_consort()` and `audit_matrix_parity()`.
+
+```python
+from omop_etl import (generate_consort_attrition, suppress_small_counts, audit_matrix_parity, summarize_table1_site,
+                      build_table1, export_site_summary, pool_site_packages, mapping_coverage_report)
+
+# CONSORT attrition from raw counts (one site), or pooled across sites. Counts below 11 are suppressed, and so is
+# anything that could be recovered from them by subtraction (retained[i-1] - dropped[i] == retained[i]).
+att = generate_consort_attrition(initial_n=10_000, exclusions=[("Wash-in", 1200), ("Age < 18", 400),
+                                                              ("Died in hospital", 310), ("Transferred out", 9)], min_cell=11)
+att.to_csv("attrition.csv"); att.to_mermaid(); att.to_tikz()
+pooled = generate_consort_attrition(sites={"site_a": table_a, "site_b": {"initial_n": 5000, "exclusions": [...]}})
+
+# Parity between a legacy table and its OMOP-derived counterpart: SMDs, missingness gaps, CCC, kappa, per-level counts
+audit = audit_matrix_parity(legacy_df, omop_df, key_col="person_id", by="site_label")
+audit.ledger, audit.flagged
+
+# Table 1 from aggregates: one site or many give the same table (exact pooled means/SDs), SMD between two groups
+kw = dict(continuous=["age"], categorical=["sex"], binary=["diabetes"], group_col="exposed")
+table1 = build_table1(pool_table1_summaries({"a": summarize_table1_site(df_a, **kw), "b": summarize_table1_site(df_b, **kw)}))
+
+# Aggregate-only site package (refuses identifier/date columns, suppresses small cells, hashes every file) and its pooling
+export_site_summary("out/site_a", "site_a", attrition=att, table1_summary=summarize_table1_site(df_a, **kw), parity=audit, con=con)
+pooled = pool_site_packages({"a": "out/site_a", "b": "out/site_b"})      # verifies each manifest first
+
+# After an ETL: how much of the source vocabulary reached a standard concept
+mapping_coverage_report(con)["summary"]
+```
+
+```r
+att <- summarize_attrition_consort(10000, c(`Wash-in` = 1200, `Age < 18` = 400, `Died in hospital` = 310), min_cell = 11)
+write_consort_csv(att, "attrition.csv"); to_mermaid(att)
+suppress_small_counts(df, "n", threshold = 11, also = "pct", group_by = "stratum")
+audit_matrix_parity(legacy_df, omop_df, "person_id")$ledger
+```
+
+- **Release the pooled table or the per-site tables, not both.** With a hidden site cell, the pooled total minus the other
+  sites gives it back. A site that suppressed a cell leaves the pooled cell unavailable; if the sites trust the coordinator,
+  export exact aggregates (inside the agreement) and suppress after pooling.
+- `load_vital()` maps `vital.csv` to the standard concepts 3004249 (systolic BP), 3012888 (diastolic BP), 3036277 (height),
+  3025315 (weight) and 3038553 (BMI) even when the vocabulary tables are not loaded yet, derives BMI where only height
+  and weight were recorded (`derive_bmi=True`) and can drop implausible readings (`plausible_ranges=True`); it returns the row counts.
+- `RunManifest(..., con=con, outputs=[...])` records the vocabulary release the run used and the SHA-256 of the files it wrote;
+  `verify_manifest()` checks both.
+- `run_bigquery_demo()` (Python and R) is the entry point of the CMS SynPUF smoke test (`vignettes/bigquery_synthetic_demo.Rmd`).
+- The Achilles-style checks (missingness, plausibility, orphaned foreign keys) are `run_dqd()`; `sanitize_measurements()` screens implausible values.
+
 ## Testing
 
 `tests/fixtures/pcornet_sample/` is a small set of fabricated (not real)
