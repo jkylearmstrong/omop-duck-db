@@ -182,7 +182,7 @@ def test_vocabulary_round_trip_and_tamper(con, features, tmp_path):
     ds = extract_multimodal_deep_dataset(con, features, max_visits=4, max_tokens_per_visit=6)
     tok = ds["tokenizer"]
     manifest = export_concept_vocabulary(tok, tmp_path / "vocab.json")
-    assert manifest["vocab_size"] == tok.vocab_size == ds["vocab_size"] and ds["mask_token_id"] == tok.vocab_size
+    assert manifest["vocab_size"] == tok.vocab_size == ds["vocab_size"] and ds["mask_token_id"] == 5
     again = import_concept_vocabulary(tmp_path / "vocab.json")
     assert list(again.concept_list) == list(tok.concept_list)
     ds2 = extract_multimodal_deep_dataset(con, features, max_visits=4, max_tokens_per_visit=6, tokenizer=again)
@@ -497,3 +497,29 @@ def test_loso_hist_gbm_drops_all_nan_column():
     df["sdi_quintile"] = np.nan                                                      # SDoH fallback column, NaN everywhere
     res = evaluate_loso_transport(df, "site_anon", model_type="hist_gbm", n_bootstraps=0, model_params={"max_iter": 40})
     assert (res.per_site["auroc"] > 0.65).all()
+
+
+def test_fixed_mask_token_layout_and_legacy_still_works(con, features, tmp_path):
+    new = extract_multimodal_deep_dataset(con, features, max_visits=4, max_tokens_per_visit=6, pretraining_targets=True)
+    tok = new["tokenizer"]
+    assert new["mask_token_id"] == 5 and new["n_special_tokens"] == 6 and tok.concept_list[5] == "[MASK]"
+    assert tok.concept_list[6] != "[MASK]" and new["mlm_labels"].max() < new["vocab_size"]
+    assert not (new["concept_tensor"] == 5).any() or (new["masked_concept_tensor"] == 5).any()
+    # the fixed id is the same whatever the vocabulary: a different concept subset keeps [MASK] at 5
+    ds_small = extract_multimodal_deep_dataset(con, features, max_visits=4, max_tokens_per_visit=6, domains=("condition",))
+    assert ds_small["mask_token_id"] == 5
+    export_concept_vocabulary(tok, tmp_path / "v2.json")
+    assert import_concept_vocabulary(tmp_path / "v2.json").concept_list == tok.concept_list
+    # legacy layout: concepts at 5, [MASK] = vocab_size; a v1 manifest (no mask_layout) still loads
+    old = extract_multimodal_deep_dataset(con, features, max_visits=4, max_tokens_per_visit=6, mask_token=False, pretraining_targets=True)
+    assert old["mask_token_id"] == old["vocab_size"] and old["n_special_tokens"] == 5
+    m = export_concept_vocabulary(old["tokenizer"], tmp_path / "v1.json")
+    assert m["mask_layout"] == "vocab_size"
+    import json
+    d = json.loads((tmp_path / "v1.json").read_text()); d["format_version"] = 1
+    for k in ("mask_layout",):
+        d.pop(k)
+    (tmp_path / "v1.json").write_text(json.dumps(d))
+    assert import_concept_vocabulary(tmp_path / "v1.json").concept_list == old["tokenizer"].concept_list
+    again = extract_multimodal_deep_dataset(con, features, max_visits=4, max_tokens_per_visit=6, tokenizer=import_concept_vocabulary(tmp_path / "v1.json"))
+    assert again["mask_token_id"] == again["vocab_size"]               # a frozen vocabulary decides the layout

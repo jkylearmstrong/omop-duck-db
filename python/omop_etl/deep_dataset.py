@@ -8,8 +8,11 @@
   token ids.
 * :func:`extract_intra_stay_tokens` tokenizes what happens between admission and discharge, never after discharge.
 
-Token layout: ids 0-4 are ``[BOS] [EOS] [SEP] [PAD] [UNK]`` (PAD = 3), concepts start at 5. The ``[MASK]`` token is
-``vocab_size`` (one past the last concept), so a model needs an embedding of ``vocab_size + 1`` rows.
+Token layout: ids 0-4 are ``[BOS] [EOS] [SEP] [PAD] [UNK]`` (PAD = 3). By default (``mask_token=True``) id 5 is a fixed
+``[MASK]`` and concepts start at 6, so the embedding rows of the special tokens line up across vocabularies, sites and
+pre-training runs. Legacy vocabularies (``mask_token=False``, manifest ``format_version`` 1) keep concepts at 5 and
+``[MASK]`` at ``vocab_size``; both layouts load and every function reads the layout from the tokenizer
+(``mask_token_id`` in the outputs is always the right id, ``n_special_tokens`` the first concept id).
 """
 
 from __future__ import annotations
@@ -25,8 +28,8 @@ import numpy as np
 import pandas as pd
 
 from omop_etl.ml_features import (
-    N_SPECIAL_TOKENS, PAD_TOKEN_IDX, SPECIAL_TOKENS, UNK_TOKEN_IDX, build_concept_tokenizer, extract_sard_visit_tensors,
-    extract_sparse_concept_matrix,
+    MASK_TOKEN, N_SPECIAL_TOKENS, PAD_TOKEN_IDX, SPECIAL_TOKENS, UNK_TOKEN_IDX, build_concept_tokenizer, extract_sard_visit_tensors,
+    extract_sparse_concept_matrix, mask_token_id, n_special_tokens,
 )
 
 __all__ = ["extract_multimodal_deep_dataset", "extract_intra_stay_tokens", "extract_intra_stay_measurements", "export_concept_vocabulary",
@@ -51,12 +54,14 @@ def export_concept_vocabulary(tokenizer: Any, path: str | Path, *, name: str = "
     patients. Returns the manifest dict.
     """
     tokens = list(tokenizer.concept_list)
-    if tuple(tokens[:N_SPECIAL_TOKENS]) != SPECIAL_TOKENS:
-        raise ValueError(f"Unexpected special tokens {tokens[:N_SPECIAL_TOKENS]}; expected {list(SPECIAL_TOKENS)}.")
+    ns = n_special_tokens(tokenizer)
+    expected = SPECIAL_TOKENS + ((MASK_TOKEN,) if ns == N_SPECIAL_TOKENS + 1 else ())
+    if tuple(tokens[:ns]) != expected:
+        raise ValueError(f"Unexpected special tokens {tokens[:ns]}; expected {list(expected)}.")
     from omop_etl import __version__
-    manifest = {"format": VOCABULARY_FORMAT, "format_version": 1, "name": name, "omop_duck_db_version": __version__,
-                "vocab_size": len(tokens), "n_special_tokens": N_SPECIAL_TOKENS, "pad_token_idx": PAD_TOKEN_IDX,
-                "unk_token_idx": UNK_TOKEN_IDX, "mask_token_id": len(tokens), "sha256": _digest(tokens), "tokens": tokens}
+    manifest = {"format": VOCABULARY_FORMAT, "format_version": 2, "name": name, "omop_duck_db_version": __version__,
+                "vocab_size": len(tokens), "n_special_tokens": ns, "pad_token_idx": PAD_TOKEN_IDX,
+                "unk_token_idx": UNK_TOKEN_IDX, "mask_token_id": mask_token_id(tokenizer), "mask_layout": "fixed" if ns > N_SPECIAL_TOKENS else "vocab_size", "sha256": _digest(tokens), "tokens": tokens}
     Path(path).write_text(json.dumps(manifest, indent=1), encoding="utf-8")
     return manifest
 
@@ -73,7 +78,8 @@ def import_concept_vocabulary(path: str | Path) -> Any:
     tokens = m["tokens"]
     if _digest(tokens) != m.get("sha256") or len(tokens) != m.get("vocab_size"):
         raise ValueError(f"{str(path)!r} is corrupted: the token list does not match its checksum.")
-    tok = build_concept_tokenizer(tokens[N_SPECIAL_TOKENS:])
+    ns = int(m.get("n_special_tokens", N_SPECIAL_TOKENS))
+    tok = build_concept_tokenizer(tokens[ns:], mask_token=ns > N_SPECIAL_TOKENS)
     if list(tok.concept_list) != tokens:
         raise ValueError("The rebuilt tokenizer assigns different token ids than the manifest; refusing to continue.")
     return tok
@@ -83,7 +89,7 @@ def import_concept_vocabulary(path: str | Path) -> Any:
 # Self-supervised targets
 # ---------------------------------------------------------------------------------------------------------------------
 def make_pretraining_targets(concept_tensor: np.ndarray, n_visits: np.ndarray, *, vocab_size: int, mask_token_id: int | None = None,
-                             mask_prob: float = 0.15, seed: int = 20261104, row_offset: int = 0) -> dict[str, np.ndarray]:
+                             n_special_tokens: int = N_SPECIAL_TOKENS, mask_prob: float = 0.15, seed: int = 20261104, row_offset: int = 0) -> dict[str, np.ndarray]:
     """Masked-concept and next-visit targets for ``concept_tensor`` (N, V, L).
 
     ``masked_concept_tensor``: of the non-padding positions each is selected with probability ``mask_prob``; a selected
@@ -92,7 +98,8 @@ def make_pretraining_targets(concept_tensor: np.ndarray, n_visits: np.ndarray, *
     visit ``v`` inside the window (the next-visit prediction pair is valid).
 
     Draws are made in blocks of 1024 absolute rows (``row_offset`` must be a multiple of 1024), so the same seed gives
-    the same masks however the cohort is chunked.
+    the same masks however the cohort is chunked. ``n_special_tokens`` is the first concept id (6 with a reserved
+    ``[MASK]``); special tokens are never selected and random replacements are drawn from the concepts only.
     """
     if not 0.0 < mask_prob < 1.0:
         raise ValueError("mask_prob must be in (0, 1).")
@@ -107,9 +114,9 @@ def make_pretraining_targets(concept_tensor: np.ndarray, n_visits: np.ndarray, *
         rows = min(_BLOCK, n - b)
         u = rng.random((_BLOCK, v, l))[:rows]
         kind = rng.random((_BLOCK, v, l))[:rows]
-        rand_tok = rng.integers(N_SPECIAL_TOKENS, max(vocab_size, N_SPECIAL_TOKENS + 1), size=(_BLOCK, v, l))[:rows]
+        rand_tok = rng.integers(n_special_tokens, max(vocab_size, n_special_tokens + 1), size=(_BLOCK, v, l))[:rows]
         block = concept_tensor[b:b + rows]
-        sel = (block >= N_SPECIAL_TOKENS) & (u < mask_prob)
+        sel = (block >= n_special_tokens) & (u < mask_prob)
         labels[b:b + rows][sel] = block[sel]
         out = masked[b:b + rows]
         out[sel & (kind < 0.8)] = mask_id
@@ -373,6 +380,7 @@ def extract_multimodal_deep_dataset(
     intra_max_days: int = 14,
     intra_max_tokens_per_day: int = 30,
     intra_tokenizer: Any = None,
+    mask_token: bool = True,
     pretraining_targets: bool = False,
     mask_prob: float = 0.15,
     seed: int = 20261104,
@@ -393,6 +401,10 @@ def extract_multimodal_deep_dataset(
         in ``dense_missing``; no scaling is applied (fit it on the training sites).
     tokenizer : ConceptTokenizer, optional
         A frozen vocabulary (:func:`import_concept_vocabulary`): concepts outside it are dropped, so token ids match across sites.
+    mask_token : bool
+        Reserve the fixed ``[MASK]`` id 5 in a vocabulary built here (default; concepts start at 6). ``False`` gives the
+        legacy omop-learn layout (concepts from 5, ``[MASK]`` = ``vocab_size``). Ignored when ``tokenizer`` is given: the
+        frozen vocabulary decides, and ``mask_token_id`` / ``n_special_tokens`` in the result report it.
     include_intra_stay : bool
         Adds ``intra_tensor`` / ``intra_day`` / ``intra_lengths`` (see :func:`extract_intra_stay_tokens`).
     include_intra_measurements : bool
@@ -459,7 +471,7 @@ def extract_multimodal_deep_dataset(
 
     sard_kw = dict(lookback_days=lookback_days, min_patient_freq=min_patient_freq, domains=tuple(domains),
                    max_nvisits=max_visits, max_visit_len=max_tokens_per_visit, dtype=np.int32,
-                   person_col="person_id", index_date_col="index_date")
+                   person_col="person_id", index_date_col="index_date", mask_token=mask_token)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -474,7 +486,7 @@ def extract_multimodal_deep_dataset(
         if tokenizer is None and n > chunk:           # one vocabulary for every chunk
             pre = extract_sparse_concept_matrix(con, _parquet(features_df, "all.parquet"), lookback_days=lookback_days,
                                                 min_patient_freq=min_patient_freq, domains=tuple(domains),
-                                                person_col="person_id", index_date_col="index_date")
+                                                person_col="person_id", index_date_col="index_date", mask_token=mask_token)
             tokenizer = pre["tokenizer"]
             del pre
 
@@ -498,6 +510,7 @@ def extract_multimodal_deep_dataset(
                 block.update(make_ragged(block["concept_tensor"]))
             if pretraining_targets:
                 block.update(make_pretraining_targets(block["concept_tensor"], block["n_visits"], vocab_size=nonlocal_tok.vocab_size,
+                                                      mask_token_id=mask_token_id(nonlocal_tok), n_special_tokens=n_special_tokens(nonlocal_tok),
                                                       mask_prob=mask_prob, seed=seed, row_offset=start))
             block["_tokenizer"] = nonlocal_tok
             return block
@@ -522,7 +535,8 @@ def extract_multimodal_deep_dataset(
             itok = block.pop("_intra_tokenizer", None)
             mmeta = block.pop("_measurement_meta", None)
             out = _attach(block, slice(0, n))
-            out.update({"dense_columns": dense_cols, "tokenizer": tok, "vocab_size": tok.vocab_size, "mask_token_id": tok.vocab_size})
+            out.update({"dense_columns": dense_cols, "tokenizer": tok, "vocab_size": tok.vocab_size, "mask_token_id": mask_token_id(tok),
+                        "n_special_tokens": n_special_tokens(tok)})
             if itok is not None:
                 out["intra_tokenizer"] = itok
             if mmeta is not None:
@@ -563,7 +577,7 @@ def extract_multimodal_deep_dataset(
             if hasattr(m, "flush"):
                 m.flush()
         meta = {**meta_common, "format": fmt, "vocab_size": tok.vocab_size if tok else None,
-                "mask_token_id": tok.vocab_size if tok else None, "chunk_size": chunk, "arrays": sorted(mm) if fmt in ("memmap", "zarr") else None,
+                "mask_token_id": mask_token_id(tok) if tok else None, "chunk_size": chunk, "arrays": sorted(mm) if fmt in ("memmap", "zarr") else None,
                 "files": [Path(f).name for f in files] or None}
         (out_dir / "manifest.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
         if tok is not None:
@@ -572,12 +586,14 @@ def extract_multimodal_deep_dataset(
             export_concept_vocabulary(itok, out_dir / "intra_vocabulary.json", name="intra")
         if fmt == "memmap":
             res = {k: np.load(out_dir / f"{k}.npy", mmap_mode="r") for k in mm}
-            res.update({"dense_columns": dense_cols, "tokenizer": tok, "vocab_size": tok.vocab_size, "mask_token_id": tok.vocab_size})
+            res.update({"dense_columns": dense_cols, "tokenizer": tok, "vocab_size": tok.vocab_size, "mask_token_id": mask_token_id(tok),
+                        "n_special_tokens": n_special_tokens(tok)})
             return res
         if fmt == "zarr":
             import zarr
             res = {k: zarr.open_array(str(out_dir / f"{k}.zarr"), mode="r") for k in mm}
-            res.update({"dense_columns": dense_cols, "tokenizer": tok, "vocab_size": tok.vocab_size, "mask_token_id": tok.vocab_size})
+            res.update({"dense_columns": dense_cols, "tokenizer": tok, "vocab_size": tok.vocab_size, "mask_token_id": mask_token_id(tok),
+                        "n_special_tokens": n_special_tokens(tok)})
             return res
         return {"files": files, "manifest": str(out_dir / "manifest.json"), "tokenizer": tok, "vocab_size": tok.vocab_size,
-                "mask_token_id": tok.vocab_size, "dense_columns": dense_cols}
+                "mask_token_id": mask_token_id(tok), "n_special_tokens": n_special_tokens(tok), "dense_columns": dense_cols}

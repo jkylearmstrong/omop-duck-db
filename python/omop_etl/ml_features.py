@@ -40,6 +40,8 @@ import pandas as pd
 
 SPECIAL_TOKENS = ("[BOS]", "[EOS]", "[SEP]", "[PAD]", "[UNK]")
 N_SPECIAL_TOKENS = len(SPECIAL_TOKENS)
+MASK_TOKEN = "[MASK]"
+MASK_TOKEN_IDX = N_SPECIAL_TOKENS      # a vocabulary built with mask_token=True reserves id 5 for [MASK]; concepts start at 6
 PAD_TOKEN_IDX = 3
 UNK_TOKEN_IDX = 4
 UNIX_REFERENCE_DATE = pd.Timestamp("1900-01-01")  # omop_learn.utils.date_utils.REFTIME
@@ -79,14 +81,16 @@ class FallbackConceptTokenizer:
     """
 
     def __init__(self, concept_set, bos_token="[BOS]", eos_token="[EOS]", sep_token="[SEP]",
-                 pad_token="[PAD]", unk_token="[UNK]"):
-        self.concept_list = [bos_token, eos_token, sep_token, pad_token, unk_token] + sorted(set(concept_set))
+                 pad_token="[PAD]", unk_token="[UNK]", mask_token=False):
+        specials = [bos_token, eos_token, sep_token, pad_token, unk_token] + ([MASK_TOKEN] if mask_token else [])
+        self.concept_list = specials + sorted(set(concept_set))
+        self.mask_token_idx = MASK_TOKEN_IDX if mask_token else None
         self.concept_map = {concept: i for i, concept in enumerate(self.concept_list)}
         self.bos_token, self.eos_token, self.sep_token = bos_token, eos_token, sep_token
         self.pad_token, self.unk_token = pad_token, unk_token
         self.bos_token_idx, self.eos_token_idx, self.sep_token_idx = 0, 1, 2
         self.pad_token_idx, self.unk_token_idx = PAD_TOKEN_IDX, UNK_TOKEN_IDX
-        self.num_special_tokens = N_SPECIAL_TOKENS
+        self.num_special_tokens = len(specials)
         self.vocab_size = len(self.concept_list)
 
     def concepts_to_ids(self, concept_list):
@@ -100,8 +104,26 @@ class FallbackConceptTokenizer:
             json.dump(vars(self), fh)
 
 
-def build_concept_tokenizer(concept_tokens: Sequence[str]):
-    """Return an omop-learn ``ConceptTokenizer`` (or an equivalent fallback) for ``concept_tokens``."""
+def n_special_tokens(tokenizer: Any) -> int:
+    """Number of special tokens (5, or 6 with a reserved ``[MASK]``) of any tokenizer; concepts start at this id."""
+    return int(getattr(tokenizer, "num_special_tokens", N_SPECIAL_TOKENS))
+
+
+def mask_token_id(tokenizer: Any) -> int:
+    """The ``[MASK]`` id: the reserved fixed id (5) when the vocabulary has one, else ``vocab_size`` (legacy layout,
+    one past the last concept)."""
+    idx = getattr(tokenizer, "mask_token_idx", None)
+    return int(idx) if idx is not None else int(tokenizer.vocab_size)
+
+
+def build_concept_tokenizer(concept_tokens: Sequence[str], mask_token: bool = False):
+    """Return an omop-learn ``ConceptTokenizer`` (or an equivalent fallback) for ``concept_tokens``.
+
+    ``mask_token=True`` reserves a fixed ``[MASK]`` id (5) so BERT-style embeddings stay aligned across vocabularies;
+    omop-learn's class has no such slot, so the built-in tokenizer is used for it.
+    """
+    if mask_token:
+        return FallbackConceptTokenizer(concept_tokens, mask_token=True)
     try:
         from omop_learn.data.common import ConceptTokenizer
     except ImportError:
@@ -268,7 +290,7 @@ def _tokenizer_vocab(tokenizer):
     """Vocabulary rows from an existing tokenizer (train/test reuse): concepts we did not write are
     kept as columns but can never match."""
     rows = []
-    for idx in range(N_SPECIAL_TOKENS, len(tokenizer.concept_list)):
+    for idx in range(n_special_tokens(tokenizer), len(tokenizer.concept_list)):
         token = tokenizer.concept_list[idx]
         parsed = _parse_token(token)
         rows.append({"token_id": idx, "token": token,
@@ -285,7 +307,7 @@ def _n_patients(pairs: pd.DataFrame, person_of_row: np.ndarray) -> pd.DataFrame:
     return t.groupby(["domain", "concept_id"]).size().rename("n_patients").reset_index()
 
 
-def _assemble_vocab(con, triples, person_of_row, tokenizer, concept_table):
+def _assemble_vocab(con, triples, person_of_row, tokenizer, concept_table, mask_token=False):
     """Build the vocabulary DataFrame for ``triples`` (any frame with row_idx/domain/concept_id).
 
     Columns: token_id (tokenizer index, >= 5), column_index (token_id - 5), token, domain, concept_id,
@@ -299,9 +321,10 @@ def _assemble_vocab(con, triples, person_of_row, tokenizer, concept_table):
         meta = _concept_metadata(con, counts["concept_id"].unique(), concept_table)
         counts["token"] = [make_token(int(c), d, (meta.get(int(c)) or (None,))[0])
                            for c, d in zip(counts["concept_id"], counts["domain"])]
-        tokenizer = build_concept_tokenizer(counts["token"].tolist())
-        base = pd.DataFrame({"token": tokenizer.concept_list[N_SPECIAL_TOKENS:]})
-        base["token_id"] = np.arange(N_SPECIAL_TOKENS, N_SPECIAL_TOKENS + len(base))
+        tokenizer = build_concept_tokenizer(counts["token"].tolist(), mask_token=mask_token)
+        ns = n_special_tokens(tokenizer)
+        base = pd.DataFrame({"token": tokenizer.concept_list[ns:]})
+        base["token_id"] = np.arange(ns, ns + len(base))
         vocab = base.merge(counts, on="token", how="left")
     else:
         base = _tokenizer_vocab(tokenizer)
@@ -314,7 +337,7 @@ def _assemble_vocab(con, triples, person_of_row, tokenizer, concept_table):
     for i, col in enumerate(("concept_name", "domain_id", "vocabulary_id", "standard_concept")):
         vocab[col] = vocab["concept_id"].map(lambda c, i=i: _meta(c, i))
     vocab["n_patients"] = vocab["n_patients"].fillna(0).astype("int64")
-    vocab["column_index"] = vocab["token_id"] - N_SPECIAL_TOKENS
+    vocab["column_index"] = vocab["token_id"] - n_special_tokens(tokenizer)
     cols = ["token_id", "column_index", "token", "domain", "concept_id", "concept_name",
             "domain_id", "vocabulary_id", "standard_concept", "n_patients"]
     return vocab[cols].reset_index(drop=True), tokenizer
@@ -374,6 +397,7 @@ def extract_sparse_concept_matrix(
     anchor_date: str = "auto",
     washin_buffer_days: int = 0,
     washin_buffer_hours: int = 0,
+    mask_token: bool = False,
 ) -> dict:
     """High-dimensional sparse concept matrix over a per-row lookback window.
 
@@ -425,7 +449,7 @@ def extract_sparse_concept_matrix(
         anchor_date=anchor_date, washin_buffer_days=washin_buffer_days, washin_buffer_hours=washin_buffer_hours,
     )
     person_of_row = cohort_df["person_id"].to_numpy()
-    vocab, tokenizer = _assemble_vocab(con, triples, person_of_row, tokenizer, concept_table)
+    vocab, tokenizer = _assemble_vocab(con, triples, person_of_row, tokenizer, concept_table, mask_token)
 
     n_rows, n_cols = len(cohort_df), len(vocab)
     if len(triples):
@@ -465,6 +489,7 @@ def extract_sard_visit_tensors(
     anchor_date: str = "auto",
     washin_buffer_days: int = 0,
     washin_buffer_hours: int = 0,
+    mask_token: bool = False,
     dense_features: Any = None,
     return_format: str = "tensors",
     max_seq_len: int | None = None,
@@ -515,7 +540,7 @@ def extract_sard_visit_tensors(
         anchor_date=anchor_date, washin_buffer_days=washin_buffer_days, washin_buffer_hours=washin_buffer_hours,
     )
     person_of_row = cohort_df["person_id"].to_numpy()
-    vocab, tokenizer = _assemble_vocab(con, toks, person_of_row, tokenizer, concept_table)
+    vocab, tokenizer = _assemble_vocab(con, toks, person_of_row, tokenizer, concept_table, mask_token)
 
     n_rows = len(cohort_df)
     if len(toks):
