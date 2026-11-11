@@ -333,6 +333,17 @@ from omop_etl.geography import (
     validate_sdi_cut_points,
     write_geography_measurements,
 )
+from omop_etl.study_features import (
+    FeatureSet,
+    StudyFeature,
+    area_feature,
+    custom_feature,
+    feature_list,
+    ruca_feature,
+    sdi_feature,
+    sql_feature,
+    stays_from_cohort,
+)
 from omop_etl.model_ablation import ablate_feature_groups, compare_model_runs, ridge_logistic_fit_predict
 from omop_etl.cohort_sql import cohort_definitions_dir
 from omop_etl.bundle_concepts import stamp_feature_spec_concepts, validate_bundle_concepts
@@ -681,6 +692,15 @@ __all__ = [
     "ruca_category",
     "validate_sdi_cut_points",
     "write_geography_measurements",
+    "FeatureSet",
+    "StudyFeature",
+    "area_feature",
+    "custom_feature",
+    "feature_list",
+    "ruca_feature",
+    "sdi_feature",
+    "sql_feature",
+    "stays_from_cohort",
     "write_custom_covariates",
     "ablate_feature_groups",
     "compare_model_runs",

@@ -1,0 +1,153 @@
+---
+title: "Study-design features: add your own person-level features to an OMOP study"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Study-design features: add your own person-level features to an OMOP study}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(omopduckdb)
+```
+
+The OMOP CDM does not define everything a protocol needs. An area deprivation index, the rural-urban code of the home ZIP, the
+median household income of the census tract, a site's own comorbidity score: none of these is a standard concept, so the OHDSI
+tools (FeatureExtraction, PatientLevelPrediction, DeepPatientLevelPrediction) cannot see them.
+
+A **study-design feature** is such a feature. `omopduckdb` ships a small framework, not a data set:
+
+| You write | The package does |
+|---|---|
+| a `study_feature()` (or a built-in: `ruca_feature()`, `sdi_feature()`, `area_feature()`, `sql_feature()`, `custom_feature()`) | resolves the address in effect at admission once, computes every feature for the index stays, keeps the fitted state |
+| a `feature_set()` you extend with `add_feature()` | writes the values as `measurement` rows under site-defined concepts and builds the FeatureExtraction covariate settings |
+| the reference table (ACS income, RUCA, SDI) | never bundles it: you supply it, the package only does the join, the transform and the missingness handling |
+
+The same API exists in Python (`omop_etl.study_features`), and the manifest and fitted state are interchangeable between the two.
+
+## A small synthetic CDM
+
+Six patients with a dated address history and one inpatient stay each. Everything below is synthetic.
+
+```{r cdm}
+db_path <- tempfile(fileext = ".duckdb")
+build_schema(db_path)
+con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+
+zips <- c("19104", "15213", "08101", "17821", "19104", "99999")   # 99999 is in no reference table
+for (i in 1:6) {
+  DBI::dbExecute(con, sprintf("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)
+                               VALUES (%d, 8507, 1960, 0, 0)", i))
+  DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,
+                               visit_end_date, visit_type_concept_id) VALUES (%d, %d, 9201, DATE '2018-0%d-10', DATE '2018-0%d-14', 0)",
+                              i, i, i, i))
+}
+DBI::dbExecute(con, "CREATE TABLE person_address_history (person_id BIGINT, location_id BIGINT, zip5 VARCHAR,
+                      address_start DATE, address_end DATE, preferred VARCHAR)")
+for (i in 1:6) DBI::dbExecute(con, sprintf("INSERT INTO person_address_history VALUES (%d, %d, '%s', DATE '2010-01-01', NULL, 'Y')", i, i, zips[i]))
+```
+
+The reference tables are plain data frames (or CSV paths). The column names are matched case-insensitively.
+
+```{r tables}
+ruca   <- data.frame(ZIPCODE = c("19104", "15213", "08101", "17821"), RUCA_CODE = c("1", "2.1", "4", "99"))
+sdi    <- data.frame(ZCTA5_FIPS = c("19104", "15213", "08101", "17821"), SDI_score = c(95, 40, 10, 70))
+income <- data.frame(zcta = c("19104", "15213", "08101", "17821"), median_income = c(31000, 88000, 61000, 54000))
+sdi_cuts <- c(20, 45, 65, 85)      # the training cohort's fixed SDI cut points
+```
+
+## Build a feature set
+
+A feature set is extended one feature at a time, so a study can start with geography and add features later.
+
+```{r set}
+fs <- feature_set() |>
+  add_feature(ruca_feature(ruca)) |>
+  add_feature(sdi_feature(sdi, cut_points = sdi_cuts))
+fs
+feature_set_columns(fs)
+```
+
+`area_feature()` turns *any* ZIP-keyed number into a feature. Median household income is right-skewed, so use `log1p`; a
+`percentile` transform instead puts every site on the training distribution (see the cross-site vignette).
+
+```{r income}
+add_feature(fs, area_feature("income", income, "median_income", transform = "log1p"))
+feature_set_columns(fs)
+```
+
+## Compute for the index stays
+
+`stays_from_cohort()` turns a cohort table into the index stays; here we use every inpatient visit (the default).
+
+```{r compute}
+wide <- compute_features(fs, con)
+wide[order(wide$stay_id), ]
+```
+
+* The address is the one **in effect at admission** (the rule of `derive_geography_features()`), never a later one.
+* A ZIP missing from a table gives `NA` and `income_missing = 1` (patient 6); turn the indicator off with
+  `missing_indicator = FALSE` or fill with the training median using `impute = TRUE`.
+* RUCA 99 ("not coded") lands in small town / rural as in the reference study; pass `code_99_missing = TRUE` to treat it as unknown.
+
+## Make it visible to OHDSI tools
+
+`write_feature_set()` stores each value as a `measurement` row dated the admission date, under a site-defined concept
+(>= 2,000,000,000). SDI and RUCA keep the ids of `GEOGRAPHY_CONCEPT_IDS`, so earlier work stays compatible; everything else is
+registered for you.
+
+```{r write}
+concepts <- write_feature_set(fs, con, wide)
+format(vapply(concepts, function(x) as.numeric(x[[1]]), numeric(1)), scientific = FALSE)
+cat(feature_set_extraction_r(fs, concepts))
+```
+
+`feature_set_covariate_settings(fs, concepts)` returns the same thing as a real FeatureExtraction object:
+
+```{r fe, eval = requireNamespace("FeatureExtraction", quietly = TRUE) && requireNamespace("DatabaseConnector", quietly = TRUE)}
+DBI::dbExecute(con, "DROP TABLE IF EXISTS cohort")
+DBI::dbExecute(con, "CREATE TABLE cohort (cohort_definition_id INT, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)")
+DBI::dbExecute(con, "INSERT INTO cohort SELECT 1, person_id, visit_start_date, visit_end_date FROM visit_occurrence")
+DBI::dbDisconnect(con, shutdown = TRUE)
+
+conn <- DatabaseConnector::connect(DatabaseConnector::createConnectionDetails(dbms = "duckdb", server = db_path))
+cov <- FeatureExtraction::getDbCovariateData(
+  connection = conn, cdmDatabaseSchema = "main", cohortTable = "cohort", cohortDatabaseSchema = "main",
+  cohortIds = 1, rowIdField = "subject_id", aggregated = FALSE,
+  covariateSettings = feature_set_covariate_settings(fs, concepts))
+DatabaseConnector::disconnect(conn)
+head(as.data.frame(cov$covariateRef)[, c("covariateId", "covariateName")])
+```
+
+From there the covariates feed PatientLevelPrediction exactly like any other FeatureExtraction output. `SQL`-defined or custom-R
+features (below) take the same path.
+
+```{r cleanup, include = FALSE}
+if (DBI::dbIsValid(con)) DBI::dbDisconnect(con, shutdown = TRUE)
+unlink(db_path)
+```
+
+## Your own feature
+
+Three ways, from least to most code:
+
+```{r own, eval = FALSE}
+# 1. A SQL query over the OMOP tables, reading the view `_stays` (person_id, stay_id, admit_date)
+prior_ed <- sql_feature("n_prior_ed", "
+  SELECT s.stay_id, CAST(count(*) AS DOUBLE) AS n_prior_ed
+  FROM _stays s JOIN visit_occurrence v
+    ON v.person_id = s.person_id AND v.visit_concept_id = 9203 AND v.visit_start_date < s.admit_date
+  GROUP BY 1", columns = "n_prior_ed")
+
+# 2. Your own R function: fn(con, stays) -> stay_id + the numeric columns
+frailty <- custom_feature("frailty", "frailty_index", function(con, stays) my_frailty_index(con, stays))
+
+# 3. A complete study_feature() with fitted state, requirements and concept ids (see ?study_feature)
+```
+
+The contract is the author's: a feature may only use data dated before the index date (or during the stay when the protocol
+says so). Nothing in the framework reads events after discharge.
+
+Next: *Study features across sites* shows how fitted state (SDI cut points, a percentile grid) travels with a model, and how
+this feeds the deep-learning datasets.

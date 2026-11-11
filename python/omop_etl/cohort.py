@@ -781,7 +781,8 @@ def remap_discharge_status(con: duckdb.DuckDBPyConnection, schema: str | None = 
     return int(n)
 
 
-_SAMPLE_STAY_RULES = {"random": "stable_random", "earliest": "first", "latest": "last", "all": "stable_random"}
+_SAMPLE_STAY_RULES = {"random": "stable_random", "earliest": "first", "latest": "last", "all": "stable_random",
+                      "first": "first", "last": "last"}
 
 
 def _study_order_by(rule: str, seed: int, pinned: bool = False) -> str:
@@ -1708,7 +1709,7 @@ def define_study_cohort(
     if sample_stay_rule is not None:
         stay_rule = str(sample_stay_rule).strip().lower()
         if stay_rule not in _SAMPLE_STAY_RULES:
-            raise ValueError(f"Unsupported sample_stay_rule '{sample_stay_rule}'. Use 'random', 'earliest', 'latest' or 'all'.")
+            raise ValueError(f"Unsupported sample_stay_rule '{sample_stay_rule}'. Use 'random', 'earliest' (or 'first'), 'latest' (or 'last') or 'all'.")
         sampling_rule = _SAMPLE_STAY_RULES[stay_rule]
         one_per_patient = stay_rule != "all"
     if random_seed is not None:

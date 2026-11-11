@@ -117,6 +117,39 @@ read_sdi_table <- function(source) {
                   params = list(name))$n[[1]] > 0
 }
 
+# One address row per stay (person_id, stay_id, zip5, rule), chosen by the reference rule. `stays` has person_id, stay_id, admit_date.
+.geo_index_addresses <- function(con, stays, tbl) {
+  duckdb::duckdb_register(con, "_geo_stays", stays)
+  on.exit(duckdb::duckdb_unregister(con, "_geo_stays"), add = TRUE)
+  if (is.null(tbl)) {
+    DBI::dbGetQuery(con, "
+      SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE 'person_location' END AS rule
+      FROM (SELECT s.person_id, s.stay_id, nullif(regexp_extract(CAST(l.zip AS VARCHAR), '(\\d{5})', 1), '') AS zip5
+            FROM _geo_stays s LEFT JOIN person p ON p.person_id = s.person_id
+            LEFT JOIN location l ON l.location_id = p.location_id)")
+  } else {
+    DBI::dbGetQuery(con, sprintf("
+      WITH m AS (
+        SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, a.address_start AS st, a.preferred, (a.zip5 IS NULL) AS nozip,
+               (a.address_start IS NULL OR a.address_start <= s.admit_date) AS started,
+               (a.address_end IS NULL OR a.address_end >= s.admit_date) AS ongoing
+        FROM _geo_stays s LEFT JOIN %s a ON a.person_id = s.person_id
+      ), r AS (
+        SELECT *, CASE WHEN started AND ongoing THEN 'in_effect' WHEN started THEN 'latest_before' ELSE 'earliest_after' END AS rule0 FROM m
+      )
+      SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE rule0 END AS rule
+      FROM r
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY stay_id
+        ORDER BY nozip,
+                 CASE rule0 WHEN 'in_effect' THEN 0 WHEN 'latest_before' THEN 1 ELSE 2 END,
+                 CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
+                 CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
+                      ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
+                 st DESC NULLS LAST) = 1", tbl))
+  }
+}
+
 #' @rdname geography
 #' @param con A DBI connection to an OMOP DuckDB.
 #' @param ruca_crosswalk,sdi_table Data frame or CSV path (see `read_ruca_crosswalk()`, `read_sdi_table()`).
@@ -157,35 +190,7 @@ derive_geography_features <- function(con, ruca_crosswalk, sdi_table, sdi_cut_po
   }
   if (!is.null(tbl) && !grepl("^[A-Za-z0-9_]+$", tbl)) stop("invalid address table name ", shQuote(tbl), ".", call. = FALSE)
 
-  duckdb::duckdb_register(con, "_geo_stays", stays)
-  on.exit(duckdb::duckdb_unregister(con, "_geo_stays"), add = TRUE)
-  picked <- if (is.null(tbl)) {
-    DBI::dbGetQuery(con, "
-      SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE 'person_location' END AS rule
-      FROM (SELECT s.person_id, s.stay_id, nullif(regexp_extract(CAST(l.zip AS VARCHAR), '(\\d{5})', 1), '') AS zip5
-            FROM _geo_stays s LEFT JOIN person p ON p.person_id = s.person_id
-            LEFT JOIN location l ON l.location_id = p.location_id)")
-  } else {
-    DBI::dbGetQuery(con, sprintf("
-      WITH m AS (
-        SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, a.address_start AS st, a.preferred, (a.zip5 IS NULL) AS nozip,
-               (a.address_start IS NULL OR a.address_start <= s.admit_date) AS started,
-               (a.address_end IS NULL OR a.address_end >= s.admit_date) AS ongoing
-        FROM _geo_stays s LEFT JOIN %s a ON a.person_id = s.person_id
-      ), r AS (
-        SELECT *, CASE WHEN started AND ongoing THEN 'in_effect' WHEN started THEN 'latest_before' ELSE 'earliest_after' END AS rule0 FROM m
-      )
-      SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE rule0 END AS rule
-      FROM r
-      QUALIFY ROW_NUMBER() OVER (
-        PARTITION BY stay_id
-        ORDER BY nozip,
-                 CASE rule0 WHEN 'in_effect' THEN 0 WHEN 'latest_before' THEN 1 ELSE 2 END,
-                 CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
-                 CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
-                      ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
-                 st DESC NULLS LAST) = 1", tbl))
-  }
+  picked <- .geo_index_addresses(con, stays, tbl)
   g <- merge(merge(picked, ruca, by = "zip5", all.x = TRUE, sort = FALSE), sdi, by = "zip5", all.x = TRUE, sort = FALSE)
   g <- merge(g, stays[, c("stay_id", "admit_date")], by = "stay_id", all.x = TRUE, sort = FALSE)
   g <- g[order(g$stay_id), , drop = FALSE]

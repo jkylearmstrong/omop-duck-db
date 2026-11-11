@@ -60,6 +60,8 @@ def test_sample_stay_rule(con):
     first = define_study_cohort(con, materialise=False, sample_stay_rule="earliest", **COHORT)
     last = define_study_cohort(con, materialise=False, sample_stay_rule="latest", **COHORT)
     assert (first["cohort_start_date"].to_numpy() <= last["cohort_start_date"].to_numpy()).all()
+    alias = define_study_cohort(con, materialise=False, sample_stay_rule="first", **COHORT)
+    assert alias["visit_occurrence_id"].tolist() == first["visit_occurrence_id"].tolist()
     r1 = define_study_cohort(con, materialise=False, sample_stay_rule="random", random_seed=7, **COHORT)
     r2 = define_study_cohort(con, materialise=False, sample_stay_rule="random", random_seed=7, **COHORT)
     assert r1["visit_occurrence_id"].tolist() == r2["visit_occurrence_id"].tolist()

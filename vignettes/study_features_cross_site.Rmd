@@ -1,0 +1,138 @@
+---
+title: "Study features across sites: fitted state, manifests and deep models"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Study features across sites: fitted state, manifests and deep models}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(omopduckdb)
+```
+
+A model that uses an area-level feature must compute it **the same way at every site**. Two things go wrong silently:
+
+1. **Quantile drift.** Cutting SDI into quintiles at the *local* quantiles moves patients between quintiles whenever a site's
+   deprivation distribution differs from training.
+2. **Scale drift.** Raw income in dollars differs by an order of magnitude between an urban and a rural network. A high-capacity model
+   can use it to recognise the site instead of learning disease risk.
+
+The framework therefore separates *fitting* from *applying*. A transform that learns from data (SDI cut points, a percentile grid,
+a mean and sd, an imputation median) is fitted **once, on the training sites, with `fit = TRUE`**, stored as the feature's *state*,
+shipped in a manifest, and reused unchanged elsewhere. Without state a learned transform refuses to run.
+
+## Two synthetic sites
+
+```{r sites}
+make_site <- function(zips, year = 2018) {
+  path <- tempfile(fileext = ".duckdb")
+  build_schema(path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = path)
+  DBI::dbExecute(con, "CREATE TABLE person_address_history (person_id BIGINT, location_id BIGINT, zip5 VARCHAR,
+                        address_start DATE, address_end DATE, preferred VARCHAR)")
+  for (i in seq_along(zips)) {
+    DBI::dbExecute(con, sprintf("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ethnicity_concept_id)
+                                 VALUES (%d, 8507, 1960, 0, 0)", i))
+    DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date,
+                                 visit_end_date, visit_type_concept_id) VALUES (%d, %d, 9201, DATE '%d-03-01', DATE '%d-03-04', 0)",
+                                i, i, year, year))
+    DBI::dbExecute(con, sprintf("INSERT INTO person_address_history VALUES (%d, %d, '%s', DATE '2000-01-01', NULL, 'Y')", i, i, zips[i]))
+  }
+  list(con = con, path = path)
+}
+
+# the reference tables are national, so both sites use the same ones
+area <- data.frame(zcta = sprintf("%05d", 10000 + 0:59),
+                   sdi = seq(5, 100, length.out = 60),
+                   income = seq(24000, 190000, length.out = 60))
+
+training <- make_site(area$zcta)                # a large mixed network: the whole range
+new_site <- make_site(area$zcta[41:60])         # a smaller network drawn from the deprived, low-income end
+```
+
+## Fit on the training site
+
+```{r fit}
+build_set <- function() {
+  feature_set(
+    sdi_feature(area[, c("zcta", "sdi")]),                                              # no cut points yet
+    area_feature("income", area[, c("zcta", "income")], "income", transform = "percentile", impute = TRUE))
+}
+fs_train <- build_set()
+train <- compute_features(fs_train, training$con, fit = TRUE)
+
+st <- feature_set_state(fs_train)
+st$sdi$cut_points
+length(st$income$percentile_grid)
+```
+
+`fit` can also name features (`fit = "income"`), so one feature can be refit without touching the others.
+
+## Ship the manifest with the model
+
+```{r manifest}
+manifest <- tempfile(fileext = ".json")
+export_feature_manifest(fs_train, manifest)
+substr(paste(readLines(manifest, n = 22), collapse = "\n"), 1, 520)
+```
+
+The manifest records every feature's columns, required tables, parameters, fitted state and the concept ids. It contains nothing
+about patients.
+
+## Apply at the new site
+
+```{r apply}
+fs_new <- build_set()
+load_feature_state(fs_new, manifest)               # also accepts a manifest written by Python
+new <- compute_features(fs_new, new_site$con)
+
+# the same SDI score gets the same quintile at both sites
+table(train$sdi_quintile)
+table(new$sdi_quintile)
+
+# income is a position in the *training* distribution, so it is comparable
+range(train$income); range(new$income)
+```
+
+The new site sits in the top two SDI quintiles and the upper third of the *training* income distribution, as it should. Local quantiles
+would have spread it over all five quintiles and hidden exactly the difference the model needs to see.
+
+Skip the state and the learned transforms refuse:
+
+```{r refuse, error = TRUE}
+compute_features(build_set(), new_site$con)
+```
+
+## Deep models
+
+`extract_multimodal_deep_dataset()` keeps temporal sequence tokens apart from static covariates (`dense_covariates`). Area features
+are static, so they belong in the dense block, and three rules follow from the above:
+
+* **Scale them.** Dollars would dominate token embeddings. Use `percentile` or `zscore` with *training* state, never the
+  statistics of the batch or the site.
+* **Prefer relative scales across sites.** A percentile of the national distribution transports; raw income can act as a site
+  identifier.
+* **Keep the missing indicator.** `<name>_missing` lets the network tell "unmapped ZIP" from "average ZIP" after imputation.
+
+```{r deep, eval = FALSE}
+wide <- compute_features(fs_new, new_site$con, stays_from_cohort(new_site$con, "cohort"))
+# merge on visit_occurrence_id, then give the numeric columns to the dense block
+```
+
+## Sharing concept ids
+
+Concept ids for registered features are per database. For a consortium, pin them with a shared registry so every site writes the same
+ids:
+
+```{r registry, eval = FALSE}
+export_custom_concept_registry(con_lead, "custom_concepts.json")      # lead site
+write_feature_set(fs, con, wide, registry = "custom_concepts.json")   # every other site
+check_custom_concepts(con, "custom_concepts.json")                    # catches a mismatch before anything is written
+```
+
+```{r cleanup, include = FALSE}
+for (s in list(training, new_site)) { DBI::dbDisconnect(s$con, shutdown = TRUE); unlink(s$path) }
+unlink(manifest)
+```
