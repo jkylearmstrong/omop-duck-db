@@ -2115,20 +2115,32 @@ prepare_competing_risks_data <- function(con,
 
 #' Generate CONSORT Attrition Flowchart Object
 #'
+#' Four ways in, checked in this order: `steps` (with `con`), raw counts (`initial_n` with `exclusions`), pooled `sites`,
+#' or `cohort_data` carrying attrition. The count and `sites` paths forward to [summarize_attrition_consort()].
+#'
 #' @param con Active DuckDB connection (optional if `cohort_data` carries attrition).
 #' @param cohort_data A data.frame with an `"attrition"` attribute, or an attrition table.
 #' @param cohort_id Evaluated cohort definition ID.
 #' @param steps Optional list of `list(step_name, query)` pairs.
+#' @param initial_n,exclusions Raw counts for one site: the source population and what each step removed.
+#' @param sites Named list of per-site attrition tables (or `list(initial_n, exclusions)`) to pool.
+#' @param min_cell Suppress counts from 1 to `min_cell - 1` (default `NULL`: exact counts; pooled `sites` default to 11).
 #' @return An object of class `consort_attrition` with methods `to_mermaid()`, `to_latex()`, `to_markdown()`.
 #' @export
 generate_consort_attrition <- function(con = NULL,
                                        cohort_data = NULL,
                                        cohort_id = 1L,
-                                       steps = NULL) {
+                                       steps = NULL,
+                                       initial_n = NULL,
+                                       exclusions = NULL,
+                                       sites = NULL,
+                                       min_cell = NULL) {
   df <- NULL
   if (!is.null(steps)) {
     if (is.null(con)) stop("Must provide `con` when `steps` is specified.", call. = FALSE)
     df <- compute_attrition(con, cohort_id, steps)
+  } else if (!is.null(initial_n) || !is.null(sites)) {
+    return(summarize_attrition_consort(initial_n = initial_n, exclusions = exclusions, sites = sites, min_cell = min_cell))
   } else if (!is.null(cohort_data)) {
     if (!is.null(attr(cohort_data, "attrition"))) {
       df <- attr(cohort_data, "attrition")
@@ -2138,10 +2150,10 @@ generate_consort_attrition <- function(con = NULL,
   }
 
   if (is.null(df)) {
-    stop("Could not determine attrition data. Provide `steps` with `con`, or a data.frame with an 'attrition' attribute.", call. = FALSE)
+    stop("Could not determine attrition data. Provide `steps` with `con`, `initial_n` with `exclusions`, `sites`, or a data.frame with an 'attrition' attribute.", call. = FALSE)
   }
-
-  structure(df, class = c("consort_attrition", "data.frame"))
+  if (!is.null(min_cell)) df <- suppress_attrition_table(df, min_cell)
+  .as_consort(df, min_cell)
 }
 
 #' Convert Object to Mermaid Diagram
@@ -2158,16 +2170,18 @@ to_mermaid.consort_attrition <- function(x, ...) {
   for (i in seq_len(nrow(x))) {
     idx <- as.integer(x$step_number[i])
     name <- gsub('"', "'", as.character(x$step_name[i]))
-    retained <- format(as.numeric(x$subjects_retained[i]), big.mark = ",")
-    pct <- sprintf("%.1f", as.numeric(x$percent_retained[i]))
-    dropped <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+    mc <- attr(x, "min_cell")
+    retained <- .consort_n(x$subjects_retained[i], mc)
+    pct <- .consort_pct(x$percent_retained[i])
+    dropped_raw <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+    dropped <- if (is.na(dropped_raw)) 1 else dropped_raw
 
-    lines <- c(lines, sprintf('    S%d["%d. %s<br/>(N = %s, %s%%)"]', idx, idx, name, retained, pct))
+    lines <- c(lines, sprintf('    S%d["%d. %s<br/>(N = %s%s)"]', idx, idx, name, retained, pct))
     if (idx > 1) {
       prev <- idx - 1L
       lines <- c(lines, sprintf("    S%d --> S%d", prev, idx))
       if (dropped > 0) {
-        lines <- c(lines, sprintf('    E%d["Excluded: %s"]', idx, format(dropped, big.mark = ",")))
+        lines <- c(lines, sprintf('    E%d["Excluded: %s"]', idx, .consort_n(dropped_raw, mc)))
         lines <- c(lines, sprintf("    S%d -.-> E%d", prev, idx))
       }
     }
@@ -2257,19 +2271,21 @@ to_typst.consort_attrition <- function(x, ...) {
   for (i in seq_len(nrow(x))) {
     idx <- as.integer(x$step_number[i])
     name <- gsub('"', '\\\\"', as.character(x$step_name[i]))
-    retained <- format(as.numeric(x$subjects_retained[i]), big.mark = ",")
-    pct <- sprintf("%.1f", as.numeric(x$percent_retained[i]))
-    dropped <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+    mc <- attr(x, "min_cell")
+    retained <- .consort_n(x$subjects_retained[i], mc)
+    pct <- .consort_pct(x$percent_retained[i])
+    dropped_raw <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+    dropped <- if (is.na(dropped_raw)) 1 else dropped_raw
 
     if (idx > 1) {
       lines <- c(lines, "    #v(6pt)", "    #text(12pt)[$arrow.b$]", "    #v(6pt)")
     }
-    box_content <- sprintf("[*Step %d: %s*\\ \n    (N = %s, %s%%)]", idx, name, retained, pct)
+    box_content <- sprintf("[*Step %d: %s*\\ \n    (N = %s%s)]", idx, name, retained, pct)
     lines <- c(lines, sprintf('    #rect(width: 85%%, inset: 8pt, radius: 4pt, stroke: 0.75pt + rgb("204060"), fill: rgb("f4f7fa"))%s', box_content))
 
     if (dropped > 0) {
       reason <- if ("exclusion_reason" %in% names(x)) gsub('"', '\\\\"', as.character(x$exclusion_reason[i])) else "Excluded criteria not met"
-      excl_content <- sprintf("[_Excluded (N = %s)_\\ \n    %s]", format(dropped, big.mark = ","), reason)
+      excl_content <- sprintf("[_Excluded (N = %s)_\\ \n    %s]", .consort_n(dropped_raw, mc), reason)
       lines <- c(lines, sprintf('    #v(3pt)\n    #rect(width: 70%%, inset: 6pt, radius: 3pt, stroke: (dash: "dashed", paint: rgb("b03030")), fill: rgb("fff5f5"))%s', excl_content))
     }
   }
@@ -2301,12 +2317,14 @@ to_tikz.consort_attrition <- function(x, ...) {
   for (i in seq_len(nrow(x))) {
     idx <- as.integer(x$step_number[i])
     name <- gsub("%", "\\\\%", gsub("&", "\\\\&", gsub("_", "\\\\_", as.character(x$step_name[i]))))
-    retained <- format(as.numeric(x$subjects_retained[i]), big.mark = ",")
-    pct <- sprintf("%.1f", as.numeric(x$percent_retained[i]))
-    dropped <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+    mc <- attr(x, "min_cell")
+    retained <- .consort_n(x$subjects_retained[i], mc)
+    pct <- .consort_pct(x$percent_retained[i])
+    dropped_raw <- if ("subjects_dropped" %in% names(x)) as.numeric(x$subjects_dropped[i]) else 0
+    dropped <- if (is.na(dropped_raw)) 1 else dropped_raw
 
     node_id <- sprintf("step%d", idx)
-    node_label <- sprintf("\\textbf{%d. %s}\\\\\\(N = %s, %s\\%%)", idx, name, retained, pct)
+    node_label <- sprintf("\\textbf{%d. %s}\\\\\\(N = %s%s)", idx, name, retained, gsub("%", "\\\\%", pct, fixed = TRUE))
 
     if (idx == 1) {
       lines <- c(lines, sprintf("  \\node [box] (%s) {%s};", node_id, node_label))
@@ -2316,7 +2334,7 @@ to_tikz.consort_attrition <- function(x, ...) {
       if (dropped > 0) {
         excl_id <- sprintf("excl%d", idx)
         reason <- if ("exclusion_reason" %in% names(x)) gsub("%", "\\\\%", gsub("&", "\\\\&", gsub("_", "\\\\_", as.character(x$exclusion_reason[i])))) else "Excluded criteria not met"
-        excl_label <- sprintf("\\textit{Excluded (N = %s)}\\\\\\%s", format(dropped, big.mark = ","), reason)
+        excl_label <- sprintf("\\textit{Excluded (N = %s)}\\\\\\%s", .consort_n(dropped_raw, mc), reason)
         lines <- c(lines, sprintf("  \\node [exclude, right of=%s, node distance=6.5cm, yshift=-0.9cm] (%s) {%s};", prev_node, excl_id, excl_label))
         lines <- c(lines, sprintf("  \\path [arrow, dashed, draw=red!70!black] (%s.south) |- (%s.west);", prev_node, excl_id))
       }

@@ -393,7 +393,24 @@ from omop_etl.monitoring import (  # noqa: E402
     update_monitoring_log,
 )
 from omop_etl.risk_tiers import fit_capacity_thresholds, map_risk_tiers, tier_load  # noqa: E402
-from omop_etl.run_manifest import RunManifest, verify_manifest  # noqa: E402
+from omop_etl.run_manifest import RunManifest, verify_manifest, vocabulary_info  # noqa: E402
+from omop_etl.disclosure import (  # noqa: E402
+    DEFAULT_MIN_CELL, DisclosureError, assert_disclosure_safe, check_disclosure, format_count, small_cell_mask,
+    suppress_attrition_table, suppress_small_counts,
+)
+from omop_etl.consort import consort_from_counts, consort_table_to_csv, pool_consort_tables  # noqa: E402
+from omop_etl.parity import ParityAudit, audit_matrix_parity  # noqa: E402
+from omop_etl.table1_pooled import build_table1, pool_table1_summaries, summarize_table1_site  # noqa: E402
+from omop_etl.site_export import SiteSummaryError, assert_aggregate_only, export_site_summary, pool_site_packages  # noqa: E402
+from omop_etl.mapping_coverage import mapping_coverage_report  # noqa: E402
+
+
+def run_bigquery_demo(*args, **kwargs):
+    """Runs the CMS SynPUF BigQuery smoke test (alias of :func:`omop_etl.demo_bigquery.run_demo`; imported lazily)."""
+    from omop_etl.demo_bigquery import run_demo
+
+    return run_demo(*args, **kwargs)
+
 from omop_etl.source_check import check_source  # noqa: E402
 from omop_etl.telemetry import aggregate_telemetry, site_telemetry  # noqa: E402
 from omop_etl.temporal_split import split_by_date  # noqa: E402
@@ -723,9 +740,15 @@ __all__ = [
     "filter_visits",
     "filter_conditions",
     "filter_measurements",
+    # v0.12.0: disclosure control, CONSORT from counts, parity audit, pooled Table 1, site summaries, mapping coverage
+    "DEFAULT_MIN_CELL", "DisclosureError", "assert_disclosure_safe", "check_disclosure", "format_count", "small_cell_mask",
+    "suppress_attrition_table", "suppress_small_counts", "consort_from_counts", "consort_table_to_csv", "pool_consort_tables",
+    "ParityAudit", "audit_matrix_parity", "build_table1", "pool_table1_summaries", "summarize_table1_site",
+    "SiteSummaryError", "assert_aggregate_only", "export_site_summary", "pool_site_packages", "mapping_coverage_report",
+    "run_bigquery_demo", "vocabulary_info",
 ]
 
-__version__ = "0.11.2"
+__version__ = "0.12.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 

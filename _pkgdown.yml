@@ -85,6 +85,8 @@ reference:
   - build_end_of_life_cohort
   - build_treatment_episodes
   - generate_consort_attrition
+  - summarize_attrition_consort
+  - write_consort_csv
   - export_consort_flowchart
   - to_mermaid
   - to_typst
@@ -396,6 +398,8 @@ reference:
   - planned_readmission_filter
   - plausibility_report
   - plot_consort_flow
+  - disclosure
+  - audit_matrix_parity
   - plot_love_plot
   - plot_multisite_attrition_heatmap
   - provenance

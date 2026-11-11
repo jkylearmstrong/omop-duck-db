@@ -2,6 +2,8 @@
 
 Each CLI entry point can write ``run_manifest.json`` recording package / interpreter / DuckDB versions, random seeds,
 SHA-256 of the input files and of the feature spec, the git commit, wall time and the cohort size at every attrition step.
+Pass ``con=`` to record the vocabulary release the run used (``vocabulary_version``, ODD-10) and ``outputs=`` / ``add_output``
+to hash the files the run wrote, so a reviewer can tell that the files they were given are the ones the run produced.
 :func:`verify_manifest` (``omop-duckdb verify-manifest`` / ``--verify-manifest``) re-hashes the inputs before scoring, so a
 changed input file fails fast.
 """
@@ -21,7 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from omop_etl.jsonio import strict_dumps  # noqa: E402
 
-__all__ = ["RunManifest", "ManifestVerificationError", "verify_manifest", "file_sha256"]
+__all__ = ["RunManifest", "ManifestVerificationError", "verify_manifest", "file_sha256", "vocabulary_info"]
 
 MANIFEST_VERSION = 1
 
@@ -42,7 +44,8 @@ def _pkg_versions() -> dict[str, str | None]:
     from importlib import metadata
 
     out: dict[str, str | None] = {}
-    for name in ("omop-duck-db", "duckdb", "pandas", "numpy", "pyarrow", "sqlalchemy", "xgboost", "onnxruntime"):
+    for name in ("omop-duck-db", "duckdb", "pandas", "numpy", "pyarrow", "sqlalchemy", "xgboost", "onnxruntime", "scipy",
+                 "scikit-learn", "matplotlib"):
         try:
             out[name] = metadata.version(name)
         except metadata.PackageNotFoundError:
@@ -55,6 +58,31 @@ def _pkg_versions() -> dict[str, str | None]:
         except Exception:
             pass
     return out
+
+
+def vocabulary_info(con: Any) -> dict[str, Any]:
+    """Which OMOP vocabulary release a connection holds: ``{"vocabulary_version", "n_concepts", "vocabularies"}``.
+
+    ``vocabulary_version`` is the release string Athena stores in the ``vocabulary`` row with ``vocabulary_id = 'None'``
+    (``None`` when the table or row is absent). ``vocabularies`` maps each vocabulary_id to its own version, so a reviewer can
+    see e.g. which LOINC and SNOMED releases were in the build. Never raises: a database without a vocabulary gives ``None`` values.
+    """
+    info: dict[str, Any] = {"vocabulary_version": None, "n_concepts": None, "vocabularies": {}}
+    if con is None:
+        return info
+    try:
+        rows = con.execute("SELECT vocabulary_id, vocabulary_version FROM vocabulary").fetchall()
+        info["vocabularies"] = {str(a): (None if b is None else str(b)) for a, b in rows if str(a) != "None"}
+        for a, b in rows:
+            if str(a) == "None" and b is not None:
+                info["vocabulary_version"] = str(b)
+    except Exception:
+        pass
+    try:
+        info["n_concepts"] = int(con.execute("SELECT COUNT(*) FROM concept").fetchone()[0])
+    except Exception:
+        pass
+    return info
 
 
 def _git_commit(cwd: str | Path | None) -> str | None:
@@ -90,12 +118,15 @@ class RunManifest:
 
     def __init__(self, entry_point: str, *, seeds: Mapping[str, Any] | None = None,
                  inputs: Iterable[str | Path] = (), feature_spec: str | Path | None = None,
-                 extra: Mapping[str, Any] | None = None, git_dir: str | Path | None = None, include_r: bool = False):
+                 extra: Mapping[str, Any] | None = None, git_dir: str | Path | None = None, include_r: bool = False,
+                 con: Any = None, outputs: Iterable[str | Path] = ()):
         self.entry_point = entry_point
         self.seeds = dict(seeds or {})
         self.inputs = [Path(p) for p in inputs]
         self.feature_spec = None if feature_spec is None else Path(feature_spec)
         self.extra = dict(extra or {})
+        self.outputs = [Path(p) for p in outputs]
+        self.vocabulary = vocabulary_info(con) if con is not None else None
         self.attrition: list[dict[str, Any]] = []
         self._git_dir = git_dir
         self._include_r = include_r
@@ -106,6 +137,14 @@ class RunManifest:
     def add_input(self, path: str | Path) -> None:
         """Records an input file (hashed when the manifest is written; add it once it is in its final state)."""
         self.inputs.append(Path(path))
+
+    def add_output(self, path: str | Path) -> None:
+        """Records a file the run wrote (hashed when the manifest is written; add it once it is complete)."""
+        self.outputs.append(Path(path))
+
+    def set_connection(self, con: Any) -> None:
+        """Records the vocabulary release of ``con`` (also done at construction when ``con=`` is given)."""
+        self.vocabulary = vocabulary_info(con)
 
     def add_step(self, step: str, n: int, **detail: Any) -> None:
         self.attrition.append({"step": str(step), "n": int(n), **detail})
@@ -142,6 +181,8 @@ class RunManifest:
             "feature_spec": None if self.feature_spec is None else {"path": str(self.feature_spec),
                                                                     "sha256": file_sha256(self.feature_spec)},
             "attrition": self.attrition, "extra": self.extra,
+            "vocabulary": self.vocabulary,
+            "outputs": {str(p): file_sha256(p) for p in self.outputs},
         }
 
     def write(self, path: str | Path = "run_manifest.json") -> Path:
@@ -162,6 +203,7 @@ def verify_manifest(path: str | Path, *, base_dir: str | Path | None = None,
     base = Path(base_dir) if base_dir else Path.cwd()
     problems: list[str] = []
     entries = dict(m.get("inputs", {}))
+    entries.update(m.get("outputs") or {})
     if m.get("feature_spec"):
         entries[m["feature_spec"]["path"]] = m["feature_spec"]["sha256"]
     for name, want in entries.items():
