@@ -106,3 +106,62 @@ def test_feature_set_inside_benchmark_features():
     assert out.attrs["feature_groups"]["study_features"] == fs.columns
     assert out.attrs["feature_provenance"]["format"] == "omop-duck-db/study-feature-set"
     pd.testing.assert_frame_equal(out[base.columns], base)                   # the existing columns are untouched
+
+
+def test_validation_paths(tmp_path, monkeypatch):
+    from omop_etl import area_feature, export_concept_vocabulary
+    from omop_etl.ml_features import FallbackConceptTokenizer
+    tab = pd.DataFrame({"zip5": ["19104"], "v": [1.0]})
+    with pytest.raises(ValueError, match="geography"):
+        area_feature("x", tab, "v", geography="zip9")
+    with pytest.raises(ValueError, match="geography"):
+        acs_feature("poverty_rate", table=fetch_acs_zcta(2022, cache_dir=tmp_path, fetcher=fake_census), geography="zip9")
+    with pytest.raises(ValueError, match="at least one"):
+        concept_feature("c", {"a": []})
+    with pytest.raises(ValueError, match="letters, digits"):
+        concept_feature("c", {"bad name": [1]})
+    bad = FallbackConceptTokenizer(["1 - condition - a"])
+    bad.concept_list[0] = "[X]"
+    with pytest.raises(ValueError, match="Unexpected special tokens"):
+        export_concept_vocabulary(bad, tmp_path / "bad.json")
+
+
+def test_default_cache_dir_and_http_fetch(tmp_path, monkeypatch):
+    import io
+    import json
+    import urllib.request
+    from omop_etl.census_acs import _http_fetch
+    monkeypatch.setenv("OMOP_DUCK_DB_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: io.BytesIO(json.dumps(fake_census(url)).encode()))
+    assert _http_fetch("https://api.census.gov/data/2022/acs/acs5?for=zip%20code%20tabulation%20area:*")[0][0] == "B01003_001E"
+    z = fetch_acs_zcta(2022, fetcher=_http_fetch)
+    assert len(z) == 3 and (tmp_path / "cache" / "acs5_2022_zcta.csv").exists()
+
+
+def test_concept_descendants_and_fit_needs_five_stays():
+    con = _con([], [(1, 1, "2016-06-01"), (2, 2, "2016-06-01")])
+    con.execute("INSERT INTO measurement (measurement_id, person_id, measurement_concept_id, measurement_date, measurement_type_concept_id, "
+                "value_as_number) VALUES (1, 1, 555, '2016-05-01', 0, 8.0)")
+    con.execute("INSERT INTO concept_ancestor VALUES (111, 555, 1, 1)")
+    out = FeatureSet([concept_feature("l", {"lab_x": [111]}, include_descendants=True)]).compute(con).set_index("stay_id")
+    assert out.loc[1, "lab_x"] == 8.0                                           # found through the descendant concept
+    plain = FeatureSet([concept_feature("l", {"lab_x": [111]})]).compute(con).set_index("stay_id")
+    assert np.isnan(plain.loc[1, "lab_x"])
+    from omop_etl import area_feature
+    with pytest.raises(ValueError, match="at least 5"):
+        FeatureSet([area_feature("a", pd.DataFrame({"zip5": ["19104"], "v": [1.0]}), "v", transform="zscore")]).compute(
+            _con([(1, 10, "19104", "2010-01-01", None, "N")], [(1, 1, "2016-06-01")]), fit=True)
+
+
+def test_benchmark_feature_set_column_clash_and_dataset_guards(tmp_path):
+    from omop_etl import extract_multimodal_deep_dataset
+    con = make_db()
+    define_study_cohort(con, materialise=True, table_name="cohort_g", min_age=18, washin_days=0, min_los_days=0, followup_days=30,
+                        require_verified_followup=False)
+    with pytest.raises(ValueError, match="already exist"):
+        extract_benchmark_features(con, "cohort_g", feature_set=FeatureSet([concept_feature("c", {"age_at_index": [LAB["creatinine"]]})]))
+    f = extract_benchmark_features(con, "cohort_g").drop(columns=["discharge_date"], errors="ignore")
+    with pytest.raises(ValueError, match="discharge_date"):
+        extract_multimodal_deep_dataset(con, f, include_intra_measurements=True)
+    with pytest.raises(ValueError, match="empty"):
+        extract_multimodal_deep_dataset(con, f.iloc[0:0])
