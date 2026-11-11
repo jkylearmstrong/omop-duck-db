@@ -7,7 +7,9 @@
 capacity_threshold(prob, top_fraction)
 }
 \arguments{
-\item{prob}{probabilities. @param top_fraction share in (0, 1) to flag, e.g. 0.10. Flag \code{p >= cutoff}; ties cannot be split.}
+\item{prob}{probabilities}
+
+\item{top_fraction}{share in (0, 1) to flag, e.g. 0.10. Flag \code{p >= cutoff}; ties cannot be split.}
 }
 \description{
 Probability cut-off that flags the riskiest share

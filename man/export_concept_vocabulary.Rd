@@ -10,7 +10,11 @@ export_concept_vocabulary(tokenizer, path, name = "history")
 import_concept_vocabulary(path)
 }
 \arguments{
-\item{tokenizer}{from \code{\link[=build_concept_tokenizer]{build_concept_tokenizer()}} (or any list with \code{concept_list}). @param path file path. @param name label.}
+\item{tokenizer}{from \code{\link[=build_concept_tokenizer]{build_concept_tokenizer()}} (or any list with \code{concept_list})}
+
+\item{path}{file path}
+
+\item{name}{label.}
 }
 \value{
 \code{export_concept_vocabulary()}: the manifest (invisibly); \code{import_concept_vocabulary()}: the tokenizer.

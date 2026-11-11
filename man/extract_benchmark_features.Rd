@@ -45,7 +45,9 @@ extract_benchmark_features(
 
 \item{lab_lookback_days}{days before admission included in the vital/lab window (default 0: the stay only).}
 
-\item{medication_specs}{drug class specs (default \code{DEFAULT_MEDICATION_CONCEPTS}, 8 classes). @param medication_window frame, default \code{"pre_admission"}.}
+\item{medication_specs}{drug class specs (default \code{DEFAULT_MEDICATION_CONCEPTS}, 8 classes)}
+
+\item{medication_window}{frame, default \code{"pre_admission"}.}
 
 \item{lab_loincs, vital_loincs}{\code{list(name = c(loinc, ...))} (defaults: core-14 panel; \code{DEFAULT_VITAL_LOINCS}).}
 

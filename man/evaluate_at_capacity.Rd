@@ -7,7 +7,13 @@
 evaluate_at_capacity(y, prob, top_fraction = 0.1, cutoff = NULL)
 }
 \arguments{
-\item{y}{outcomes, @param prob probabilities, @param top_fraction share flagged, @param cutoff optional frozen cut-off.}
+\item{y}{outcomes}
+
+\item{prob}{probabilities}
+
+\item{top_fraction}{share flagged}
+
+\item{cutoff}{optional frozen cut-off.}
 }
 \value{
 list(cutoff, n_flagged, share_flagged, ppv, sensitivity, lift).

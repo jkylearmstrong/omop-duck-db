@@ -7,7 +7,9 @@
 adjust_for_prevalence(p, train_prevalence, target_prevalence)
 }
 \arguments{
-\item{p}{probabilities. @param train_prevalence,target_prevalence base rates in (0, 1).}
+\item{p}{probabilities}
+
+\item{train_prevalence, target_prevalence}{base rates in (0, 1).}
 }
 \description{
 Adds the log odds ratio of the two base rates to the log odds, so scores of a model trained on a balanced

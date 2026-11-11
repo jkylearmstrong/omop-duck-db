@@ -39,7 +39,10 @@
 #'
 #' `platt_scaling_fit()` fits `logit(p') = intercept + slope * logit(p)` by maximum likelihood; `platt_scaling_apply()`
 #' applies it.
-#' @param y 0/1 outcomes. @param p predicted probabilities. @param params list with `intercept` and `slope`.
+#'
+#' @param y 0/1 outcomes
+#' @param p predicted probabilities
+#' @param params list with `intercept` and `slope`.
 #' @return `platt_scaling_fit()`: list(intercept, slope); `platt_scaling_apply()`: numeric vector.
 #' @export
 platt_scaling_fit <- function(y, p) {
@@ -56,7 +59,10 @@ platt_scaling_apply <- function(p, params) .tr_expit(params$intercept + params$s
 
 #' Isotonic recalibration (pool-adjacent-violators)
 #'
-#' @param y 0/1 outcomes. @param p predicted probabilities. @param params list with knots `x` and `y`.
+#'
+#' @param y 0/1 outcomes
+#' @param p predicted probabilities
+#' @param params list with knots `x` and `y`.
 #' @return `isotonic_fit()`: list(x, y) step-function knots; `isotonic_apply()`: numeric vector.
 #' @export
 isotonic_fit <- function(y, p) {
@@ -91,7 +97,9 @@ isotonic_apply <- function(p, params) stats::approx(params$x, params$y, xout = .
 #'
 #' Adds the log odds ratio of the two base rates to the log odds, so scores of a model trained on a balanced
 #' sample (prevalence 0.5) map to the natural incidence.
-#' @param p probabilities. @param train_prevalence,target_prevalence base rates in (0, 1).
+#'
+#' @param p probabilities
+#' @param train_prevalence,target_prevalence base rates in (0, 1).
 #' @export
 adjust_for_prevalence <- function(p, train_prevalence, target_prevalence) {
   for (v in list(train_prevalence, target_prevalence)) if (!(v > 0 && v < 1)) stop("prevalences must be in (0, 1).", call. = FALSE)
@@ -103,7 +111,9 @@ adjust_for_prevalence <- function(p, train_prevalence, target_prevalence) {
 #'
 #' @param method `"none"`, `"prior_shift"`, `"platt"` or `"isotonic"`. `platt` / `isotonic` need `y` and `p` at natural
 #'   prevalence; `prior_shift` needs the two prevalences.
-#' @param y,p outcomes and probabilities. @param train_prevalence,target_prevalence base rates.
+#'
+#' @param y,p outcomes and probabilities
+#' @param train_prevalence,target_prevalence base rates.
 #' @return A list of class `omop_recalibrator` with `method`, `params` and a `predict` function.
 #' @export
 fit_recalibrator <- function(method, y = NULL, p = NULL, train_prevalence = NULL, target_prevalence = NULL) {
@@ -127,7 +137,9 @@ fit_recalibrator <- function(method, y = NULL, p = NULL, train_prevalence = NULL
 
 #' Probability cut-off that flags the riskiest share
 #'
-#' @param prob probabilities. @param top_fraction share in (0, 1) to flag, e.g. 0.10. Flag `p >= cutoff`; ties cannot be split.
+#'
+#' @param prob probabilities
+#' @param top_fraction share in (0, 1) to flag, e.g. 0.10. Flag `p >= cutoff`; ties cannot be split.
 #' @export
 capacity_threshold <- function(prob, top_fraction) {
   if (!(top_fraction > 0 && top_fraction < 1)) stop("top_fraction must be in (0, 1).", call. = FALSE)
@@ -138,8 +150,12 @@ capacity_threshold <- function(prob, top_fraction) {
 
 #' Two risk tiers whose cut-point is set by capacity
 #'
-#' @param reference_prob scores used to place the cut-point. @param top_fraction share in the high tier.
-#' @param high_name,low_name tier names. @return Thresholds for [map_risk_tiers()].
+#'
+#' @param reference_prob scores used to place the cut-point
+#' @param top_fraction share in the high tier.
+#'
+#' @param high_name,low_name tier names
+#' @return Thresholds for [map_risk_tiers()].
 #' @export
 capacity_risk_tiers <- function(reference_prob, top_fraction = 0.10, high_name = "high_risk", low_name = "standard") {
   fit_capacity_thresholds(reference_prob, list(list(name = high_name, top_fraction = top_fraction), list(name = low_name)))
@@ -147,7 +163,11 @@ capacity_risk_tiers <- function(reference_prob, top_fraction = 0.10, high_name =
 
 #' What flagging the riskiest share achieves
 #'
-#' @param y outcomes, @param prob probabilities, @param top_fraction share flagged, @param cutoff optional frozen cut-off.
+#'
+#' @param y outcomes
+#' @param prob probabilities
+#' @param top_fraction share flagged
+#' @param cutoff optional frozen cut-off.
 #' @return list(cutoff, n_flagged, share_flagged, ppv, sensitivity, lift).
 #' @export
 evaluate_at_capacity <- function(y, prob, top_fraction = 0.10, cutoff = NULL) {
@@ -212,13 +232,20 @@ evaluate_at_capacity <- function(y, prob, top_fraction = 0.10, cutoff = NULL) {
 #' bootstrap intervals. The model is the ridge logistic regression of [ridge_logistic_fit_predict()].
 #'
 #' @param features_df data frame with the site column, the 0/1 label and numeric features.
-#' @param site_col site column. @param feature_cols features (default: numeric columns other than label, site and ids/dates).
-#' @param label_col label column. @param balance_ratio majority rows per minority row in training (1 = 50/50); `NULL` = natural.
+#'
+#' @param site_col site column
+#' @param feature_cols features (default: numeric columns other than label, site and ids/dates).
+#'
+#' @param label_col label column
+#' @param balance_ratio majority rows per minority row in training (1 = 50/50); `NULL` = natural.
 #' @param score_natural score every row of the held-out site (`TRUE`) or a balanced subsample (diagnostic only).
 #' @param calibration `"prior_shift"` (default), `"platt"`, `"isotonic"` or `"none"`. `platt` / `isotonic` are fitted on the
 #'   training sites' natural data scored by the model (in-sample for those rows).
 #' @param n_bootstraps bootstrap resamples for 95 percent intervals (0 = none).
-#' @param capacity_fractions top-k shares flagged. @param random_state seed. @param keep_predictions keep row-level scores.
+#'
+#' @param capacity_fractions top-k shares flagged
+#' @param random_state seed
+#' @param keep_predictions keep row-level scores.
 #' @param l2 ridge penalty.
 #' @return A list of class `omop_loso_transport` with `per_site`, `summary`, `predictions` and `settings`.
 #'   The R sampling and bootstrap draws come from R's RNG, so they differ from the Python twin for the same seed.

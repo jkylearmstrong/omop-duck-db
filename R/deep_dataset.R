@@ -25,7 +25,10 @@ build_concept_tokenizer <- function(concept_tokens) {
 #' `export_concept_vocabulary()` writes a checksummed JSON manifest (token list, size, SHA-256, no patient data);
 #' `import_concept_vocabulary()` rebuilds the tokenizer with identical ids and refuses a corrupted or foreign file.
 #' The file format is shared with the Python functions of the same names.
-#' @param tokenizer from [build_concept_tokenizer()] (or any list with `concept_list`). @param path file path. @param name label.
+#'
+#' @param tokenizer from [build_concept_tokenizer()] (or any list with `concept_list`)
+#' @param path file path
+#' @param name label.
 #' @return `export_concept_vocabulary()`: the manifest (invisibly); `import_concept_vocabulary()`: the tokenizer.
 #' @export
 export_concept_vocabulary <- function(tokenizer, path, name = "history") {
@@ -62,8 +65,14 @@ import_concept_vocabulary <- function(path) {
 #' holds the original id at selected positions and -100 elsewhere; `next_visit_flag[i, v]` is 1 when row `i` has a visit
 #' after `v`. `[MASK]` is `vocab_size` (embedding needs `vocab_size + 1` rows). Draws use R's RNG, so for the same seed
 #' they differ from the Python function; the properties (rates, labels, flags) are the same.
-#' @param concept_tensor integer array. @param n_visits visits per row. @param vocab_size tokenizer size.
-#' @param mask_prob selection probability. @param seed RNG seed. @param n_special number of special ids (5).
+#'
+#' @param concept_tensor integer array
+#' @param n_visits visits per row
+#' @param vocab_size tokenizer size.
+#'
+#' @param mask_prob selection probability
+#' @param seed RNG seed
+#' @param n_special number of special ids (5).
 #' @return list(masked_concept_tensor, mlm_labels, next_visit_flag).
 #' @export
 make_pretraining_targets <- function(concept_tensor, n_visits, vocab_size, mask_prob = 0.15, seed = 20261104, n_special = 5L) {

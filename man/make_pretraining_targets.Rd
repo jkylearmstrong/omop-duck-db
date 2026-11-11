@@ -14,9 +14,17 @@ make_pretraining_targets(
 )
 }
 \arguments{
-\item{concept_tensor}{integer array. @param n_visits visits per row. @param vocab_size tokenizer size.}
+\item{concept_tensor}{integer array}
 
-\item{mask_prob}{selection probability. @param seed RNG seed. @param n_special number of special ids (5).}
+\item{n_visits}{visits per row}
+
+\item{vocab_size}{tokenizer size.}
+
+\item{mask_prob}{selection probability}
+
+\item{seed}{RNG seed}
+
+\item{n_special}{number of special ids (5).}
 }
 \value{
 list(masked_concept_tensor, mlm_labels, next_visit_flag).

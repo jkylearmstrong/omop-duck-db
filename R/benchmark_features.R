@@ -120,7 +120,9 @@ DEFAULT_DISPOSITION_MAP <- c(`8536` = "home", `581476` = "home_health", `8863` =
 #'   feature groups. `include_sdoh` needs `ruca_crosswalk`, `sdi_table` and frozen `sdi_cut_points`.
 #' @param lookback_days history window for Elixhauser (back from discharge), utilization and medications.
 #' @param lab_lookback_days days before admission included in the vital/lab window (default 0: the stay only).
-#' @param medication_specs drug class specs (default `DEFAULT_MEDICATION_CONCEPTS`, 8 classes). @param medication_window frame, default `"pre_admission"`.
+#'
+#' @param medication_specs drug class specs (default `DEFAULT_MEDICATION_CONCEPTS`, 8 classes)
+#' @param medication_window frame, default `"pre_admission"`.
 #' @param lab_loincs,vital_loincs `list(name = c(loinc, ...))` (defaults: core-14 panel; `DEFAULT_VITAL_LOINCS`).
 #' @param lab_concept_ids,vital_concept_ids `list(name = c(concept_id))` for databases without the LOINC vocabulary.
 #' @param derive_labs add `lab_egfr` and `lab_anion_gap` (mean and `_last`).

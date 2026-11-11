@@ -22,9 +22,13 @@ evaluate_loso_transport(
 \arguments{
 \item{features_df}{data frame with the site column, the 0/1 label and numeric features.}
 
-\item{site_col}{site column. @param feature_cols features (default: numeric columns other than label, site and ids/dates).}
+\item{site_col}{site column}
 
-\item{label_col}{label column. @param balance_ratio majority rows per minority row in training (1 = 50/50); \code{NULL} = natural.}
+\item{feature_cols}{features (default: numeric columns other than label, site and ids/dates).}
+
+\item{label_col}{label column}
+
+\item{balance_ratio}{majority rows per minority row in training (1 = 50/50); \code{NULL} = natural.}
 
 \item{score_natural}{score every row of the held-out site (\code{TRUE}) or a balanced subsample (diagnostic only).}
 
@@ -33,7 +37,11 @@ training sites' natural data scored by the model (in-sample for those rows).}
 
 \item{n_bootstraps}{bootstrap resamples for 95 percent intervals (0 = none).}
 
-\item{capacity_fractions}{top-k shares flagged. @param random_state seed. @param keep_predictions keep row-level scores.}
+\item{capacity_fractions}{top-k shares flagged}
+
+\item{random_state}{seed}
+
+\item{keep_predictions}{keep row-level scores.}
 
 \item{l2}{ridge penalty.}
 }

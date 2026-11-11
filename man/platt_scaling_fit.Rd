@@ -10,7 +10,11 @@ platt_scaling_fit(y, p)
 platt_scaling_apply(p, params)
 }
 \arguments{
-\item{y}{0/1 outcomes. @param p predicted probabilities. @param params list with \code{intercept} and \code{slope}.}
+\item{y}{0/1 outcomes}
+
+\item{p}{predicted probabilities}
+
+\item{params}{list with \code{intercept} and \code{slope}.}
 }
 \value{
 \code{platt_scaling_fit()}: list(intercept, slope); \code{platt_scaling_apply()}: numeric vector.

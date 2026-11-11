@@ -10,7 +10,11 @@ isotonic_fit(y, p)
 isotonic_apply(p, params)
 }
 \arguments{
-\item{y}{0/1 outcomes. @param p predicted probabilities. @param params list with knots \code{x} and \code{y}.}
+\item{y}{0/1 outcomes}
+
+\item{p}{predicted probabilities}
+
+\item{params}{list with knots \code{x} and \code{y}.}
 }
 \value{
 \code{isotonic_fit()}: list(x, y) step-function knots; \code{isotonic_apply()}: numeric vector.

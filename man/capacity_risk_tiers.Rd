@@ -12,9 +12,14 @@ capacity_risk_tiers(
 )
 }
 \arguments{
-\item{reference_prob}{scores used to place the cut-point. @param top_fraction share in the high tier.}
+\item{reference_prob}{scores used to place the cut-point}
 
-\item{high_name, low_name}{tier names. @return Thresholds for \code{\link[=map_risk_tiers]{map_risk_tiers()}}.}
+\item{top_fraction}{share in the high tier.}
+
+\item{high_name, low_name}{tier names}
+}
+\value{
+Thresholds for \code{\link[=map_risk_tiers]{map_risk_tiers()}}.
 }
 \description{
 Two risk tiers whose cut-point is set by capacity

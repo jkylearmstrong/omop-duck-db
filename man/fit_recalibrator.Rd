@@ -16,7 +16,9 @@ fit_recalibrator(
 \item{method}{\code{"none"}, \code{"prior_shift"}, \code{"platt"} or \code{"isotonic"}. \code{platt} / \code{isotonic} need \code{y} and \code{p} at natural
 prevalence; \code{prior_shift} needs the two prevalences.}
 
-\item{y, p}{outcomes and probabilities. @param train_prevalence,target_prevalence base rates.}
+\item{y, p}{outcomes and probabilities}
+
+\item{train_prevalence, target_prevalence}{base rates.}
 }
 \value{
 A list of class \code{omop_recalibrator} with \code{method}, \code{params} and a \code{predict} function.
