@@ -298,7 +298,11 @@ def _to_torch(d: dict[str, Any]) -> dict[str, Any]:
     for k, v in d.items():
         if isinstance(v, np.ndarray) and v.dtype != object:
             t = torch.from_numpy(np.ascontiguousarray(v))
-            out[k] = t.long() if k in ("concept_tensor", "masked_concept_tensor", "mlm_labels", "intra_tensor", "person_id") else t
+            if k in ("concept_tensor", "masked_concept_tensor", "mlm_labels", "intra_tensor", "person_id"):
+                t = t.long()
+            elif k == "y":
+                t = t.float()      # BCEWithLogitsLoss and friends need a float32 target
+            out[k] = t
         else:
             out[k] = v
     return out
