@@ -222,6 +222,7 @@ def test_torch_dict(con, features):
     ds = extract_multimodal_deep_dataset(con, features, max_visits=3, max_tokens_per_visit=4, output_format="torch_dict")
     assert isinstance(ds["concept_tensor"], torch.Tensor) and ds["concept_tensor"].dtype == torch.long
     assert {"concept_tensor", "times", "dense_covariates", "y", "person_id"} <= set(ds)
+    assert ds["y"].dtype == torch.float32
 
 
 def test_memmap_chunks_equal_in_memory(con, features, tmp_path):
