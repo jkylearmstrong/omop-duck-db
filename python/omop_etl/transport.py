@@ -247,7 +247,10 @@ def _make_fit_predict(model_type: str, random_state: int, model_params: Mapping[
 
         def fit_predict(xtr, ytr, xte):
             xtr, xte = np.asarray(xtr, dtype="float64"), np.asarray(xte, dtype="float64")
-            if mt == "hist_gbm":                       # takes NaN natively
+            if mt == "hist_gbm":                       # takes NaN natively, but not a column that is NaN everywhere
+                keep = ~np.all(np.isnan(xtr), axis=0)
+                if not keep.all():
+                    xtr, xte = xtr[:, keep], xte[:, keep]
                 model = HistGradientBoostingClassifier(**{"random_state": random_state, **user})
             else:                                      # forests cannot: fill with the training medians
                 med = np.nanmedian(xtr, axis=0)

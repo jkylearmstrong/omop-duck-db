@@ -229,6 +229,19 @@ reference:
   - as_tidymodels_data
   - model_concepts
   - materialize_concept_features
+- title: Study-design features
+  desc: Add your own person-level features (RUCA, SDI, census income, SQL or R-defined) to an OMOP study; fitted state travels with the model.
+  contents:
+  - study_features
+  - study_feature
+  - feature_set
+  - builtin_study_features
+  - stays_from_cohort
+  - compute_features
+  - write_feature_set
+  - feature_set_state
+  - feature_set_covariate_settings
+  - register_feature_factory
 - title: Geography features (RUCA and SDI)
   desc: Area-level covariates derived from the address in effect at admission, with fixed training-cohort SDI cut points.
   contents:

@@ -1018,6 +1018,49 @@ gdrive_download_latest()    # pull the latest snapshot instead of rebuilding
 Configure the target Drive folder in `config/gdrive.yml` (copy from
 `config/gdrive.yml.example`).
 
+## Study-design features: add your own person-level features (v0.14.0, Python and R)
+
+A protocol often needs something OMOP does not define: the rural-urban code of the home ZIP, an area deprivation index, ACS median
+household income. A `feature_set` collects such *study-design features*, computes them for the index stays (the address in effect at
+admission is resolved once), and writes them as `measurement` rows under site-defined concepts so **OHDSI FeatureExtraction,
+PatientLevelPrediction and DeepPatientLevelPrediction read them like any other covariate**. The package ships the framework and
+worked examples (RUCA, SDI, any ZIP-keyed table), never the reference data. SDI and RUCA keep the concept ids of
+`GEOGRAPHY_CONCEPT_IDS`, so earlier work stays compatible.
+
+```r
+fs <- feature_set() |>
+  add_feature(ruca_feature("ruca_crosswalk.csv")) |>
+  add_feature(sdi_feature("sdi.csv", cut_points = c(20.8, 40.6, 60.4, 80.2))) |>   # the training cohort's fixed cuts
+  add_feature(area_feature("income", "acs_b19013.csv", "median_income", transform = "log1p"))
+
+wide     <- compute_features(fs, con, stays_from_cohort(con, "cohort"))   # one row per stay, leakage-free
+concepts <- write_feature_set(fs, con, wide)                              # measurement rows
+cov      <- FeatureExtraction::getDbCovariateData(
+  connection = conn, cdmDatabaseSchema = "main", cohortTable = "cohort", cohortIds = 1, rowIdField = "subject_id",
+  covariateSettings = feature_set_covariate_settings(fs, concepts))       # or feature_set_extraction_r(fs, concepts) as text
+```
+
+```python
+fs = (FeatureSet().add(ruca_feature("ruca_crosswalk.csv"))
+      .add(sdi_feature("sdi.csv", cut_points=[20.8, 40.6, 60.4, 80.2]))
+      .add(area_feature("income", "acs_b19013.csv", "median_income", transform="log1p")))
+wide = fs.compute(con, stays_from_cohort(con, "cohort")); concepts = fs.write(con, wide)
+```
+
+Transforms that learn from data (SDI cut points, a percentile grid, a mean and sd, an imputation median) are fitted once on the
+training sites with `fit = TRUE`, stored as the feature's state, and shipped in a manifest; at another site they are loaded, never
+refitted, and refuse to run without them. This prevents quintile drift and keeps income comparable across sites (a *percentile of
+the training distribution* transports, raw dollars can identify the site). The manifest is the same JSON in Python and R.
+
+```r
+export_feature_manifest(fs_train, "study_features.json")     # after compute_features(fs_train, con, fit = TRUE)
+load_feature_state(fs_site, "study_features.json")           # at the replicating site
+```
+
+Add your own with `sql_feature()` (a query over a `_stays` view), `custom_feature()` (an R or Python function) or a full
+`study_feature()`, and register new kinds with `register_feature_factory()`. Vignettes: *Study-design features*, *Study features
+across sites* and *Study-design features in Python*.
+
 ## Tools for a downstream study
 
 The package supports studies that use the validated OHDSI tools (FeatureExtraction, PatientLevelPrediction, CohortGenerator) on DuckDB
@@ -1032,7 +1075,8 @@ cohort <- execute_circe_cohort(con, file.path(cohort_definitions_dir(), "target_
 rec <- reconcile_cohort(con, "legacy_patients.csv", definition = file.path(cohort_definitions_dir(), "target_cohort.circe.json"),
                         id_col = "patient_id", index_date_col = "admit_date", min_cell = 11)
 
-# 3. Your own version of a feature (a Charlson index, RUCA/SDI) next to the standard one, readable by FeatureExtraction / PLP;
+# 3. Your own version of a feature (a Charlson index, RUCA/SDI) next to the standard one, readable by FeatureExtraction / PLP
+#    (see 'Study-design features' above for feature_set(), which also fits and ships the transforms);
 #    concept ids are per database, so share a registry across sites and check it
 ids <- write_custom_features(con, features)               # person_id, date, one numeric column per feature
 export_custom_concept_registry(con, "custom_concepts.json")
