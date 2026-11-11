@@ -277,6 +277,20 @@ from omop_etl.ml_features import (
     impute_encounter_observations,
     to_clinical_sequence_tokens,
 )
+from omop_etl.study_report import (
+    build_study_tables,
+    explain_models,
+    export_workbook,
+    index_stay_dates,
+    los_by_site,
+    plot_cohort_flowchart,
+    plot_shap_beeswarm,
+    plot_shap_panels,
+    random_stay_draw,
+    seed_sensitivity,
+    stay_type_auc,
+    tune_models,
+)
 from omop_etl.omop_learn_backend import (
     DuckDBBackend,
     cohort_frame_from_parquet,
@@ -537,6 +551,18 @@ __all__ = [
     # omop-learn / SARD / PLP bridge: set-based sparse & sequence feature extraction
     "extract_sparse_concept_matrix",
     "extract_sard_visit_tensors",
+    "build_study_tables",
+    "explain_models",
+    "plot_cohort_flowchart",
+    "plot_shap_beeswarm",
+    "plot_shap_panels",
+    "export_workbook",
+    "index_stay_dates",
+    "los_by_site",
+    "random_stay_draw",
+    "seed_sensitivity",
+    "stay_type_auc",
+    "tune_models",
     "as_omop_learn_batch",
     "arrow_to_pytorch",
     "arrow_to_cuda_tensors",
@@ -779,7 +805,7 @@ __all__ = [
     "isotonic_apply", "adjust_for_prevalence", "capacity_threshold", "capacity_risk_tiers", "evaluate_at_capacity",
 ]
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 
