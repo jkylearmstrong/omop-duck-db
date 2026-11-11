@@ -29,7 +29,7 @@ from omop_etl.ml_features import (
     extract_sparse_concept_matrix,
 )
 
-__all__ = ["extract_multimodal_deep_dataset", "extract_intra_stay_tokens", "export_concept_vocabulary",
+__all__ = ["extract_multimodal_deep_dataset", "extract_intra_stay_tokens", "extract_intra_stay_measurements", "export_concept_vocabulary",
            "import_concept_vocabulary", "make_pretraining_targets"]
 
 VOCABULARY_FORMAT = "omop-duck-db/concept-vocabulary"
@@ -199,6 +199,76 @@ def extract_intra_stay_tokens(con: duckdb.DuckDBPyConnection, features_df: pd.Da
         np.add.at(lengths, (r[keep], d[keep]), 1)
         day_of[r, d] = d
     return {"intra_tensor": tensor, "intra_day": day_of, "intra_lengths": lengths, "tokenizer": tokenizer}
+
+
+def extract_intra_stay_measurements(con: duckdb.DuckDBPyConnection, features_df: pd.DataFrame, *, concept_ids: Sequence[int] | None = None,
+                                    top_concepts: int = 50, max_days: int = 14, max_obs_per_day: int = 20,
+                                    normalization: dict[int, tuple[float, float]] | None = None) -> dict[str, Any]:
+    """Continuous in-stay measurement arrays for time-series models (GRU-D, continuous-time transformers, numeric heads).
+
+    ``intra_obs[i, d, k] = [time_offset, concept_idx, normalized_value]`` for the ``k``-th numeric measurement (time order)
+    on stay day ``d`` of row ``i``: ``time_offset`` is days since the admission date (fractional when the measurement has a
+    time), ``concept_idx`` is 1..K into ``concepts`` (0 = padding), ``normalized_value`` the z-score with the concept's
+    ``normalization`` (mean, sd). Padding is ``[-1, 0, 0]`` and ``intra_obs_mask`` is False there. Only measurements dated
+    from the admission to the discharge date are used. Stays longer than ``max_days`` keep their first days, days with more
+    than ``max_obs_per_day`` keep the earliest observations.
+
+    Parameters
+    ----------
+    features_df : needs ``person_id``, ``index_date`` (admission) and ``discharge_date``.
+    concept_ids : measurement concept ids to include (frozen list shared across sites); default the ``top_concepts`` most
+        frequent numeric concepts inside these stays.
+    normalization : ``{concept_id: (mean, sd)}``. When ``None`` it is computed from these rows: for training / test use,
+        take it from the training table (returned as ``normalization``) and pass it to the other tables.
+    """
+    need = {"person_id", "index_date", "discharge_date"} - set(features_df.columns)
+    if need:
+        raise ValueError(f"features_df is missing {sorted(need)}.")
+    n = len(features_df)
+    stays = pd.DataFrame({"row_idx": np.arange(n, dtype="int64"), "person_id": features_df["person_id"].astype("int64").to_numpy(),
+                          "admit": pd.to_datetime(features_df["index_date"]).to_numpy(),
+                          "disch": pd.to_datetime(features_df["discharge_date"]).to_numpy()})
+    con.register("stays", stays)
+    try:
+        ev = con.execute("""
+            SELECT s.row_idx, m.measurement_concept_id AS concept_id, m.value_as_number AS value,
+                   epoch(COALESCE(m.measurement_datetime, CAST(m.measurement_date AS TIMESTAMP)) - CAST(CAST(s.admit AS DATE) AS TIMESTAMP)) / 86400.0 AS t
+            FROM stays s JOIN measurement m ON m.person_id = s.person_id AND m.measurement_concept_id <> 0
+                 AND m.value_as_number IS NOT NULL AND isfinite(m.value_as_number)
+                 AND m.measurement_date BETWEEN CAST(s.admit AS DATE) AND CAST(s.disch AS DATE)""").df()
+    finally:
+        con.unregister("stays")
+    if concept_ids is None:
+        concept_ids = ev["concept_id"].value_counts().head(int(top_concepts)).index.tolist() if len(ev) else []
+    concepts = [int(c) for c in concept_ids]
+    idx_of = {c: i + 1 for i, c in enumerate(concepts)}
+    ev = ev[ev["concept_id"].isin(idx_of)].copy()
+    if normalization is None:
+        g = ev.groupby("concept_id")["value"]
+        normalization = {int(c): (float(m), float(sd) if sd and sd > 0 else 1.0) for c, m, sd in zip(g.mean().index, g.mean(), g.std(ddof=0))}
+    mean = ev["concept_id"].map(lambda c: normalization.get(int(c), (0.0, 1.0))[0]).astype("float64")
+    sd = ev["concept_id"].map(lambda c: normalization.get(int(c), (0.0, 1.0))[1]).astype("float64")
+    ev["z"] = (ev["value"] - mean) / sd.where(sd > 0, 1.0)
+    ev["cidx"] = ev["concept_id"].map(idx_of).astype("int64")
+    ev["day"] = np.floor(ev["t"]).clip(lower=0).astype("int64")
+    ev = ev[ev["day"] < int(max_days)].sort_values(["row_idx", "t", "cidx"], kind="stable").reset_index(drop=True)
+    obs = np.zeros((n, int(max_days), int(max_obs_per_day), 3), dtype="float32")
+    obs[..., 0] = -1.0
+    mask = np.zeros((n, int(max_days), int(max_obs_per_day)), dtype=bool)
+    if len(ev):
+        r, d = ev["row_idx"].to_numpy(), ev["day"].to_numpy()
+        order = np.lexsort((np.arange(len(ev)), d, r))      # position within (row, day) in time order
+        r, d = r[order], d[order]
+        e = ev.iloc[order].reset_index(drop=True)
+        new = np.r_[True, (r[1:] != r[:-1]) | (d[1:] != d[:-1])]
+        pos = np.arange(len(e)) - np.maximum.accumulate(np.where(new, np.arange(len(e)), 0))
+        keep = pos < int(max_obs_per_day)
+        rr, dd, pp = r[keep], d[keep], pos[keep]
+        obs[rr, dd, pp, 0] = e["t"].to_numpy()[keep]
+        obs[rr, dd, pp, 1] = e["cidx"].to_numpy()[keep]
+        obs[rr, dd, pp, 2] = e["z"].to_numpy()[keep]
+        mask[rr, dd, pp] = True
+    return {"intra_obs": obs, "intra_obs_mask": mask, "concepts": concepts, "normalization": normalization}
 
 
 # ---------------------------------------------------------------------------------------------------------------------

@@ -113,9 +113,60 @@ def test_benchmark_features_toggles_and_order(con):
     assert "prior_ip_count" in stays and stays["prior_ip_count"].max() >= 1
 
 
-def test_include_sdoh_requires_inputs(con):
+def test_include_sdoh_requires_inputs_or_falls_back_to_an_indicator(con):
     with pytest.raises(ValueError, match="sdi_cut_points"):
-        extract_benchmark_features(con, "cohort_t", include_sdoh=True, **KW)
+        extract_benchmark_features(con, "cohort_t", include_sdoh=True, sdoh_fallback="raise", **KW)
+    with pytest.warns(UserWarning, match="sdoh_missing"):
+        df = extract_benchmark_features(con, "cohort_t", include_sdoh=True, **KW)
+    assert (df["sdoh_missing"] == 1).all() and df["sdi_quintile"].isna().all() and df.attrs["feature_groups"]["sdoh"]
+    with pytest.raises(ValueError, match="sdoh_fallback"):
+        extract_benchmark_features(con, "cohort_t", include_sdoh=True, sdoh_fallback="ignore", **KW)
+
+
+def test_impute_uses_frozen_training_values(con):
+    raw = extract_benchmark_features(con, "cohort_t", **KW)
+    raw.loc[raw.index[:5], "lab_sodium"] = np.nan
+    assert raw["lab_sodium"].isna().any()
+    train = extract_benchmark_features(con, "cohort_t", impute="median", **KW)
+    assert not train[[c for c in train.columns if c.startswith(("lab_", "vital_"))]].isna().any().any()
+    vals = train.attrs["imputation_values"]
+    assert set(vals) == set(train.attrs["feature_groups"]["vitals"] + train.attrs["feature_groups"]["labs"])
+    other = extract_benchmark_features(con, "cohort_t", impute_values={**vals, "lab_sodium": 123.0}, **KW)
+    assert other.attrs["imputation_values"]["lab_sodium"] == 123.0
+    with pytest.raises(ValueError, match="impute"):
+        extract_benchmark_features(con, "cohort_t", impute="mode", **KW)
+
+
+def test_no_fragmentation_warning(con):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", pd.errors.PerformanceWarning)
+        extract_benchmark_features(con, "cohort_t", **KW)
+
+
+def test_adjacent_central_vocabulary_is_attached(tmp_path):
+    import duckdb
+    from _bf_fixture import make_db
+    main = make_db()
+    main.execute("COPY concept_ancestor TO '" + str(tmp_path / "anc.parquet").replace("\\", "/") + "'")
+    main.execute("DELETE FROM concept_ancestor")
+    # build a database file whose vocabulary lives in a neighbouring central_vocabulary.duckdb
+    vocab = duckdb.connect(str(tmp_path / "central_vocabulary.duckdb"))
+    vocab.execute("CREATE TABLE concept_ancestor AS SELECT * FROM read_parquet('" + str(tmp_path / "anc.parquet").replace("\\", "/") + "')")
+    vocab.execute("CREATE TABLE concept AS SELECT * FROM (SELECT 1 AS concept_id, 'x' AS concept_name, 'LOINC' AS vocabulary_id, 'a' AS concept_code)")
+    vocab.close()
+    main.execute(f"EXPORT DATABASE '{str(tmp_path / 'exp').replace(chr(92), '/')}'")
+    db = duckdb.connect(str(tmp_path / "site.duckdb"))
+    db.execute(f"IMPORT DATABASE '{str(tmp_path / 'exp').replace(chr(92), '/')}'")
+    db.execute("DELETE FROM concept_ancestor")
+    define_study_cohort(db, materialise=True, table_name="cohort_t", **COHORT)
+    with pytest.warns(UserWarning, match="attached the central vocabulary"):
+        df = extract_benchmark_features(db, "cohort_t", include_vitals=False, include_labs=False)
+    assert len(df.attrs["feature_groups"]["medications"]) == 8
+    db.close()                                                                      # the ATTACH lives with the instance
+    off = duckdb.connect(str(tmp_path / "site.duckdb"))
+    with pytest.raises(ValueError, match="not reachable"):
+        extract_benchmark_features(off, "cohort_t", include_vitals=False, include_labs=False, include_elixhauser=False, vocabulary_db=None)
 
 
 # ---- vocabulary --------------------------------------------------------------------------------------------------------------
@@ -265,6 +316,28 @@ def test_intra_stay_in_dataset(con, features):
     assert ds["intra_tensor"].shape == (len(features), 6, 30) and "intra_tokenizer" in ds
 
 
+def test_intra_stay_measurements_are_continuous_and_inside_the_stay(con, features):
+    from omop_etl import extract_intra_stay_measurements
+    res = extract_intra_stay_measurements(con, features, concept_ids=list(LAB.values()), max_days=8, max_obs_per_day=6)
+    obs, mask = res["intra_obs"], res["intra_obs_mask"]
+    n = len(features)
+    assert obs.shape == (n, 8, 6, 3) and mask.shape == (n, 8, 6) and res["concepts"] == list(LAB.values())
+    los = (pd.to_datetime(features["discharge_date"]) - pd.to_datetime(features["index_date"])).dt.days.to_numpy()
+    t = np.where(mask, obs[..., 0], -1)
+    assert (t.max(axis=(1, 2)) <= los + 1).all() and (t[mask] >= 0).all()          # nothing after the discharge day
+    assert (obs[..., 1][mask] >= 1).all() and (obs[~mask] == np.array([-1, 0, 0])).all()
+    z = obs[..., 2][mask]
+    cidx = obs[..., 1][mask].astype(int)
+    for k in range(1, 5):                                                         # z-scores: mean 0 and sd 1 per concept
+        assert abs(z[cidx == k].mean()) < 1e-3 and abs(z[cidx == k].std() - 1) < 1e-3
+    assert abs(float(res["normalization"][LAB["creatinine"]][0]) - 3.5) < 3         # planted 99 is not included
+    again = extract_intra_stay_measurements(con, features, concept_ids=list(LAB.values()), max_days=8, max_obs_per_day=6,
+                                            normalization=res["normalization"])
+    np.testing.assert_array_equal(again["intra_obs"], obs)
+    top = extract_intra_stay_measurements(con, features, top_concepts=2)
+    assert len(top["concepts"]) == 2
+
+
 # ---- recalibration, capacity -------------------------------------------------------------------------------------------------
 
 def _sim(n=20000, prev=0.15, seed=0):
@@ -374,4 +447,14 @@ def test_loso_xgboost_when_installed():
     pytest.importorskip("xgboost")
     res = evaluate_loso_transport(_sites(), "site_anon", model_type="xgboost", n_bootstraps=0,
                                   model_params={"n_estimators": 40})
+    assert (res.per_site["auroc"] > 0.65).all()
+
+
+@pytest.mark.parametrize("model", ["hist_gbm", "random_forest"])
+def test_loso_sklearn_models(model):
+    pytest.importorskip("sklearn")
+    df = _sites()
+    df.loc[df.index[::7], "x1"] = np.nan                                             # NaN handling
+    res = evaluate_loso_transport(df, "site_anon", model_type=model, n_bootstraps=0,
+                                  model_params={"max_iter": 40} if model == "hist_gbm" else {"n_estimators": 40})
     assert (res.per_site["auroc"] > 0.65).all()

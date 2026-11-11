@@ -84,7 +84,18 @@ test_that("extract_benchmark_features returns dual labs, derived labs and nothin
   disp <- df[, grepl("^disp_", names(df))]
   expect_true(all(rowSums(disp) == 1))
   expect_true("y" %in% names(df))
-  expect_error(extract_benchmark_features(con, "cohort_t", include_sdoh = TRUE), "sdi_cut_points")
+  expect_error(extract_benchmark_features(con, "cohort_t", include_sdoh = TRUE, sdoh_fallback = "raise"), "sdi_cut_points")
+  expect_warning(fb <- extract_benchmark_features(con, "cohort_t", include_sdoh = TRUE,
+                                                  vital_concept_ids = list(systolic_bp = 3004249)), "sdoh_missing")
+  expect_true(all(fb$sdoh_missing == 1) && all(is.na(fb$sdi_quintile)))
+  raw <- suppressWarnings(extract_benchmark_features(con, "cohort_t"))
+  filled <- suppressWarnings(extract_benchmark_features(con, "cohort_t", impute = "median"))
+  vals <- attr(filled, "imputation_values")
+  expect_setequal(names(vals), c(attr(filled, "feature_groups")$vitals, attr(filled, "feature_groups")$labs))
+  expect_false(anyNA(filled[, names(vals)[!is.na(vals)]]))
+  other <- suppressWarnings(extract_benchmark_features(con, "cohort_t", impute_values = c(lab_sodium = 123)))
+  expect_equal(attr(other, "imputation_values")[["lab_sodium"]], 123)
+  expect_error(suppressWarnings(extract_benchmark_features(con, "cohort_t", impute = "mode")), "impute")
 })
 
 test_that("concept vocabulary round-trips and reads the Python manifest", {

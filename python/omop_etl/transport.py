@@ -238,7 +238,27 @@ def _make_fit_predict(model_type: str, random_state: int, model_params: Mapping[
                                 num_boost_round=rounds)
             return booster.predict(xgb.DMatrix(np.asarray(xte, dtype="float32")))
         return fit_predict
-    raise ValueError("model_type must be 'logistic' or 'xgboost'.")
+    if mt in ("hist_gbm", "random_forest"):
+        try:
+            from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+        except ImportError as exc:
+            raise ImportError(f"model_type={model_type!r} needs scikit-learn (pip install scikit-learn).") from exc
+        user = dict(model_params or {})
+
+        def fit_predict(xtr, ytr, xte):
+            xtr, xte = np.asarray(xtr, dtype="float64"), np.asarray(xte, dtype="float64")
+            if mt == "hist_gbm":                       # takes NaN natively
+                model = HistGradientBoostingClassifier(**{"random_state": random_state, **user})
+            else:                                      # forests cannot: fill with the training medians
+                med = np.nanmedian(xtr, axis=0)
+                med = np.where(np.isnan(med), 0.0, med)
+                xtr, xte = np.where(np.isnan(xtr), med, xtr), np.where(np.isnan(xte), med, xte)
+                model = RandomForestClassifier(**{"n_estimators": 300, "min_samples_leaf": 5, "n_jobs": 1,
+                                                  "random_state": random_state, **user})
+            model.fit(xtr, ytr)
+            return model.predict_proba(xte)[:, 1]
+        return fit_predict
+    raise ValueError("model_type must be 'logistic', 'xgboost', 'hist_gbm' or 'random_forest'.")
 
 
 def _balance(y: np.ndarray, ratio: float | None, rng: np.random.Generator) -> np.ndarray:
@@ -303,8 +323,10 @@ def evaluate_loso_transport(
     capacity_fractions : sequence of float
         Top-k shares flagged for PPV / sensitivity / lift. The cut-off is the held-out site's own quantile of the
         calibrated scores (a capacity rule: "the riskiest 10%").
-    model_type : {"logistic", "xgboost"}
-        ``logistic`` is the ridge IRLS fit of :func:`ridge_logistic_fit_predict`; ``xgboost`` needs the package.
+    model_type : {"logistic", "xgboost", "hist_gbm", "random_forest"}
+        ``logistic`` is the ridge IRLS fit of :func:`ridge_logistic_fit_predict`; ``xgboost`` needs xgboost; ``hist_gbm``
+        (``HistGradientBoostingClassifier``, NaN-native) and ``random_forest`` (training-median fill) need scikit-learn.
+        ``model_params`` are passed to the model.
     """
     if site_col not in features_df or label_col not in features_df:
         raise ValueError(f"features_df needs the columns {site_col!r} and {label_col!r}.")

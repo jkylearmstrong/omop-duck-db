@@ -15,6 +15,7 @@ Leakage policy (all windows are fixed by the code, not by the caller):
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import Any, Mapping, Sequence
 
@@ -32,6 +33,43 @@ _DISPOSITION_LEVELS = ("home", "home_health", "snf", "ama", "other", "missing")
 def _default_medication_specs() -> dict[str, dict[str, list[int]]]:
     from omop_etl.table1 import DEFAULT_MEDICATION_CONCEPTS
     return {k: {"ancestor_concept_ids": list(v)} for k, v in DEFAULT_MEDICATION_CONCEPTS.items()}
+
+
+def _vocab_reachable(con) -> bool:
+    try:
+        return con.execute("SELECT 1 FROM concept_ancestor LIMIT 1").fetchone() is not None
+    except (duckdb.CatalogException, duckdb.BinderException):
+        return False
+
+
+def _ensure_vocabulary(con, vocabulary_db) -> None:
+    """Attach an adjacent central vocabulary file when ``concept_ancestor`` cannot be read (multi-database setups)."""
+    if vocabulary_db is None or _vocab_reachable(con):
+        return
+    path = None
+    if vocabulary_db == "auto":
+        try:
+            files = [r[2] for r in con.execute("PRAGMA database_list").fetchall() if r[2]]
+        except duckdb.Error:
+            files = []
+        for f in files:
+            for name in ("central_vocabulary.duckdb", "central_vocab.duckdb"):
+                cand = os.path.join(os.path.dirname(os.path.abspath(f)), name)
+                if os.path.exists(cand) and os.path.abspath(cand) != os.path.abspath(f):
+                    path = cand
+                    break
+            if path:
+                break
+    else:
+        path = os.fspath(vocabulary_db)
+    if path is None:
+        return
+    from omop_etl.build_omop_cdm import attach_central_vocabulary
+    try:
+        attach_central_vocabulary(con, path)
+        warnings.warn(f"concept_ancestor was not reachable; attached the central vocabulary {path!r}.", UserWarning, stacklevel=3)
+    except Exception as exc:   # an already attached catalog, a locked file: carry on and let the extractors report it
+        warnings.warn(f"Could not attach the central vocabulary {path!r}: {exc}", UserWarning, stacklevel=3)
 
 
 def _cohort_frame(con, cohort_table: str, cohort_id: int | None) -> pd.DataFrame:
@@ -160,6 +198,10 @@ def extract_benchmark_features(
     sdi_table: Any = None,
     sdi_cut_points: Sequence[float] | None = None,
     disposition_map: Mapping[int, str] | None = None,
+    sdoh_fallback: str = "indicator",
+    impute: str | None = None,
+    impute_values: Mapping[str, float] | None = None,
+    vocabulary_db: str | os.PathLike | None = "auto",
 ) -> pd.DataFrame:
     """Leakage-free modelling table, one row per cohort row, in cohort order.
 
@@ -174,6 +216,18 @@ def extract_benchmark_features(
     include_sdoh : bool, default False
         SDI quintile and RUCA category of the admission ZIP (:func:`derive_geography_features`); needs ``ruca_crosswalk``,
         ``sdi_table`` and the frozen ``sdi_cut_points``. Off by default because it needs those external files.
+        ``sdoh_fallback="indicator"`` (default): when any of the three is missing the group becomes ``sdi_quintile`` /
+        ``ruca_category`` = NaN plus ``sdoh_missing`` = 1 and a warning, instead of an error; ``"raise"`` keeps the error.
+        No national cut points are bundled: quintiles must use the training cohort's frozen cut points.
+    impute : {"median", "mean"} or None, default None
+        Fills missing vital and lab values (``vital_*``, ``lab_*``, ``lab_*_last``) for models that cannot take NaN. The
+        statistics are the ones of **this** table unless ``impute_values`` ({column: value}) is given, so fit them on the
+        training sites (``attrs["imputation_values"]`` returns them) and pass them to every other table. Tree models
+        handle NaN natively and need no imputation.
+    vocabulary_db : path, "auto" or None, default "auto"
+        When ``concept_ancestor`` is not reachable, attach this central vocabulary DuckDB file (temporary zero-copy views,
+        :func:`attach_central_vocabulary`). ``"auto"`` looks for ``central_vocabulary.duckdb`` / ``central_vocab.duckdb`` next
+        to the connection's database file; ``None`` never attaches.
     include_elixhauser : bool
         31 Elixhauser flags and the van Walraven score. Anchored at **discharge** and including the index stay's
         diagnoses ("discharge-inclusive lookback", ``lookback_days`` back from the discharge date).
@@ -219,10 +273,14 @@ def extract_benchmark_features(
     groups: dict[str, list[str]] = {}
     skipped: list[str] = []
 
+    blocks: list[pd.DataFrame] = []     # joined once at the end: 100+ single-column inserts fragment a DataFrame
+
     def add(group: str, frame: pd.DataFrame) -> None:
-        for col in frame.columns:
-            out[col] = frame[col].to_numpy()
+        blocks.append(pd.DataFrame({c: frame[c].to_numpy() for c in frame.columns}, index=out.index))
         groups.setdefault(group, []).extend(frame.columns)
+
+    if include_elixhauser or include_medications:
+        _ensure_vocabulary(con, vocabulary_db)
 
     age = female = None
     if include_demographics or (include_labs and derive_labs):
@@ -305,13 +363,35 @@ def extract_benchmark_features(
             add("disposition", pd.DataFrame({f"disp_{lv}": (cat == lv).astype("int8").to_numpy() for lv in levels}))
 
     if include_sdoh:
+        if sdoh_fallback not in ("indicator", "raise"):
+            raise ValueError("sdoh_fallback must be 'indicator' or 'raise'.")
         if ruca_crosswalk is None or sdi_table is None or sdi_cut_points is None:
-            raise ValueError("include_sdoh=True needs ruca_crosswalk, sdi_table and the frozen sdi_cut_points.")
-        from omop_etl.geography import derive_geography_features
-        stays = pd.DataFrame({"person_id": cohort["subject_id"], "stay_id": cohort["row_id"], "admit_date": cohort["cohort_start_date"]})
-        geo = derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays=stays)
-        geo = geo.drop_duplicates("stay_id").set_index("stay_id").reindex(cohort["row_id"])
-        add("sdoh", pd.DataFrame({"sdi_quintile": geo["sdi_quintile"].to_numpy(), "ruca_category": geo["ruca_category"].to_numpy()}))
+            if sdoh_fallback == "raise":
+                raise ValueError("include_sdoh=True needs ruca_crosswalk, sdi_table and the frozen sdi_cut_points.")
+            warnings.warn("include_sdoh=True but ruca_crosswalk, sdi_table or sdi_cut_points is missing: sdi_quintile and "
+                          "ruca_category are NaN and sdoh_missing = 1 for every row.", UserWarning, stacklevel=2)
+            add("sdoh", pd.DataFrame({"sdi_quintile": np.full(n, np.nan), "ruca_category": np.full(n, np.nan, dtype=object),
+                                      "sdoh_missing": np.ones(n, dtype="int8")}))
+        else:
+            from omop_etl.geography import derive_geography_features
+            stays = pd.DataFrame({"person_id": cohort["subject_id"], "stay_id": cohort["row_id"], "admit_date": cohort["cohort_start_date"]})
+            geo = derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays=stays)
+            geo = geo.drop_duplicates("stay_id").set_index("stay_id").reindex(cohort["row_id"])
+            q = geo["sdi_quintile"].to_numpy()
+            add("sdoh", pd.DataFrame({"sdi_quintile": q, "ruca_category": geo["ruca_category"].to_numpy(),
+                                      "sdoh_missing": pd.isna(q).astype("int8")}))
+
+    out = pd.concat([out, *blocks], axis=1)
+    imputation: dict[str, float] = {}
+    if impute is not None or impute_values is not None:
+        method = (impute or "median").lower()
+        if method not in ("median", "mean"):
+            raise ValueError("impute must be 'median', 'mean' or None.")
+        for col in groups.get("vitals", []) + groups.get("labs", []):
+            val = float(impute_values[col]) if impute_values is not None and col in impute_values else                 float(getattr(out[col], method)()) if out[col].notna().any() else np.nan
+            imputation[col] = val
+            if not np.isnan(val):
+                out[col] = out[col].fillna(val)
 
     leaked = [c for c in out.columns if c not in keys and c.lower() in ("y", "outcome", "outcome_flag", "outcome_date")]
     if leaked:
@@ -319,6 +399,7 @@ def extract_benchmark_features(
     out.attrs["feature_groups"] = groups
     out.attrs["skipped"] = skipped
     out.attrs["key_columns"] = keys
+    out.attrs["imputation_values"] = imputation
     return out
 
 

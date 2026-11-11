@@ -747,7 +747,7 @@ __all__ = [
     "SiteSummaryError", "assert_aggregate_only", "export_site_summary", "pool_site_packages", "mapping_coverage_report",
     "run_bigquery_demo", "vocabulary_info",
     # v0.13.0: benchmark feature table, deep-learning datasets, frozen vocabulary, LOSO transport and recalibration
-    "extract_benchmark_features", "DEFAULT_DISPOSITION_MAP", "extract_multimodal_deep_dataset", "extract_intra_stay_tokens",
+    "extract_benchmark_features", "DEFAULT_DISPOSITION_MAP", "extract_multimodal_deep_dataset", "extract_intra_stay_tokens", "extract_intra_stay_measurements",
     "export_concept_vocabulary", "import_concept_vocabulary", "make_pretraining_targets", "evaluate_loso_transport",
     "LosoTransportResult", "Recalibrator", "fit_recalibrator", "platt_scaling_fit", "platt_scaling_apply", "isotonic_fit",
     "isotonic_apply", "adjust_for_prevalence", "capacity_threshold", "capacity_risk_tiers", "evaluate_at_capacity",
@@ -759,7 +759,7 @@ __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 from omop_etl.benchmark_features import DEFAULT_DISPOSITION_MAP, extract_benchmark_features  # noqa: E402
 from omop_etl.deep_dataset import (  # noqa: E402
-    export_concept_vocabulary, extract_intra_stay_tokens, extract_multimodal_deep_dataset, import_concept_vocabulary,
+    export_concept_vocabulary, extract_intra_stay_measurements, extract_intra_stay_tokens, extract_multimodal_deep_dataset, import_concept_vocabulary,
     make_pretraining_targets,
 )
 from omop_etl.transport import (  # noqa: E402

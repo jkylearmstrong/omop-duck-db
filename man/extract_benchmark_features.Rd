@@ -28,7 +28,10 @@ extract_benchmark_features(
   ruca_crosswalk = NULL,
   sdi_table = NULL,
   sdi_cut_points = NULL,
-  disposition_map = NULL
+  disposition_map = NULL,
+  sdoh_fallback = "indicator",
+  impute = NULL,
+  impute_values = NULL
 )
 }
 \arguments{
@@ -58,6 +61,14 @@ extract_benchmark_features(
 \item{ruca_crosswalk, sdi_table, sdi_cut_points}{inputs of \code{\link[=derive_geography_features]{derive_geography_features()}}.}
 
 \item{disposition_map}{named character vector concept id -> category.}
+
+\item{sdoh_fallback}{\code{"indicator"} (default): when \code{ruca_crosswalk}, \code{sdi_table} or \code{sdi_cut_points} is missing, \code{include_sdoh = TRUE}
+gives \code{sdi_quintile} / \code{ruca_category} = NA plus \code{sdoh_missing = 1} and a warning; \code{"raise"} keeps the error. No national cut points are bundled.}
+
+\item{impute}{\code{NULL}, \code{"median"} or \code{"mean"}: fill missing vital / lab values. Statistics come from this table unless \code{impute_values}
+(named numeric) is given; fit them on the training sites (\code{attr(, "imputation_values")}) and pass them to other tables.}
+
+\item{impute_values}{named numeric vector of frozen fill values.}
 }
 \value{
 A data frame in cohort order; \code{attr(, "feature_groups")} lists the columns per group and \code{attr(, "skipped")} the

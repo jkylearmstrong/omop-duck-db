@@ -128,6 +128,11 @@ DEFAULT_DISPOSITION_MAP <- c(`8536` = "home", `581476` = "home_health", `8863` =
 #' @param derive_labs add `lab_egfr` and `lab_anion_gap` (mean and `_last`).
 #' @param ruca_crosswalk,sdi_table,sdi_cut_points inputs of [derive_geography_features()].
 #' @param disposition_map named character vector concept id -> category.
+#' @param sdoh_fallback `"indicator"` (default): when `ruca_crosswalk`, `sdi_table` or `sdi_cut_points` is missing, `include_sdoh = TRUE`
+#'   gives `sdi_quintile` / `ruca_category` = NA plus `sdoh_missing = 1` and a warning; `"raise"` keeps the error. No national cut points are bundled.
+#' @param impute `NULL`, `"median"` or `"mean"`: fill missing vital / lab values. Statistics come from this table unless `impute_values`
+#'   (named numeric) is given; fit them on the training sites (`attr(, "imputation_values")`) and pass them to other tables.
+#' @param impute_values named numeric vector of frozen fill values.
 #' @return A data frame in cohort order; `attr(, "feature_groups")` lists the columns per group and `attr(, "skipped")` the
 #'   features that could not be built.
 #' @export
@@ -138,7 +143,8 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
                                        medication_specs = NULL, medication_window = "pre_admission", lab_loincs = NULL,
                                        vital_loincs = NULL, lab_concept_ids = NULL, vital_concept_ids = NULL,
                                        derive_labs = TRUE, ruca_crosswalk = NULL, sdi_table = NULL, sdi_cut_points = NULL,
-                                       disposition_map = NULL) {
+                                       disposition_map = NULL, sdoh_fallback = "indicator", impute = NULL,
+                                       impute_values = NULL) {
   if (lookback_days < 0 || lab_lookback_days < 0) stop("lookback_days and lab_lookback_days must be non-negative.", call. = FALSE)
   cohort <- .bf_cohort(con, cohort_table, cohort_id)
   n <- nrow(cohort)
@@ -241,14 +247,31 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
   }
 
   if (include_sdoh) {
+    if (!sdoh_fallback %in% c("indicator", "raise")) stop("sdoh_fallback must be 'indicator' or 'raise'.", call. = FALSE)
     if (is.null(ruca_crosswalk) || is.null(sdi_table) || is.null(sdi_cut_points)) {
-      stop("include_sdoh = TRUE needs ruca_crosswalk, sdi_table and the frozen sdi_cut_points.", call. = FALSE)
+      if (sdoh_fallback == "raise") stop("include_sdoh = TRUE needs ruca_crosswalk, sdi_table and the frozen sdi_cut_points.", call. = FALSE)
+      warning("include_sdoh = TRUE but ruca_crosswalk, sdi_table or sdi_cut_points is missing: sdi_quintile and ruca_category are NA and sdoh_missing = 1 for every row.", call. = FALSE)
+      add("sdoh", data.frame(sdi_quintile = rep(NA_real_, n), ruca_category = rep(NA_character_, n), sdoh_missing = rep(1L, n)))
+    } else {
+      stays <- data.frame(person_id = cohort$subject_id, stay_id = cohort$row_id, admit_date = cohort$cohort_start_date)
+      geo <- derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays = stays)
+      geo <- geo[!duplicated(geo$stay_id), , drop = FALSE]
+      idx <- match(cohort$row_id, geo$stay_id)
+      add("sdoh", data.frame(sdi_quintile = geo$sdi_quintile[idx], ruca_category = geo$ruca_category[idx],
+                             sdoh_missing = as.integer(is.na(geo$sdi_quintile[idx]))))
     }
-    stays <- data.frame(person_id = cohort$subject_id, stay_id = cohort$row_id, admit_date = cohort$cohort_start_date)
-    geo <- derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays = stays)
-    geo <- geo[!duplicated(geo$stay_id), , drop = FALSE]
-    idx <- match(cohort$row_id, geo$stay_id)
-    add("sdoh", data.frame(sdi_quintile = geo$sdi_quintile[idx], ruca_category = geo$ruca_category[idx]))
+  }
+
+  imputation <- numeric()
+  if (!is.null(impute) || !is.null(impute_values)) {
+    method <- if (is.null(impute)) "median" else tolower(impute)
+    if (!method %in% c("median", "mean")) stop("impute must be 'median', 'mean' or NULL.", call. = FALSE)
+    for (cc in c(groups$vitals, groups$labs)) {
+      val <- if (!is.null(impute_values) && cc %in% names(impute_values)) as.numeric(impute_values[[cc]]) else
+        if (any(!is.na(out[[cc]]))) as.numeric(if (method == "median") stats::median(out[[cc]], na.rm = TRUE) else mean(out[[cc]], na.rm = TRUE)) else NA_real_
+      imputation[[cc]] <- val
+      if (!is.na(val)) out[[cc]][is.na(out[[cc]])] <- val
+    }
   }
 
   leaked <- setdiff(names(out)[tolower(names(out)) %in% c("y", "outcome", "outcome_flag", "outcome_date")], keys)
@@ -256,5 +279,6 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
   attr(out, "feature_groups") <- groups
   attr(out, "skipped") <- skipped
   attr(out, "key_columns") <- keys
+  attr(out, "imputation_values") <- imputation
   out
 }
