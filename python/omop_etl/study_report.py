@@ -38,11 +38,14 @@ __all__ = [
     "prepare_model_matrix", "classification_metrics", "bootstrap_ci", "oof_predictions", "default_model_grid",
     "tune_models", "stay_type_auc", "random_stay_draw", "seed_sensitivity", "los_by_site", "index_stay_dates",
     "export_workbook", "build_study_tables", "DEFAULT_ID_COLUMNS", "plot_cohort_flowchart", "explain_models", "shap_ranking",
-    "plot_shap_beeswarm", "plot_shap_panels",
+    "plot_shap_beeswarm", "plot_shap_panels", "table_one", "logistic_regression_table", "missingness_table", "LR_DROP_COLUMNS",
 ]
 
 DEFAULT_ID_COLUMNS = (
     "person_id", "visit_occurrence_id", "admit_date", "discharge_date", "encounterid", "patid", "site_source", "site_anon", "site_id",
+    # cohort bookkeeping and outcome-derived columns (never predictors)
+    "subject_id", "row_id", "cohort_definition_id", "cohort_start_date", "cohort_end_date", "outcome_flag", "outcome_date",
+    "followup_verified", "target_outcome", "stay_rank", "y", "index_date",
 )
 
 
@@ -56,13 +59,20 @@ def _sk():
 # ------------------------------------------------------------------ feature matrix
 def prepare_model_matrix(df: pd.DataFrame, *, label_col: str = "readmitted_30d", drop_cols: Sequence[str] = (),
                          id_cols: Sequence[str] = DEFAULT_ID_COLUMNS) -> tuple[pd.DataFrame, pd.Series]:
-    """Feature table -> ``(X, y)``: identifiers and ``drop_cols`` removed, numeric-looking text converted, categoricals dummy
+    """Feature table -> ``(X, y)``: identifiers, outcome-derived cohort columns, date columns and ``drop_cols`` removed, numeric-looking text converted, categoricals dummy
     coded (first level dropped), characters XGBoost rejects (``[ ] <``) replaced, all-NaN columns dropped."""
     if label_col not in df:
         raise ValueError(f"label column {label_col!r} not found.")
     y = df[label_col].astype(int).reset_index(drop=True)
     drop = [c for c in [*id_cols, *drop_cols, label_col] if c in df.columns]
     X = df.drop(columns=drop).reset_index(drop=True)
+    X = X.drop(columns=X.select_dtypes(include=["datetime", "datetimetz", "timedelta"]).columns)  # dates are not predictors
+    leak = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c]) and X[c].notna().all() and np.array_equal(X[c].to_numpy(float), y.to_numpy(float))]
+    if leak:  # a copy of the label among the predictors would give a perfect, meaningless AUC
+        import warnings
+
+        warnings.warn(f"dropped column(s) identical to the label: {leak}", stacklevel=2)
+        X = X.drop(columns=leak)
     for c in X.select_dtypes(include=["object"]).columns:  # e.g. DuckDB DECIMAL arriving as Python Decimal
         conv = pd.to_numeric(X[c], errors="coerce")
         if conv.notna().sum() == X[c].notna().sum():
@@ -323,6 +333,10 @@ def seed_sensitivity(all_stays: pd.DataFrame, seeds: Sequence[int], *, model_fac
 
 
 # ------------------------------------------------------------------ descriptive tables
+# composite scores and duplicates are collinear with the columns they summarise, which makes odds ratios unstable
+LR_DROP_COLUMNS = ("elix_total_conditions", "elix_van_walraven_score", "elix_pre_index_conditions_count", "los_days", "lab_hemoglobin_last",
+                   "lab_hematocrit_last")
+
 def los_by_site(df: pd.DataFrame, *, site_col: str = "site_anon", los_col: str = "index_los_days",
                 label_col: str = "readmitted_30d", min_cell: int | None = 11) -> pd.DataFrame:
     """Length of stay (days) by site and overall: mean ± SD, median [IQR] for all, readmitted and not, with Welch t and Mann-Whitney p.
@@ -631,12 +645,129 @@ def plot_shap_panels(explained: Mapping[str, Mapping[str, Any]], *, top: int = 1
     return fig
 
 
+# ------------------------------------------------------------------ descriptive tables
+def _supp(n: int, min_cell: int | None) -> Any:
+    return "<%d" % min_cell if (min_cell and 0 < n < min_cell) else int(n)
+
+
+def _p_text(p: float) -> str:
+    return "" if p is None or not np.isfinite(p) else ("<0.001" if p < 0.001 else f"{p:.3f}")
+
+
+def table_one(df: pd.DataFrame, *, label_col: str = "readmitted_30d", columns: Sequence[str] | None = None,
+              id_cols: Sequence[str] = DEFAULT_ID_COLUMNS, min_cell: int | None = 11, max_levels: int = 12) -> pd.DataFrame:
+    """Table 1: every column described overall and by outcome (``label_col`` 0 / 1) with a p-value.
+
+    Numeric columns: median [Q1, Q3] (Mann-Whitney p). 0/1 columns: n (%) with the flag (chi-square p). Text / category columns:
+    n (%) per level, up to ``max_levels`` levels (chi-square p). Counts between 1 and ``min_cell - 1`` show as ``<min_cell``."""
+    from scipy import stats
+
+    y = df[label_col].astype(int).to_numpy()
+    cols = list(columns) if columns is not None else [c for c in df.columns if c not in {*id_cols, label_col} and not pd.api.types.is_datetime64_any_dtype(df[c])]
+    n0, n1 = int((y == 0).sum()), int((y == 1).sum())
+    rows: list[dict[str, Any]] = [{"Variable": "N", "Level": "", "Overall": len(df), f"{label_col}=0": n0, f"{label_col}=1": n1, "p": ""}]
+
+    def cnt(mask: np.ndarray) -> tuple[str, str, str]:
+        out = []
+        for m, d in ((np.ones(len(y), bool), len(y)), (y == 0, n0), (y == 1, n1)):
+            k = int((mask & m).sum())
+            out.append(f"{_supp(k, min_cell)} ({100 * k / d:.1f}%)" if d else "")
+        return tuple(out)  # type: ignore[return-value]
+
+    def chi(masks: list[np.ndarray]) -> str:
+        tab = np.array([[int((m & (y == 0)).sum()), int((m & (y == 1)).sum())] for m in masks])
+        tab = tab[tab.sum(axis=1) > 0]
+        if tab.shape[0] < 2 or (tab.sum(axis=0) == 0).any():
+            return ""
+        try:
+            return _p_text(stats.chi2_contingency(tab)[1])
+        except ValueError:
+            return ""
+
+    for c in cols:
+        s = df[c]
+        nn = s.dropna()
+        if nn.empty:
+            continue
+        num = pd.to_numeric(s, errors="coerce") if s.dtype == object else s
+        if pd.api.types.is_bool_dtype(s) or (pd.api.types.is_numeric_dtype(num) and set(pd.unique(num.dropna())) <= {0, 1}):
+            m = (num == 1).fillna(False).to_numpy()
+            a, b, c1 = cnt(m)
+            rows.append({"Variable": c, "Level": "yes", "Overall": a, f"{label_col}=0": b, f"{label_col}=1": c1, "p": chi([m, ~m])})
+        elif pd.api.types.is_numeric_dtype(num):
+            def q(v: pd.Series) -> str:
+                v = v.dropna()
+                return "" if v.empty else f"{v.median():.2f} [{v.quantile(.25):.2f}, {v.quantile(.75):.2f}]"
+            a0, a1 = num[y == 0].dropna(), num[y == 1].dropna()
+            p = stats.mannwhitneyu(a0, a1).pvalue if len(a0) and len(a1) and num.nunique() > 1 else np.nan
+            rows.append({"Variable": c, "Level": "median [Q1, Q3]", "Overall": q(num), f"{label_col}=0": q(num[y == 0]),
+                         f"{label_col}=1": q(num[y == 1]), "p": _p_text(p)})
+        else:
+            levels = s.value_counts().index[:max_levels]
+            masks = [(s == lv).fillna(False).to_numpy() for lv in levels]
+            p = chi(masks)
+            for lv, m in zip(levels, masks):
+                a, b, c1 = cnt(m)
+                rows.append({"Variable": c, "Level": str(lv), "Overall": a, f"{label_col}=0": b, f"{label_col}=1": c1, "p": p if lv == levels[0] else ""})
+    return pd.DataFrame(rows)
+
+
+def logistic_regression_table(X: pd.DataFrame, y: pd.Series | np.ndarray, *, max_iter: int = 100, ridge: float = 1e-4) -> pd.DataFrame:
+    """Multivariable logistic regression (no penalty, Newton-Raphson) -> odds ratios with 95% Wald CIs and p-values.
+
+    Missing values are median imputed; 0/1 columns enter as they are (OR for the flag), other columns are standardised (OR per
+    1 SD); constant columns are dropped. Fitted on the full ``X`` (not a prediction model: no hold-out)."""
+    from scipy import stats
+
+    Z = X.copy()
+    Z = Z.fillna(Z.median(numeric_only=True)).loc[:, lambda d: d.nunique() > 1]
+    kind = {}
+    for c in Z.columns:
+        if set(pd.unique(Z[c])) <= {0, 1, 0.0, 1.0}:
+            kind[c] = "per flag"
+        else:
+            Z[c] = (Z[c] - Z[c].mean()) / Z[c].std(ddof=0)
+            kind[c] = "per 1 SD"
+    A = np.column_stack([np.ones(len(Z)), Z.to_numpy(float)])
+    t = np.asarray(y, float)
+    beta = np.zeros(A.shape[1])
+    for _ in range(max_iter):
+        p = 1 / (1 + np.exp(-np.clip(A @ beta, -30, 30)))
+        W = np.clip(p * (1 - p), 1e-9, None)
+        H = A.T @ (A * W[:, None]) + ridge * np.eye(A.shape[1])
+        step = np.linalg.solve(H, A.T @ (t - p) - ridge * beta)
+        beta = beta + step
+        if np.max(np.abs(step)) < 1e-8:
+            break
+    cov = np.linalg.inv(H)
+    se = np.sqrt(np.clip(np.diag(cov), 0, None))
+    b, s = beta[1:], se[1:]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pv = 2 * (1 - stats.norm.cdf(np.abs(b / s)))
+    return pd.DataFrame({"Variable": list(Z.columns), "Scale": [kind[c] for c in Z.columns], "OR": np.exp(b).round(3),
+                         "CI_low": np.exp(b - 1.96 * s).round(3), "CI_high": np.exp(b + 1.96 * s).round(3),
+                         "p": [_p_text(v) for v in pv]}).sort_values("OR", key=lambda v: (v - 1).abs(), ascending=False).reset_index(drop=True)
+
+
+def missingness_table(df: pd.DataFrame, *, site_col: str | None = "site_anon", id_cols: Sequence[str] = DEFAULT_ID_COLUMNS,
+                      label_col: str | None = "readmitted_30d", min_cell: int | None = 11) -> pd.DataFrame:
+    """Per-column missingness: ``% missing`` overall and per site (counts below ``min_cell`` are not shown, only percentages)."""
+    cols = [c for c in df.columns if c not in {*id_cols, label_col, site_col}]
+    out = pd.DataFrame({"Variable": cols, "n_missing": [_supp(int(df[c].isna().sum()), min_cell) for c in cols],
+                        "pct_missing": [round(100 * df[c].isna().mean(), 2) for c in cols]})
+    if site_col and site_col in df:
+        for site, g in df.groupby(site_col):
+            out[f"pct_missing_{site}"] = [round(100 * g[c].isna().mean(), 2) for c in cols]
+    return out.sort_values("pct_missing", ascending=False).reset_index(drop=True)
+
+
 # ------------------------------------------------------------------ driver
 def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "Study", label_col: str = "readmitted_30d",
                        site_col: str = "site_anon", los_col: str = "index_los_days", first_stay_col: str | None = "prior_ip_count",
                        n_bootstraps: int = 100, loso: bool = True, workbook: bool = True, window: tuple[str, str] | None = None,
                        min_cell: int | None = 11, random_state: int = 42, attrition: pd.DataFrame | None = None,
                        figures: bool = False, shap_sample_n: int = 2000, shap_top: int = 10,
+                       descriptive: bool = True, lr_drop_cols: Sequence[str] = LR_DROP_COLUMNS, extra_tables: Mapping[str, pd.DataFrame] | None = None,
                        first_box: str = "All patients with an inpatient or emergency-to-inpatient stay",
                        final_box: str = "one randomly drawn stay per patient") -> dict[str, Any]:
     """Runs the model benchmark, tuning comparison, stay-type split, length of stay, dates and (optionally) leave-one-site-out
@@ -652,6 +783,10 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
     patients; random forest and HistGBM panels need the ``shap`` package and are left out without it). Only the ranked table
     and the figures are written; per-patient SHAP values are not.
 
+    ``descriptive=True`` adds ``Table1`` (:func:`table_one`), ``Logistic_Regression`` (:func:`logistic_regression_table`) and
+    ``Missingness`` (:func:`missingness_table`; the regression leaves out ``lr_drop_cols``, composites such as the Van Walraven score); ``attrition`` also becomes a ``CONSORT_Attrition`` table. ``extra_tables``
+    (``{name: DataFrame}``) are written as further CSVs and workbook sheets.
+
     Returns ``{"tables": {name: DataFrame}, "files": [paths], "summary": {...}}``."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -664,13 +799,23 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
         model = "HistGBM" if "HistGBM" in tuned["summary"] else next(iter(tuned["summary"]))
         tables["By_Stay_Type_AUC"] = stay_type_auc(y, tuned["oof"][(model, best["best_by_f1"])], (df[first_stay_col].to_numpy() == 0),
                                                    model_name=model, min_cell=min_cell)
+    if descriptive:
+        tables["Table1"] = table_one(df, label_col=label_col, min_cell=min_cell)
+        tables["Logistic_Regression"] = logistic_regression_table(X.drop(columns=[c for c in lr_drop_cols if c in X.columns]), y)
+        tables["Missingness"] = missingness_table(df, site_col=site_col, label_col=label_col, min_cell=min_cell)
+    if attrition is not None:
+        tables["CONSORT_Attrition"] = attrition.reset_index(drop=True)
+    for k, v in (extra_tables or {}).items():
+        tables[k] = v
     if los_col in df and site_col in df:
         tables["LOS_Distribution_By_Site"] = los_by_site(df, site_col=site_col, los_col=los_col, label_col=label_col, min_cell=min_cell)
     if loso and site_col in df and df[site_col].nunique() >= 2:
         from omop_etl.transport import evaluate_loso_transport
 
-        feats = df.assign(y=df[label_col].astype(int))
-        res = evaluate_loso_transport(feats, site_col=site_col, model_type="hist_gbm", label_col="y", n_bootstraps=n_bootstraps,
+        # the prepared matrix (outcome copies, ids and dates already removed), not the raw frame: a label copy among the features
+        # gave a held-out AUROC of 1.0
+        feats = X.assign(**{"__y": y.to_numpy(), site_col: df[site_col].to_numpy()})
+        res = evaluate_loso_transport(feats, site_col=site_col, model_type="hist_gbm", label_col="__y", n_bootstraps=n_bootstraps,
                                       random_state=random_state)
         tables["LOSO_By_Site"] = res.per_site
     summary: dict[str, Any] = {"n": int(len(y)), "n_features": int(X.shape[1]), "readmit_rate_pct": round(float(y.mean() * 100), 2),

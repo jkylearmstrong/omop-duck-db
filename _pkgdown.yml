@@ -10,6 +10,25 @@ home:
 template:
   bootstrap: 5
 
+repo:
+  url:
+    home: https://github.com/jkylearmstrong/omop-duck-db
+    source: https://github.com/jkylearmstrong/omop-duck-db/blob/main/
+    issue: https://github.com/jkylearmstrong/omop-duck-db/issues/
+    user: https://github.com/jkylearmstrong
+
+navbar:
+  structure:
+    left: [intro, reference, articles, news]
+    right: [search, github, issues, features, lightswitch]
+  components:
+    issues:
+      text: Report a bug
+      href: https://github.com/jkylearmstrong/omop-duck-db/issues/new?template=bug_report.yml
+    features:
+      text: Request a feature
+      href: https://github.com/jkylearmstrong/omop-duck-db/issues/new?template=feature_request.yml
+
 reference:
 - title: Schema and vocabulary
   desc: Initialize CDM tables and manage standard Athena vocabularies.
@@ -440,6 +459,23 @@ reference:
   - normalize_units
   - stream_to_parquet
   - to_arrow_dataset
+  - extract_benchmark_features
+  - adjust_for_prevalence
+  - BENCHMARK_LAB_LOINCS
+  - build_concept_tokenizer
+  - capacity_risk_tiers
+  - capacity_threshold
+  - DEFAULT_BOUNDS
+  - DEFAULT_DISPOSITION_MAP
+  - EDERRI_MEDICATION_SPECS
+  - evaluate_at_capacity
+  - evaluate_loso_transport
+  - export_concept_vocabulary
+  - extract_protocol_history_features
+  - fit_recalibrator
+  - isotonic_fit
+  - make_pretraining_targets
+  - platt_scaling_fit
 - title: Hierarchical rollups, tabular loaders, concept patterns, fuzzy mappings, domain provenance, and Parquet crosswalk cache (v0.6.7 - v0.6.8)
   desc: Declarative multi-domain hierarchical rollups, native tabular and workbook loaders, bundled clinical code lists, concept set pattern matching, DuckDB in-database fuzzy string matching, clinical provenance filters, Parquet crosswalk materialization, and vocabulary drift auditing.
   contents:

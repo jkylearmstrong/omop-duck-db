@@ -286,6 +286,9 @@ from omop_etl.study_report import (
     plot_cohort_flowchart,
     plot_shap_beeswarm,
     plot_shap_panels,
+    table_one,
+    logistic_regression_table,
+    missingness_table,
     random_stay_draw,
     seed_sensitivity,
     stay_type_auc,
@@ -556,6 +559,9 @@ __all__ = [
     "plot_cohort_flowchart",
     "plot_shap_beeswarm",
     "plot_shap_panels",
+    "table_one",
+    "logistic_regression_table",
+    "missingness_table",
     "export_workbook",
     "index_stay_dates",
     "los_by_site",
@@ -805,7 +811,7 @@ __all__ = [
     "isotonic_apply", "adjust_for_prevalence", "capacity_threshold", "capacity_risk_tiers", "evaluate_at_capacity",
 ]
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 

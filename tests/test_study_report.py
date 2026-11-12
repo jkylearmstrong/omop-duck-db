@@ -270,3 +270,64 @@ def test_positive_class_handles_list_and_3d_shap_output():
 def test_bootstrap_ci_skips_single_class_resamples():
     ci = sr.bootstrap_ci(np.array([0, 0, 0, 0, 1]), np.array([.1, .2, .3, .4, .9]), n_bootstraps=20, seed=1)
     assert set(ci) == {"AUC", "F1", "Sensitivity", "Specificity", "Brier"}
+
+
+# ------------------------------------------------------------------ descriptive tables
+def test_table_one_levels_pvalues_and_suppression(cohort):
+    d = cohort.assign(flag=(cohort["prior_ip_count"] > 0).astype(int), rare=0)
+    d.loc[d.index[:3], "rare"] = 1
+    t = sr.table_one(d, min_cell=11)
+    assert t.iloc[0]["Variable"] == "N" and t.iloc[0]["Overall"] == len(d)
+    assert {"age", "sex", "flag"} <= set(t["Variable"])
+    assert t.loc[t["Variable"] == "rare", "Overall"].iloc[0].startswith("<11")
+    assert t.loc[t["Variable"] == "sex", "Level"].tolist() == sorted(t.loc[t["Variable"] == "sex", "Level"].tolist(), key=lambda s: -(d["sex"] == s).sum())
+    assert (t.loc[t["Variable"] == "prior_ip_count", "p"].iloc[0]) != ""
+
+
+def test_logistic_regression_matches_sklearn_direction(cohort):
+    X, y = sr.prepare_model_matrix(cohort)
+    t = sr.logistic_regression_table(X, y)
+    assert {"OR", "CI_low", "CI_high", "p"} <= set(t.columns)
+    assert (t["CI_low"] <= t["OR"]).all() and (t["OR"] <= t["CI_high"]).all()
+    # data were generated with positive effects of age, LOS and prior admissions
+    ors = t.set_index("Variable")["OR"]
+    assert ors["prior_ip_count"] > 1 and ors["index_los_days"] > 1
+
+
+def test_missingness_table_by_site(cohort):
+    t = sr.missingness_table(cohort)
+    row = t.set_index("Variable").loc["lab_x"]
+    assert 20 < row["pct_missing"] < 40
+    assert "pct_missing_Site A" in t.columns
+    assert "person_id" not in set(t["Variable"])
+
+
+def test_build_study_tables_descriptive_and_extra(cohort, attrition, tmp_path, monkeypatch):
+    from sklearn.linear_model import LogisticRegression
+
+    monkeypatch.setattr(sr, "default_model_grid", lambda *a, **k: {"Logistic Regression": (True, [("C=1 (benchmark)", lambda: LogisticRegression(max_iter=200))])})
+    r = sr.build_study_tables(cohort, tmp_path, prefix="D", n_bootstraps=5, loso=False, attrition=attrition,
+                              extra_tables={"My_Extra": pd.DataFrame({"a": [1]})})
+    assert {"Table1", "Logistic_Regression", "Missingness", "CONSORT_Attrition", "My_Extra"} <= set(r["tables"])
+    import openpyxl
+
+    names = openpyxl.load_workbook(tmp_path / "D_Tables.xlsx").sheetnames
+    assert {"Table1", "Logistic_Regression", "Missingness", "CONSORT_Attrition", "My_Extra"} <= set(names)
+
+
+def test_prepare_model_matrix_drops_label_copy_dates_and_outcome_columns(cohort):
+    d = cohort.assign(y=cohort["readmitted_30d"], outcome_flag=cohort["readmitted_30d"], index_date=cohort["admit_date"],
+                      other_date=cohort["admit_date"])
+    with pytest.warns(UserWarning, match="identical to the label"):
+        d2 = d.assign(label_copy=d["readmitted_30d"])
+        X, _ = sr.prepare_model_matrix(d2)
+    assert not ({"y", "outcome_flag", "index_date", "other_date", "label_copy"} & set(X.columns))
+
+
+def test_build_study_tables_loso_ignores_outcome_copies(cohort, tmp_path, monkeypatch):
+    from sklearn.linear_model import LogisticRegression
+
+    monkeypatch.setattr(sr, "default_model_grid", lambda *a, **k: {"Logistic Regression": (True, [("C=1 (benchmark)", lambda: LogisticRegression(max_iter=200))])})
+    d = cohort.assign(outcome_flag=cohort["readmitted_30d"], y=cohort["readmitted_30d"])
+    r = sr.build_study_tables(d, tmp_path, prefix="L", n_bootstraps=5, workbook=False, descriptive=False)
+    assert r["tables"]["LOSO_By_Site"]["auroc"].max() < 0.95
