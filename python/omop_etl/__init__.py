@@ -833,6 +833,7 @@ from omop_etl.tensor import (
 
 from omop_etl.manuscript_tables import (  # noqa: E402
     compare_workbooks,
+    workbook_similarity,
     manuscript_completeness,
     manuscript_consort,
     manuscript_frame,
@@ -843,6 +844,7 @@ from omop_etl.manuscript_tables import (  # noqa: E402
 
 __all__ += [
     "compare_workbooks",
+    "workbook_similarity",
     "manuscript_completeness",
     "manuscript_consort",
     "manuscript_frame",

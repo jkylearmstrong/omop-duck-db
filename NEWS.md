@@ -1,3 +1,9 @@
+# omop-duck-db (development)
+
+* **Site labels**: `run_study` / `reproduce_study.py` label the five consortium sites as in the delivered workbook (Geisinger A, Hopkins B, PITT C, PSU D, Temple E, `MANUSCRIPT_SITE_LABELS`); other site names keep command-line order.
+* **`workbook_similarity(new, old)`** and `SIMILARITY_TOLERANCES`: named, adjustable checks (Table 2 and 5 AUCs, Table 6 odds ratio, direction and p < 0.05 verdict, Table 1 cells) for "the new run reproduces the delivered manuscript"; `run_study(compare_to=...)` writes `<prefix>_Similarity.csv`.
+* README: *Reproducing the delivered manuscript* (measured differences of an unpinned default run and their causes) and *Status and roadmap*.
+
 # omopduckdb (development)
 
 Highlights of this development version: the cohort definitions ship with the package (`inst/cohorts`); the native Circe compiler evaluates many more constructs and accepts 521 of the 707 PhenotypeLibrary definitions (was 368), each new construct checked against the official engine; cohort reconciliation, feature ablation, run comparison, bundle concept checks and a worked end-to-end example give a downstream study tools for the questions it meets; the DQD catalog exists in R and was compared with the official DataQualityDashboard; and the intermittent Windows R crash was traced to a failed DuckDB extension load and fixed.

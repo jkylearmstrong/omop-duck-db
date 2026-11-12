@@ -26,7 +26,7 @@ import pandas as pd
 from omop_etl.study_report import _newton_logit, export_workbook
 
 __all__ = ["manuscript_frame", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
-           "manuscript_workbook", "compare_workbooks", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER"]
+           "manuscript_workbook", "compare_workbooks", "workbook_similarity", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER"]
 
 EN = "–"
 PM = "±"
@@ -460,3 +460,90 @@ def compare_workbooks(new: str | Path, old: str | Path, *, key_columns: Mapping[
         if sheet not in b_all and not sheet.startswith("Manifest"):
             summ.append({"sheet": sheet, "rows_new": None, "rows_old": None, "only_new": None, "only_old": None, "cells": 0, "differ": None, "note": "missing in old"})
     return pd.DataFrame(summ), pd.DataFrame(diffs, columns=["sheet", "row", "column", "new", "old"])
+
+
+#: What "similar to the delivered manuscript" means, as checks a run must pass. These are proposals to be agreed with the study
+#: lead, not a published standard; pass your own ``tolerances`` to :func:`workbook_similarity` to change them.
+SIMILARITY_TOLERANCES: dict[str, float] = {
+    "table2_auc_abs": 0.01,        # every Table 2 AUC within this of the delivered value
+    "table5_auc_abs": 0.02,        # every Table 5 per-site AUC within this (sites paired by label)
+    "table6_or_rel": 0.10,         # Table 6 odds ratio within this relative difference ...
+    "table6_or_share": 0.95,       # ... for at least this share of rows
+    "table6_sig_share": 0.95,      # share of rows whose p < 0.05 verdict agrees
+    "table6_dir_share": 0.95,      # share of rows (old OR outside 0.97-1.03) whose direction agrees
+    "table1_rel": 0.05,            # Table 1 value within this relative difference ...
+    "table1_share": 0.90,          # ... for at least this share of numeric cells
+}
+
+
+def _first_number(v: Any) -> float | None:
+    n = _numbers(v)
+    return n[0] if n else None
+
+
+def _p_value(v: Any) -> float | None:
+    s = str(v).strip()
+    if s.startswith("<"):
+        return float(s[1:]) / 2 if _numbers(s[1:]) else None
+    return _first_number(s)
+
+
+def _sheet(path: str | Path, name: str, header_row: int = 2) -> pd.DataFrame | None:
+    try:
+        raw = pd.read_excel(path, sheet_name=name, header=None)
+    except ValueError:
+        return None
+    t = raw.iloc[header_row + 1:].reset_index(drop=True)
+    t.columns = raw.iloc[header_row].astype(str).tolist()
+    return t.set_index(t.columns[0])
+
+
+def workbook_similarity(new: str | Path, old: str | Path, *, tolerances: Mapping[str, float] | None = None) -> pd.DataFrame:
+    """Checks a new manuscript workbook against a delivered one with explicit, named tolerances (:data:`SIMILARITY_TOLERANCES`).
+
+    Unlike :func:`compare_workbooks`, which counts every cell that moved, this asks whether the conclusions are the same: Table 2 AUCs,
+    Table 5 per-site AUCs (rows paired by site label, so the labels must follow the same convention; see
+    ``omop_etl.study_run.MANUSCRIPT_SITE_LABELS``), the Table 6 odds ratios, their direction and their p < 0.05 verdicts, and the share of
+    Table 1 cells that agree. Returns one row per check with the number of items, how many passed, the observed worst case, the
+    threshold and ``passed``."""
+    tol = {**SIMILARITY_TOLERANCES, **dict(tolerances or {})}
+    out: list[dict[str, Any]] = []
+
+    def add(check: str, n: int, ok: int, worst: float | None, threshold: float, need_all: bool) -> None:
+        share = ok / n if n else float("nan")
+        passed = bool(n) and (ok == n if need_all else share >= threshold)
+        out.append({"check": check, "items": n, "within": ok, "share": round(share, 3) if n else None,
+                    "worst": None if worst is None else round(worst, 4), "threshold": threshold, "passed": passed})
+
+    def pairs(sheet: str, col: str):
+        a, b = _sheet(new, sheet), _sheet(old, sheet)
+        if a is None or b is None or col not in a.columns or col not in b.columns:
+            return []
+        keep = [k for k in b.index if k in a.index and not str(k).startswith("Mean")]
+        return [(k, _first_number(a.at[k, col]), _first_number(b.at[k, col])) for k in keep
+                if _first_number(a.at[k, col]) is not None and _first_number(b.at[k, col]) is not None]
+
+    d2 = [abs(x - y) for _, x, y in pairs("Table 2 - Model Performance", "AUC-ROC (95% CI)")]
+    add("Table 2 AUC within abs tolerance", len(d2), sum(d <= tol["table2_auc_abs"] for d in d2), max(d2, default=None), tol["table2_auc_abs"], True)
+    d5 = [abs(x - y) for _, x, y in pairs("Table 5 - Cross-Site LOSO", "AUC-ROC (95% CI)")]
+    add("Table 5 per-site AUC within abs tolerance", len(d5), sum(d <= tol["table5_auc_abs"] for d in d5), max(d5, default=None), tol["table5_auc_abs"], True)
+    a6, b6 = _sheet(new, "Table 6 - Multivariable LR"), _sheet(old, "Table 6 - Multivariable LR")
+    if a6 is not None and b6 is not None:
+        orc, pc = "Adjusted OR (95% CI)*", "P-Value"
+        rows = [k for k in b6.index if k in a6.index and _first_number(a6.at[k, orc]) is not None and _first_number(b6.at[k, orc]) is not None]
+        rel = [abs(_first_number(a6.at[k, orc]) / _first_number(b6.at[k, orc]) - 1) for k in rows]
+        add("Table 6 odds ratio within relative tolerance", len(rows), sum(r <= tol["table6_or_rel"] for r in rel), max(rel, default=None), tol["table6_or_share"], False)
+        sig = [(_p_value(a6.at[k, pc]) < 0.05) == (_p_value(b6.at[k, pc]) < 0.05) for k in rows
+               if _p_value(a6.at[k, pc]) is not None and _p_value(b6.at[k, pc]) is not None]
+        add("Table 6 p < 0.05 verdict agrees", len(sig), sum(sig), None, tol["table6_sig_share"], False)
+        far = [k for k in rows if not 0.97 <= _first_number(b6.at[k, orc]) <= 1.03]
+        dr = [(_first_number(a6.at[k, orc]) > 1) == (_first_number(b6.at[k, orc]) > 1) for k in far]
+        add("Table 6 direction agrees (old OR outside 0.97-1.03)", len(dr), sum(dr), None, tol["table6_dir_share"], False)
+        add("Table 6 rows missing from the new workbook", len(b6.index), len(b6.index) - len(b6.index.difference(a6.index)), None, 1.0, True)
+    a1, b1 = _sheet(new, "Table 1 - Descriptive"), _sheet(old, "Table 1 - Descriptive")
+    if a1 is not None and b1 is not None:
+        cells = [(x, y) for k in b1.index if k in a1.index for c in b1.columns if c in a1.columns
+                 for x, y in [(_first_number(a1.at[k, c]), _first_number(b1.at[k, c]))] if x is not None and y is not None]
+        ok = [abs(x - y) <= tol["table1_rel"] * max(abs(y), 1e-9) or abs(x - y) <= 0.01 for x, y in cells]
+        add("Table 1 cells within relative tolerance", len(cells), sum(ok), None, tol["table1_share"], False)
+    return pd.DataFrame(out)

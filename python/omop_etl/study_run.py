@@ -16,7 +16,10 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays"]
+__all__ = ["run_study", "PROTOCOL_COHORT_PARAMS", "MANUSCRIPT_SITE_LABELS", "pin_stays"]
+
+#: The anonymous site labels used in the delivered manuscript (Table 5, CONSORT). Used by default when every site is named here.
+MANUSCRIPT_SITE_LABELS: dict[str, str] = {"Geisinger": "Site A", "Hopkins": "Site B", "PITT": "Site C", "PSU": "Site D", "Temple": "Site E"}
 
 #: The eDERRI protocol's cohort definition (all-cause 30-day readmission after an inpatient stay in a patient with diabetes).
 PROTOCOL_COHORT_PARAMS: dict[str, Any] = dict(
@@ -131,7 +134,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
 
     db, out = Path(db_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    labels = dict(site_labels or {s: f"Site {chr(65 + i)}" for i, s in enumerate(sites)})
+    labels = dict(site_labels or (MANUSCRIPT_SITE_LABELS if all(s in MANUSCRIPT_SITE_LABELS for s in sites)
+                                   else {s: f"Site {chr(65 + i)}" for i, s in enumerate(sites)}))
     pinned = None if pinned_stays is None else (pd.read_csv(pinned_stays) if isinstance(pinned_stays, (str, Path)) else pinned_stays)
     import time
 
@@ -172,6 +176,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         summary, diffs = compare_workbooks(wb["path"], compare_to)
         summary.to_csv(out / f"{prefix}_Comparison_Summary.csv", index=False)
         diffs.to_csv(out / f"{prefix}_Comparison_Differences.csv", index=False)
+        from omop_etl.manuscript_tables import workbook_similarity
+
+        workbook_similarity(wb["path"], compare_to).to_csv(out / f"{prefix}_Similarity.csv", index=False)
         comparison = (summary, diffs)
     (out / f"{prefix}_run.json").write_text(json.dumps({"sites": list(sites), "labels": labels, "window": [start, end], "profile": profile, "pinned": pinned is not None,
                                                        "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings}, indent=1), encoding="utf-8")
