@@ -1,0 +1,27 @@
+name: Bug Report
+description: Report a reproducible issue
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: A minimal reproducible example (R or Python). Do not include patient-level data.
+      render: r
+    validations:
+      required: true
+  - type: textarea
+    id: session
+    attributes:
+      label: Session information
+      description: Output of `sessionInfo()` (R) or `pip freeze` (Python), plus the omopduckdb version and DuckDB version.
+      render: text
