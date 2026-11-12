@@ -855,8 +855,16 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
         # gave a held-out AUROC of 1.0
         feats = X.assign(**{"__y": y.to_numpy(), site_col: df[site_col].to_numpy()})
         res = evaluate_loso_transport(feats, site_col=site_col, model_type="hist_gbm", label_col="__y", n_bootstraps=n_bootstraps,
-                                      random_state=random_state)
-        tables["LOSO_By_Site"] = res.per_site
+                                      random_state=random_state, keep_predictions=True)
+        per = res.per_site.copy()
+        # the uncalibrated view a manuscript usually reports: balanced-trained scores at the 0.5 threshold on the natural held-out site
+        extra = []
+        for site, g in res.predictions.groupby("site"):
+            pred, yy = (g["p_raw"].to_numpy() >= 0.5), g["y"].to_numpy().astype(int)
+            extra.append({"site": site, "sensitivity_050": float((pred & (yy == 1)).sum() / max(1, (yy == 1).sum())),
+                          "specificity_050": float((~pred & (yy == 0)).sum() / max(1, (yy == 0).sum())),
+                          "brier_uncalibrated": float(np.mean((g["p_raw"].to_numpy() - yy) ** 2))})
+        tables["LOSO_By_Site"] = per.merge(pd.DataFrame(extra), on="site", how="left")
     summary: dict[str, Any] = {"n": int(len(y)), "n_features": int(X.shape[1]), "readmit_rate_pct": round(float(y.mean() * 100), 2),
                                "tuning": tuned["summary"]}
     if "admit_date" in df and "discharge_date" in df and site_col in df:

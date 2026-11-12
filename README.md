@@ -512,6 +512,29 @@ reconciliation = validate_table1_reconciliation(
 print("Reconciliation Passed:", reconciliation["passed"])
 ```
 
+## Running on the NVIDIA DGX Spark (deep models) and Oracle transfers
+
+**Status (0.18.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
+
+On the Spark, from the parent `eDerri_data` directory (so omop-learn and `pipeline/` are in the build context):
+
+```bash
+docker build -f omop-duck-db/Dockerfile.dgx -t omop-duck-db:dgx .
+docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+    -v /workspace/ederri:/workspace/ederri omop-duck-db:dgx dgx-smoke
+```
+
+`dgx-smoke` (`scripts/dgx_smoke_test.py --require-gpu`) prints the torch / CUDA report, trains and scores a small MLP, and fails if no GPU is visible. If the build cannot pull the base image, set `--build-arg NGC_TAG=<tag you have verified>`; do not pip-install torch over the NGC build. Then:
+
+```python
+from omop_etl import make_mlp_fit_predict, deep_study_tables, device_report
+res = deep_study_tables(make_mlp_fit_predict(), X, y, sites=site_labels, model_name="MLP")   # Model_Performance row + leave-one-site-out
+```
+
+Any trainer (SARD, DeepPLP, `pipeline/*_dgx.py`) can be scored the same way by wrapping it as `fit_predict(x_train, y_train, x_test) -> probabilities`; such wrappers are not written yet.
+
+Oracle / server transfers (`to_sql`, `verify_transfer`, and `import_omop` / `from_sql` back) were run against a live Oracle 19c with `oracledb` in thick mode; credentials come from a SQLAlchemy URL or `env:NAME`, never from code.
+
 ## ML bridge: omop-learn, scikit-learn, SARD & OHDSI PLP / DeepPLP
 
 omop-duck-db connects an OMOP-on-DuckDB database to three modelling

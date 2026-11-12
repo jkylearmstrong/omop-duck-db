@@ -301,6 +301,7 @@ def extract_benchmark_features(
     disposition_map: Mapping[int, str] | str | None = None,
     sdoh_fallback: str = "indicator",
     address_table: str | None = "auto",
+    address_tie_break: str = "deterministic",
     impute: str | None = None,
     impute_values: Mapping[str, float] | None = None,
     vocabulary_db: str | os.PathLike | None = "auto",
@@ -327,6 +328,8 @@ def extract_benchmark_features(
         Dated address history used for ``include_sdoh`` (columns ``person_id``, ``zip5``, ``address_start``, ``address_end``,
         ``preferred``): ``"auto"`` uses ``person_address_history`` when it exists, else ``person.location_id``; pass a table
         name (for example a study's own ``ederri_address_history``) to use another one, ``None`` for ``person.location_id``.
+    address_tie_break : {"deterministic", "highest_zip", "ambiguous_missing", "arbitrary"}, default "deterministic"
+        Which address wins when several tie on every rule key (see :func:`derive_geography_features`).
     impute : {"median", "mean"} or None, default None
         Fills missing vital and lab values (``vital_*``, ``lab_*``, ``lab_*_last``) for models that cannot take NaN. The
         statistics are the ones of **this** table unless ``impute_values`` ({column: value}) is given, so fit them on the
@@ -595,7 +598,8 @@ def extract_benchmark_features(
         else:
             from omop_etl.geography import SDI_MISSING, derive_geography_features
             stays = pd.DataFrame({"person_id": cohort["subject_id"], "stay_id": cohort["row_id"], "admit_date": cohort["cohort_start_date"]})
-            geo = derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays=stays, address_table=address_table)
+            geo = derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays=stays, address_table=address_table,
+                                         tie_break=address_tie_break)
             if geo["zip5"].isna().all():
                 warnings.warn("include_sdoh: no ZIP code was found for any stay, so sdi_quintile and ruca_category are all missing. "
                               "The default address_table='auto' reads person_address_history, else person.location_id; pass "

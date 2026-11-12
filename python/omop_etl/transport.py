@@ -218,8 +218,14 @@ def _metrics(y: np.ndarray, p: np.ndarray, fractions: Sequence[float]) -> dict[s
 # ---------------------------------------------------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------------------------------------------------
-def _make_fit_predict(model_type: str, random_state: int, model_params: Mapping[str, Any] | None) -> Callable:
+def _make_fit_predict(model_type: Any, random_state: int, model_params: Mapping[str, Any] | None) -> Callable:
+    if callable(model_type):                       # any fit_predict(x_train, y_train, x_test) -> probabilities
+        return model_type
     mt = model_type.lower()
+    if mt == "mlp":                                # torch multilayer perceptron (omop_etl.deep_models)
+        from omop_etl.deep_models import make_mlp_fit_predict
+
+        return make_mlp_fit_predict(random_state=random_state, **dict(model_params or {}))
     if mt in ("logistic", "ridge_logistic"):
         l2 = float((model_params or {}).get("l2", 1.0))
         return lambda xtr, ytr, xte: ridge_logistic_fit_predict(xtr, ytr, xte, l2=l2)
@@ -261,7 +267,7 @@ def _make_fit_predict(model_type: str, random_state: int, model_params: Mapping[
             model.fit(xtr, ytr)
             return model.predict_proba(xte)[:, 1]
         return fit_predict
-    raise ValueError("model_type must be 'logistic', 'xgboost', 'hist_gbm' or 'random_forest'.")
+    raise ValueError("model_type must be 'logistic', 'xgboost', 'hist_gbm', 'random_forest', 'mlp' or a fit_predict callable.")
 
 
 def _balance(y: np.ndarray, ratio: float | None, rng: np.random.Generator) -> np.ndarray:
@@ -326,7 +332,9 @@ def evaluate_loso_transport(
     capacity_fractions : sequence of float
         Top-k shares flagged for PPV / sensitivity / lift. The cut-off is the held-out site's own quantile of the
         calibrated scores (a capacity rule: "the riskiest 10%").
-    model_type : {"logistic", "xgboost", "hist_gbm", "random_forest"}
+    model_type : {"logistic", "xgboost", "hist_gbm", "random_forest", "mlp"} or callable
+        ``"mlp"`` is the torch network of :func:`omop_etl.deep_models.make_mlp_fit_predict` (``model_params`` are its arguments); a callable
+        ``fit_predict(x_train, y_train, x_test) -> probabilities`` plugs in any other model.
         ``logistic`` is the ridge IRLS fit of :func:`ridge_logistic_fit_predict`; ``xgboost`` needs xgboost; ``hist_gbm``
         (``HistGradientBoostingClassifier``, NaN-native) and ``random_forest`` (training-median fill) need scikit-learn.
         ``model_params`` are passed to the model.
@@ -393,6 +401,6 @@ def evaluate_loso_transport(
     metric_cols = [c for c in per_site.columns if c not in ("site", "n", "n_events") and not c.endswith(("_lo", "_hi"))
                    and not c.startswith("train_")]
     summary = per_site[metric_cols].agg(["mean", "min", "max"]).T.reset_index().rename(columns={"index": "metric"})
-    settings = {"model_type": model_type, "balance_ratio": balance_ratio, "score_natural": score_natural, "calibration": calibration,
+    settings = {"model_type": model_type if isinstance(model_type, str) else getattr(model_type, "__name__", "callable"), "balance_ratio": balance_ratio, "score_natural": score_natural, "calibration": calibration,
                 "n_bootstraps": n_bootstraps, "capacity_fractions": list(capacity_fractions), "features": cols, "random_state": random_state}
     return LosoTransportResult(per_site, summary, pd.concat(preds, ignore_index=True) if preds else None, settings)

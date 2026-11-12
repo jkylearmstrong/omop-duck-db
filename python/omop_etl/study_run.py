@@ -49,7 +49,7 @@ def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on:
 
 def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mapping[str, Any], profile: str | None, pinned: pd.DataFrame | None,
                 ruca: Any, sdi: Any, cuts: Sequence[float] | None, address_table: str | None, transfer_source_values: Sequence[str],
-                feature_kwargs: Mapping[str, Any], work: Path):
+                feature_kwargs: Mapping[str, Any], work: Path, attrition_mode: str = "windowed"):
     import duckdb
 
     from omop_etl.benchmark_features import extract_benchmark_features
@@ -71,6 +71,16 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         att = pd.DataFrame(cohort.attrs.get("attrition"))
         att["site"] = site
         cohort.attrs = {}
+        if attrition_mode == "full_history":
+            # the manuscript's CONSORT: every rule over the whole history, then the study window and the one stay per patient last
+            full = define_study_cohort(con, materialise=False, sample_stay_rule="all", **dict(params))
+            att = pd.DataFrame(full.attrs.get("attrition"))
+            att["site"] = site
+            n_final = int(cohort["subject_id"].nunique()) if "subject_id" in cohort else len(cohort)
+            att = pd.concat([att, pd.DataFrame([{"step_name": f"Index admission {start} to {end}, one stay per patient", "subjects_retained": n_final, "site": site}])],
+                            ignore_index=True)
+        elif attrition_mode != "windowed":
+            raise ValueError("attrition_mode must be 'windowed' or 'full_history'.")
         if pinned is not None:
             from_site = pinned[pinned["site_source"] == site] if "site_source" in pinned else pinned
             cohort = pin_stays(cohort, from_site, strict=False)
@@ -101,7 +111,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               sdi_cut_points: Sequence[float] | None = (25, 41, 58, 77), address_table: str | None = "auto", transfer_source_values: Sequence[str] = ("IP",),
               feature_kwargs: Mapping[str, Any] | None = None, n_bootstraps: int = 100, loso: bool = True, figures: bool = True,
               reuse_features: bool = False, compare_to: str | Path | None = None, prefix: str = "Study", random_state: int = 42,
-              min_cell: int | None = 11) -> dict[str, Any]:
+              min_cell: int | None = 11, attrition_mode: str = "windowed", table5: str = "manuscript", sdi_missing_term: bool = True,
+              address_tie_break: str = "deterministic") -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
@@ -110,7 +121,11 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     ``ruca_crosswalk`` + ``sdi_table`` turn on the SDI / RUCA features (cut points ``sdi_cut_points``, address history ``address_table``).
     ``transfer_source_values``: discharge source values recoded to a transfer (8717) so the transfer exclusion applies (``("IP",)`` for
     PCORnet-derived sites; pass ``()`` for none). ``reuse_features=True`` reads ``features_<site>.parquet`` from ``out_dir`` when present.
-    ``compare_to``: a previous workbook to compare the new one with (:func:`omop_etl.manuscript_tables.compare_workbooks`)."""
+    ``compare_to``: a previous workbook to compare the new one with (:func:`omop_etl.manuscript_tables.compare_workbooks`).
+    ``attrition_mode``: ``"windowed"`` (default; the steps that built the cohort, the date window second) or ``"full_history"`` (every rule over
+    all history, then the window and one stay per patient last, which is how the manuscript's CONSORT table is laid out; costs one extra
+    cohort build per site). ``table5`` / ``sdi_missing_term``: see :func:`omop_etl.manuscript_tables.manuscript_workbook`.
+    ``address_tie_break``: see :func:`omop_etl.geography.derive_geography_features`. The result has ``timings`` (seconds per stage)."""
     from omop_etl.manuscript_tables import compare_workbooks, manuscript_workbook
     from omop_etl.study_report import build_study_tables
 
@@ -118,8 +133,13 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     out.mkdir(parents=True, exist_ok=True)
     labels = dict(site_labels or {s: f"Site {chr(65 + i)}" for i, s in enumerate(sites)})
     pinned = None if pinned_stays is None else (pd.read_csv(pinned_stays) if isinstance(pinned_stays, (str, Path)) else pinned_stays)
+    import time
+
+    t_start = time.time()
+    timings: dict[str, float] = {}
     frames, atts = [], []
     for site in sites:
+        t_site = time.time()
         f = out / f"features_{site}.parquet"
         a = out / f"attrition_{site}.csv"
         if reuse_features and f.exists() and a.exists():
@@ -128,20 +148,25 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             continue
         df, att = _site_frame(db, site, start=start, end=end, params=cohort_params or PROTOCOL_COHORT_PARAMS, profile=profile, pinned=pinned,
                               ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
-                              transfer_source_values=transfer_source_values, feature_kwargs=feature_kwargs or {}, work=out)
+                              transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, **dict(feature_kwargs or {})}, work=out,
+                              attrition_mode=attrition_mode)
         df["site_anon"] = labels.get(site, site)
         df.to_parquet(f)
         att.to_csv(a, index=False)
         frames.append(df)
         atts.append(att)
+        timings[f"site_{site}"] = round(time.time() - t_site, 1)
     pooled = pd.concat(frames, ignore_index=True, sort=False)
     attrition = pd.concat(atts, ignore_index=True)
     first = (attrition.groupby("step_name", sort=False)["subjects_retained"].sum().rename("subjects_retained").reset_index())
     first["subjects_dropped"] = (first["subjects_retained"].shift(1) - first["subjects_retained"]).fillna(0).astype(int)
+    t_tab = time.time()
     res = build_study_tables(pooled, out, prefix=prefix, n_bootstraps=n_bootstraps, loso=loso, attrition=first, figures=figures, workbook=False,
                              window=(start, end), min_cell=min_cell, random_state=random_state)
+    timings["tables_figures"] = round(time.time() - t_tab, 1)
     wb = manuscript_workbook(pooled, res["tables"], out / f"{prefix}_Manuscript_Tables.xlsx", attrition=attrition, site_labels=labels, min_cell=min_cell,
-                             title=f"{prefix} manuscript tables")
+                             title=f"{prefix} manuscript tables", table5=table5, sdi_missing_term=sdi_missing_term)
+    timings["total"] = round(time.time() - t_start, 1)
     comparison = None
     if compare_to is not None:
         summary, diffs = compare_workbooks(wb["path"], compare_to)
@@ -149,5 +174,5 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         diffs.to_csv(out / f"{prefix}_Comparison_Differences.csv", index=False)
         comparison = (summary, diffs)
     (out / f"{prefix}_run.json").write_text(json.dumps({"sites": list(sites), "labels": labels, "window": [start, end], "profile": profile, "pinned": pinned is not None,
-                                                       "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state}, indent=1), encoding="utf-8")
-    return {"data": pooled, "tables": res["tables"], "workbook": wb["path"], "files": res["files"] + [str(wb["path"])], "comparison": comparison, "summary": res["summary"]}
+                                                       "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings}, indent=1), encoding="utf-8")
+    return {"data": pooled, "tables": res["tables"], "workbook": wb["path"], "files": res["files"] + [str(wb["path"])], "comparison": comparison, "summary": res["summary"], "timings": timings}
