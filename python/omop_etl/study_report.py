@@ -812,8 +812,10 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
     if loso and site_col in df and df[site_col].nunique() >= 2:
         from omop_etl.transport import evaluate_loso_transport
 
-        feats = df.assign(y=df[label_col].astype(int))
-        res = evaluate_loso_transport(feats, site_col=site_col, model_type="hist_gbm", label_col="y", n_bootstraps=n_bootstraps,
+        # the prepared matrix (outcome copies, ids and dates already removed), not the raw frame: a label copy among the features
+        # gave a held-out AUROC of 1.0
+        feats = X.assign(**{"__y": y.to_numpy(), site_col: df[site_col].to_numpy()})
+        res = evaluate_loso_transport(feats, site_col=site_col, model_type="hist_gbm", label_col="__y", n_bootstraps=n_bootstraps,
                                       random_state=random_state)
         tables["LOSO_By_Site"] = res.per_site
     summary: dict[str, Any] = {"n": int(len(y)), "n_features": int(X.shape[1]), "readmit_rate_pct": round(float(y.mean() * 100), 2),

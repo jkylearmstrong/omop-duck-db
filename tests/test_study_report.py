@@ -322,3 +322,12 @@ def test_prepare_model_matrix_drops_label_copy_dates_and_outcome_columns(cohort)
         d2 = d.assign(label_copy=d["readmitted_30d"])
         X, _ = sr.prepare_model_matrix(d2)
     assert not ({"y", "outcome_flag", "index_date", "other_date", "label_copy"} & set(X.columns))
+
+
+def test_build_study_tables_loso_ignores_outcome_copies(cohort, tmp_path, monkeypatch):
+    from sklearn.linear_model import LogisticRegression
+
+    monkeypatch.setattr(sr, "default_model_grid", lambda *a, **k: {"Logistic Regression": (True, [("C=1 (benchmark)", lambda: LogisticRegression(max_iter=200))])})
+    d = cohort.assign(outcome_flag=cohort["readmitted_30d"], y=cohort["readmitted_30d"])
+    r = sr.build_study_tables(d, tmp_path, prefix="L", n_bootstraps=5, workbook=False, descriptive=False)
+    assert r["tables"]["LOSO_By_Site"]["auroc"].max() < 0.95
