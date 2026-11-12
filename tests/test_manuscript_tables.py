@@ -134,3 +134,71 @@ def test_shared_folds_and_performance_from_predictions(feats):
     p = np.random.default_rng(0).random(len(y)) * 0.5 + y.to_numpy() * 0.2
     row = sr.performance_from_predictions(y, p, model_name="Deep", n_bootstraps=20)
     assert list(row.columns) == ["Model", "AUC-ROC (95% CI)", "Sensitivity", "Specificity", "F1", "Brier"] and "(" in row.iloc[0, 1]
+
+
+def _fake_study(tmp_path, monkeypatch, feats):
+    """Three tiny site databases plus stand-ins for the cohort and feature builders, so run_study is exercised end to end."""
+    import duckdb
+    from sklearn.linear_model import LogisticRegression
+
+    import omop_etl.benchmark_features as bf
+    import omop_etl.cohort as coh
+
+    db = tmp_path / "db"
+    db.mkdir()
+    sites = ["A", "B", "C"]
+    for i, s in enumerate(sites):
+        part = feats[feats.site_anon == "Site " + s]
+        con = duckdb.connect(str(db / f"omop_{s}.duckdb"))
+        con.register("p", pd.DataFrame({"visit_occurrence_id": part.visit_occurrence_id, "person_id": part.subject_id,
+                                        "discharged_to_source_value": "IP", "discharged_to_concept_id": 0}))
+        con.execute("CREATE TABLE visit_occurrence AS SELECT * FROM p")
+        con.close()
+    by_id = feats.set_index("visit_occurrence_id")
+
+    def fake_cohort(con, **kw):
+        v = con.execute("SELECT visit_occurrence_id, person_id FROM visit_occurrence").df()
+        out = pd.DataFrame({"subject_id": v.person_id, "visit_occurrence_id": v.visit_occurrence_id,
+                            "outcome_flag": by_id.loc[v.visit_occurrence_id, "readmitted_30d"].to_numpy(),
+                            "cohort_start_date": "2018-01-01", "cohort_end_date": "2018-01-05"})
+        out.attrs["attrition"] = [{"step_name": "Index", "subjects_retained": len(out) + 5}, {"step_name": "Final", "subjects_retained": len(out)}]
+        return out
+
+    def fake_features(con, table, **kw):
+        ids = con.execute(f"SELECT visit_occurrence_id FROM {table}").df().visit_occurrence_id
+        cols = [c for c in feats.columns if c not in ("subject_id", "readmitted_30d", "site_anon", "index_los_days")]
+        return by_id.loc[ids, [c for c in cols if c != "visit_occurrence_id"]].reset_index()
+
+    monkeypatch.setattr(coh, "define_study_cohort", fake_cohort)
+    monkeypatch.setattr(bf, "extract_benchmark_features", fake_features)
+    monkeypatch.setattr(sr, "default_model_grid",
+                        lambda *a, **k: {"Logistic Regression": (True, [("C=1 (benchmark)", lambda: LogisticRegression(max_iter=200))])})
+    return db, sites
+
+
+def test_run_study_end_to_end(feats, tmp_path, monkeypatch):
+    from omop_etl.study_run import run_study
+
+    db, sites = _fake_study(tmp_path, monkeypatch, feats)
+    out = tmp_path / "out"
+    kw = dict(sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None)
+    r = run_study(db, out, **kw)
+    assert len(r["data"]) == len(feats) and set(r["data"].site_anon) == {"Site A", "Site B", "Site C"} and Path(r["workbook"]).exists()
+    assert r["comparison"] is None and (out / "Study_run.json").exists()
+    # pinned draw: only the listed stays survive; reuse_features re-reads the saved parquet; compare_to compares with the first workbook
+    pins = feats[feats.subject_id % 2 == 0][["visit_occurrence_id"]].assign(site_source=lambda d: "A")
+    r2 = run_study(db, tmp_path / "out2", pinned_stays=pins, **kw)
+    assert 0 < len(r2["data"]) < len(feats)
+    r3 = run_study(db, out, reuse_features=True, compare_to=r["workbook"], prefix="Again", **kw)
+    assert len(r3["data"]) == len(r["data"]) and r3["comparison"][0]["cells"].sum() > 0
+    assert (out / "Again_Comparison_Summary.csv").exists()
+
+
+def test_reproduce_study_script(feats, tmp_path, monkeypatch, capsys):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import reproduce_study
+
+    db, sites = _fake_study(tmp_path, monkeypatch, feats)
+    assert reproduce_study.main(["--db-dir", str(db), "--out", str(tmp_path / "o"), "--sites", *sites, "--bootstraps", "3", "--no-loso",
+                                 "--no-figures", "--profile", "none"]) == 0
+    assert "N = 1,500" in capsys.readouterr().out
