@@ -800,6 +800,26 @@ def missingness_table(df: pd.DataFrame, *, site_col: str | None = "site_anon", i
     return out.sort_values("pct_missing", ascending=False).reset_index(drop=True)
 
 
+
+def _tuned_fit_predict(model: str, config: str, random_state: int) -> Callable:
+    """``fit_predict(x_train, y_train, x_test)`` for one configuration of :func:`default_model_grid` with the training-median
+    imputation of :func:`oof_predictions`, for leave-one-site-out scoring with the model the F1 tuning selected."""
+    from sklearn.impute import SimpleImputer
+
+    scale, configs = default_model_grid(random_state)[model]
+    factory = dict(configs)[config]
+    if scale:
+        raise ValueError(f"{model} is a scaled model; only unscaled models are supported here.")
+
+    def fit_predict(xtr, ytr, xte):
+        imp = SimpleImputer(strategy="median", keep_empty_features=True)
+        m = factory()
+        m.fit(imp.fit_transform(xtr), ytr)
+        return m.predict_proba(imp.transform(xte))[:, 1]
+
+    fit_predict.__name__ = f"{model}: {config}"
+    return fit_predict
+
 # ------------------------------------------------------------------ driver
 def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "Study", label_col: str = "readmitted_30d",
                        site_col: str = "site_anon", los_col: str = "index_los_days", first_stay_col: str | None = "prior_ip_count",
@@ -808,7 +828,7 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
                        figures: bool = False, shap_sample_n: int = 2000, shap_top: int = 10,
                        descriptive: bool = True, lr_drop_cols: Sequence[str] = LR_DROP_COLUMNS, extra_tables: Mapping[str, pd.DataFrame] | None = None,
                        first_box: str = "All patients with an inpatient or emergency-to-inpatient stay",
-                       final_box: str = "one randomly drawn stay per patient") -> dict[str, Any]:
+                       final_box: str = "one randomly drawn stay per patient", loso_model: str = "tuned_xgboost") -> dict[str, Any]:
     """Runs the model benchmark, tuning comparison, stay-type split, length of stay, dates and (optionally) leave-one-site-out
     on ``df`` (one row per patient) and writes ``<prefix>_*.csv`` (plus an .xlsx workbook) to ``out_dir``.
 
@@ -854,8 +874,14 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
         # the prepared matrix (outcome copies, ids and dates already removed), not the raw frame: a label copy among the features
         # gave a held-out AUROC of 1.0
         feats = X.assign(**{"__y": y.to_numpy(), site_col: df[site_col].to_numpy()})
-        res = evaluate_loso_transport(feats, site_col=site_col, model_type="hist_gbm", label_col="__y", n_bootstraps=n_bootstraps,
-                                      random_state=random_state, keep_predictions=True)
+        model_type: Any = "hist_gbm"
+        if loso_model == "tuned_xgboost" and "XGBoost" in tuned["summary"]:
+            model_type = _tuned_fit_predict("XGBoost", tuned["summary"]["XGBoost"]["best_by_f1"], random_state)
+        elif loso_model not in ("tuned_xgboost", "hist_gbm"):
+            raise ValueError("loso_model must be 'tuned_xgboost' or 'hist_gbm'.")
+        # the delivered Table 5 trains on the same 50/50 upsampled sample as Tables 2 to 4, whichever model scores the held-out site
+        res = evaluate_loso_transport(feats, site_col=site_col, model_type=model_type, label_col="__y", n_bootstraps=n_bootstraps,
+                                      random_state=random_state, keep_predictions=True, balance_method="upsample")
         per = res.per_site.copy()
         # the uncalibrated view a manuscript usually reports: balanced-trained scores at the 0.5 threshold on the natural held-out site
         extra = []

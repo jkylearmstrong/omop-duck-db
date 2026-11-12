@@ -172,6 +172,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         summary, diffs = compare_workbooks(wb["path"], compare_to)
         summary.to_csv(out / f"{prefix}_Comparison_Summary.csv", index=False)
         diffs.to_csv(out / f"{prefix}_Comparison_Differences.csv", index=False)
+        from omop_etl.manuscript_tables import workbook_similarity
+
+        workbook_similarity(wb["path"], compare_to).to_csv(out / f"{prefix}_Similarity.csv", index=False)
         comparison = (summary, diffs)
     (out / f"{prefix}_run.json").write_text(json.dumps({"sites": list(sites), "labels": labels, "window": [start, end], "profile": profile, "pinned": pinned is not None,
                                                        "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings}, indent=1), encoding="utf-8")

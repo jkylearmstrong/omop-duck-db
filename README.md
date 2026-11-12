@@ -514,7 +514,7 @@ print("Reconciliation Passed:", reconciliation["passed"])
 
 ## Running on the NVIDIA DGX Spark (deep models) and Oracle transfers
 
-**Status (0.18.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
+**Status (0.19.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
 
 On the Spark, from the parent `eDerri_data` directory (so omop-learn and `pipeline/` are in the build context):
 
@@ -1132,6 +1132,111 @@ disclosure). The rules that hold today:
   and this policy in one object; publish it whole and never recompute pooled totals from the pair rows.
 - Only the duplicate and overlap helpers were audited for this. Other helpers that print group sizes beside
   suppressed cells have not been audited; treat their output the same way before publishing.
+
+## Reproducing the delivered manuscript: what "similar" means, and what is still open
+
+The package is meant to be the thing delivered going forward: the default federated cohort (one random stay per patient,
+2017-01-01 to 2022-09-30, 50/50 balanced training), the standard OHDSI features and the eDERRI features Dr. Rubin asked for,
+and the tables, listings and figures of the current manuscript. "The defaults give results very similar to the ones we
+already have" is a claim that has to be measured, so this section records the measurement and the rule.
+
+**Timed run with repo defaults** (`scripts/reproduce_study.py`, 5 sites, N = 225,939, 100 bootstraps): 4,086 s, about 68 minutes
+(per-site extraction 40 s to 1,274 s depending on site size, tables and figures 1,240 s). The sample was not pinned,
+so it is a fresh random draw.
+
+**What was found when that run was compared with the delivered workbook** (`compare_workbooks` counts every cell that moved):
+
+| Sheet | Cells that differ | Reading |
+|---|---|---|
+| Table 2, Table 4 | 0 | Identical. Every Table 2 AUC is within 0.001 of the delivered value. |
+| Table 1 | 29 of 189 | Small: median relative difference about 2%. |
+| Table 3, S1, S2 | 3 of 72, 17 of 84, 9 of 63 | Small. |
+| Table 5 | 23 of 25 | **Mostly a labelling and metric issue, see below.** |
+| Table 6 | 126 of 281 | Real. P-values move most; the SDI and RUCA terms drive it. |
+| Table S3 | 75 of 277 | Follows the site labels, plus one extra row. |
+| Tables 6, S3, S4 | one extra row each | The `SDI Quintile: Missing / Unknown` term and the new attrition step. |
+
+Three causes were separated:
+
+1. **Site labels.** The delivered workbook uses anonymous labels (Site A to E) that are not the command-line order, so the run's
+   "Site A" was a different health system and Table 5 and S3 rows were compared against the wrong sites. The site-to-label
+   mapping is deliberately **not** stored in this repository, because publishing it would identify the sites in the manuscript.
+   `run_study(site_labels={...})` takes it from the caller; keep that mapping in a private, untracked file. Without it the labels
+   are `Site A, B, ...` in command-line order.
+2. **Table 5 used a different model and balancing from the delivered table (found and fixed).** The delivered Table 5 comes from
+   `pipeline/evaluate_loso_harmonized.py`: the F1-tuned XGBoost (300 trees, learning rate 0.05, depth 6), trained on the other four
+   sites with the minority class **upsampled with replacement** to 50/50 (the rule of Tables 2 to 4), median imputation fitted on the
+   training sites, scored at the 0.5 threshold on the natural held-out site with **no calibration**. The package's leave-one-site-out
+   used HistGBM and **undersampled** the majority class, so sensitivity, specificity and Brier (and the largest site, below) moved. This was
+   established by running the legacy script on the legacy feature file (it reproduces the delivered Table 5 to the third
+   decimal) and then the package on the same file: with the old balancing the package gave an AUC of 0.713 at the largest site and sensitivity 0.598;
+   with `balance_method="upsample"` and the tuned XGBoost it reproduces all five delivered rows exactly (AUC, Brier,
+   sensitivity, specificity). `build_study_tables(loso_model="tuned_xgboost")` is now the default (the XGBoost configuration chosen
+   by F1 in Table 3, upsampled, median-imputed; `"hist_gbm"` keeps the previous model) and `evaluate_loso_transport` has a
+   `balance_method` argument (`"undersample"` default, `"upsample"`). The "manuscript" Table 5 option (0.5 threshold, uncalibrated) is
+   the delivered rule; "calibrated" is an alternative view, not what was delivered.
+3. **The largest site in Table 5.** Its delivered AUC of 0.687 (and low sensitivity, 0.364) is not a feature problem; it
+   is what the upsampled tuned XGBoost gives when the largest site is held out. The package reproduces it exactly on the
+   legacy feature file. The first full run with the new default has not been done yet.
+
+**The rule for "similar".** `omop_etl.workbook_similarity(new, old)` returns one pass/fail row per check, with the thresholds in
+`SIMILARITY_TOLERANCES`. `run_study` writes it as `<prefix>_Similarity.csv` when `compare_to` is given.
+
+| Check | Default threshold | Result on the unpinned default run (sites paired as delivered) |
+|---|---|---|
+| Table 2 AUC, every model | within 0.01 | pass (worst 0.001) |
+| Table 5 AUC, every site | within 0.02 | **fail** on the first run (4 of 5; the largest site differs by 0.032) because of the model and balancing in item 2; exact on the legacy feature file after the fix |
+| Table 6 odds ratio | within 10% relative, for 95% of rows | pass (96.5%) |
+| Table 6 direction (old OR outside 0.97 to 1.03) | agrees for 95% of rows | pass (98.1%) |
+| Table 6 p < 0.05 verdict | agrees for 95% of rows | **fail** (86%; the 12 disagreements are SDI quintiles, RUCA, smoking, beta blockers, corticosteroids, CKD, diabetes, HIV and overweight BMI) |
+| Table 6 rows missing from the new workbook | none | pass |
+| Table 1 cells | within 5% for 90% of cells | pass (97.9%) |
+
+The thresholds are a proposal; nothing here has been agreed with Dr. Rubin. Change them in one place (`SIMILARITY_TOLERANCES`) once
+they are. The check is a regression gate: it says how far two workbooks are apart, not which one is right. The Table 5 line
+above was computed after re-labelling the saved workbook; the next full run will use the manuscript labels directly.
+
+Reading of the result: the model-performance story reproduces (Table 2 to 0.001) and the cross-site story reproduces for four of
+five sites. What does not reproduce is which Table 6 covariates are significant, mostly the area-level (SDI, RUCA) terms. That
+is consistent with the address `tie_break` choice and with a fresh random sample, and it is untested which of the two it is. The
+next step is a run with the stays pinned (`pin_stays`) to separate sampling noise from definition changes. If the pinned run
+matches Table 6, the remaining gap is sampling, and the manuscript profile should ship a pinned stay list or a seed manifest.
+
+## Status and roadmap (what is claimed, what is verified, what is next)
+
+What is in the package and what has been run:
+
+- **Loading and building**: PCORnet to OMOP ETL, vocabulary loading, and building and "inflating" OMOP tables in DuckDB are the
+  core of the package and are field-tested on five production databases (see *Verification status*). Inflating with a full
+  vocabulary was not re-run for this section.
+- **OHDSI tools**: `OHDSI_INTEGRATION.md` is the authority. It records what was compared against the official tools
+  (CirceR, CohortGenerator, FeatureExtraction, Achilles, DataQualityDashboard, PhenotypeLibrary, CohortDiagnostics,
+  PatientLevelPrediction) and where the package overlaps or defers. omop-learn, scikit-learn, SARD and the PLP / DeepPLP bridge
+  are documented in the ML bridge section. **Not covered by any check in the repo:** Atlas 3, CohortConstructor, Data2Evidence,
+  Phenelope and GIS integration. CohortMethod and Strategus appear only as "prefer HADES for published estimates". Treat those
+  as planned, not delivered, until a row appears in `OHDSI_INTEGRATION.md`.
+- **Cohort and Circe**: "one random stay per patient" cannot be written in Circe. The eligibility part is available as Circe JSON
+  (`target_cohort.circe.json`); the random draw is a documented post-step in `define_study_cohort`.
+- **Federation**: sites run the same code locally and share aggregate outputs. Disclosure control (`min_cell`, small-cell
+  suppression) and site summary packages exist (v0.12.0). Not yet done: a run manifest stamped into every output (package
+  version, git commit, seed, options, vocabulary version, timings) and a check that all sites ran identical versions and options
+  before pooling. Deep models are evaluated leave-one-site-out on pooled data; training them federated (sharing weights or
+  gradients) is a separate design that does not exist yet.
+- **Defaults can drift the manuscript.** The 0.18 options (`tie_break`, `table5`, `sdi_missing_term`, `attrition_mode`) change
+  the published numbers. Next: a single named "manuscript profile" that pins all of them, run against a golden workbook in a
+  test with the tolerances above.
+- **R**: the address `tie_break` option is Python only. A site running the R path gets the old behaviour.
+- **Deep models and the DGX Spark**: see the DGX Spark section. The CPU path is tested; the GPU path, the arm64 container tag and
+  real-cohort training are not. The existing SARD and DeepPLP trainers (`pipeline/dgx_spark_sard_trainer.py`,
+  `ederri_sard_deep_model.py`, `train_clinical_deep_dgx.py`, `train_residual_deep_dgx.py`) still need `fit_predict` wrappers
+  before `deep_study_tables` can use them. A deep-model report builder needs a spec: there is no manuscript template for it.
+- **Data quality**: run DataQualityDashboard and Achilles on each site database and record the vocabulary version in the manifest.
+- **Oracle**: `to_sql`, `verify_transfer` and `from_sql` were verified on live Oracle 19c; `tests/test_live_databases.py` against
+  Oracle has not been run.
+
+Order of work: (1) agree the similarity thresholds and run once with pinned stays (and the new Table 5 default) to separate
+sampling from definition changes; (2) the manuscript profile and the run manifest; (3) an integration status row for every tool
+named above; (4) the Spark GPU run and the SARD / DeepPLP wrappers.
 
 ## Verification status
 
