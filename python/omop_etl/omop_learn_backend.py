@@ -10,7 +10,7 @@ whole omop-learn stack (``Cohort``, ``Feature``, ``OMOPDataset`` -> ``to_torch``
     from omop_etl.omop_learn_backend import DuckDBBackend, default_features, cohort_from_parquet
 
     backend = DuckDBBackend(con=con)                       # or DuckDBBackend(Config({"path": "site.duckdb"}))
-    cohort = cohort_from_parquet(con, "ederri_features_Temple.parquet")
+    cohort = cohort_from_parquet(con, "ederri_features_site1.parquet")
     dataset = OMOPDataset(name="temple", config=Config({"cdm_schema": "main"}), cohort=cohort,
                           features=default_features(), backend=backend, data_dir=Path("datasets"))
 

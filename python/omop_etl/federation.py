@@ -673,7 +673,7 @@ class FederatedConsortium:
 
     Example:
         >>> consortium = FederatedConsortium(
-        ...     sites={"Site A": "omop_Temple.duckdb", "Site B": "omop_PSU.duckdb"},
+        ...     sites={"Site A": "omop_site1.duckdb", "Site B": "omop_site2.duckdb"},
         ...     central_vocabulary="central_vocabulary.duckdb"
         ... )
         >>> t1 = consortium.generate_table1(domain="heart_failure")

@@ -82,9 +82,9 @@ omop-learn's \code{ConceptTokenizer} does, so R and Python agree regardless of t
 }
 \examples{
 \dontrun{
-con <- DBI::dbConnect(duckdb::duckdb(), "omop_Temple.duckdb", read_only = TRUE)
+con <- DBI::dbConnect(duckdb::duckdb(), "omop_site1.duckdb", read_only = TRUE)
 DBI::dbExecute(con, "ATTACH 'central_vocabulary.duckdb' AS central_vocab (READ_ONLY);")
-res <- extract_sparse_concept_matrix(con, "ederri_features_Temple.parquet", min_patient_freq = 50)
+res <- extract_sparse_concept_matrix(con, "ederri_features_site1.parquet", min_patient_freq = 50)
 dim(res$X)
 }
 }

@@ -134,7 +134,7 @@ def load_profile(source: str | Path | Mapping[str, Any]) -> dict[str, Any]:
 class Table1Generator:
     """Build a cohort-level Table 1 from a DuckDB OMOP database, extended by domain profiles.
 
-    >>> t1 = Table1Generator(db_path="omop_Temple.duckdb")
+    >>> t1 = Table1Generator(db_path="omop_site1.duckdb")
     >>> t1.add_domain_profile("heart_failure")
     >>> t1.add_custom_lab("troponin_t", loinc_codes=["6598-7", "42757-5"], bounds=[0.0, 50.0])
     >>> out = t1.generate(cohort_table="inpatient_hf_cohort", stratify_by="readmitted_30d")
