@@ -1247,6 +1247,13 @@ count), so its later steps are one number off from the combined table, which has
 `workbook_similarity` passes every check at 100% (worst Table 2 AUC difference 0.002, worst Table 6 odds-ratio difference 1.1%, all 86
 p < 0.05 verdicts agree). Reproduce the table with `scripts/check_golden.py --new ... --golden ... --deltas deltas.csv`.
 
+**Anonymous site letters.** `run_study(site_labels="random")` (or `--labels random`) gives each site a random letter, so "Site A" does
+not follow the order the sites were typed in; `label_seed` / `--label-seed` makes the draw repeatable, `"ordered"` follows the command
+line, and a JSON file written by `save_site_labels()` (`labels_out` / `--labels-out`) is read back with `site_labels=<path>`. The mapping
+is never written to the workbook or to `<prefix>_run.json` (which holds only the list of labels): keep the file outside the repository and
+the shared results. For a consortium, assign the letters once at the coordinating centre and give each site its own, otherwise every
+site's "Site A" is a different system. `assign_site_labels(sites, mode=, seed=)` returns the mapping without running anything.
+
 **Golden workbook.** `tests/golden/synthetic_manuscript_tables.xlsx` is a committed workbook built from a seeded synthetic cohort;
 `tests/test_golden_workbook.py` fails when any cell moves and shows that a changed decision is caught. Regenerate it on purpose with
 `OMOP_GOLDEN_UPDATE=1 pytest tests/test_golden_workbook.py`. `scripts/check_golden.py` does the same against a real delivered workbook

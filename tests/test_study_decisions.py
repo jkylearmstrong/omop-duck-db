@@ -82,3 +82,20 @@ def test_delivered_preset_uses_the_study_pipeline_address_rules():
     d = resolve_decisions("delivered_2026_11_11")
     assert d["address_tie_break"] == "first_listed" and d["address_undated"] == "first"
     assert resolve_decisions("package")["address_undated"] == "last"
+
+
+def test_assign_site_labels_random_seeded_ordered_and_saved(tmp_path):
+    from omop_etl.study_run import assign_site_labels, load_site_labels, save_site_labels
+
+    sites = ["s1", "s2", "s3", "s4", "s5", "s6"]
+    a = assign_site_labels(sites, seed=3)
+    assert a == assign_site_labels(sites, seed=3) and sorted(a.values()) == [f"Site {c}" for c in "ABCDEF"]
+    assert any(assign_site_labels(sites, seed=k) != a for k in range(4, 9))        # different seeds shuffle differently
+    assert assign_site_labels(sites, mode="ordered") == {s: f"Site {c}" for s, c in zip(sites, "ABCDEF")}
+    assert sorted(assign_site_labels(sites).values()) == sorted(a.values())           # unseeded: still a permutation
+    assert assign_site_labels(["x", "x", "y"], mode="ordered") == {"x": "Site A", "y": "Site B"}
+    assert load_site_labels(save_site_labels(a, tmp_path / "l.json")) == a
+    with pytest.raises(ValueError):
+        assign_site_labels(sites, mode="alphabetical")
+    with pytest.raises(ValueError):
+        assign_site_labels([str(i) for i in range(27)])

@@ -20,7 +20,9 @@ def main(argv=None) -> int:
     p.add_argument("--db-dir", required=False, help="folder with omop_<site>.duckdb (and central_vocabulary.duckdb)")
     p.add_argument("--out", required=False)
     p.add_argument("--sites", nargs="+", required=False)
-    p.add_argument("--labels", nargs="*", help="anonymous label per site, same order (default Site A, B, ...)")
+    p.add_argument("--labels", nargs="*", help="anonymous label per site, same order (default Site A, B, ...); or one word: random, ordered, or a JSON file of site -> label")
+    p.add_argument("--label-seed", type=int, help="seed for --labels random (repeatable assignment)")
+    p.add_argument("--labels-out", help="save the site -> label mapping here (keep it out of the repository and the shared results)")
     p.add_argument("--start", default="2017-01-01")
     p.add_argument("--end", default="2022-09-30")
     p.add_argument("--profile", default="ederri", choices=["ederri", "both", "none"])
@@ -51,14 +53,17 @@ def main(argv=None) -> int:
         return 0
     if not (a.db_dir and a.out and a.sites):
         p.error("--db-dir, --out and --sites are required")
-    labels = dict(zip(a.sites, a.labels)) if a.labels else None
-    r = run_study(a.db_dir, a.out, sites=a.sites, site_labels=labels, start=a.start, end=a.end, profile=None if a.profile == "none" else a.profile,
+    if a.labels and len(a.labels) == 1 and len(a.sites) != 1:
+        labels = a.labels[0]
+    else:
+        labels = dict(zip(a.sites, a.labels)) if a.labels else None
+    r = run_study(a.db_dir, a.out, sites=a.sites, site_labels=labels, label_seed=a.label_seed, labels_out=a.labels_out, start=a.start, end=a.end, profile=None if a.profile == "none" else a.profile,
                   pinned_stays=a.pinned_stays, ruca_crosswalk=a.ruca, sdi_table=a.sdi, address_table=a.address_table, n_bootstraps=a.bootstraps,
                   loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix,
                   attrition_mode=a.attrition, table5=a.table5, sdi_missing_term=a.sdi_missing_term, address_tie_break=a.tie_break, address_undated=a.address_undated,
                   table6_increments=a.table6_increments, consort_final_steps=a.consort_final_steps,
                   sheet_site_labels=({"Table S1": dict(zip(labels.values(), a.s1_s3_labels)), "Table S3": dict(zip(labels.values(), a.s1_s3_labels))}
-                                     if a.s1_s3_labels and labels else None), preset=a.preset)
+                                     if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset)
     print(f"N = {len(r['data']):,}; workbook: {r['workbook']}; seconds: {r['timings']}")
     if r["comparison"] is not None:
         print(r["comparison"][0].to_string(index=False))
