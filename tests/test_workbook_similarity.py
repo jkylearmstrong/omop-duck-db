@@ -46,3 +46,45 @@ def test_drift_and_swapped_site_labels_fail_with_named_checks(tmp_path):
     loose = workbook_similarity(_book(tmp_path / "n3.xlsx", auc2=0.80), old, tolerances={"table2_auc_abs": 0.1}).set_index("check")
     assert loose.loc["Table 2 AUC within abs tolerance", "passed"] and SIMILARITY_TOLERANCES["table2_auc_abs"] == 0.01
 
+
+
+def test_loso_upsample_balances_like_tables_2_to_4_and_undersample_stays_the_default():
+    import numpy as np
+    from omop_etl.transport import evaluate_loso_transport
+
+    rng = np.random.default_rng(0)
+    n = 600
+    df = pd.DataFrame({"x": rng.normal(size=n), "s": np.array(["A", "B", "C"])[np.arange(n) % 3]})
+    df["y"] = (rng.random(n) < 0.15).astype(int)
+    seen = {"up": [], "down": []}
+
+    def spy(key):
+        def fp(xtr, ytr, xte):
+            seen[key].append((len(ytr), float(np.mean(ytr)), len(xte)))
+            return np.full(len(xte), 0.3)
+        return fp
+
+    evaluate_loso_transport(df, site_col="s", model_type=spy("up"), label_col="y", n_bootstraps=0, balance_method="upsample")
+    evaluate_loso_transport(df, site_col="s", model_type=spy("down"), label_col="y", n_bootstraps=0)
+    for (n_up, m_up, _), (n_dn, m_dn, _) in zip(seen["up"], seen["down"]):
+        assert m_up == 0.5 and m_dn == 0.5 and n_up > n_dn          # upsampled keeps every majority row, undersampled drops them
+    r = evaluate_loso_transport(df, site_col="s", model_type=spy("up"), label_col="y", n_bootstraps=0, balance_method="upsample")
+    assert r.settings["balance_method"] == "upsample"
+    import pytest
+
+    with pytest.raises(ValueError, match="balance_method"):
+        evaluate_loso_transport(df, site_col="s", model_type=spy("up"), label_col="y", n_bootstraps=0, balance_method="nope")
+
+
+def test_tuned_fit_predict_imputes_and_scores():
+    import numpy as np
+    from omop_etl.study_report import _tuned_fit_predict
+
+    pytest = __import__("pytest")
+    pytest.importorskip("xgboost")
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(400, 5))
+    y = (X[:, 0] + rng.normal(size=400) > 0).astype(int)
+    X[::7, 1] = np.nan
+    p = _tuned_fit_predict("XGBoost", "100 trees, lr 0.1, depth 6 (benchmark)", 42)(X[:300], y[:300], X[300:])
+    assert p.shape == (100,) and ((p > 0) & (p < 1)).all()

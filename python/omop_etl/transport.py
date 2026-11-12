@@ -270,10 +270,18 @@ def _make_fit_predict(model_type: Any, random_state: int, model_params: Mapping[
     raise ValueError("model_type must be 'logistic', 'xgboost', 'hist_gbm', 'random_forest', 'mlp' or a fit_predict callable.")
 
 
-def _balance(y: np.ndarray, ratio: float | None, rng: np.random.Generator) -> np.ndarray:
-    """Row indices of a training sample with ``ratio`` majority rows per minority row (1.0 = 50/50); all rows when None."""
+def _balance(y: np.ndarray, ratio: float | None, rng: np.random.Generator, method: str = "undersample", seed: int = 42) -> np.ndarray:
+    """Row indices of a training sample with ``ratio`` majority rows per minority row (1.0 = 50/50); all rows when None.
+    ``method="upsample"`` keeps every majority row and draws the minority class with replacement up to the majority size (the
+    50/50 rule of the benchmark tables, :func:`omop_etl.study_report.balanced_training_indices`); ``ratio`` is then ignored."""
     if ratio is None:
         return np.arange(len(y))
+    if method == "upsample":
+        from omop_etl.study_report import balanced_training_indices
+
+        return balanced_training_indices(y, random_state=seed)
+    if method != "undersample":
+        raise ValueError("balance_method must be 'undersample' or 'upsample'.")
     if ratio <= 0:
         raise ValueError("balance_ratio must be positive (or None to train on the natural sample).")
     pos, neg = np.flatnonzero(y == 1), np.flatnonzero(y == 0)
@@ -301,6 +309,7 @@ def evaluate_loso_transport(
     feature_cols: Sequence[str] | None = None,
     label_col: str = "y",
     balance_ratio: float | None = 1.0,
+    balance_method: str = "undersample",
     score_natural: bool = True,
     calibration: str = "prior_shift",
     n_bootstraps: int = 100,
@@ -317,6 +326,9 @@ def evaluate_loso_transport(
     features_df : DataFrame
         One row per stay with ``site_col``, ``label_col`` (0/1) and the features (default: every numeric column that is not
         the label, the site or an identifier / date column).
+    balance_method : {"undersample", "upsample"}, default "undersample"
+        How the 50/50 training sample is drawn: random majority subsample (default, unchanged) or minority upsampled with replacement,
+        the rule of Tables 2 to 4 and of the delivered Table 5.
     balance_ratio : float or None, default 1.0
         Majority rows per minority row in the training sample (1.0 = 50/50). ``None`` trains on the natural sample.
     score_natural : bool, default True
@@ -361,12 +373,12 @@ def evaluate_loso_transport(
         rng = np.random.default_rng([random_state, k])
         if ytr_nat.min() == ytr_nat.max():
             raise ValueError(f"Training sites for held-out site {site!r} contain a single outcome class.")
-        idx = _balance(ytr_nat, balance_ratio, rng)
+        idx = _balance(ytr_nat, balance_ratio, rng, balance_method, random_state if balance_method == "upsample" else 42)
         xtr_nat = X[train]
         xtr, ytr = xtr_nat[idx], ytr_nat[idx]
         xte = X[test]
         if not score_natural:
-            sub = _balance(yte, 1.0 if balance_ratio is None else balance_ratio, rng)
+            sub = _balance(yte, 1.0 if balance_ratio is None else balance_ratio, rng, "undersample")
             xte, yte, kept = xte[sub], yte[sub], np.flatnonzero(test)[sub]
         else:
             kept = np.flatnonzero(test)
@@ -401,6 +413,6 @@ def evaluate_loso_transport(
     metric_cols = [c for c in per_site.columns if c not in ("site", "n", "n_events") and not c.endswith(("_lo", "_hi"))
                    and not c.startswith("train_")]
     summary = per_site[metric_cols].agg(["mean", "min", "max"]).T.reset_index().rename(columns={"index": "metric"})
-    settings = {"model_type": model_type if isinstance(model_type, str) else getattr(model_type, "__name__", "callable"), "balance_ratio": balance_ratio, "score_natural": score_natural, "calibration": calibration,
+    settings = {"model_type": model_type if isinstance(model_type, str) else getattr(model_type, "__name__", "callable"), "balance_ratio": balance_ratio, "balance_method": balance_method, "score_natural": score_natural, "calibration": calibration,
                 "n_bootstraps": n_bootstraps, "capacity_fractions": list(capacity_fractions), "features": cols, "random_state": random_state}
     return LosoTransportResult(per_site, summary, pd.concat(preds, ignore_index=True) if preds else None, settings)

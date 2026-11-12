@@ -1163,14 +1163,21 @@ Three causes were separated:
    mapping is deliberately **not** stored in this repository, because publishing it would identify the sites in the manuscript.
    `run_study(site_labels={...})` takes it from the caller; keep that mapping in a private, untracked file. Without it the labels
    are `Site A, B, ...` in command-line order.
-2. **Table 5 sensitivity, specificity and Brier follow a different rule from the delivered table.** With the sites paired
-   correctly, the AUCs agree within 0.001 to 0.011 for four sites, but the delivered sensitivity and specificity are those of a
-   conservative operating point (for example 0.364 / 0.856 at the largest site), while the `"manuscript"` option reports the 0.5 threshold on
-   the balanced-trained probabilities (0.575 / 0.740). The delivered Brier (0.158 to 0.217) is not the calibrated Brier either
-   (0.08 to 0.10). Which rule produced the delivered columns has to be settled with the study lead before the default is
-   declared; it is an open question, not a fixed one.
-3. **The largest site in Table 5.** Its delivered leave-one-site-out AUC is 0.687; the new run gives 0.719 (difference 0.032, the
-   only Table 5 AUC outside 0.02). A feature or cohort difference at the largest site is the first thing to check.
+2. **Table 5 used a different model and balancing from the delivered table (found and fixed).** The delivered Table 5 comes from
+   `pipeline/evaluate_loso_harmonized.py`: the F1-tuned XGBoost (300 trees, learning rate 0.05, depth 6), trained on the other four
+   sites with the minority class **upsampled with replacement** to 50/50 (the rule of Tables 2 to 4), median imputation fitted on the
+   training sites, scored at the 0.5 threshold on the natural held-out site with **no calibration**. The package's leave-one-site-out
+   used HistGBM and **undersampled** the majority class, so sensitivity, specificity and Brier (and the largest site, below) moved. This was
+   established by running the legacy script on the legacy feature file (it reproduces the delivered Table 5 to the third
+   decimal) and then the package on the same file: with the old balancing the package gave an AUC of 0.713 at the largest site and sensitivity 0.598;
+   with `balance_method="upsample"` and the tuned XGBoost it reproduces all five delivered rows exactly (AUC, Brier,
+   sensitivity, specificity). `build_study_tables(loso_model="tuned_xgboost")` is now the default (the XGBoost configuration chosen
+   by F1 in Table 3, upsampled, median-imputed; `"hist_gbm"` keeps the previous model) and `evaluate_loso_transport` has a
+   `balance_method` argument (`"undersample"` default, `"upsample"`). The "manuscript" Table 5 option (0.5 threshold, uncalibrated) is
+   the delivered rule; "calibrated" is an alternative view, not what was delivered.
+3. **The largest site in Table 5.** Its delivered AUC of 0.687 (and low sensitivity, 0.364) is not a feature problem; it
+   is what the upsampled tuned XGBoost gives when the largest site is held out. The package reproduces it exactly on the
+   legacy feature file. The first full run with the new default has not been done yet.
 
 **The rule for "similar".** `omop_etl.workbook_similarity(new, old)` returns one pass/fail row per check, with the thresholds in
 `SIMILARITY_TOLERANCES`. `run_study` writes it as `<prefix>_Similarity.csv` when `compare_to` is given.
@@ -1178,7 +1185,7 @@ Three causes were separated:
 | Check | Default threshold | Result on the unpinned default run (sites paired as delivered) |
 |---|---|---|
 | Table 2 AUC, every model | within 0.01 | pass (worst 0.001) |
-| Table 5 AUC, every site | within 0.02 | **fail** (4 of 5; the largest site differs by 0.032) |
+| Table 5 AUC, every site | within 0.02 | **fail** on the first run (4 of 5; the largest site differs by 0.032) because of the model and balancing in item 2; exact on the legacy feature file after the fix |
 | Table 6 odds ratio | within 10% relative, for 95% of rows | pass (96.5%) |
 | Table 6 direction (old OR outside 0.97 to 1.03) | agrees for 95% of rows | pass (98.1%) |
 | Table 6 p < 0.05 verdict | agrees for 95% of rows | **fail** (86%; the 12 disagreements are SDI quintiles, RUCA, smoking, beta blockers, corticosteroids, CKD, diabetes, HIV and overweight BMI) |
@@ -1227,7 +1234,7 @@ What is in the package and what has been run:
 - **Oracle**: `to_sql`, `verify_transfer` and `from_sql` were verified on live Oracle 19c; `tests/test_live_databases.py` against
   Oracle has not been run.
 
-Order of work: (1) agree the similarity thresholds, settle the Table 5 metric rule and run once with pinned stays to separate
+Order of work: (1) agree the similarity thresholds and run once with pinned stays (and the new Table 5 default) to separate
 sampling from definition changes; (2) the manuscript profile and the run manifest; (3) an integration status row for every tool
 named above; (4) the Spark GPU run and the SARD / DeepPLP wrappers.
 
