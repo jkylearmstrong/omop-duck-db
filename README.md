@@ -1141,7 +1141,7 @@ and the tables, listings and figures of the current manuscript. "The defaults gi
 already have" is a claim that has to be measured, so this section records the measurement and the rule.
 
 **Timed run with repo defaults** (`scripts/reproduce_study.py`, 5 sites, N = 225,939, 100 bootstraps): 4,086 s, about 68 minutes
-(Temple 40 s, PSU 75 s, Hopkins 199 s, PITT 1,254 s, Geisinger 1,274 s, tables and figures 1,240 s). The sample was not pinned,
+(per-site extraction 40 s to 1,274 s depending on site size, tables and figures 1,240 s). The sample was not pinned,
 so it is a fresh random draw.
 
 **What was found when that run was compared with the delivered workbook** (`compare_workbooks` counts every cell that moved):
@@ -1158,18 +1158,19 @@ so it is a fresh random draw.
 
 Three causes were separated:
 
-1. **Site labels (fixed in this change).** The delivered workbook labels the sites Geisinger = A, Hopkins = B, PITT = C, PSU = D,
-   Temple = E. The run labelled them in the order given on the command line, so "Site A" meant a different health system and the
-   Table 5 and S3 rows were compared against the wrong sites. `run_study` now uses `MANUSCRIPT_SITE_LABELS` by default when every
-   site is one of those five, and falls back to `Site A, B, ...` in command-line order otherwise. Pass `--labels` to override.
+1. **Site labels.** The delivered workbook uses anonymous labels (Site A to E) that are not the command-line order, so the run's
+   "Site A" was a different health system and Table 5 and S3 rows were compared against the wrong sites. The site-to-label
+   mapping is deliberately **not** stored in this repository, because publishing it would identify the sites in the manuscript.
+   `run_study(site_labels={...})` takes it from the caller; keep that mapping in a private, untracked file. Without it the labels
+   are `Site A, B, ...` in command-line order.
 2. **Table 5 sensitivity, specificity and Brier follow a different rule from the delivered table.** With the sites paired
    correctly, the AUCs agree within 0.001 to 0.011 for four sites, but the delivered sensitivity and specificity are those of a
-   conservative operating point (for example 0.364 / 0.856 at PITT), while the `"manuscript"` option reports the 0.5 threshold on
+   conservative operating point (for example 0.364 / 0.856 at the largest site), while the `"manuscript"` option reports the 0.5 threshold on
    the balanced-trained probabilities (0.575 / 0.740). The delivered Brier (0.158 to 0.217) is not the calibrated Brier either
    (0.08 to 0.10). Which rule produced the delivered columns has to be settled with the study lead before the default is
    declared; it is an open question, not a fixed one.
-3. **PITT in Table 5.** The delivered PITT leave-one-site-out AUC is 0.687; the new run gives 0.719 (difference 0.032, the only
-   Table 5 AUC outside 0.02). PITT is the largest site, so a feature or cohort difference there is the first thing to check.
+3. **The largest site in Table 5.** Its delivered leave-one-site-out AUC is 0.687; the new run gives 0.719 (difference 0.032, the
+   only Table 5 AUC outside 0.02). A feature or cohort difference at the largest site is the first thing to check.
 
 **The rule for "similar".** `omop_etl.workbook_similarity(new, old)` returns one pass/fail row per check, with the thresholds in
 `SIMILARITY_TOLERANCES`. `run_study` writes it as `<prefix>_Similarity.csv` when `compare_to` is given.
@@ -1177,7 +1178,7 @@ Three causes were separated:
 | Check | Default threshold | Result on the unpinned default run (sites paired as delivered) |
 |---|---|---|
 | Table 2 AUC, every model | within 0.01 | pass (worst 0.001) |
-| Table 5 AUC, every site | within 0.02 | **fail** (4 of 5; PITT 0.032) |
+| Table 5 AUC, every site | within 0.02 | **fail** (4 of 5; the largest site differs by 0.032) |
 | Table 6 odds ratio | within 10% relative, for 95% of rows | pass (96.5%) |
 | Table 6 direction (old OR outside 0.97 to 1.03) | agrees for 95% of rows | pass (98.1%) |
 | Table 6 p < 0.05 verdict | agrees for 95% of rows | **fail** (86%; the 12 disagreements are SDI quintiles, RUCA, smoking, beta blockers, corticosteroids, CKD, diabetes, HIV and overweight BMI) |

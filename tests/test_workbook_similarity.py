@@ -10,7 +10,6 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from omop_etl.manuscript_tables import SIMILARITY_TOLERANCES, workbook_similarity  # noqa: E402
-from omop_etl.study_run import MANUSCRIPT_SITE_LABELS  # noqa: E402
 
 
 def _book(path, auc2=0.731, auc5=(0.712, 0.730), or_=(1.20, 0.80), p=("<0.001", "0.300")):
@@ -47,6 +46,3 @@ def test_drift_and_swapped_site_labels_fail_with_named_checks(tmp_path):
     loose = workbook_similarity(_book(tmp_path / "n3.xlsx", auc2=0.80), old, tolerances={"table2_auc_abs": 0.1}).set_index("check")
     assert loose.loc["Table 2 AUC within abs tolerance", "passed"] and SIMILARITY_TOLERANCES["table2_auc_abs"] == 0.01
 
-
-def test_manuscript_site_labels_follow_the_delivered_workbook():
-    assert MANUSCRIPT_SITE_LABELS == {"Geisinger": "Site A", "Hopkins": "Site B", "PITT": "Site C", "PSU": "Site D", "Temple": "Site E"}

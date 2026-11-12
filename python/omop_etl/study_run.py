@@ -16,10 +16,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["run_study", "PROTOCOL_COHORT_PARAMS", "MANUSCRIPT_SITE_LABELS", "pin_stays"]
-
-#: The anonymous site labels used in the delivered manuscript (Table 5, CONSORT). Used by default when every site is named here.
-MANUSCRIPT_SITE_LABELS: dict[str, str] = {"Geisinger": "Site A", "Hopkins": "Site B", "PITT": "Site C", "PSU": "Site D", "Temple": "Site E"}
+__all__ = ["run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays"]
 
 #: The eDERRI protocol's cohort definition (all-cause 30-day readmission after an inpatient stay in a patient with diabetes).
 PROTOCOL_COHORT_PARAMS: dict[str, Any] = dict(
@@ -134,8 +131,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
 
     db, out = Path(db_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    labels = dict(site_labels or (MANUSCRIPT_SITE_LABELS if all(s in MANUSCRIPT_SITE_LABELS for s in sites)
-                                   else {s: f"Site {chr(65 + i)}" for i, s in enumerate(sites)}))
+    labels = dict(site_labels or {s: f"Site {chr(65 + i)}" for i, s in enumerate(sites)})
     pinned = None if pinned_stays is None else (pd.read_csv(pinned_stays) if isinstance(pinned_stays, (str, Path)) else pinned_stays)
     import time
 

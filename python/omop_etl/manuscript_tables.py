@@ -502,8 +502,7 @@ def workbook_similarity(new: str | Path, old: str | Path, *, tolerances: Mapping
     """Checks a new manuscript workbook against a delivered one with explicit, named tolerances (:data:`SIMILARITY_TOLERANCES`).
 
     Unlike :func:`compare_workbooks`, which counts every cell that moved, this asks whether the conclusions are the same: Table 2 AUCs,
-    Table 5 per-site AUCs (rows paired by site label, so the labels must follow the same convention; see
-    ``omop_etl.study_run.MANUSCRIPT_SITE_LABELS``), the Table 6 odds ratios, their direction and their p < 0.05 verdicts, and the share of
+    Table 5 per-site AUCs (rows paired by site label, so pass ``site_labels`` to ``run_study`` to match the delivered convention), the Table 6 odds ratios, their direction and their p < 0.05 verdicts, and the share of
     Table 1 cells that agree. Returns one row per check with the number of items, how many passed, the observed worst case, the
     threshold and ``passed``."""
     tol = {**SIMILARITY_TOLERANCES, **dict(tolerances or {})}
