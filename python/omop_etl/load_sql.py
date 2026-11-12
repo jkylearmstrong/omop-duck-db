@@ -85,7 +85,7 @@ def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, 
 
     ``tables``: DuckDB table names (created under the same name on the server), or ``{server_table: "table or SELECT query"}`` to load a
     query result such as a feature table under another name. ``url``: SQLAlchemy URL or ``env:NAME`` (for Oracle
-    ``oracle+oracledb://user:pass@host:1521/?service_name=SVC``). ``if_exists``: ``"fail"`` (default; refuses an existing table),
+    ``oracle+oracledb://`` + user, password, host:1521 and ``?service_name=SVC``). ``if_exists``: ``"fail"`` (default; refuses an existing table),
     ``"replace"`` (drops and recreates), ``"append"``. ``columns``: optional ``{server_table: [column, ...]}`` subset. Oracle identifiers are
     upper-cased and limited to 30 characters; text columns become ``VARCHAR2(varchar_length)`` (``CLOB`` beyond 4000).
 
