@@ -70,3 +70,23 @@ def test_no_zip_found_anywhere_warns_with_the_fix(con):
     with warnings.catch_warnings():
         warnings.simplefilter("error")                                # with the study's table there is nothing to warn about
         _sdoh(con, address_table="ederri_address_history")
+
+
+def test_tie_break_options(con):
+    stays = pd.DataFrame({"person_id": [2], "stay_id": [102], "admit_date": ["2020-01-12"]})
+
+    def run(tb):
+        return derive_geography_features(con, RUCA, SDI, CUTS, stays=stays, address_table="ederri_address_history", tie_break=tb).iloc[0]
+
+    assert run("deterministic")["zip5"] == "17001"
+    assert run("highest_zip")["zip5"] == "19102"
+    amb = run("ambiguous_missing")
+    assert pd.isna(amb["zip5"]) and amb["rule"] == "ambiguous"
+    assert run("arbitrary")["zip5"] in {"17001", "19102"}
+    # an unambiguous stay is unaffected by the option
+    one = pd.DataFrame({"person_id": [1], "stay_id": [101], "admit_date": ["2020-01-10"]})
+    assert derive_geography_features(con, RUCA, SDI, CUTS, stays=one, address_table="ederri_address_history", tie_break="ambiguous_missing").loc[0, "zip5"] == "19101"
+    with pytest.raises(ValueError, match="tie_break"):
+        run("nope")
+    df = _sdoh(con, address_table="ederri_address_history", address_tie_break="ambiguous_missing")
+    assert df.loc[df.person_id == 2, "sdoh_missing"].iloc[0] == 1

@@ -127,8 +127,18 @@ def _has_table(con, name: str) -> bool:
                             "AND table_name = ?", [name]).fetchone()[0])
 
 
-def _index_addresses(con, stays_sql: str, address_table: str | None) -> pd.DataFrame:
-    """One address row per stay, selected by the reference rule. ``stays_sql`` yields (person_id, stay_id, admit_date)."""
+TIE_BREAKS = ("deterministic", "highest_zip", "ambiguous_missing", "arbitrary")
+
+
+def _index_addresses(con, stays_sql: str, address_table: str | None, tie_break: str = "deterministic") -> pd.DataFrame:
+    """One address row per stay, selected by the reference rule. ``stays_sql`` yields (person_id, stay_id, admit_date).
+
+    Addresses that tie on every rule key (two periods sharing a boundary date, neither preferred) are resolved by ``tie_break``:
+    ``deterministic`` the later start, then the lowest ZIP; ``highest_zip`` the later start, then the highest ZIP;
+    ``ambiguous_missing`` no ZIP at all (rule ``ambiguous``) when the tied addresses have different ZIPs; ``arbitrary`` whichever the
+    engine returns first (what a pipeline without a final key does: not reproducible run to run)."""
+    if tie_break not in TIE_BREAKS:
+        raise ValueError(f"tie_break must be one of {TIE_BREAKS}.")
     if address_table is None:
         return con.execute(f"""
             SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE 'person_location' END AS rule
@@ -139,7 +149,13 @@ def _index_addresses(con, stays_sql: str, address_table: str | None) -> pd.DataF
                 LEFT JOIN location l ON l.location_id = p.location_id
             )
         """).df()
-    return con.execute(f"""
+    keys = """nozip,
+                     CASE rule0 WHEN 'in_effect' THEN 0 WHEN 'latest_before' THEN 1 ELSE 2 END,
+                     CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
+                     CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
+                          ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
+                     st DESC NULLS LAST"""
+    head = f"""
         WITH m AS (
             SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, a.address_start AS st, a.address_end AS en, a.preferred,
                    (a.zip5 IS NULL) AS nozip,
@@ -149,17 +165,19 @@ def _index_addresses(con, stays_sql: str, address_table: str | None) -> pd.DataF
         ), r AS (
             SELECT *, CASE WHEN started AND ongoing THEN 'in_effect' WHEN started THEN 'latest_before'
                            ELSE 'earliest_after' END AS rule0 FROM m
-        )
+        )"""
+    if tie_break == "ambiguous_missing":
+        return con.execute(head + f""", k AS (SELECT *, RANK() OVER (PARTITION BY stay_id ORDER BY {keys}) AS rk FROM r)
+        SELECT person_id, stay_id,
+               CASE WHEN count(DISTINCT zip5) > 1 THEN NULL ELSE min(zip5) END AS zip5,
+               CASE WHEN count(DISTINCT zip5) > 1 THEN 'ambiguous' WHEN min(zip5) IS NULL THEN 'no_zip' ELSE min(rule0) END AS rule
+        FROM k WHERE rk = 1 GROUP BY person_id, stay_id
+        """).df()
+    final = {"deterministic": ", zip5", "highest_zip": ", zip5 DESC", "arbitrary": ""}[tie_break]
+    return con.execute(head + f"""
         SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE rule0 END AS rule
         FROM r
-        QUALIFY ROW_NUMBER() OVER (
-            PARTITION BY stay_id
-            ORDER BY nozip,
-                     CASE rule0 WHEN 'in_effect' THEN 0 WHEN 'latest_before' THEN 1 ELSE 2 END,
-                     CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
-                     CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
-                          ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
-                     st DESC NULLS LAST, zip5) = 1
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY stay_id ORDER BY {keys}{final}) = 1
     """).df()
 
 
@@ -171,6 +189,7 @@ def derive_geography_features(
     *,
     stays: pd.DataFrame | None = None,
     address_table: str | None = "auto",
+    tie_break: str = "deterministic",
     fit_cut_points: bool = False,
     code_99_missing: bool = False,
 ) -> pd.DataFrame:
@@ -180,6 +199,9 @@ def derive_geography_features(
     index is used); the default is every inpatient/ED-inpatient visit (concepts 9201, 262) in ``visit_occurrence``,
     with ``stay_id = visit_occurrence_id``. ``address_table='auto'`` uses ``person_address_history`` when present and
     non-empty, else ``person.location_id``; pass a table name to force one, or ``None`` for the person's location.
+    ``tie_break`` decides between addresses that tie on every rule key: ``"deterministic"`` (default: later start, lowest ZIP),
+    ``"highest_zip"``, ``"ambiguous_missing"`` (no ZIP, rule ``ambiguous``, when the tied ZIPs differ) or ``"arbitrary"`` (engine
+    order, not reproducible).
 
     Returns ``person_id, stay_id, zip5, rule, ruca_code, ruca_category, sdi_score, sdi_quintile``. ``rule`` records how the
     address was chosen (``in_effect``, ``latest_before``, ``earliest_after``, ``person_location``, ``no_zip``).
@@ -213,7 +235,7 @@ def derive_geography_features(
                                        and con.execute(f"SELECT count(*) FROM {_ADDRESS_TABLE}").fetchone()[0]) else None
         if table is not None and not table.replace("_", "").isalnum():
             raise ValueError(f"invalid address table name {table!r}.")
-        picked = _index_addresses(con, "SELECT person_id, stay_id, CAST(admit_date AS DATE) AS admit_date FROM _geo_stays", table)
+        picked = _index_addresses(con, "SELECT person_id, stay_id, CAST(admit_date AS DATE) AS admit_date FROM _geo_stays", table, tie_break)
     finally:
         con.unregister("_geo_stays")
 

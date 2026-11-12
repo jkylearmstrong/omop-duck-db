@@ -31,12 +31,17 @@ def main(argv=None) -> int:
     p.add_argument("--reuse-features", action="store_true")
     p.add_argument("--compare-to", help="previous manuscript workbook to compare with")
     p.add_argument("--prefix", default="Study")
+    p.add_argument("--attrition", default="windowed", choices=["windowed", "full_history"], help="CONSORT layout (full_history = the manuscript's)")
+    p.add_argument("--table5", default="manuscript", choices=["manuscript", "calibrated"])
+    p.add_argument("--no-sdi-missing-term", action="store_true", help="leave the SDI-missing term out of Table 6 (as the manuscript did)")
+    p.add_argument("--tie-break", default="deterministic", choices=["deterministic", "highest_zip", "ambiguous_missing", "arbitrary"])
     a = p.parse_args(argv)
     labels = dict(zip(a.sites, a.labels)) if a.labels else None
     r = run_study(a.db_dir, a.out, sites=a.sites, site_labels=labels, start=a.start, end=a.end, profile=None if a.profile == "none" else a.profile,
                   pinned_stays=a.pinned_stays, ruca_crosswalk=a.ruca, sdi_table=a.sdi, address_table=a.address_table, n_bootstraps=a.bootstraps,
-                  loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix)
-    print(f"N = {len(r['data']):,}; workbook: {r['workbook']}")
+                  loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix,
+                  attrition_mode=a.attrition, table5=a.table5, sdi_missing_term=not a.no_sdi_missing_term, address_tie_break=a.tie_break)
+    print(f"N = {len(r['data']):,}; workbook: {r['workbook']}; seconds: {r['timings']}")
     if r["comparison"] is not None:
         print(r["comparison"][0].to_string(index=False))
     return 0

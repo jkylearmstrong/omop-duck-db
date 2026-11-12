@@ -202,3 +202,18 @@ def test_reproduce_study_script(feats, tmp_path, monkeypatch, capsys):
     assert reproduce_study.main(["--db-dir", str(db), "--out", str(tmp_path / "o"), "--sites", *sites, "--bootstraps", "3", "--no-loso",
                                  "--no-figures", "--profile", "none"]) == 0
     assert "N = 1,500" in capsys.readouterr().out
+
+
+def test_run_study_full_history_attrition_options_and_timings(feats, tmp_path, monkeypatch):
+    from omop_etl.study_run import run_study
+
+    db, sites = _fake_study(tmp_path, monkeypatch, feats)
+    r = run_study(db, tmp_path / "o", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, attrition_mode="full_history",
+                  sdi_missing_term=False, table5="calibrated", address_tie_break="ambiguous_missing")
+    consort = pd.read_excel(r["workbook"], sheet_name="Table S3 - CONSORT Attrition", header=2)
+    comb = consort[consort["Site"] == "All_Sites_Combined"]
+    assert comb["Stage / Description"].iloc[-1].startswith("Index admission 2017-01-01 to 2022-09-30, one stay per patient")
+    assert comb["Remaining Patients (P)"].iloc[-1] == len(feats)
+    assert {"site_A", "tables_figures", "total"} <= set(r["timings"])
+    with pytest.raises(ValueError, match="attrition_mode"):
+        run_study(db, tmp_path / "o2", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, attrition_mode="nope")

@@ -38,6 +38,7 @@ RUN python -c "import torch; print('NGC torch', torch.__version__)" \
 COPY omop-duck-db/pyproject.toml omop-duck-db/README.md /workspace/ederri/omop-duck-db/
 COPY omop-duck-db/python /workspace/ederri/omop-duck-db/python
 COPY omop-duck-db/inst /workspace/ederri/omop-duck-db/inst
+COPY omop-duck-db/scripts /workspace/ederri/omop-duck-db/scripts
 RUN pip install -c /tmp/torch-constraint.txt -e "/workspace/ederri/omop-duck-db[deep,oracle,bundle,zarr,sklearn,ml,plot,shap]" \
     && pip install -c /tmp/torch-constraint.txt statsmodels openpyxl
 
@@ -57,6 +58,7 @@ from omop_etl import extract_sard_visit_tensors, extract_benchmark_features
 from omop_etl.deep_dataset import extract_multimodal_deep_dataset
 from omop_etl.extract import from_sql
 from omop_etl.study_report import build_study_tables, explain_models
+from omop_etl import run_study, to_sql, verify_transfer, make_mlp_fit_predict, deep_study_tables, device_report
 print("omop_etl", omop_etl.__version__, "| torch", torch.__version__, "| duckdb", duckdb.__version__,
       "| oracledb", oracledb.__version__, "| sqlalchemy", sqlalchemy.__version__)
 EOF
@@ -64,5 +66,9 @@ EOF
 # Runtime GPU check (fails fast if the container was started without --gpus all)
 RUN printf '#!/usr/bin/env bash\npython - <<PY\nimport torch\nassert torch.cuda.is_available(), "CUDA not visible: run with --gpus all"\nprint(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))\nPY\n' > /usr/local/bin/gpu-check \
     && chmod +x /usr/local/bin/gpu-check
+
+# Full deep-model smoke test on the GPU: torch/CUDA report, an MLP trained and scored with the study tables (see scripts/dgx_smoke_test.py)
+RUN printf '#!/usr/bin/env bash\npython /workspace/ederri/omop-duck-db/scripts/dgx_smoke_test.py --require-gpu "$@"\n' > /usr/local/bin/dgx-smoke \
+    && chmod +x /usr/local/bin/dgx-smoke
 
 CMD ["bash"]

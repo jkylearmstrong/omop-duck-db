@@ -260,7 +260,8 @@ def manuscript_consort(attrition: pd.DataFrame, *, site_col: str = "site", site_
 
 
 # ------------------------------------------------------------------ Table 6
-def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d", frame: pd.DataFrame | None = None) -> pd.DataFrame:
+def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d", frame: pd.DataFrame | None = None,
+                          sdi_missing_term: bool = True) -> pd.DataFrame:
     """Table 6: one multivariable logistic regression, rows grouped as the manuscript prints them. Flags enter as 0/1 (OR for yes vs
     no, reference categories: age 18-44, female, White, non-Hispanic, SDI quintile 1, metropolitan, discharged home, never tobacco,
     BMI 18.5-24.9); continuous measures are standardised (OR per 1 SD) and missing values median imputed. ``Standardized Beta`` is
@@ -284,7 +285,7 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     flag(g, "Ethnicity: Hispanic", m["m_hispanic"] if "m_hispanic" in m else None)
     for lv in _RACE[1:]:
         flag(g, lv, (m["m_race"] == lv) if "m_race" in m else None)
-    for lv in _SDI[1:] + ["SDI: Missing / Unknown"]:
+    for lv in _SDI[1:] + (["SDI: Missing / Unknown"] if sdi_missing_term else []):
         flag(g, lv.replace("SDI: Missing / Unknown", "SDI Quintile: Missing / Unknown"), (m["m_sdi"] == lv) if "m_sdi" in m else None)
     for lv in _RUCA[1:]:
         flag(g, lv, (m["m_ruca"] == lv) if "m_ruca" in m else None)
@@ -348,10 +349,13 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
 # ------------------------------------------------------------------ workbook
 def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], path: str | Path, *, attrition: pd.DataFrame | None = None,
                         site_labels: Mapping[str, str] | None = None, label_col: str = "readmitted_30d", min_cell: int | None = 11,
-                        title: str = "Manuscript tables") -> dict[str, Any]:
+                        title: str = "Manuscript tables", table5: str = "manuscript", sdi_missing_term: bool = True) -> dict[str, Any]:
     """Builds the manuscript sheets from the ``tables`` returned by :func:`omop_etl.study_report.build_study_tables` and the feature table
     ``df``, and writes one workbook. ``attrition`` is the per-site attrition (``site``, ``step_name``, ``subjects_retained``) for
-    Table S3. Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
+    Table S3. ``table5``: ``"manuscript"`` (default; AUC-ROC with CI, uncalibrated Brier, sensitivity and specificity at the 0.5 threshold of
+    the balanced-trained model, as the manuscript reports) or ``"calibrated"`` (prior-shift calibrated Brier, top-10% sensitivity and PPV).
+    ``sdi_missing_term``: keep an "SDI Quintile: Missing / Unknown" term in Table 6 (default; ``False`` leaves it out, as the manuscript did,
+    so those stays join the reference quintile). Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
     m = manuscript_frame(df)
     n = len(df)
     sheets: dict[str, tuple[str, pd.DataFrame]] = {}
@@ -368,15 +372,22 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
             "Stay drawn for the patient": t["Subset"], "Patients (N)": t["Stays"], "Share of patients": (100 * t["Share"]).map("{:.1f}%".format),
             "30-Day Readmission Rate": (100 * t["Readmit rate"]).map("{:.2f}%".format), auc_col.replace("AUC", "AUC-ROC"): t[auc_col].round(3)}))
     if "LOSO_By_Site" in tables:
+        if table5 not in ("manuscript", "calibrated"):
+            raise ValueError("table5 must be 'manuscript' or 'calibrated'.")
         t = tables["LOSO_By_Site"]
-        lo = pd.DataFrame({"Held-out site": t["site"], "Test patients": t["n"].map("{:,}".format),
-                           "Training patients (other systems)": (t["n"].sum() - t["n"]).map("{:,}".format),
-                           "AUC-ROC (95% CI)": [f"{a:.3f} ({l:.3f}{EN}{h:.3f})" for a, l, h in zip(t["auroc"], t["auroc_lo"], t["auroc_hi"])],
-                           "Brier": t["brier"].round(3), "Top-10% sensitivity": t["top10_sensitivity"].round(3), "Top-10% PPV": t["top10_ppv"].round(3)})
-        lo.loc[len(lo)] = ["Mean of sites", None, None, f"{t['auroc'].mean():.3f}", round(float(t["brier"].mean()), 3), round(float(t["top10_sensitivity"].mean()), 3), round(float(t["top10_ppv"].mean()), 3)]
+        base = {"Held-out site": t["site"], "Test patients": t["n"].map("{:,}".format),
+                "Training patients (other systems)": (t["n"].sum() - t["n"]).map("{:,}".format),
+                "AUC-ROC (95% CI)": [f"{a:.3f} ({l:.3f}{EN}{h:.3f})" for a, l, h in zip(t["auroc"], t["auroc_lo"], t["auroc_hi"])]}
+        if table5 == "manuscript" and "sensitivity_050" in t:
+            cols = [("Brier", "brier_uncalibrated"), ("Sensitivity", "sensitivity_050"), ("Specificity", "specificity_050")]
+        else:
+            cols = [("Brier", "brier"), ("Top-10% sensitivity", "top10_sensitivity"), ("Top-10% PPV", "top10_ppv")]
+        lo = pd.DataFrame({**base, **{name: t[src].round(3) for name, src in cols}})
+        mean_row = [("Mean of sites", None, None, f"{t['auroc'].mean():.3f}")] + [round(float(t[src].mean()), 3) for _, src in cols]
+        lo.loc[len(lo)] = [x for part in mean_row for x in (part if isinstance(part, tuple) else (part,))]
         sheets["Table 5 - Cross-Site LOSO"] = (f"Table 5: Harmonized Leave-One-Site-Out (LOSO) Cross-Site External Validation Across {len(t)} Health Systems", lo)
     sheets["Table 6 - Multivariable LR"] = ("Table 6: Multivariable Logistic Regression Independent Risk Factors for 30-Day Readmission",
-                                           manuscript_regression(df, label_col=label_col, frame=m))
+                                           manuscript_regression(df, label_col=label_col, frame=m, sdi_missing_term=sdi_missing_term))
     if "LOS_Distribution_By_Site" in tables:
         sheets["Table S1 - LOS Distribution"] = ("Table S1: Distribution of Index Stay Length of Stay (Days) by Participating Health System", tables["LOS_Distribution_By_Site"])
     sheets["Table S2 - Data Completeness"] = ("Table S2: Missingness and Measurement Completeness Across Clinical Features",
