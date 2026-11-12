@@ -146,7 +146,7 @@ read_sdi_table <- function(source) {
                  CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
                  CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
                       ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
-                 st DESC NULLS LAST) = 1", tbl))
+                 st DESC NULLS LAST, zip5) = 1", tbl))
   }
 }
 

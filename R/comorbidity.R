@@ -55,6 +55,11 @@
 #'   `index_date_col`, `exclude_index_diagnoses = FALSE` and `end_inclusive = TRUE`.
 #' @param end_inclusive Logical (default `FALSE`): also count diagnoses dated ON the index date, window
 #'   `[index - lookback_days, index]`. Needed to match a pipeline that uses `condition_start_date <= discharge_date`.
+#' @param code_table `"quan"` (default; the curated Quan et al. table `elixhauser_codes.csv`) or `"ederri"`
+#'   (`elixhauser_codes_ederri.csv`: the eDERRI study protocol's own ICD-9 / ICD-10 prefix lists, generated from the protocol's
+#'   SQL, e.g. `neuro_other` is any G code except G81/G82 and `solid_tumor` any C code except C77-C85). The `"ederri"` table has
+#'   ICD prefixes only (no SNOMED ancestors), so pair it with `source_and_standard = FALSE`. Weights and output columns are those
+#'   of the `"quan"` table. Same as Python `code_table`.
 #' @param fallback_on_unmapped Logical; if TRUE, falls back to source-value matching if standard concept ancestor is unavailable (default FALSE).
 #' @param return_mapping_fidelity Logical; if TRUE, attaches mapping fidelity diagnostics attribute (default FALSE).
 #' @return A `data.frame` with the columns, in order: `person_col`, `index_date_col`, the 31 `elix_<domain>` flags
@@ -86,8 +91,15 @@ extract_elixhauser_comorbidities <- function(con,
                                              exclude_index_diagnoses = TRUE,
                                              fallback_on_unmapped = FALSE,
                                              return_mapping_fidelity = FALSE,
-                                             end_inclusive = FALSE) {
-  .comorb_profile(con, .comorb_elixhauser, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
+                                             end_inclusive = FALSE,
+                                             code_table = "quan") {
+  files <- c(quan = "elixhauser_codes.csv", ederri = "elixhauser_codes_ederri.csv")
+  if (length(code_table) != 1L || !code_table %in% names(files)) {
+    stop(sprintf("code_table must be one of %s, got '%s'.", paste(sprintf("'%s'", names(files)), collapse = ", "), paste(code_table, collapse = ", ")), call. = FALSE)
+  }
+  spec <- .comorb_elixhauser
+  spec$file <- files[[code_table]]
+  .comorb_profile(con, spec, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
                   index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, exclude_index_diagnoses,
                   fallback_on_unmapped = fallback_on_unmapped, return_mapping_fidelity = return_mapping_fidelity,
                   end_inclusive = end_inclusive)
