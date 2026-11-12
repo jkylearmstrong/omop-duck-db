@@ -76,6 +76,8 @@ EDERRI_MEDICATION_SPECS: dict[str, dict[str, list[int]]] = {
 #: the PCORnet ETL). Everything else is "other"; a missing disposition is its own indicator.
 DEFAULT_DISPOSITION_MAP: dict[int, str] = {8536: "home", 581476: "home_health", 8863: "snf", 32216: "ama"}
 _DISPOSITION_LEVELS = ("home", "home_health", "snf", "ama", "other", "missing")
+#: The study protocol's discharge-status rule (concept sets, or the source value HO / HH / SN, RH / AM): ``disposition_map="ederri"``.
+_EDERRI_DISPOSITION_CONCEPTS = {"home": {8536, 4161979}, "home_health": {8844, 4038234}, "snf": {8863, 8676, 8827, 4163901}, "ama": {4155309, 44814650}}
 
 def _default_medication_specs() -> dict[str, dict[str, list[int]]]:
     from omop_etl.table1 import DEFAULT_MEDICATION_CONCEPTS
@@ -296,7 +298,7 @@ def extract_benchmark_features(
     ruca_crosswalk: Any = None,
     sdi_table: Any = None,
     sdi_cut_points: Sequence[float] | None = None,
-    disposition_map: Mapping[int, str] | None = None,
+    disposition_map: Mapping[int, str] | str | None = None,
     sdoh_fallback: str = "indicator",
     address_table: str | None = "auto",
     impute: str | None = None,
@@ -363,7 +365,7 @@ def extract_benchmark_features(
         columns as usual **plus** the protocol's Elixhauser flags and medication classes under an ``ederri_`` prefix
         (``ederri_elix_*``, ``ederri_med_*``) and the history columns, so the two definitions can be compared or used side by
         side. Each choice can be set on its own with ``elixhauser_code_table``, ``medication_set``, ``medication_window``,
-        ``hematocrit_fallback`` and ``include_protocol_history``; an explicit argument always wins over the profile.
+        ``hematocrit_fallback`` and ``include_protocol_history``; an explicit argument always wins over the profile. ``profile="ederri"`` also classifies the discharge disposition by the protocol's rule (concept sets or the source value HO / HH / SN / RH / AM; ``disposition_map="ederri"``), because the default concept map matches nothing at sites that store the disposition as a source value.
     hematocrit_fallback : bool or None
         Fill a missing hemoglobin with hematocrit / 3. Default: off, on with ``profile="ederri"``.
     elixhauser_lookback_days : int, None or "lookback_days"
@@ -543,9 +545,38 @@ def extract_benchmark_features(
             disp = pd.Series(con.execute("SELECT v.discharged_to_concept_id FROM (SELECT unnest(?) AS vid, generate_subscripts(?, 1) AS ord) k "
                                          "LEFT JOIN visit_occurrence v ON v.visit_occurrence_id = k.vid ORDER BY k.ord",
                                          [cohort["visit_occurrence_id"].tolist()] * 2).df().iloc[:, 0].to_numpy())
-        mapping = {int(k): v for k, v in (disposition_map or DEFAULT_DISPOSITION_MAP).items()}
+        rule = disposition_map if isinstance(disposition_map, str) else ("ederri" if (disposition_map is None and profile == "ederri") else None)
+        if rule not in (None, "ederri", "generic"):
+            raise ValueError("disposition_map must be a {concept_id: level} mapping, 'ederri', 'generic' or None.")
+        mapping = {int(k): v for k, v in ((disposition_map if isinstance(disposition_map, Mapping) else None) or DEFAULT_DISPOSITION_MAP).items()}
         if disp is None:
             skipped.append("disposition")
+        elif rule == "ederri":
+            # the protocol's rule: concept sets OR the source value, anything else is other / unknown
+            src = pd.Series([None] * len(cohort), dtype=object)
+            if "visit_occurrence_id" in cohort:
+                try:
+                    src = pd.Series(con.execute("SELECT upper(v.discharged_to_source_value) FROM (SELECT unnest(?) AS vid, generate_subscripts(?, 1) AS ord) k "
+                                                "LEFT JOIN visit_occurrence v ON v.visit_occurrence_id = k.vid ORDER BY k.ord",
+                                                [cohort["visit_occurrence_id"].tolist()] * 2).df().iloc[:, 0].to_numpy(), dtype=object)
+                except duckdb.Error:
+                    pass  # no source value column: concept ids only
+            d = disp.reset_index(drop=True)
+
+            def _level(c, sv):
+                c = -1 if pd.isna(c) else int(c)
+                if c in _EDERRI_DISPOSITION_CONCEPTS["home"] or sv in ("HO", "HOME"):
+                    return "home"
+                if c in _EDERRI_DISPOSITION_CONCEPTS["home_health"] or sv in ("HH", "HOME HEALTH"):
+                    return "home_health"
+                if c in _EDERRI_DISPOSITION_CONCEPTS["snf"] or sv in ("SN", "RH", "SNF", "REHAB"):
+                    return "snf"
+                if c in _EDERRI_DISPOSITION_CONCEPTS["ama"] or sv in ("AM", "AMA"):
+                    return "ama"
+                return "other"
+
+            cat = pd.Series([_level(c, sv) for c, sv in zip(d, src)])
+            add("disposition", pd.DataFrame({f"disp_{lv}": (cat == lv).astype("int8").to_numpy() for lv in _DISPOSITION_LEVELS}))
         else:
             cat = disp.map(lambda c: "missing" if pd.isna(c) else mapping.get(int(c), "other"))
             levels = list(dict.fromkeys(list(_DISPOSITION_LEVELS) + sorted(set(mapping.values()) - set(_DISPOSITION_LEVELS))))

@@ -38,7 +38,8 @@ __all__ = [
     "prepare_model_matrix", "classification_metrics", "bootstrap_ci", "oof_predictions", "default_model_grid",
     "tune_models", "stay_type_auc", "random_stay_draw", "seed_sensitivity", "los_by_site", "index_stay_dates",
     "export_workbook", "build_study_tables", "DEFAULT_ID_COLUMNS", "plot_cohort_flowchart", "explain_models", "shap_ranking",
-    "plot_shap_beeswarm", "plot_shap_panels", "table_one", "logistic_regression_table", "missingness_table", "LR_DROP_COLUMNS",
+    "plot_shap_beeswarm", "plot_shap_panels", "table_one", "logistic_regression_table", "missingness_table", "LR_DROP_COLUMNS", "study_folds", "balanced_training_indices",
+    "performance_from_predictions",
 ]
 
 DEFAULT_ID_COLUMNS = (
@@ -140,6 +141,45 @@ def bootstrap_ci(y_true: Any, y_prob: Any, *, n_bootstraps: int = 100, seed: int
             for k, v in vals.items()}
 
 
+# ------------------------------------------------------------------ shared folds and deep-model reporting
+def study_folds(y: Any, *, n_splits: int = 5, groups: Any = None, random_state: int = 42) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The cross-validation folds :func:`oof_predictions` / :func:`tune_models` use, as ``[(train_idx, validation_idx), ...]``.
+
+    Hand the same list to a deep-learning run (and to ``oof_predictions(splits=...)``) so every model is scored on identical
+    validation stays. ``groups`` (patient ids) keeps a patient's rows in one fold."""
+    _sk()
+    from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
+
+    yv = np.asarray(y).astype(int)
+    X = np.zeros((len(yv), 1))
+    it = (StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state).split(X, yv, groups) if groups is not None
+          else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state).split(X, yv))
+    return [(tr, va) for tr, va in it]
+
+
+def balanced_training_indices(y_train: Any, *, random_state: int = 42) -> np.ndarray:
+    """Row positions (into ``y_train``) of the 50/50 training sample: every majority row plus the minority class upsampled with
+    replacement to the same size. The sampling :func:`oof_predictions` applies to each training fold, for a deep model to reuse."""
+    _sk()
+    from sklearn.utils import resample
+
+    ytr = np.asarray(y_train).astype(int)
+    pos, neg = np.flatnonzero(ytr == 1), np.flatnonzero(ytr == 0)
+    minority, majority = (pos, neg) if len(pos) <= len(neg) else (neg, pos)
+    return np.concatenate([majority, resample(minority, replace=True, n_samples=len(majority), random_state=random_state)])
+
+
+def performance_from_predictions(y: Any, prob: Any, *, model_name: str = "Deep model", n_bootstraps: int = 100, threshold: float = 0.5,
+                                 groups: Any = None, random_state: int = 42) -> pd.DataFrame:
+    """One row in the layout of the ``Model_Performance`` table (AUC-ROC with 95% bootstrap CI, sensitivity, specificity, F1, Brier)
+    from out-of-fold (or held-out) probabilities of any model, for example a neural network trained on :func:`study_folds` folds.
+    Concatenate it with ``build_study_tables(...)['tables']['Model_Performance']`` to put the deep model in the same table."""
+    m = classification_metrics(y, prob, threshold)
+    ci = bootstrap_ci(y, prob, n_bootstraps=n_bootstraps, seed=random_state, threshold=threshold, groups=groups)
+    return pd.DataFrame([{"Model": model_name, "AUC-ROC (95% CI)": f"{_fmt(m['AUC'])} ({_fmt(ci['AUC'][0])}–{_fmt(ci['AUC'][1])})",
+                          "Sensitivity": _fmt(m["Sensitivity"]), "Specificity": _fmt(m["Specificity"]), "F1": _fmt(m["F1"]), "Brier": _fmt(m["Brier"])}])
+
+
 # ------------------------------------------------------------------ out-of-fold predictions
 def oof_predictions(model_factory: Callable[[], Any], X: pd.DataFrame, y: pd.Series | np.ndarray, *, n_splits: int = 5,
                     scale: bool = False, balanced: bool = True, groups: Any = None, random_state: int = 42,
@@ -161,10 +201,7 @@ def oof_predictions(model_factory: Callable[[], Any], X: pd.DataFrame, y: pd.Ser
     for tr, va in splits:
         Xtr, ytr = X.iloc[tr], yv[tr]
         if balanced:
-            pos, neg = np.flatnonzero(ytr == 1), np.flatnonzero(ytr == 0)
-            minority, majority = (pos, neg) if len(pos) <= len(neg) else (neg, pos)
-            up = resample(minority, replace=True, n_samples=len(majority), random_state=random_state)
-            keep = np.concatenate([majority, up])
+            keep = balanced_training_indices(ytr, random_state=random_state)
             Xtr, ytr = Xtr.iloc[keep], ytr[keep]
         imp = SimpleImputer(strategy="median", keep_empty_features=True)
         A, B = imp.fit_transform(Xtr), imp.transform(X.iloc[va])
@@ -238,8 +275,7 @@ def tune_models(X: pd.DataFrame, y: pd.Series | np.ndarray, *, grid: Mapping[str
 
     grid = dict(grid) if grid is not None else default_model_grid(random_state)
     yv = np.asarray(y).astype(int)
-    splits = list((StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state).split(X, yv, groups)
-                   if groups is not None else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state).split(X, yv)))
+    splits = study_folds(yv, n_splits=n_splits, groups=groups, random_state=random_state)
     all_rows: list[dict[str, Any]] = []
     tuning_rows: list[dict[str, Any]] = []
     perf_rows: list[dict[str, Any]] = []
@@ -712,6 +748,20 @@ def table_one(df: pd.DataFrame, *, label_col: str = "readmitted_30d", columns: S
     return pd.DataFrame(rows)
 
 
+def _newton_logit(A: np.ndarray, t: np.ndarray, *, max_iter: int = 100, ridge: float = 1e-4) -> tuple[np.ndarray, np.ndarray]:
+    """Unpenalised (ridge 1e-4 for stability) logistic regression by Newton-Raphson: ``(coefficients, standard errors)``."""
+    beta = np.zeros(A.shape[1])
+    for _ in range(max_iter):
+        p = 1 / (1 + np.exp(-np.clip(A @ beta, -30, 30)))
+        W = np.clip(p * (1 - p), 1e-9, None)
+        H = A.T @ (A * W[:, None]) + ridge * np.eye(A.shape[1])
+        step = np.linalg.solve(H, A.T @ (t - p) - ridge * beta)
+        beta = beta + step
+        if np.max(np.abs(step)) < 1e-8:
+            break
+    return beta, np.sqrt(np.clip(np.diag(np.linalg.inv(H)), 0, None))
+
+
 def logistic_regression_table(X: pd.DataFrame, y: pd.Series | np.ndarray, *, max_iter: int = 100, ridge: float = 1e-4) -> pd.DataFrame:
     """Multivariable logistic regression (no penalty, Newton-Raphson) -> odds ratios with 95% Wald CIs and p-values.
 
@@ -729,18 +779,7 @@ def logistic_regression_table(X: pd.DataFrame, y: pd.Series | np.ndarray, *, max
             Z[c] = (Z[c] - Z[c].mean()) / Z[c].std(ddof=0)
             kind[c] = "per 1 SD"
     A = np.column_stack([np.ones(len(Z)), Z.to_numpy(float)])
-    t = np.asarray(y, float)
-    beta = np.zeros(A.shape[1])
-    for _ in range(max_iter):
-        p = 1 / (1 + np.exp(-np.clip(A @ beta, -30, 30)))
-        W = np.clip(p * (1 - p), 1e-9, None)
-        H = A.T @ (A * W[:, None]) + ridge * np.eye(A.shape[1])
-        step = np.linalg.solve(H, A.T @ (t - p) - ridge * beta)
-        beta = beta + step
-        if np.max(np.abs(step)) < 1e-8:
-            break
-    cov = np.linalg.inv(H)
-    se = np.sqrt(np.clip(np.diag(cov), 0, None))
+    beta, se = _newton_logit(A, np.asarray(y, float), max_iter=max_iter, ridge=ridge)
     b, s = beta[1:], se[1:]
     with np.errstate(divide="ignore", invalid="ignore"):
         pv = 2 * (1 - stats.norm.cdf(np.abs(b / s)))

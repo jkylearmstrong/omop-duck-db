@@ -146,3 +146,18 @@ def test_default_bounds_cover_every_default_lab_and_vital():
     names = set(bf.BENCHMARK_LAB_LOINCS) | set(bf.BENCHMARK_VITAL_LOINCS)
     assert names <= set(bf.DEFAULT_BOUNDS)
     assert all(lo < hi for lo, hi in bf.DEFAULT_BOUNDS.values())
+
+
+def test_ederri_disposition_rule_uses_source_value_and_concept_sets(con):
+    con.execute("CREATE TABLE visit_occurrence (visit_occurrence_id BIGINT, discharged_to_concept_id INT, discharged_to_source_value VARCHAR)")
+    con.execute("INSERT INTO visit_occurrence VALUES (101, 0, 'ho'), (102, 8844, NULL), (103, 0, 'AM')")
+    kw = dict(include_labs=False, include_vitals=False, include_medications=False, include_elixhauser=False, include_utilization=False,
+              include_protocol_history=False, vocabulary_db=None)
+    generic = extract_benchmark_features(con, "cohort_t", **kw)
+    assert generic["disp_home"].sum() == 0 and generic["disp_other"].sum() == 3    # the default concept map matches none of them
+    f = extract_benchmark_features(con, "cohort_t", profile="ederri", **kw).sort_values("visit_occurrence_id")
+    assert f["disp_home"].tolist() == [1, 0, 0] and f["disp_home_health"].tolist() == [0, 1, 0] and f["disp_ama"].tolist() == [0, 0, 1]
+    explicit = extract_benchmark_features(con, "cohort_t", disposition_map="ederri", **kw)
+    assert explicit["disp_home"].sum() == 1
+    with pytest.raises(ValueError, match="disposition_map"):
+        extract_benchmark_features(con, "cohort_t", disposition_map="nope", **kw)
