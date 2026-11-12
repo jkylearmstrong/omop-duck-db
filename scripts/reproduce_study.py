@@ -2,7 +2,7 @@
 
 Example (the multi-site eDERRI study, pinned to an earlier draw and compared with the previous deliverable):
 
-    python scripts/reproduce_study.py --db-dir derived/omop_duckdb --out out --sites Temple PSU Hopkins PITT Geisinger \
+    python scripts/reproduce_study.py --db-dir derived/omop_duckdb --out out --sites SiteA SiteB SiteC SiteD SiteE \
         --ruca aws_data/supplementaryData/ruca_mapping.csv --sdi aws_data/supplementaryData/SDI_Data/rgcsdi-2015-2019-zcta.csv \
         --address-table ederri_address_history --pinned-stays derived/grant_scoped_cohort_random/selected_stays_seed20261104.csv \
         --compare-to deliverables/eDERRI_Traditional_ML_Models_Manuscript_Tables.xlsx

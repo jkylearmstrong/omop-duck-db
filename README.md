@@ -563,9 +563,9 @@ and return arrays whose row `i` is parquet row `i`.
 import duckdb
 from omop_etl import extract_sparse_concept_matrix, extract_sard_visit_tensors
 
-con = duckdb.connect("derived/omop_duckdb/omop_Temple.duckdb", read_only=True)
+con = duckdb.connect("derived/omop_duckdb/omop_site1.duckdb", read_only=True)
 con.execute("ATTACH 'derived/omop_duckdb/central_vocabulary.duckdb' AS central_vocab (READ_ONLY)")
-cohort = "derived/ederri_features/ederri_features_Temple.parquet"
+cohort = "derived/ederri_features/ederri_features_site1.parquet"
 
 res = extract_sparse_concept_matrix(con, cohort, min_patient_freq=50)
 res["X"].shape            # (N, V) csr_matrix; res["concepts"] has names, domains, patient counts
@@ -576,9 +576,9 @@ sard["concept_tensor"].shape   # (N, max_nvisits, max_visit_len); also visit_len
 
 ``` r
 library(DBI); library(duckdb)
-con <- dbConnect(duckdb::duckdb(), "derived/omop_duckdb/omop_Temple.duckdb", read_only = TRUE)
+con <- dbConnect(duckdb::duckdb(), "derived/omop_duckdb/omop_site1.duckdb", read_only = TRUE)
 dbExecute(con, "ATTACH 'derived/omop_duckdb/central_vocabulary.duckdb' AS central_vocab (READ_ONLY);")
-res <- extract_sparse_concept_matrix(con, "derived/ederri_features/ederri_features_Temple.parquet",
+res <- extract_sparse_concept_matrix(con, "derived/ederri_features/ederri_features_site1.parquet",
                                      min_patient_freq = 50)
 dim(res$X)
 ```
@@ -632,8 +632,8 @@ cohort SQL does not create inclusion-rule statistics tables, so call
 `CohortGenerator::generateCohortSet(..., generateStats = FALSE)`:
 
 ``` r
-hades_preflight("omop_Temple.duckdb")
-db <- plp_database_details("omop_Temple.duckdb", target_id = 1, outcome_ids = 2)
+hades_preflight("omop_site1.duckdb")
+db <- plp_database_details("omop_site1.duckdb", target_id = 1, outcome_ids = 2)
 
 # Native OHDSI features (including DeepPLP's temporal transformer input):
 plp <- PatientLevelPrediction::getPlpData(db, FeatureExtraction::createCovariateSettings(
@@ -814,9 +814,9 @@ from omop_duck_db import FederatedConsortium
 
 consortium = FederatedConsortium(
     sites={
-        "Site A": "omop_Temple.duckdb",
-        "Site B": "omop_PSU.duckdb",
-        "Site C": "omop_Hopkins.duckdb"
+        "Site A": "omop_site1.duckdb",
+        "Site B": "omop_site2.duckdb",
+        "Site C": "omop_site3.duckdb"
     },
     central_vocabulary="central_vocabulary.duckdb"
 )
@@ -836,7 +836,7 @@ In R:
 
 ``` r
 fc <- federated_consortium(
-  sites = c("Site A" = "omop_Temple.duckdb", "Site B" = "omop_PSU.duckdb"),
+  sites = c("Site A" = "omop_site1.duckdb", "Site B" = "omop_site2.duckdb"),
   central_vocabulary = "central_vocabulary.duckdb"
 )
 t1 <- consortium_generate_table1(fc, domain = "heart_failure")
