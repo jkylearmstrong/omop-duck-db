@@ -811,7 +811,7 @@ __all__ = [
     "isotonic_apply", "adjust_for_prevalence", "capacity_threshold", "capacity_risk_tiers", "evaluate_at_capacity",
 ]
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 
@@ -830,3 +830,29 @@ from omop_etl.tensor import (
     MAX_TOKENS_PER_VISIT,
     VOCAB_SIZE,
 )
+
+from omop_etl.manuscript_tables import (  # noqa: E402
+    compare_workbooks,
+    manuscript_completeness,
+    manuscript_consort,
+    manuscript_frame,
+    manuscript_regression,
+    manuscript_table1,
+    manuscript_workbook,
+)
+
+__all__ += [
+    "compare_workbooks",
+    "manuscript_completeness",
+    "manuscript_consort",
+    "manuscript_frame",
+    "manuscript_regression",
+    "manuscript_table1",
+    "manuscript_workbook",
+]
+
+from omop_etl.study_run import PROTOCOL_COHORT_PARAMS, pin_stays, run_study  # noqa: E402
+
+from omop_etl.study_report import balanced_training_indices, performance_from_predictions, study_folds  # noqa: E402
+
+__all__ += ["PROTOCOL_COHORT_PARAMS", "pin_stays", "run_study", "balanced_training_indices", "performance_from_predictions", "study_folds"]
