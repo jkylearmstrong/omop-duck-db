@@ -217,3 +217,23 @@ def test_run_study_full_history_attrition_options_and_timings(feats, tmp_path, m
     assert {"site_A", "tables_figures", "total"} <= set(r["timings"])
     with pytest.raises(ValueError, match="attrition_mode"):
         run_study(db, tmp_path / "o2", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, attrition_mode="nope")
+
+
+def test_random_site_labels_end_to_end_keep_the_mapping_out_of_the_outputs(feats, tmp_path, monkeypatch):
+    import json
+
+    from omop_etl.study_run import load_site_labels, run_study
+
+    db, sites = _fake_study(tmp_path, monkeypatch, feats)
+    priv = tmp_path / "private" / "labels.json"
+    priv.parent.mkdir()
+    r = run_study(db, tmp_path / "out", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None,
+                  site_labels="random", label_seed=11, labels_out=priv)
+    mapping = load_site_labels(priv)
+    assert set(mapping) == set(sites) and set(mapping.values()) == {"Site A", "Site B", "Site C"}
+    assert set(r["data"].site_anon) == set(mapping.values())
+    run = json.loads((tmp_path / "out" / "Study_run.json").read_text(encoding="utf-8"))
+    assert run["labels"] == ["Site A", "Site B", "Site C"] and "sites" not in run and not any(s in json.dumps(run) for s in ('"A":', '"B":'))
+    # the same seed rebuilds the mapping; a saved file is accepted as site_labels
+    r2 = run_study(db, tmp_path / "out2", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, site_labels=priv)
+    assert (r2["data"].groupby("site_anon").size().sort_index().tolist() == r["data"].groupby("site_anon").size().sort_index().tolist())

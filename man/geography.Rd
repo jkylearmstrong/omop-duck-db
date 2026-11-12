@@ -31,7 +31,9 @@ derive_geography_features(
   stays = NULL,
   address_table = "auto",
   fit_cut_points = FALSE,
-  code_99_missing = FALSE
+  code_99_missing = FALSE,
+  tie_break = "deterministic",
+  undated = "last"
 )
 }
 \arguments{
@@ -58,6 +60,13 @@ inpatient visit (concepts 9201, 262) with \code{stay_id = visit_occurrence_id}.}
 a table name, or \code{NULL} for the person's location.}
 
 \item{fit_cut_points}{Logical; fit cut points from these stays (training reference only).}
+
+\item{undated}{Rank of an address with no start date among those in effect: \code{"last"} (default; a dated address wins) or
+\code{"first"} (an undated address wins, as in the study's pandas pipeline and the delivered 2026-11-11 geography).}
+
+\item{tie_break}{Addresses that tie on every rule key: \code{"deterministic"} (default; later start, lowest ZIP), \code{"highest_zip"},
+\code{"ambiguous_missing"} (no ZIP, rule \code{ambiguous}, when the tied ZIPs differ) or \code{"arbitrary"} (engine order; not reproducible)
+or \code{"first_listed"} (the address stored first in the address table, by \code{location_id}; reproduces a pandas pipeline's stable sort).}
 }
 \value{
 \code{ruca_category()}: a character vector of categories.

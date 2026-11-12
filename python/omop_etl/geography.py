@@ -127,18 +127,23 @@ def _has_table(con, name: str) -> bool:
                             "AND table_name = ?", [name]).fetchone()[0])
 
 
-TIE_BREAKS = ("deterministic", "highest_zip", "ambiguous_missing", "arbitrary")
+UNDATED = ("last", "first")
+TIE_BREAKS = ("deterministic", "highest_zip", "ambiguous_missing", "arbitrary", "first_listed")
 
 
-def _index_addresses(con, stays_sql: str, address_table: str | None, tie_break: str = "deterministic") -> pd.DataFrame:
+def _index_addresses(con, stays_sql: str, address_table: str | None, tie_break: str = "deterministic", undated: str = "last") -> pd.DataFrame:
     """One address row per stay, selected by the reference rule. ``stays_sql`` yields (person_id, stay_id, admit_date).
 
     Addresses that tie on every rule key (two periods sharing a boundary date, neither preferred) are resolved by ``tie_break``:
     ``deterministic`` the later start, then the lowest ZIP; ``highest_zip`` the later start, then the highest ZIP;
     ``ambiguous_missing`` no ZIP at all (rule ``ambiguous``) when the tied addresses have different ZIPs; ``arbitrary`` whichever the
-    engine returns first (what a pipeline without a final key does: not reproducible run to run)."""
+    engine returns first (what a pipeline without a final key does: not reproducible run to run); ``first_listed`` the address stored first in the
+    address table (its ``location_id``, else its row order): what a pandas pipeline gets from a stable sort of the merged
+    addresses, so it reproduces such a pipeline exactly and, unlike ``arbitrary``, the same way on every run."""
     if tie_break not in TIE_BREAKS:
         raise ValueError(f"tie_break must be one of {TIE_BREAKS}.")
+    if undated not in UNDATED:
+        raise ValueError(f"undated must be one of {UNDATED}.")
     if address_table is None:
         return con.execute(f"""
             SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE 'person_location' END AS rule
@@ -149,15 +154,18 @@ def _index_addresses(con, stays_sql: str, address_table: str | None, tie_break: 
                 LEFT JOIN location l ON l.location_id = p.location_id
             )
         """).df()
-    keys = """nozip,
+    cols = {r[0] for r in con.execute(f"DESCRIBE {address_table}").fetchall()}
+    listed = "a.location_id" if "location_id" in cols else "a.rowid"
+    undated_dist = 1000000 if undated == "last" else -1000000
+    keys = f"""nozip,
                      CASE rule0 WHEN 'in_effect' THEN 0 WHEN 'latest_before' THEN 1 ELSE 2 END,
                      CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
                      CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
-                          ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
+                          ELSE coalesce(date_diff('day', st, admit_date), {undated_dist}) END,
                      st DESC NULLS LAST"""
     head = f"""
         WITH m AS (
-            SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, a.address_start AS st, a.address_end AS en, a.preferred,
+            SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, {listed} AS listed, a.address_start AS st, a.address_end AS en, a.preferred,
                    (a.zip5 IS NULL) AS nozip,
                    (a.address_start IS NULL OR a.address_start <= s.admit_date) AS started,
                    (a.address_end IS NULL OR a.address_end >= s.admit_date) AS ongoing
@@ -173,7 +181,7 @@ def _index_addresses(con, stays_sql: str, address_table: str | None, tie_break: 
                CASE WHEN count(DISTINCT zip5) > 1 THEN 'ambiguous' WHEN min(zip5) IS NULL THEN 'no_zip' ELSE min(rule0) END AS rule
         FROM k WHERE rk = 1 GROUP BY person_id, stay_id
         """).df()
-    final = {"deterministic": ", zip5", "highest_zip": ", zip5 DESC", "arbitrary": ""}[tie_break]
+    final = {"deterministic": ", zip5", "highest_zip": ", zip5 DESC", "arbitrary": "", "first_listed": ", listed"}[tie_break]
     return con.execute(head + f"""
         SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE rule0 END AS rule
         FROM r
@@ -190,6 +198,7 @@ def derive_geography_features(
     stays: pd.DataFrame | None = None,
     address_table: str | None = "auto",
     tie_break: str = "deterministic",
+    undated: str = "last",
     fit_cut_points: bool = False,
     code_99_missing: bool = False,
 ) -> pd.DataFrame:
@@ -199,6 +208,9 @@ def derive_geography_features(
     index is used); the default is every inpatient/ED-inpatient visit (concepts 9201, 262) in ``visit_occurrence``,
     with ``stay_id = visit_occurrence_id``. ``address_table='auto'`` uses ``person_address_history`` when present and
     non-empty, else ``person.location_id``; pass a table name to force one, or ``None`` for the person's location.
+    ``undated`` ranks an address with no start date among those in effect at admission: ``"last"`` (default; a dated address wins,
+    the nearest start first) or ``"first"`` (an undated address wins, which is what the study's pandas pipeline does through an
+    operator-precedence quirk and what the delivered 2026-11-11 geography reflects).
     ``tie_break`` decides between addresses that tie on every rule key: ``"deterministic"`` (default: later start, lowest ZIP),
     ``"highest_zip"``, ``"ambiguous_missing"`` (no ZIP, rule ``ambiguous``, when the tied ZIPs differ) or ``"arbitrary"`` (engine
     order, not reproducible).
@@ -235,7 +247,7 @@ def derive_geography_features(
                                        and con.execute(f"SELECT count(*) FROM {_ADDRESS_TABLE}").fetchone()[0]) else None
         if table is not None and not table.replace("_", "").isalnum():
             raise ValueError(f"invalid address table name {table!r}.")
-        picked = _index_addresses(con, "SELECT person_id, stay_id, CAST(admit_date AS DATE) AS admit_date FROM _geo_stays", table, tie_break)
+        picked = _index_addresses(con, "SELECT person_id, stay_id, CAST(admit_date AS DATE) AS admit_date FROM _geo_stays", table, tie_break, undated)
     finally:
         con.unregister("_geo_stays")
 

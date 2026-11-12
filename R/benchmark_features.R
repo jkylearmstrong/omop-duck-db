@@ -294,6 +294,8 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
 #' @param address_table dated address history for `include_sdoh` (columns `person_id`, `zip5`, `address_start`, `address_end`,
 #'   `preferred`): `"auto"` (default) uses `person_address_history` when present, else `person.location_id`; or a table name (for
 #'   example a study's own `ederri_address_history`); `NULL` for `person.location_id`.
+#' @param address_undated rank of an address with no start date (`undated` of `derive_geography_features()`).
+#' @param address_tie_break how `derive_geography_features()` resolves addresses that tie on every rule key (`tie_break`).
 #' @param impute `NULL`, `"median"` or `"mean"`: fill missing vital / lab values. Statistics come from this table unless `impute_values`
 #'   (named numeric) is given; fit them on the training sites (`attr(, "imputation_values")`) and pass them to other tables.
 #' @param impute_values named numeric vector of frozen fill values.
@@ -310,7 +312,7 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
                                        elixhauser_lookback_days = "lookback_days", elixhauser_code_table = NULL,
                                        medication_set = NULL, include_protocol_history = NULL,
                                        ruca_crosswalk = NULL, sdi_table = NULL, sdi_cut_points = NULL,
-                                       disposition_map = NULL, sdoh_fallback = "indicator", address_table = "auto", impute = NULL,
+                                       disposition_map = NULL, sdoh_fallback = "indicator", address_table = "auto", address_tie_break = "deterministic", address_undated = "last", impute = NULL,
                                        impute_values = NULL) {
   if (lookback_days < 0 || lab_lookback_days < 0) stop("lookback_days and lab_lookback_days must be non-negative.", call. = FALSE)
   if (!is.null(profile) && !profile %in% c("ederri", "both")) stop("profile must be 'ederri', 'both' or NULL.", call. = FALSE)
@@ -480,7 +482,8 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
       add("sdoh", data.frame(sdi_quintile = rep(NA_real_, n), ruca_category = rep(NA_character_, n), sdoh_missing = rep(1L, n)))
     } else {
       stays <- data.frame(person_id = cohort$subject_id, stay_id = cohort$row_id, admit_date = cohort$cohort_start_date)
-      geo <- derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays = stays, address_table = address_table)
+      geo <- derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays = stays, address_table = address_table,
+                                        tie_break = address_tie_break, undated = address_undated)
       if (all(is.na(geo$zip5))) warning("include_sdoh: no ZIP code was found for any stay, so sdi_quintile and ruca_category are all missing. ",
                                         "The default address_table = 'auto' reads person_address_history, else person.location_id; pass ",
                                         "address_table = the name of your dated address table.", call. = FALSE)

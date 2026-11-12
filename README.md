@@ -514,7 +514,7 @@ print("Reconciliation Passed:", reconciliation["passed"])
 
 ## Running on the NVIDIA DGX Spark (deep models) and Oracle transfers
 
-**Status (0.19.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
+**Status (0.20.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
 
 On the Spark, from the parent `eDerri_data` directory (so omop-learn and `pipeline/` are in the build context):
 
@@ -1202,6 +1202,69 @@ is consistent with the address `tie_break` choice and with a fresh random sample
 next step is a run with the stays pinned (`pin_stays`) to separate sampling noise from definition changes. If the pinned run
 matches Table 6, the remaining gap is sampling, and the manuscript profile should ship a pinned stay list or a seed manifest.
 
+## Decisions that move the numbers, and how to recreate or change each
+
+Several choices made while reproducing the delivered manuscript change the published numbers. None is hard-wired: each is an option
+with a name, a list of values and a record in `<prefix>_run.json` (`decisions`). `python scripts/reproduce_study.py --list-decisions`
+prints them; `omop_etl.STUDY_DECISIONS` and `omop_etl.STUDY_PRESETS` hold the same in code.
+
+| Decision (`run_study` argument) | Options | `package` preset | `delivered_2026_11_11` preset | Effect |
+|---|---|---|---|---|
+| `address_tie_break` | `deterministic`, `highest_zip`, `ambiguous_missing`, `arbitrary`, `first_listed` | `deterministic` | `first_listed` | Which ZIP wins when addresses tie on every rule key. `first_listed` takes the address stored first in the address table (`location_id`), which is what a stable pandas sort does; it is the same on every run. `arbitrary` is engine order and is not reproducible. |
+| `address_undated` | `last`, `first` | `last` | `first` | Rank of an address with no start date among those in effect. The study's pandas pipeline ranks it ahead of every dated address (an operator-precedence quirk in `index_address`); `last` is the documented rule. |
+| `sdi_missing_term` | `True`, `False` | `True` | `False` | `False` leaves the SDI-missing term out of Table 6, as the delivered workbook did. |
+| `table5` | `manuscript`, `calibrated` | `manuscript` | `manuscript` | Delivered rule: tuned XGBoost, 50/50 upsampled training, 0.5 threshold, uncalibrated. |
+| `attrition_mode` | `windowed`, `full_history` | `windowed` | `full_history` | CONSORT layout (Table S3). |
+| `consort_final_steps` | `True`, `False` | `True` | `False` | Table S3 ends with the window / one-stay and pinned-list steps, or with the last eligibility rule. |
+| `table6_increments` | `sd`, `clinical` | `sd` | `clinical` | Continuous Table 6 rows per 1 SD, or per 10 mmHg, 30 days, 5 mEq/L and so on (`CLINICAL_INCREMENTS`; a mapping `label -> (text, size)` gives your own). Same model: p-values and standardised betas do not change. |
+
+Other choices with their own switch: `pinned_stays` (reuse the delivered stay-per-patient draw, or leave unset for a fresh random
+draw), `sites` and `site_labels` (the label mapping is supplied by the caller and never stored in the repository),
+`sheet_site_labels` (relabel Tables S1 and S3 only: the delivered workbook labels the sites one way in Table 5 and another in S1 and S3;
+on the command line `--s1-s3-labels`), the date window (`start`, `end`), `cohort_params`, `profile` (`ederri`, `both`, `none`),
+`n_bootstraps`, `min_cell`, `SIMILARITY_TOLERANCES`, and in `build_study_tables` `loso_model` (`tuned_xgboost`, `hist_gbm`) with
+`evaluate_loso_transport(balance_method=)`. In R: `derive_geography_features(tie_break=, undated=)` and
+`extract_benchmark_features(address_tie_break=, address_undated=)`.
+
+```bash
+python scripts/reproduce_study.py --db-dir derived/omop_duckdb --out out --sites A B C --preset delivered_2026_11_11 \
+    --pinned-stays selected_stays.csv --tie-break deterministic      # the delivered recipe, with one decision changed
+```
+
+**Why the delivered Table 6 differed in the SDI and RUCA rows, and what fixed it.** The regression code was right: given the legacy
+feature file, `manuscript_regression(sdi_missing_term=False)` reproduces every delivered Table 6 row. The difference was the per-patient
+geography. With the stays pinned, the package's documented address rule disagreed with the delivered SDI quintile for 22,440 stays at
+one site, 2,297 at another and 29 at a third; `arbitrary` agreed only in the totals. `first_listed` + `address_undated="first"` gives 0
+differing SDI quintiles and 0 differing RUCA categories at all five sites (225,939 stays).
+
+**Measured: pinned stays + `delivered_2026_11_11` + `--s1-s3-labels` (5 sites, N = 225,939, 100 bootstraps, 69 minutes plus a 17-minute
+re-run of the tables).** Cells that differ from the November 11 workbook, with `compare_workbooks` tolerances (0.01 absolute and 2%
+relative): Tables 1, 2, 4, S1 and S2: 0. Table 6: 2 of 281 (BUN standardised beta 0.13 against 0.12, eGFR p 0.578 against 0.563; three
+stays have a different eGFR in the legacy file). Table 3: 1 of 72 (the logistic-regression AUC-tuned row picked `C=0.01` instead of the
+near-tied `C=0.1`). Table 5: 3 of 29, all sensitivities (Site C 0.385 against 0.364); every AUC is within 0.003. Table S3: 50 of 252, all in
+the per-site rows: the delivered per-site table has ten steps, with the "not metformin-only" step listed twice (steps 7 and 8, same
+count), so its later steps are one number off from the combined table, which has nine; the package keeps nine for every site.
+`workbook_similarity` passes every check at 100% (worst Table 2 AUC difference 0.002, worst Table 6 odds-ratio difference 1.1%, all 86
+p < 0.05 verdicts agree). Reproduce the table with `scripts/check_golden.py --new ... --golden ... --deltas deltas.csv`.
+
+**Anonymous site letters.** `run_study(site_labels="random")` (or `--labels random`) gives each site a random letter, so "Site A" does
+not follow the order the sites were typed in; `label_seed` / `--label-seed` makes the draw repeatable, `"ordered"` follows the command
+line, and a JSON file written by `save_site_labels()` (`labels_out` / `--labels-out`) is read back with `site_labels=<path>`. The mapping
+is never written to the workbook or to `<prefix>_run.json` (which holds only the list of labels): keep the file outside the repository and
+the shared results. For a consortium, assign the letters once at the coordinating centre and give each site its own, otherwise every
+site's "Site A" is a different system. `assign_site_labels(sites, mode=, seed=)` returns the mapping without running anything.
+
+**Golden workbook.** `tests/golden/synthetic_manuscript_tables.xlsx` is a committed workbook built from a seeded synthetic cohort;
+`tests/test_golden_workbook.py` fails when any cell moves and shows that a changed decision is caught. Regenerate it on purpose with
+`OMOP_GOLDEN_UPDATE=1 pytest tests/test_golden_workbook.py`. `scripts/check_golden.py` does the same against a real delivered workbook
+(not in the repository). `workbook_deltas()` / `delta_summary()` list the cells and rows that moved, sorted by relative change;
+`run_study(compare_to=)` writes them as `<prefix>_Deltas.csv` and `<prefix>_Delta_Rows.csv`.
+
+**Results report.** `scripts/render_manuscript.py --workbook ... --out ...` (`omop_etl.render_results_report`) writes
+`manuscript_facts.json` (cohort size, readmission rate, AUC ranges, site sizes), one CSV per table, `Results.md` and a self-contained
+`Results.html`, so the numbers a text quotes come from the run. It does not render the Quarto manuscript, whose narrative modules
+(`manuscript_params_grant_scoped.py`) live outside this repository.
+
 ## Status and roadmap (what is claimed, what is verified, what is next)
 
 What is in the package and what has been run:
@@ -1223,9 +1286,8 @@ What is in the package and what has been run:
   before pooling. Deep models are evaluated leave-one-site-out on pooled data; training them federated (sharing weights or
   gradients) is a separate design that does not exist yet.
 - **Defaults can drift the manuscript.** The 0.18 options (`tie_break`, `table5`, `sdi_missing_term`, `attrition_mode`) change
-  the published numbers. Next: a single named "manuscript profile" that pins all of them, run against a golden workbook in a
-  test with the tolerances above.
-- **R**: the address `tie_break` option is Python only. A site running the R path gets the old behaviour.
+  the published numbers. Done: the named presets in *Decisions that move the numbers*. Done: a golden-workbook test (synthetic, committed) and `scripts/check_golden.py` for the real delivered workbook.
+- **R**: `derive_geography_features(tie_break=, undated=)` and `extract_benchmark_features(address_tie_break=, address_undated=)` take the same options as Python (tested in `tests/testthat/test-geography.R`). Not yet checked: that R and Python give identical ZIPs on the real sites under `arbitrary` (engine order is not guaranteed to agree).
 - **Deep models and the DGX Spark**: see the DGX Spark section. The CPU path is tested; the GPU path, the arm64 container tag and
   real-cohort training are not. The existing SARD and DeepPLP trainers (`pipeline/dgx_spark_sard_trainer.py`,
   `ederri_sard_deep_model.py`, `train_clinical_deep_dgx.py`, `train_residual_deep_dgx.py`) still need `fit_predict` wrappers

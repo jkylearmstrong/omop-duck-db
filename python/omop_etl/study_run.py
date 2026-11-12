@@ -16,7 +16,86 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+
+# Every choice that moves the published numbers, with the options and what each does. Nothing is hard-wired: each can be set on
+# run_study (or on reproduce_study.py) and the values used are written to <prefix>_run.json.
+STUDY_DECISIONS: dict[str, dict[str, Any]] = {
+    "address_undated": {"options": ("last", "first"),
+                        "about": "Rank of an address with no start date among those in effect at admission: after dated ones (documented rule) or before them "
+                                 "(what the study pandas pipeline did; with first_listed it reproduces the delivered geography)."},
+    "address_tie_break": {"options": ("deterministic", "highest_zip", "ambiguous_missing", "arbitrary", "first_listed"),
+                          "about": "Which ZIP a patient gets when several addresses tie for the index date (feeds SDI, RUCA, Table 1 geography). "
+                                   "'first_listed' (address-table order) reproduces the study pipeline and is the same on every run; 'arbitrary' (engine order) is not reproducible; 'deterministic' lowest ZIP."},
+    "sdi_missing_term": {"options": (True, False),
+                         "about": "Keep an 'SDI Quintile: Missing / Unknown' term in Table 6. False is what the delivered workbook did."},
+    "table5": {"options": ("manuscript", "calibrated"),
+               "about": "Table 5 metrics: delivered rule (0.5 threshold, uncalibrated, tuned XGBoost on 50/50 upsampled training) or prior-shift calibrated."},
+    "attrition_mode": {"options": ("windowed", "full_history"),
+                       "about": "CONSORT layout: steps that built the cohort, or every rule over all history then window and one stay last (the manuscript layout)."},
+    "consort_final_steps": {"options": (True, False),
+                            "about": "Table S3 ends with the date window / one-stay-per-patient step and the pinned-list step (True), or with the last eligibility rule "
+                                     "as in the delivered workbook (False)."},
+    "table6_increments": {"options": ("sd", "clinical"),
+                          "about": "Continuous Table 6 rows per 1 SD, or per clinical unit (10 mmHg, 30 days, ...) as delivered. Same model; only OR and CI are rescaled."},
+}
+STUDY_PRESETS: dict[str, dict[str, Any]] = {
+    "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "deterministic", "sdi_missing_term": True, "table5": "manuscript", "attrition_mode": "windowed", "table6_increments": "sd"},
+    "delivered_2026_11_11": {"consort_final_steps": False, "address_undated": "first", "address_tie_break": "first_listed", "sdi_missing_term": False, "table5": "manuscript", "attrition_mode": "full_history",
+                             "table6_increments": "clinical"},
+}
+
+
+def assign_site_labels(sites: Sequence[str], *, mode: str = "random", seed: int | None = None, prefix: str = "Site ") -> dict[str, str]:
+    """Anonymous labels (``Site A``, ``Site B``, ...) for ``sites``, so that tables and figures do not identify a health system.
+
+    ``mode="random"`` (default) gives each site a random letter: a fresh shuffle every call, or a repeatable one with ``seed``;
+    ``mode="ordered"`` follows the order of ``sites``. Keep the mapping private and **outside the repository and the shared outputs**
+    (:func:`save_site_labels`), and assign it once for a whole consortium and hand each site its own letter, or every site's "Site A"
+    would be a different system. With a ``seed`` the mapping can be rebuilt only by whoever holds both the seed and the site list."""
+    import random
+
+    sites = list(dict.fromkeys(sites))
+    def _letters(i: int) -> str:  # A..Z, AA..AZ, BA.. (any number of sites)
+        out, i = "", i + 1
+        while i:
+            i, r = divmod(i - 1, 26)
+            out = chr(65 + r) + out
+        return out
+
+    letters = [_letters(i) for i in range(len(sites))]
+    if mode == "random":
+        (random.Random(seed) if seed is not None else random.SystemRandom()).shuffle(letters)
+    elif mode != "ordered":
+        raise ValueError("mode must be 'random' or 'ordered'.")
+    return {s: f"{prefix}{c}" for s, c in zip(sites, letters)}
+
+
+def save_site_labels(labels: Mapping[str, str], path: str | Path) -> Path:
+    """Writes a ``site -> label`` mapping as JSON. Put it somewhere that is not committed or shared with the results."""
+    p = Path(path)
+    p.write_text(json.dumps(dict(labels), indent=1), encoding="utf-8")
+    return p
+
+
+def load_site_labels(path: str | Path) -> dict[str, str]:
+    """Reads a mapping written by :func:`save_site_labels`."""
+    return {str(k): str(v) for k, v in json.loads(Path(path).read_text(encoding="utf-8")).items()}
+
+
+def resolve_decisions(preset: str = "package", **overrides: Any) -> dict[str, Any]:
+    """The decisions in force: the named preset in :data:`STUDY_PRESETS`, then any explicit (not None) override. Unknown names or values raise."""
+    if preset not in STUDY_PRESETS:
+        raise ValueError(f"preset must be one of {sorted(STUDY_PRESETS)}.")
+    out = dict(STUDY_PRESETS[preset])
+    for k, v in overrides.items():
+        if k not in STUDY_DECISIONS:
+            raise ValueError(f"Unknown decision {k!r}; known: {sorted(STUDY_DECISIONS)}.")
+        if v is not None:
+            if v not in STUDY_DECISIONS[k]["options"]:
+                raise ValueError(f"{k} must be one of {STUDY_DECISIONS[k]['options']}, got {v!r}.")
+            out[k] = v
+    return out
 
 #: The eDERRI protocol's cohort definition (all-cause 30-day readmission after an inpatient stay in a patient with diabetes).
 PROTOCOL_COHORT_PARAMS: dict[str, Any] = dict(
@@ -105,18 +184,21 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
     return df, att
 
 
-def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], site_labels: Mapping[str, str] | None = None,
+def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], site_labels: Mapping[str, str] | str | Path | None = None, label_seed: int | None = None, labels_out: str | Path | None = None,
               start: str = "2017-01-01", end: str = "2022-09-30", cohort_params: Mapping[str, Any] | None = None, profile: str | None = "ederri",
               pinned_stays: str | Path | pd.DataFrame | None = None, ruca_crosswalk: str | Path | None = None, sdi_table: str | Path | None = None,
               sdi_cut_points: Sequence[float] | None = (25, 41, 58, 77), address_table: str | None = "auto", transfer_source_values: Sequence[str] = ("IP",),
               feature_kwargs: Mapping[str, Any] | None = None, n_bootstraps: int = 100, loso: bool = True, figures: bool = True,
               reuse_features: bool = False, compare_to: str | Path | None = None, prefix: str = "Study", random_state: int = 42,
-              min_cell: int | None = 11, attrition_mode: str = "windowed", table5: str = "manuscript", sdi_missing_term: bool = True,
-              address_tie_break: str = "deterministic") -> dict[str, Any]:
+              min_cell: int | None = 11, attrition_mode: str | None = None, table5: str | None = None, sdi_missing_term: bool | None = None,
+              address_tie_break: str | None = None, address_undated: str | None = None, table6_increments: str | None = None, consort_final_steps: bool | None = None,
+              sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package") -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
-    anonymous label used in the tables (default Site A, B, ... in the order of ``sites``). ``pinned_stays`` (CSV or frame with
+    anonymous label used in the tables (default Site A, B, ... in the order of ``sites``); ``"random"`` assigns a random letter to each site
+    (repeatable with ``label_seed``), a path reads a mapping saved by :func:`save_site_labels`, and ``labels_out`` saves the mapping used. The
+    mapping is never written to the run record or the workbook: keep it private. ``pinned_stays`` (CSV or frame with
     ``site_source`` and ``visit_occurrence_id``) reproduces an earlier draw instead of the package's random stay rule.
     ``ruca_crosswalk`` + ``sdi_table`` turn on the SDI / RUCA features (cut points ``sdi_cut_points``, address history ``address_table``).
     ``transfer_source_values``: discharge source values recoded to a transfer (8717) so the transfer exclusion applies (``("IP",)`` for
@@ -125,13 +207,28 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     ``attrition_mode``: ``"windowed"`` (default; the steps that built the cohort, the date window second) or ``"full_history"`` (every rule over
     all history, then the window and one stay per patient last, which is how the manuscript's CONSORT table is laid out; costs one extra
     cohort build per site). ``table5`` / ``sdi_missing_term``: see :func:`omop_etl.manuscript_tables.manuscript_workbook`.
-    ``address_tie_break``: see :func:`omop_etl.geography.derive_geography_features`. The result has ``timings`` (seconds per stage)."""
+    ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (see
+    :func:`omop_etl.manuscript_tables.manuscript_workbook`).
+    ``address_tie_break``: see :func:`omop_etl.geography.derive_geography_features`. ``preset`` names a set of the decisions above
+    (:data:`STUDY_PRESETS`: ``"package"`` or ``"delivered_2026_11_11"``); any of ``attrition_mode``, ``table5``, ``sdi_missing_term``,
+    ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps`` given (not None) overrides the preset. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage)."""
     from omop_etl.manuscript_tables import compare_workbooks, manuscript_workbook
     from omop_etl.study_report import build_study_tables
 
+    dec = resolve_decisions(preset, attrition_mode=attrition_mode, table5=table5, sdi_missing_term=sdi_missing_term,
+                            address_tie_break=address_tie_break, address_undated=address_undated, table6_increments=table6_increments,
+                            consort_final_steps=consort_final_steps)
+    attrition_mode, table5, sdi_missing_term, address_tie_break = (dec["attrition_mode"], dec["table5"], dec["sdi_missing_term"], dec["address_tie_break"])
+    undated = dec["address_undated"]
     db, out = Path(db_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    labels = dict(site_labels or {s: f"Site {chr(65 + i)}" for i, s in enumerate(sites)})
+    if isinstance(site_labels, (str, Path)) and str(site_labels) not in ("random", "ordered"):
+        site_labels = load_site_labels(site_labels)  # a JSON file written by save_site_labels
+    elif isinstance(site_labels, str):
+        site_labels = assign_site_labels(sites, mode=site_labels, seed=label_seed)
+    labels = dict(site_labels or assign_site_labels(sites, mode="ordered"))
+    if labels_out is not None:
+        save_site_labels(labels, labels_out)
     pinned = None if pinned_stays is None else (pd.read_csv(pinned_stays) if isinstance(pinned_stays, (str, Path)) else pinned_stays)
     import time
 
@@ -148,7 +245,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             continue
         df, att = _site_frame(db, site, start=start, end=end, params=cohort_params or PROTOCOL_COHORT_PARAMS, profile=profile, pinned=pinned,
                               ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
-                              transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, **dict(feature_kwargs or {})}, work=out,
+                              transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=out,
                               attrition_mode=attrition_mode)
         df["site_anon"] = labels.get(site, site)
         df.to_parquet(f)
@@ -158,6 +255,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         timings[f"site_{site}"] = round(time.time() - t_site, 1)
     pooled = pd.concat(frames, ignore_index=True, sort=False)
     attrition = pd.concat(atts, ignore_index=True)
+    if not dec["consort_final_steps"]:
+        final = attrition["step_name"].astype(str).str.startswith("Index admission ") | attrition["step_name"].astype(str).str.startswith("Stay selected for the patient")
+        attrition = attrition[~final].reset_index(drop=True)
     first = (attrition.groupby("step_name", sort=False)["subjects_retained"].sum().rename("subjects_retained").reset_index())
     first["subjects_dropped"] = (first["subjects_retained"].shift(1) - first["subjects_retained"]).fillna(0).astype(int)
     t_tab = time.time()
@@ -165,7 +265,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                              window=(start, end), min_cell=min_cell, random_state=random_state)
     timings["tables_figures"] = round(time.time() - t_tab, 1)
     wb = manuscript_workbook(pooled, res["tables"], out / f"{prefix}_Manuscript_Tables.xlsx", attrition=attrition, site_labels=labels, min_cell=min_cell,
-                             title=f"{prefix} manuscript tables", table5=table5, sdi_missing_term=sdi_missing_term)
+                             title=f"{prefix} manuscript tables", table5=table5, sdi_missing_term=sdi_missing_term,
+                             table6_increments=dec["table6_increments"], sheet_site_labels=sheet_site_labels)
     timings["total"] = round(time.time() - t_start, 1)
     comparison = None
     if compare_to is not None:
@@ -175,7 +276,12 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         from omop_etl.manuscript_tables import workbook_similarity
 
         workbook_similarity(wb["path"], compare_to).to_csv(out / f"{prefix}_Similarity.csv", index=False)
+        from omop_etl.manuscript_tables import workbook_deltas
+
+        d_cells, d_rows = workbook_deltas(wb["path"], compare_to)
+        d_cells.to_csv(out / f"{prefix}_Deltas.csv", index=False)
+        d_rows.to_csv(out / f"{prefix}_Delta_Rows.csv", index=False)
         comparison = (summary, diffs)
-    (out / f"{prefix}_run.json").write_text(json.dumps({"sites": list(sites), "labels": labels, "window": [start, end], "profile": profile, "pinned": pinned is not None,
+    (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
                                                        "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings}, indent=1), encoding="utf-8")
     return {"data": pooled, "tables": res["tables"], "workbook": wb["path"], "files": res["files"] + [str(wb["path"])], "comparison": comparison, "summary": res["summary"], "timings": timings}

@@ -26,9 +26,10 @@ import pandas as pd
 from omop_etl.study_report import _newton_logit, export_workbook
 
 __all__ = ["manuscript_frame", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
-           "manuscript_workbook", "compare_workbooks", "workbook_similarity", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER"]
+           "manuscript_workbook", "compare_workbooks", "workbook_similarity", "workbook_deltas", "delta_summary", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER"]
 
 EN = "–"
+_WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
 PM = "±"
 #: (feature-table column names tried in order, label)
 MANUSCRIPT_LABS = [(("lab_albumin",), "Albumin"), (("lab_alt",), "ALT"), (("lab_anion_gap",), "Anion gap"), (("lab_ast",), "AST"),
@@ -260,12 +261,31 @@ def manuscript_consort(attrition: pd.DataFrame, *, site_col: str = "site", site_
 
 
 # ------------------------------------------------------------------ Table 6
+# Table 6 increments as the delivered workbook prints them: label -> (increment text, size in the measure's own unit).
+CLINICAL_INCREMENTS: dict[str, tuple[str, float]] = {
+    "Prior Inpatient / Obs / ED Count": ("1 stay", 1), "Prior Outpatient / Other Encounter Count": ("10 encounters", 10),
+    "Number of Secondary Diagnosis CCS Categories": ("1 category", 1), "Index Admission Length of Stay (days)": ("1 day", 1),
+    "Days Since Prior Encounter": ("30 days", 30), "Days Since Prior Inpatient / Obs / ED Encounter": ("30 days", 30),
+    "Prior Readmissions in Past 12 Months": ("1 readmission", 1), "Systolic Blood Pressure (mmHg)": ("10 mmHg", 10),
+    "Diastolic Blood Pressure (mmHg)": ("10 mmHg", 10), "Albumin": ("1 g/dL", 1), "ALT": ("10 U/L", 10), "Anion gap": ("1 mEq/L", 1),
+    "AST": ("10 U/L", 10), "Bicarbonate (CO2)": ("5 mEq/L", 5), "BUN": ("10 mg/dL", 10), "Creatinine": ("1 mg/dL", 1),
+    "eGFR (2021)": ("10 mL/min/1.73 m²", 10), "Glucose": ("50 mg/dL", 50), "HbA1c": ("1 percentage point", 1),
+    "Hematocrit": ("5 percentage points", 5), "LDL": ("30 mg/dL", 30), "Leukocytes (WBC)": ("5 x10^9/L", 5), "Sodium": ("5 mEq/L", 5)}
+
+
 def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d", frame: pd.DataFrame | None = None,
-                          sdi_missing_term: bool = True) -> pd.DataFrame:
+                          sdi_missing_term: bool = True, increments: str | Mapping[str, tuple[str, float]] = "sd") -> pd.DataFrame:
     """Table 6: one multivariable logistic regression, rows grouped as the manuscript prints them. Flags enter as 0/1 (OR for yes vs
     no, reference categories: age 18-44, female, White, non-Hispanic, SDI quintile 1, metropolitan, discharged home, never tobacco,
     BMI 18.5-24.9); continuous measures are standardised (OR per 1 SD) and missing values median imputed. ``Standardized Beta`` is
-    the coefficient times the predictor's SD."""
+    the coefficient times the predictor's SD (unchanged by ``increments``).
+
+    ``increments``: ``"sd"`` (default) reports continuous measures per 1 SD; ``"clinical"`` reports them per the clinical unit of the
+    delivered workbook (:data:`CLINICAL_INCREMENTS`, for example 10 mmHg or 30 days); a mapping ``label -> (text, size)`` sets
+    its own (labels not in it stay per 1 SD). The fit is the same model, so p-values do not change; only OR and CI are rescaled."""
+    if isinstance(increments, str) and increments not in ("sd", "clinical"):
+        raise ValueError("increments must be 'sd', 'clinical' or a mapping.")
+    inc_map = CLINICAL_INCREMENTS if increments == "clinical" else ({} if increments == "sd" else dict(increments))
     m = frame if frame is not None else manuscript_frame(df)
     y = m[label_col].astype(float).to_numpy()
     terms: list[tuple[str, str, str, pd.Series]] = []  # group, label, increment, values
@@ -341,21 +361,28 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
         b, e = res[label]
         sdv = 1.0 if inc == "Per 1 SD" else sd[label]
         p = 2 * (1 - stats.norm.cdf(abs(b / e))) if e > 0 else np.nan
-        out.append({"Feature": label, "Increment": inc, "Adjusted OR (95% CI)*": f"{np.exp(b):.2f} ({np.exp(b - 1.96 * e):.2f}{EN}{np.exp(b + 1.96 * e):.2f})",
-                    "Standardized Beta": round(float(b * sdv), 2), "P-Value": "<0.001" if p < 0.001 else f"{p:.3f}"})
+        beta_std = round(float(b * sdv), 2)  # standardised beta is per SD whichever increment the OR is shown in
+        shown = inc
+        if inc == "Per 1 SD" and label in inc_map:  # same fit, rescaled from 1 SD to the clinical unit
+            shown, size = inc_map[label]
+            b, e = b * size / sd[label], e * size / sd[label]
+        out.append({"Feature": label, "Increment": shown, "Adjusted OR (95% CI)*": f"{np.exp(b):.2f} ({np.exp(b - 1.96 * e):.2f}{EN}{np.exp(b + 1.96 * e):.2f})",
+                    "Standardized Beta": beta_std, "P-Value": "<0.001" if p < 0.001 else f"{p:.3f}"})
     return pd.DataFrame(out)
 
 
 # ------------------------------------------------------------------ workbook
 def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], path: str | Path, *, attrition: pd.DataFrame | None = None,
                         site_labels: Mapping[str, str] | None = None, label_col: str = "readmitted_30d", min_cell: int | None = 11,
-                        title: str = "Manuscript tables", table5: str = "manuscript", sdi_missing_term: bool = True) -> dict[str, Any]:
+                        title: str = "Manuscript tables", table5: str = "manuscript", sdi_missing_term: bool = True,
+                        table6_increments: str | Mapping[str, tuple[str, float]] = "sd",
+                        sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, Any]:
     """Builds the manuscript sheets from the ``tables`` returned by :func:`omop_etl.study_report.build_study_tables` and the feature table
     ``df``, and writes one workbook. ``attrition`` is the per-site attrition (``site``, ``step_name``, ``subjects_retained``) for
     Table S3. ``table5``: ``"manuscript"`` (default; AUC-ROC with CI, uncalibrated Brier, sensitivity and specificity at the 0.5 threshold of
     the balanced-trained model, as the manuscript reports) or ``"calibrated"`` (prior-shift calibrated Brier, top-10% sensitivity and PPV).
     ``sdi_missing_term``: keep an "SDI Quintile: Missing / Unknown" term in Table 6 (default; ``False`` leaves it out, as the manuscript did,
-    so those stays join the reference quintile). Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
+    so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
     m = manuscript_frame(df)
     n = len(df)
     sheets: dict[str, tuple[str, pd.DataFrame]] = {}
@@ -383,18 +410,23 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
         else:
             cols = [("Brier", "brier"), ("Top-10% sensitivity", "top10_sensitivity"), ("Top-10% PPV", "top10_ppv")]
         lo = pd.DataFrame({**base, **{name: t[src].round(3) for name, src in cols}})
-        mean_row = [("Mean of sites", None, None, f"{t['auroc'].mean():.3f}")] + [round(float(t[src].mean()), 3) for _, src in cols]
+        mean_row = [(f"Mean of {_WORDS.get(len(t), len(t))} sites", None, None, f"{t['auroc'].mean():.3f}")] + [round(float(t[src].mean()), 3) for _, src in cols]
         lo.loc[len(lo)] = [x for part in mean_row for x in (part if isinstance(part, tuple) else (part,))]
         sheets["Table 5 - Cross-Site LOSO"] = (f"Table 5: Harmonized Leave-One-Site-Out (LOSO) Cross-Site External Validation Across {len(t)} Health Systems", lo)
     sheets["Table 6 - Multivariable LR"] = ("Table 6: Multivariable Logistic Regression Independent Risk Factors for 30-Day Readmission",
-                                           manuscript_regression(df, label_col=label_col, frame=m, sdi_missing_term=sdi_missing_term))
+                                           manuscript_regression(df, label_col=label_col, frame=m, sdi_missing_term=sdi_missing_term, increments=table6_increments))
     if "LOS_Distribution_By_Site" in tables:
-        sheets["Table S1 - LOS Distribution"] = ("Table S1: Distribution of Index Stay Length of Stay (Days) by Participating Health System", tables["LOS_Distribution_By_Site"])
+        s1 = tables["LOS_Distribution_By_Site"].copy()
+        if "Table S1" in (sheet_site_labels or {}):
+            s1[s1.columns[0]] = s1[s1.columns[0]].map(lambda x: sheet_site_labels["Table S1"].get(x, x))
+        sheets["Table S1 - LOS Distribution"] = ("Table S1: Distribution of Index Stay Length of Stay (Days) by Participating Health System", s1)
     sheets["Table S2 - Data Completeness"] = ("Table S2: Missingness and Measurement Completeness Across Clinical Features",
                                               manuscript_completeness(df, label_col=label_col, min_cell=min_cell, frame=m))
     if attrition is not None:
         sheets["Table S3 - CONSORT Attrition"] = ("Table S3: Multi-Center CONSORT Stepwise Cohort Attrition and Eligibility Accounting",
-                                                  manuscript_consort(attrition, site_labels=site_labels))
+                                                  manuscript_consort(attrition, site_labels=(
+                                                      {k: sheet_site_labels["Table S3"].get(v, v) for k, v in site_labels.items()}
+                                                      if site_labels and "Table S3" in (sheet_site_labels or {}) else site_labels)))
     if "Tuning_All_Configs" in tables:
         sheets["Table S4 - All Tuning Grid"] = ("Table S4: Full Grid Evaluation Metrics for All Evaluated Hyperparameter Configurations", tables["Tuning_All_Configs"])
     out = export_workbook([(name, cap, t) for name, (cap, t) in sheets.items()], path, title=title, subtitle=f"N = {n:,}; aggregate results only")
@@ -460,6 +492,60 @@ def compare_workbooks(new: str | Path, old: str | Path, *, key_columns: Mapping[
         if sheet not in b_all and not sheet.startswith("Manifest"):
             summ.append({"sheet": sheet, "rows_new": None, "rows_old": None, "only_new": None, "only_old": None, "cells": 0, "differ": None, "note": "missing in old"})
     return pd.DataFrame(summ), pd.DataFrame(diffs, columns=["sheet", "row", "column", "new", "old"])
+
+
+def workbook_deltas(new: str | Path, old: str | Path, **kw: Any) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The deltas between two manuscript workbooks, ready to read or sort. Returns ``(cells, rows)``.
+
+    ``cells``: every differing cell of :func:`compare_workbooks` (same tolerances; pass ``atol``, ``rtol``, ``key_columns`` through
+    ``kw``) with ``new_value`` / ``old_value`` (the first number in the cell), ``delta`` (new - old), ``rel_delta`` (delta / |old|) and
+    ``kind`` (``"numeric"``, ``"text"`` for labels, ``"shape"`` when the cells hold a different count of numbers), largest ``|rel_delta|``
+    first. ``rows``: the rows present in only one workbook (``side`` is ``"only_new"`` or ``"only_old"``), which is where an extra
+    attrition step or a missing model term shows up."""
+    summary, diffs = compare_workbooks(new, old, **kw)
+    rows_out: list[dict[str, Any]] = []
+    for r in diffs.itertuples(index=False):
+        x, y = _numbers(r.new), _numbers(r.old)
+        if x and y and len(x) == len(y):
+            kind, d = "numeric", x[0] - y[0]
+            rel = d / abs(y[0]) if y[0] else float("nan")
+            rows_out.append({"sheet": r.sheet, "row": r.row, "column": r.column, "kind": kind, "new_value": x[0], "old_value": y[0],
+                             "delta": d, "rel_delta": rel, "new": r.new, "old": r.old})
+        else:
+            rows_out.append({"sheet": r.sheet, "row": r.row, "column": r.column, "kind": "shape" if (x or y) else "text", "new_value": None,
+                             "old_value": None, "delta": None, "rel_delta": None, "new": r.new, "old": r.old})
+    cells = pd.DataFrame(rows_out, columns=["sheet", "row", "column", "kind", "new_value", "old_value", "delta", "rel_delta", "new", "old"])
+    if len(cells):
+        cells = cells.assign(_m=cells["rel_delta"].abs().fillna(-1)).sort_values("_m", ascending=False).drop(columns="_m").reset_index(drop=True)
+    kc = dict(kw.get("key_columns") or {})
+    for name in ("Table 3 - Tuning AUC vs F1", "Table S4 - All Tuning Grid", "Table S3 - CONSORT Attrition"):
+        kc.setdefault(name, 2)
+    a_all, b_all = pd.read_excel(new, sheet_name=None, header=None), pd.read_excel(old, sheet_name=None, header=None)
+    hdr = kw.get("header_row", 2)
+    extra: list[dict[str, Any]] = []
+    for sheet in b_all:
+        if sheet.startswith("Manifest") or sheet not in a_all:
+            continue
+        n = kc.get(sheet, 1)
+
+        def keys(raw: pd.DataFrame) -> list[str]:
+            t = raw.iloc[hdr + 1:]
+            kk = t.iloc[:, :n].astype(str).agg(" | ".join, axis=1)
+            return (kk + kk.groupby(kk).cumcount().map(lambda i: "" if i == 0 else f" #{i + 1}")).tolist()
+
+        ka, kb = keys(a_all[sheet]), keys(b_all[sheet])
+        extra += [{"sheet": sheet, "row": r, "side": "only_new"} for r in ka if r not in set(kb)]
+        extra += [{"sheet": sheet, "row": r, "side": "only_old"} for r in kb if r not in set(ka)]
+    return cells, pd.DataFrame(extra, columns=["sheet", "row", "side"])
+
+
+def delta_summary(cells: pd.DataFrame) -> pd.DataFrame:
+    """Per sheet: how many cells moved, how many are numeric, and the median and largest relative change (from :func:`workbook_deltas`)."""
+    if cells.empty:
+        return pd.DataFrame(columns=["sheet", "cells", "numeric", "median_abs_rel", "max_abs_rel"])
+    g = cells.assign(a=cells["rel_delta"].abs()).groupby("sheet", sort=False)
+    return pd.DataFrame({"cells": g.size(), "numeric": g["kind"].apply(lambda s: int((s == "numeric").sum())),
+                         "median_abs_rel": g["a"].median().round(4), "max_abs_rel": g["a"].max().round(4)}).reset_index()
 
 
 #: What "similar to the delivered manuscript" means, as checks a run must pass. These are proposals to be agreed with the study
