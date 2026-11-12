@@ -117,8 +117,14 @@ read_sdi_table <- function(source) {
                   params = list(name))$n[[1]] > 0
 }
 
+.geo_tie_breaks <- c("deterministic", "highest_zip", "ambiguous_missing", "arbitrary", "first_listed")
+.geo_undated <- c("last", "first")
+
 # One address row per stay (person_id, stay_id, zip5, rule), chosen by the reference rule. `stays` has person_id, stay_id, admit_date.
-.geo_index_addresses <- function(con, stays, tbl) {
+# Addresses that tie on every rule key are resolved by `tie_break` (same four options as the Python package).
+.geo_index_addresses <- function(con, stays, tbl, tie_break = "deterministic", undated = "last") {
+  tie_break <- match.arg(tie_break, .geo_tie_breaks)
+  undated <- match.arg(undated, .geo_undated)
   duckdb::duckdb_register(con, "_geo_stays", stays)
   on.exit(duckdb::duckdb_unregister(con, "_geo_stays"), add = TRUE)
   if (is.null(tbl)) {
@@ -128,25 +134,36 @@ read_sdi_table <- function(source) {
             FROM _geo_stays s LEFT JOIN person p ON p.person_id = s.person_id
             LEFT JOIN location l ON l.location_id = p.location_id)")
   } else {
-    DBI::dbGetQuery(con, sprintf("
+    listed <- if ("location_id" %in% DBI::dbListFields(con, tbl)) "a.location_id" else "a.rowid"
+    undated_dist <- if (undated == "last") "1000000" else "-1000000"
+    keys <- sprintf("nozip,
+                 CASE rule0 WHEN 'in_effect' THEN 0 WHEN 'latest_before' THEN 1 ELSE 2 END,
+                 CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
+                 CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
+                      ELSE coalesce(date_diff('day', st, admit_date), %s) END,
+                 st DESC NULLS LAST", undated_dist)
+    head <- sprintf("
       WITH m AS (
-        SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, a.address_start AS st, a.preferred, (a.zip5 IS NULL) AS nozip,
+        SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, %s AS listed, a.address_start AS st, a.preferred, (a.zip5 IS NULL) AS nozip,
                (a.address_start IS NULL OR a.address_start <= s.admit_date) AS started,
                (a.address_end IS NULL OR a.address_end >= s.admit_date) AS ongoing
         FROM _geo_stays s LEFT JOIN %s a ON a.person_id = s.person_id
       ), r AS (
         SELECT *, CASE WHEN started AND ongoing THEN 'in_effect' WHEN started THEN 'latest_before' ELSE 'earliest_after' END AS rule0 FROM m
-      )
-      SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE rule0 END AS rule
-      FROM r
-      QUALIFY ROW_NUMBER() OVER (
-        PARTITION BY stay_id
-        ORDER BY nozip,
-                 CASE rule0 WHEN 'in_effect' THEN 0 WHEN 'latest_before' THEN 1 ELSE 2 END,
-                 CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
-                 CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
-                      ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
-                 st DESC NULLS LAST, zip5) = 1", tbl))
+      )", listed, tbl)
+    if (tie_break == "ambiguous_missing") {
+      DBI::dbGetQuery(con, paste0(head, ", k AS (SELECT *, RANK() OVER (PARTITION BY stay_id ORDER BY ", keys, ") AS rk FROM r)
+        SELECT person_id, stay_id,
+               CASE WHEN count(DISTINCT zip5) > 1 THEN NULL ELSE min(zip5) END AS zip5,
+               CASE WHEN count(DISTINCT zip5) > 1 THEN 'ambiguous' WHEN min(zip5) IS NULL THEN 'no_zip' ELSE min(rule0) END AS rule
+        FROM k WHERE rk = 1 GROUP BY person_id, stay_id"))
+    } else {
+      final <- c(deterministic = ", zip5", highest_zip = ", zip5 DESC", arbitrary = "", first_listed = ", listed")[[tie_break]]
+      DBI::dbGetQuery(con, paste0(head, "
+        SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE rule0 END AS rule
+        FROM r
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY stay_id ORDER BY ", keys, final, ") = 1"))
+    }
   }
 }
 
@@ -159,11 +176,17 @@ read_sdi_table <- function(source) {
 #' @param address_table `"auto"` (use `person_address_history` when present and non-empty, else `person.location_id`),
 #'   a table name, or `NULL` for the person's location.
 #' @param fit_cut_points Logical; fit cut points from these stays (training reference only).
+#' @param undated Rank of an address with no start date among those in effect: `"last"` (default; a dated address wins) or
+#'   `"first"` (an undated address wins, as in the study's pandas pipeline and the delivered 2026-11-11 geography).
+#' @param tie_break Addresses that tie on every rule key: `"deterministic"` (default; later start, lowest ZIP), `"highest_zip"`,
+#'   `"ambiguous_missing"` (no ZIP, rule `ambiguous`, when the tied ZIPs differ) or `"arbitrary"` (engine order; not reproducible)
+#'   or `"first_listed"` (the address stored first in the address table, by `location_id`; reproduces a pandas pipeline's stable sort).
 #' @return `derive_geography_features()`: data frame `person_id, stay_id, zip5, rule, ruca_code, ruca_category,
 #'   sdi_score, sdi_quintile`, with the cut points used in `attr(, "sdi_cut_points")`.
 #' @export
 derive_geography_features <- function(con, ruca_crosswalk, sdi_table, sdi_cut_points = NULL, stays = NULL,
-                                      address_table = "auto", fit_cut_points = FALSE, code_99_missing = FALSE) {
+                                      address_table = "auto", fit_cut_points = FALSE, code_99_missing = FALSE,
+                                      tie_break = "deterministic", undated = "last") {
   if (is.null(sdi_cut_points) && !isTRUE(fit_cut_points)) {
     stop("sdi_cut_points is required: SDI quintiles must use the training cohort's fixed cut points, not quantiles of the ",
          "local population. Pass fit_cut_points = TRUE only when building the training reference.", call. = FALSE)
@@ -190,7 +213,7 @@ derive_geography_features <- function(con, ruca_crosswalk, sdi_table, sdi_cut_po
   }
   if (!is.null(tbl) && !grepl("^[A-Za-z0-9_]+$", tbl)) stop("invalid address table name ", shQuote(tbl), ".", call. = FALSE)
 
-  picked <- .geo_index_addresses(con, stays, tbl)
+  picked <- .geo_index_addresses(con, stays, tbl, tie_break, undated)
   g <- merge(merge(picked, ruca, by = "zip5", all.x = TRUE, sort = FALSE), sdi, by = "zip5", all.x = TRUE, sort = FALSE)
   g <- merge(g, stays[, c("stay_id", "admit_date")], by = "stay_id", all.x = TRUE, sort = FALSE)
   g <- g[order(g$stay_id), , drop = FALSE]

@@ -38,6 +38,8 @@ extract_benchmark_features(
   disposition_map = NULL,
   sdoh_fallback = "indicator",
   address_table = "auto",
+  address_tie_break = "deterministic",
+  address_undated = "last",
   impute = NULL,
   impute_values = NULL
 )
@@ -99,6 +101,10 @@ gives \code{sdi_quintile} / \code{ruca_category} = NA plus \code{sdoh_missing = 
 \item{address_table}{dated address history for \code{include_sdoh} (columns \code{person_id}, \code{zip5}, \code{address_start}, \code{address_end},
 \code{preferred}): \code{"auto"} (default) uses \code{person_address_history} when present, else \code{person.location_id}; or a table name (for
 example a study's own \code{ederri_address_history}); \code{NULL} for \code{person.location_id}.}
+
+\item{address_undated}{rank of an address with no start date (\code{undated} of \code{derive_geography_features()}).}
+
+\item{address_tie_break}{how \code{derive_geography_features()} resolves addresses that tie on every rule key (\code{tie_break}).}
 
 \item{impute}{\code{NULL}, \code{"median"} or \code{"mean"}: fill missing vital / lab values. Statistics come from this table unless \code{impute_values}
 (named numeric) is given; fit them on the training sites (\code{attr(, "imputation_values")}) and pass them to other tables.}

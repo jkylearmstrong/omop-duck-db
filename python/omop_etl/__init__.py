@@ -838,6 +838,8 @@ from omop_etl.manuscript_tables import (  # noqa: E402
     manuscript_consort,
     manuscript_frame,
     manuscript_regression,
+    workbook_deltas,
+    delta_summary,
     manuscript_table1,
     manuscript_workbook,
 )
@@ -849,15 +851,20 @@ __all__ += [
     "manuscript_consort",
     "manuscript_frame",
     "manuscript_regression",
+    "workbook_deltas",
+    "delta_summary",
     "manuscript_table1",
     "manuscript_workbook",
 ]
 
-from omop_etl.study_run import PROTOCOL_COHORT_PARAMS, pin_stays, run_study  # noqa: E402
+from omop_etl.study_run import PROTOCOL_COHORT_PARAMS, STUDY_DECISIONS, STUDY_PRESETS, pin_stays, resolve_decisions, run_study  # noqa: E402
 
 from omop_etl.study_report import balanced_training_indices, performance_from_predictions, study_folds  # noqa: E402
+from omop_etl.manuscript_report import manuscript_facts, read_workbook_tables, render_results_report  # noqa: E402
 
-__all__ += ["PROTOCOL_COHORT_PARAMS", "pin_stays", "run_study", "balanced_training_indices", "performance_from_predictions", "study_folds"]
+__all__ += ["manuscript_facts", "read_workbook_tables", "render_results_report"]
+
+__all__ += ["PROTOCOL_COHORT_PARAMS", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions", "pin_stays", "run_study", "balanced_training_indices", "performance_from_predictions", "study_folds"]
 
 from omop_etl.deep_models import deep_oof_predictions, deep_study_tables, device_report, make_mlp_fit_predict  # noqa: E402
 
