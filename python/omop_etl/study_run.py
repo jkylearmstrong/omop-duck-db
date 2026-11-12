@@ -56,9 +56,14 @@ def assign_site_labels(sites: Sequence[str], *, mode: str = "random", seed: int 
     import random
 
     sites = list(dict.fromkeys(sites))
-    if len(sites) > 26:
-        raise ValueError("assign_site_labels supports at most 26 sites (A to Z).")
-    letters = [chr(65 + i) for i in range(len(sites))]
+    def _letters(i: int) -> str:  # A..Z, AA..AZ, BA.. (any number of sites)
+        out, i = "", i + 1
+        while i:
+            i, r = divmod(i - 1, 26)
+            out = chr(65 + r) + out
+        return out
+
+    letters = [_letters(i) for i in range(len(sites))]
     if mode == "random":
         (random.Random(seed) if seed is not None else random.SystemRandom()).shuffle(letters)
     elif mode != "ordered":

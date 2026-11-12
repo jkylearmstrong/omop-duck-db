@@ -514,7 +514,7 @@ print("Reconciliation Passed:", reconciliation["passed"])
 
 ## Running on the NVIDIA DGX Spark (deep models) and Oracle transfers
 
-**Status (0.19.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
+**Status (0.20.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
 
 On the Spark, from the parent `eDerri_data` directory (so omop-learn and `pipeline/` are in the build context):
 

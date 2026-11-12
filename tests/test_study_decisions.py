@@ -97,5 +97,5 @@ def test_assign_site_labels_random_seeded_ordered_and_saved(tmp_path):
     assert load_site_labels(save_site_labels(a, tmp_path / "l.json")) == a
     with pytest.raises(ValueError):
         assign_site_labels(sites, mode="alphabetical")
-    with pytest.raises(ValueError):
-        assign_site_labels([str(i) for i in range(27)])
+    many = assign_site_labels([str(i) for i in range(40)], mode="ordered")  # no cap: Site AA.. after Site Z
+    assert len(set(many.values())) == 40 and many["25"] == "Site Z" and many["26"] == "Site AA"

@@ -112,3 +112,43 @@ def test_consort_final_steps_decision_is_listed():
 
     assert "consort_final_steps" in STUDY_DECISIONS
     assert resolve_decisions("package")["consort_final_steps"] is True and resolve_decisions("delivered_2026_11_11")["consort_final_steps"] is False
+
+
+
+@pytest.mark.parametrize("k", [1, 2, 8, 30])
+def test_any_number_of_sites(tmp_path, k):
+    from omop_etl.manuscript_report import manuscript_facts
+    from omop_etl.study_run import assign_site_labels
+
+    labels = list(assign_site_labels([f"s{i}" for i in range(k)], mode="ordered").values())
+    assert len(set(labels)) == k
+    loso = pd.DataFrame({"site": labels, "n": [500 + i for i in range(k)], "auroc": [0.7] * k, "auroc_lo": [0.68] * k, "auroc_hi": [0.72] * k,
+                         "brier_uncalibrated": [0.2] * k, "sensitivity_050": [0.6] * k, "specificity_050": [0.7] * k})
+    perf = pd.DataFrame({"Model": ["A"], "AUC-ROC (95% CI)": ["0.7 (0.6-0.8)"], "Sensitivity": [0.6], "Specificity": [0.7], "F1": [0.3], "Brier": [0.2]})
+    wb = mt.manuscript_workbook(make_features(n=1000, seed=3), {"Model_Performance": perf, "LOSO_By_Site": loso}, tmp_path / "w.xlsx")["path"]
+    assert manuscript_facts(wb)["n_sites"] == k
+
+
+def test_report_is_parameterised_and_aggregate_only(tmp_path):
+    import json
+
+    from omop_etl.manuscript_report import render_results_report
+
+    wb = build(tmp_path / "w.xlsx")
+    r = render_results_report(wb, tmp_path / "r", sheets=["Table 2"], formats=["md"], write_csv=False, write_facts=False, sentences=False)
+    assert set(r) == {"markdown"} and not (tmp_path / "r" / "tables").exists()
+    text = r["markdown"].read_text(encoding="utf-8")
+    assert "Table 2" in text and "Table 1:" not in text and str(tmp_path) not in text
+    facts = json.loads(render_results_report(wb, tmp_path / "r2")["facts"].read_text(encoding="utf-8"))
+    assert facts["workbook"] == "w.xlsx"
+    with pytest.raises(ValueError, match="rows"):
+        render_results_report(wb, tmp_path / "r3", max_rows=2)
+
+
+def test_report_refuses_identifier_columns_and_suppresses_small_counts(tmp_path):
+    from omop_etl import manuscript_report as mr
+
+    with pytest.raises(ValueError, match="identifier"):
+        mr._check_aggregate("S", pd.DataFrame({"person_id": [1]}), 500)
+    t = mr._suppress_small(pd.DataFrame({"Patients (N)": [5, 50, "7", "1,200"], "x": ["3 (1.2%)", "30 (4%)", "a", "b"]}), 11)
+    assert t["Patients (N)"].tolist() == ["<11", 50, "<11", "1,200"] and t["x"].iloc[0] == "<11" and t["x"].iloc[1] == "30 (4%)"
