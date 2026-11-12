@@ -245,3 +245,28 @@ def test_build_study_tables_writes_figures(cohort, attrition, tmp_path, monkeypa
                               figures=True, shap_sample_n=100)
     names = {Path(f).name for f in r["files"]}
     assert {"F_Figure1_Cohort_Flowchart.png", "F_Figure_SHAP_4Panel.png"} <= names
+
+
+def test_build_study_tables_writes_xgboost_shap_outputs(cohort, attrition, tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    xgb = pytest.importorskip("xgboost")
+    from sklearn.linear_model import LogisticRegression
+
+    grid = {"Logistic Regression": (True, [("C=1 (benchmark)", lambda: LogisticRegression(max_iter=200))]),
+            "XGBoost": (False, [("tiny (benchmark)", lambda: xgb.XGBClassifier(n_estimators=5, max_depth=2, n_jobs=1))])}
+    monkeypatch.setattr(sr, "default_model_grid", lambda *a, **k: grid)
+    r = sr.build_study_tables(cohort, tmp_path, prefix="X", n_bootstraps=5, loso=False, workbook=False, attrition=attrition,
+                              figures=True, shap_sample_n=100)
+    names = {Path(f).name for f in r["files"]}
+    assert {"X_Figure_SHAP_XGBoost.png", "X_Table_SHAP_Top_Predictors.csv"} <= names
+
+
+def test_positive_class_handles_list_and_3d_shap_output():
+    a, b = np.zeros((4, 3)), np.ones((4, 3))
+    assert (sr._positive_class([a, b]) == 1).all()
+    assert sr._positive_class(np.stack([a, b], axis=-1)).shape == (4, 3)
+
+
+def test_bootstrap_ci_skips_single_class_resamples():
+    ci = sr.bootstrap_ci(np.array([0, 0, 0, 0, 1]), np.array([.1, .2, .3, .4, .9]), n_bootstraps=20, seed=1)
+    assert set(ci) == {"AUC", "F1", "Sensitivity", "Specificity", "Brier"}
