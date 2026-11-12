@@ -16,7 +16,8 @@ extract_elixhauser_comorbidities(
   exclude_index_diagnoses = TRUE,
   fallback_on_unmapped = FALSE,
   return_mapping_fidelity = FALSE,
-  end_inclusive = FALSE
+  end_inclusive = FALSE,
+  code_table = "quan"
 )
 }
 \arguments{
@@ -52,6 +53,12 @@ counted (when both tables have that column; cohorts from \code{define_study_coho
 the index stay. The window is \verb{[index - lookback_days, index)} unless \code{end_inclusive = TRUE}. To reproduce a
 discharge-anchored window (the legacy study's 730 days up to discharge, index stay included) pass a discharge-date
 \code{index_date_col}, \code{exclude_index_diagnoses = FALSE} and \code{end_inclusive = TRUE}.}
+
+\item{code_table}{\code{"quan"} (default; the curated Quan et al. table \code{elixhauser_codes.csv}) or \code{"ederri"}
+(\code{elixhauser_codes_ederri.csv}: the eDERRI study protocol's own ICD-9 / ICD-10 prefix lists, generated from the protocol's
+SQL, e.g. \code{neuro_other} is any G code except G81/G82 and \code{solid_tumor} any C code except C77-C85). The \code{"ederri"} table has
+ICD prefixes only (no SNOMED ancestors), so pair it with \code{source_and_standard = FALSE}. Weights and output columns are those
+of the \code{"quan"} table. Same as Python \code{code_table}.}
 
 \item{fallback_on_unmapped}{Logical; if TRUE, falls back to source-value matching if standard concept ancestor is unavailable (default FALSE).}
 

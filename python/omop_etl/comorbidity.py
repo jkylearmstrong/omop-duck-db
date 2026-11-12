@@ -23,6 +23,7 @@ behind.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import operator
 import os
 import re
@@ -72,6 +73,7 @@ _ELIXHAUSER = _Spec(
     total_col="elix_total_conditions",
     hierarchy=(("dm_comp", "dm_uncomp"), ("mets", "solid_tumor"), ("htn_comp", "htn_uncomp")),
 )
+_ELIXHAUSER_TABLES = {"quan": "elixhauser_codes.csv", "ederri": "elixhauser_codes_ederri.csv"}
 _CHARLSON = _Spec(
     index="charlson",
     file="charlson_codes.csv",
@@ -476,6 +478,7 @@ def extract_elixhauser_comorbidities(
     fallback_on_unmapped: bool = False,
     return_mapping_fidelity: bool = False,
     end_inclusive: bool = False,
+    code_table: str = "quan",
 ) -> Any:
     """Elixhauser comorbidity profile (31 domains, Quan et al. 2005) with the van Walraven 2009 score.
 
@@ -524,6 +527,13 @@ def extract_elixhauser_comorbidities(
         Count diagnoses dated ON the index date too (window ``[index - lookback_days, index]``). Off by default so
         nothing dated on the index day leaks in; needed to match a pipeline that uses ``condition_start_date <=
         discharge_date``, where diagnoses coded on the discharge day are included.
+    code_table : {'quan', 'ederri'}, default 'quan'
+        Which bundled ICD prefix table defines the 31 domains. ``'quan'`` is the curated Quan et al. (2005) table
+        (``elixhauser_codes.csv``). ``'ederri'`` (``elixhauser_codes_ederri.csv``, Python only) is the eDERRI study protocol's
+        own ICD-9 / ICD-10 prefix lists, generated from the protocol's SQL, so a study can reproduce its published flags: for
+        example ``neuro_other`` is any G code except G81/G82 and ``solid_tumor`` any C code except C77-C85. It has ICD
+        prefixes only (no SNOMED ancestors), so pair it with ``source_and_standard=False``. The weights and the output
+        columns are those of the ``'quan'`` table.
     format : {'df', 'arrow', 'polars'}, default 'df'
         Return a pandas DataFrame, a pyarrow Table or a polars DataFrame. ``'polars'`` needs the optional ``polars``
         package and raises ``ImportError`` without it.
@@ -571,7 +581,10 @@ def extract_elixhauser_comorbidities(
     >>> df[["subject_id", "elix_chf", "elix_van_walraven_score"]].values.tolist()
     [[1, 1, 7]]
     """
-    return _profile(con, _ELIXHAUSER, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
+    if code_table not in _ELIXHAUSER_TABLES:
+        raise ValueError(f"code_table must be one of {sorted(_ELIXHAUSER_TABLES)}, got {code_table!r}.")
+    spec = dataclasses.replace(_ELIXHAUSER, file=_ELIXHAUSER_TABLES[code_table])
+    return _profile(con, spec, "extract_elixhauser_comorbidities", cohort_table, cohort_id, person_col,
                     index_date_col, lookback_days, source_and_standard, hierarchy_adjusted, format,
                     exclude_index_diagnoses, fallback_on_unmapped=fallback_on_unmapped,
                     return_mapping_fidelity=return_mapping_fidelity, end_inclusive=end_inclusive)

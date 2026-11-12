@@ -14,7 +14,9 @@ predictors therefore needs three things at the replicating site, all supplied he
 
 Address rule (reference study): the address whose period contains the admission date; else the most recent address that
 started before admission; else the earliest address that started after it. Addresses with a ZIP always beat those
-without. Ties: ``preferred = 'Y'``, then the nearest start date.
+without. Ties: ``preferred = 'Y'``, then the nearest start date, then the later start, then the lowest ZIP (so the result is
+reproducible: addresses that tie on every earlier key, for example two periods that share their boundary date, otherwise
+pick one at random).
 
 RUCA labels follow the reference coding: primary code 1 = Metropolitan, 2 = Micropolitan, 3 and above = Small Town / Rural.
 USDA code 99 ("not coded") therefore lands in Small Town / Rural, as in the reference; pass ``code_99_missing=True`` to
@@ -157,7 +159,7 @@ def _index_addresses(con, stays_sql: str, address_table: str | None) -> pd.DataF
                      CASE WHEN upper(coalesce(preferred, '')) = 'Y' THEN 0 ELSE 1 END,
                      CASE WHEN rule0 = 'earliest_after' THEN date_diff('day', admit_date, st)
                           ELSE coalesce(date_diff('day', st, admit_date), 1000000) END,
-                     st DESC NULLS LAST) = 1
+                     st DESC NULLS LAST, zip5) = 1
     """).df()
 
 

@@ -19,17 +19,25 @@ extract_benchmark_features(
   lookback_days = 365,
   lab_lookback_days = 0,
   medication_specs = NULL,
-  medication_window = "pre_admission",
+  medication_window = NULL,
   lab_loincs = NULL,
   vital_loincs = NULL,
   lab_concept_ids = NULL,
   vital_concept_ids = NULL,
   derive_labs = TRUE,
+  bounds = "default",
+  profile = NULL,
+  hematocrit_fallback = NULL,
+  elixhauser_lookback_days = "lookback_days",
+  elixhauser_code_table = NULL,
+  medication_set = NULL,
+  include_protocol_history = NULL,
   ruca_crosswalk = NULL,
   sdi_table = NULL,
   sdi_cut_points = NULL,
   disposition_map = NULL,
   sdoh_fallback = "indicator",
+  address_table = "auto",
   impute = NULL,
   impute_values = NULL
 )
@@ -50,13 +58,36 @@ extract_benchmark_features(
 
 \item{medication_specs}{drug class specs (default \code{DEFAULT_MEDICATION_CONCEPTS}, 8 classes)}
 
-\item{medication_window}{frame, default \code{"pre_admission"}.}
+\item{medication_window}{\code{"pre_admission"} (default; the \code{lookback_days} before the admission), \code{"pre_discharge"} (the
+\code{lookback_days} up to and including the discharge date, as the eDERRI protocol does), \code{"inpatient"} or \code{"discharge"}.
+Default \code{NULL}: \code{"pre_discharge"} for \code{medication_set = "ederri"}, else \code{"pre_admission"}.}
 
-\item{lab_loincs, vital_loincs}{\code{list(name = c(loinc, ...))} (defaults: core-14 panel; \code{DEFAULT_VITAL_LOINCS}).}
+\item{lab_loincs, vital_loincs}{\code{list(name = c(loinc, ...))} (defaults: \code{BENCHMARK_LAB_LOINCS}, \code{BENCHMARK_VITAL_LOINCS}).}
 
 \item{lab_concept_ids, vital_concept_ids}{\code{list(name = c(concept_id))} for databases without the LOINC vocabulary.}
 
-\item{derive_labs}{add \code{lab_egfr} and \code{lab_anion_gap} (mean and \verb{_last}).}
+\item{derive_labs}{add \code{lab_egfr} and fill \code{lab_anion_gap} where none was measured (mean and \verb{_last}).}
+
+\item{bounds}{\code{"default"} (\code{DEFAULT_BOUNDS}), a named list \code{list(name = c(min, max))} overriding those names (\code{NA} leaves a
+side open) or \code{NULL} for no bounds. A single vital / lab measurement outside its bounds is dropped before the stay's mean and
+latest value are taken; WBC counts per uL are rescaled first (\code{DEFAULT_RESCALE}, off with \code{NULL}).}
+
+\item{profile}{\code{NULL} (generic definitions), \code{"ederri"} (the eDERRI protocol's: its ATC medication classes over
+\verb{[discharge - lookback_days, discharge]}, its Elixhauser ICD prefix lists over all history up to discharge, hemoglobin from
+hematocrit / 3 and its history columns) or \code{"both"} (the generic columns plus the protocol's Elixhauser flags and medication
+classes as \verb{ederri_elix_*} / \verb{ederri_med_*}, and its history columns). Any single choice can be set with the arguments
+below; an explicit argument wins over the profile.}
+
+\item{hematocrit_fallback}{fill a missing hemoglobin with hematocrit / 3. Default: \code{TRUE} for \code{profile = "ederri"}.}
+
+\item{elixhauser_lookback_days}{history window of the Elixhauser flags; \code{"lookback_days"} (default) uses \code{lookback_days},
+\code{NULL} is all history (what \code{profile = "ederri"} uses).}
+
+\item{elixhauser_code_table}{\code{"quan"}, \code{"ederri"} or \code{"both"} (the protocol's flags as \verb{ederri_elix_*}); default from \code{profile}.}
+
+\item{medication_set}{\code{"generic"}, \code{"ederri"} or \code{"both"} (the protocol's classes as \verb{ederri_med_*}); default from \code{profile}.}
+
+\item{include_protocol_history}{add \code{\link[=extract_protocol_history_features]{extract_protocol_history_features()}} columns; default \code{TRUE} for \code{profile = "ederri"} / \code{"both"}.}
 
 \item{ruca_crosswalk, sdi_table, sdi_cut_points}{inputs of \code{\link[=derive_geography_features]{derive_geography_features()}}.}
 
@@ -64,6 +95,10 @@ extract_benchmark_features(
 
 \item{sdoh_fallback}{\code{"indicator"} (default): when \code{ruca_crosswalk}, \code{sdi_table} or \code{sdi_cut_points} is missing, \code{include_sdoh = TRUE}
 gives \code{sdi_quintile} / \code{ruca_category} = NA plus \code{sdoh_missing = 1} and a warning; \code{"raise"} keeps the error. No national cut points are bundled.}
+
+\item{address_table}{dated address history for \code{include_sdoh} (columns \code{person_id}, \code{zip5}, \code{address_start}, \code{address_end},
+\code{preferred}): \code{"auto"} (default) uses \code{person_address_history} when present, else \code{person.location_id}; or a table name (for
+example a study's own \code{ederri_address_history}); \code{NULL} for \code{person.location_id}.}
 
 \item{impute}{\code{NULL}, \code{"median"} or \code{"mean"}: fill missing vital / lab values. Statistics come from this table unless \code{impute_values}
 (named numeric) is given; fit them on the training sites (\code{attr(, "imputation_values")}) and pass them to other tables.}

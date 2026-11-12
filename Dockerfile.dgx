@@ -38,8 +38,8 @@ RUN python -c "import torch; print('NGC torch', torch.__version__)" \
 COPY omop-duck-db/pyproject.toml omop-duck-db/README.md /workspace/ederri/omop-duck-db/
 COPY omop-duck-db/python /workspace/ederri/omop-duck-db/python
 COPY omop-duck-db/inst /workspace/ederri/omop-duck-db/inst
-RUN pip install -c /tmp/torch-constraint.txt -e "/workspace/ederri/omop-duck-db[deep,oracle,bundle,zarr,sklearn,ml]" \
-    && pip install -c /tmp/torch-constraint.txt xgboost shap statsmodels
+RUN pip install -c /tmp/torch-constraint.txt -e "/workspace/ederri/omop-duck-db[deep,oracle,bundle,zarr,sklearn,ml,plot,shap]" \
+    && pip install -c /tmp/torch-constraint.txt statsmodels openpyxl
 
 # omop-learn provides VisitTransformer / VisitClassifier used by pipeline/ederri_sard_deep_model.py (not on PyPI).
 COPY omop-learn-repo /workspace/ederri/omop-learn-repo
@@ -51,11 +51,12 @@ COPY pipeline /workspace/ederri/pipeline
 
 # Build-time smoke test: imports only (no GPU is visible during `docker build`).
 RUN python - <<'EOF'
-import torch, duckdb, oracledb, sqlalchemy
+import torch, duckdb, oracledb, sqlalchemy, shap, matplotlib, openpyxl, xgboost
 import omop_etl
 from omop_etl import extract_sard_visit_tensors, extract_benchmark_features
 from omop_etl.deep_dataset import extract_multimodal_deep_dataset
 from omop_etl.extract import from_sql
+from omop_etl.study_report import build_study_tables, explain_models
 print("omop_etl", omop_etl.__version__, "| torch", torch.__version__, "| duckdb", duckdb.__version__,
       "| oracledb", oracledb.__version__, "| sqlalchemy", sqlalchemy.__version__)
 EOF
