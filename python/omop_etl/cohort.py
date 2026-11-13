@@ -509,7 +509,7 @@ def get_cohort_summary(
 
 _VISIT_TYPE_CONCEPTS = {"inpatient": (9201,), "emergency": (9203,), "outpatient": (9202,)}
 _SAMPLING_RULES = ("first", "earliest", "last", "random", "stable_random")
-_AGE_METHODS = ("year_difference", "completed_years")
+_AGE_METHODS = ("completed_years", "year_difference")
 _DEATH_SOURCES = ("death_table", "discharge_disposition")
 _FOLLOWUP_EVIDENCE = ("observation_period", "visit", "measurement", "condition", "drug", "death")
 _MORTALITY_TYPES = ("in_hospital", "post_discharge", "fixed_window", "composite_readmit_or_death")
@@ -566,7 +566,7 @@ class _StudySpec:
     study_start: str | None = None
     study_end: str | None = None
     min_age: int | None = 18
-    age_method: str = "year_difference"
+    age_method: str = "completed_years"
     min_los_days: int | None = 1
     washin_days: int = 365
     exclude_death: bool = True
@@ -1467,7 +1467,7 @@ def define_study_cohort(
     death_sources: str | Sequence[str] | None = None,
     transfer_discharge_concept_ids: int | Sequence[int] | None = None,
     followup_evidence: str | Sequence[str] | None = None,
-    age_method: str = "year_difference",
+    age_method: str = "completed_years",
     cohort_definition_id: int = 1,
     outcome_cohort_id: int | None = None,
     cohort_name: str | None = None,
@@ -1599,10 +1599,11 @@ def define_study_cohort(
         ``'visit'`` (another visit's start), ``'measurement'``, ``'condition'``, ``'drug'`` (record dates) and
         ``'death'`` (death date). Default: the four record types for readmission / cohort-only, all six for
         mortality outcomes.
-    age_method : {"year_difference", "completed_years"}, default "year_difference"
-        ``year_difference`` (legacy, the default for equivalence) is ``date_diff('year', birth, index_start)``, the
-        number of calendar-year boundaries crossed, which overstates age by one year before the birthday.
-        ``completed_years`` is the exact age in whole years (``date_sub``). Missing birth month / day count as 1.
+    age_method : {"completed_years", "year_difference"}, default "completed_years"
+        ``completed_years`` is the exact age in whole years on the index date (``date_sub``). ``year_difference``
+        (deprecated, kept to reproduce older results) is ``date_diff('year', birth, index_start)``, the number of
+        calendar-year boundaries crossed, which overstates age by one year before the birthday and so admits people
+        just under ``min_age``; it emits a ``FutureWarning``. Missing birth month / day count as 1.
     cohort_definition_id : int, default 1
         Id written to ``cohort`` / ``cohort_definition``.
     outcome_cohort_id : int, optional
@@ -1745,6 +1746,11 @@ def define_study_cohort(
     method = str(age_method).strip().lower()
     if method not in _AGE_METHODS:
         raise ValueError(f"Unsupported age_method '{age_method}'. Use one of {_AGE_METHODS}.")
+    if method == "year_difference":
+        warnings.warn(
+            "age_method='year_difference' is deprecated: it counts calendar-year boundaries, so it overstates age "
+            "by one year before the birthday and admits people younger than min_age. Use the default "
+            "'completed_years'.", FutureWarning, stacklevel=2)
     if schema is not None:
         _quote_ident_path(schema, "schema", 2)
     if table_name is not None:
@@ -2001,7 +2007,7 @@ def build_readmission_cohort(
     spec = _StudySpec(
         cohort_id=int(cohort_id), outcome="readmission", label="all_cause_readmission",
         visit_ids=_legacy_ids(target_visit_concept_ids), outcome_visit_ids=_legacy_ids(outcome_visit_concept_ids),
-        min_age=18, age_method="year_difference", min_los_days=1,
+        min_age=18, age_method="completed_years", min_los_days=1,
         washin_days=int(washin_days) if washin_days and washin_days > 0 else 0,
         exclude_death=True, death_ids=_READMISSION_CONVENTIONS["death_ids"],
         death_sources=_READMISSION_CONVENTIONS["death_sources"], transfer_ids=_READMISSION_CONVENTIONS["transfer_ids"],
@@ -2100,7 +2106,7 @@ def build_end_of_life_cohort(
     spec = _StudySpec(
         cohort_id=int(cohort_id), outcome=outcome, label=m_type, schema=schema,
         visit_ids=_legacy_ids(target_visit_concept_ids), outcome_visit_ids=_legacy_ids(outcome_visit_concept_ids),
-        min_age=int(min_age), age_method="year_difference", min_los_days=min_los,
+        min_age=int(min_age), age_method="completed_years", min_los_days=min_los,
         washin_days=int(washin_days) if washin_days and washin_days > 0 else 0,
         exclude_death=exclude, death_ids=_END_OF_LIFE_CONVENTIONS["death_ids"],
         death_sources=_END_OF_LIFE_CONVENTIONS["death_sources"],

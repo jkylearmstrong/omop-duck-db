@@ -375,7 +375,7 @@ cm_database_details <- function(db_path,
 #' @return A `plpData` object (`cohorts`, `outcomes`, `covariateData`, `timeRef`, `metaData`).
 #' @export
 as_plp_data <- function(sparse_result, con, target_id = 1L, outcome_id = 1L, days_to_event = 1, cohort_end_days = 0) {
-  for (pkg in c("Andromeda", "Matrix")) {
+  for (pkg in c("Andromeda", "Matrix", "FeatureExtraction")) {
     if (!requireNamespace(pkg, quietly = TRUE)) stop(sprintf("as_plp_data() needs the '%s' package.", pkg), call. = FALSE)
   }
   if (!inherits(con, "duckdb_connection")) stop("`con` must be a DuckDB connection (duckdb::duckdb()).", call. = FALSE)
@@ -465,7 +465,10 @@ as_plp_data <- function(sparse_result, con, target_id = 1L, outcome_id = 1L, day
   # Same construction FeatureExtraction uses for its own CovariateData objects.
   covariate_data <- Andromeda::andromeda(covariates = covariates, covariateRef = covariate_ref, analysisRef = analysis_ref)
   attr(covariate_data, "metaData") <- list(populationSize = nrow(cohorts), cohortIds = as.integer(target_id))
-  class(covariate_data) <- "CovariateData"
+  # The S4 class lives in FeatureExtraction. Setting the bare string from this namespace cannot see that class
+  # definition, which leaves an object whose `$` / `[[` methods do not dispatch (newer Andromeda), so take the
+  # class name with its package attribute from FeatureExtraction.
+  class(covariate_data) <- methods::getClass("CovariateData", where = asNamespace("FeatureExtraction"))@className
 
   structure(
     list(

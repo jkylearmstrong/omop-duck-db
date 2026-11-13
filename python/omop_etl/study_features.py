@@ -105,7 +105,7 @@ class StudyContext:
             table = self.address_table
             if table == "auto":
                 table = _ADDRESS_TABLE if (_has_table(self.con, _ADDRESS_TABLE)
-                                           and self.con.execute(f"SELECT count(*) FROM {_ADDRESS_TABLE}").fetchone()[0]) else None
+                                           and self.con.execute(f"SELECT count(*) FROM {_ADDRESS_TABLE}").fetchall()[0][0]) else None
             if table is not None and not table.replace("_", "").isalnum():
                 raise ValueError(f"invalid address table name {table!r}.")
             self.con.register("_sf_stays", self.stays[list(_KEY)])

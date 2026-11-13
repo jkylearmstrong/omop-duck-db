@@ -240,7 +240,7 @@ def calculate_bedside_scores(
                 SELECT 
                     c.person_id,
                     c.cohort_start_date,
-                    date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age,
+                    date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age,
                     CASE WHEN p.gender_concept_id = 8532 THEN 1 ELSE 0 END AS is_female,
                     -- Congestive heart failure (1 pt)
                     MAX(CASE WHEN cond.condition_concept_id IN (316139, 434056, 433435, 4185932, 314378) 

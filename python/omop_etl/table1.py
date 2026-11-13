@@ -65,7 +65,9 @@ def _calc_smd_continuous(s1: pd.Series, s0: pd.Series) -> float | None:
     v1, v0 = float(s1_clean.var()), float(s0_clean.var())
     pooled_sd = math.sqrt((v1 + v0) / 2.0)
     if pooled_sd <= 1e-9:
-        return 0.0
+        # Both groups are constant. Equal constants are balanced; different constants are perfectly separated
+        # (infinite SMD), never "0.0 = perfect balance".
+        return 0.0 if abs(m1 - m0) <= 1e-9 else math.inf
     return abs(m1 - m0) / pooled_sd
 
 
@@ -73,7 +75,8 @@ def _calc_smd_binary(p1: float, p0: float) -> float | None:
     """Calculates SMD for binary proportions."""
     denom = math.sqrt((p1 * (1.0 - p1) + p0 * (1.0 - p0)) / 2.0)
     if denom <= 1e-9:
-        return 0.0
+        # p1, p0 each in {0, 1}: identical means balanced, different (e.g. 0 vs 1) means perfectly separated.
+        return 0.0 if abs(p1 - p0) <= 1e-9 else math.inf
     return abs(p1 - p0) / denom
 
 

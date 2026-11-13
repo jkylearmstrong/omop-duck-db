@@ -1,0 +1,127 @@
+---
+title: "Building the database, vocabulary and concept mapping"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Building the database, vocabulary and concept mapping}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+Build the CDM schema, load or refresh the Athena vocabulary, attach a central vocabulary with `omop_connect()`, and import custom or Usagi mappings.
+
+Code blocks on this page are illustrative and are not run when the package is built. R and Python examples are labelled; a feature marked "Python only" has no R counterpart.
+
+1.  Generate the CDM v5.4 schema and load the vocabulary:
+
+    ``` r
+    library(omopduckdb)
+    build_schema("omop_cdm.duckdb")
+    load_vocabulary("path/to/vocabulary_download", "omop_cdm.duckdb")
+    ```
+
+2.  Map a source directory into the CDM, with either implementation
+    (they read the same source layout and produce equivalent output):
+
+    ``` r
+    etl_pcornet("path/to/source_extract", "omop_cdm.duckdb")
+    ```
+
+    ``` bash
+    python -m omop_etl.build_omop_cdm --source-dir path/to/source_extract
+    ```
+
+Command-line equivalents of the R functions live in `inst/scripts/`,
+e.g.
+`Rscript inst/scripts/etl_pcornet.R --source-dir path/to/source_extract`.
+
+## Refreshing the vocabulary
+
+- From a new download:
+  `load_vocabulary("path/to/new_download", "omop_cdm.duckdb")`. Each
+  table is truncated and reloaded inside its own transaction with a
+  row-count sanity check, so a bad/partial file can only fail that one
+  table (rolled back, left untouched), not half-clobber the rest of the
+  vocabulary.
+
+- Live, from BigQuery (e.g. a public or your own OMOP-shaped dataset):
+  `load_from_bigquery(billing_project = "...", dataset = "...", tables = c("concept", "concept_ancestor", "concept_relationship"))`.
+  A GCP project ID is required for query billing/quota even against
+  public datasets (set one in `config/bigquery.yml`, copied from
+  `config/bigquery.yml.example`).
+
+  **First-time auth**: the BigQuery OAuth flow needs an interactive R
+  session to open a browser — it fails silently if run non-interactively
+  before a token exists. Run this once, in an interactive session (not
+  `Rscript`), and approve the browser prompt:
+
+  ``` r
+  bigrquery::bq_auth()
+  ```
+
+  The resulting token is cached and reused by later non-interactive
+  runs.
+
+## Transparent Central Vocabulary & Single-Store Architecture (`omop_connect`)
+
+Instead of duplicating 10–15 GB of Athena vocabulary tables inside every
+site-specific CDM database, `omop_connect()` attaches a shared central
+vocabulary database read-only (`central_vocab`) and automatically
+injects DuckDB’s `search_path = 'main,central_vocab'`. All queries
+seamlessly resolve `concept`, `concept_ancestor`, and vocabulary macros
+without schema qualification:
+
+``` r
+library(omopduckdb)
+
+# Auto-discovers sibling central_vocabulary.duckdb or connects with explicit path
+con <- omop_connect("omop_cdm.duckdb")
+DBI::dbGetQuery(con, "SELECT COUNT(*) FROM concept;")
+```
+
+In Python:
+
+``` python
+from omop_etl import omop_connect
+
+con = omop_connect("omop_cdm.duckdb")
+con.execute("SELECT COUNT(*) FROM concept").fetchone()
+```
+
+## Custom mapping and retroactive remapping
+
+When standard Athena vocabularies lack mappings for site-specific or
+unmapped codes:
+
+1.  **Audit unmapped codes**:
+
+    ``` r
+    con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
+    export_unmapped_codes(con, "condition_occurrence", "unmapped_conditions.csv")
+    ```
+
+2.  **Import custom crosswalks or Usagi exports**:
+
+    ``` r
+    # Load custom source_to_concept_map CSV
+    import_source_to_concept_map(con, "mappings.csv")
+
+    # Or import OHDSI Usagi review export CSV
+    import_usagi_mappings(con, "usagi_reviewed.csv")
+    ```
+
+3.  **Retroactively remap populated CDM tables**:
+
+    ``` r
+    # Preview changes without modifying data (dry run)
+    remap_cdm_table(con, "condition_occurrence", dry_run = TRUE)
+
+    # Apply remapping across all tables and rebuild condition/drug eras
+    remap_all(con)
+    ```
+
+Equivalent functions are available in Python via
+`from omop_etl import remap_all, import_usagi_mappings`.

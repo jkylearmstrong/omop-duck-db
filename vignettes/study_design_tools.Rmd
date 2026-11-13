@@ -1,0 +1,92 @@
+---
+title: "Study-design features and tools for a downstream study"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Study-design features and tools for a downstream study}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+Add person-level features, evaluate Circe cohorts, reconcile cohorts, bundles and the DQD catalog.
+
+Code blocks on this page are illustrative and are not run when the package is built. R and Python examples are labelled; a feature marked "Python only" has no R counterpart.
+
+A protocol often needs something OMOP does not define: the rural-urban code of the home ZIP, an area deprivation index, ACS median
+household income. A `feature_set` collects such *study-design features*, computes them for the index stays (the address in effect at
+admission is resolved once), and writes them as `measurement` rows under site-defined concepts so **OHDSI FeatureExtraction,
+PatientLevelPrediction and DeepPatientLevelPrediction read them like any other covariate**. The package ships the framework and
+worked examples (RUCA, SDI, any ZIP-keyed table), never the reference data. SDI and RUCA keep the concept ids of
+`GEOGRAPHY_CONCEPT_IDS`, so earlier work stays compatible.
+
+```r
+fs <- feature_set() |>
+  add_feature(ruca_feature("ruca_crosswalk.csv")) |>
+  add_feature(sdi_feature("sdi.csv", cut_points = c(20.8, 40.6, 60.4, 80.2))) |>   # the training cohort's fixed cuts
+  add_feature(area_feature("income", "acs_b19013.csv", "median_income", transform = "log1p"))
+
+wide     <- compute_features(fs, con, stays_from_cohort(con, "cohort"))   # one row per stay, leakage-free
+concepts <- write_feature_set(fs, con, wide)                              # measurement rows
+cov      <- FeatureExtraction::getDbCovariateData(
+  connection = conn, cdmDatabaseSchema = "main", cohortTable = "cohort", cohortIds = 1, rowIdField = "subject_id",
+  covariateSettings = feature_set_covariate_settings(fs, concepts))       # or feature_set_extraction_r(fs, concepts) as text
+```
+
+```python
+fs = (FeatureSet().add(ruca_feature("ruca_crosswalk.csv"))
+      .add(sdi_feature("sdi.csv", cut_points=[20.8, 40.6, 60.4, 80.2]))
+      .add(area_feature("income", "acs_b19013.csv", "median_income", transform="log1p")))
+wide = fs.compute(con, stays_from_cohort(con, "cohort")); concepts = fs.write(con, wide)
+```
+
+Transforms that learn from data (SDI cut points, a percentile grid, a mean and sd, an imputation median) are fitted once on the
+training sites with `fit = TRUE`, stored as the feature's state, and shipped in a manifest; at another site they are loaded, never
+refitted, and refuse to run without them. This prevents quintile drift and keeps income comparable across sites (a *percentile of
+the training distribution* transports, raw dollars can identify the site). The manifest is the same JSON in Python and R.
+
+```r
+export_feature_manifest(fs_train, "study_features.json")     # after compute_features(fs_train, con, fit = TRUE)
+load_feature_state(fs_site, "study_features.json")           # at the replicating site
+```
+
+Add your own with `sql_feature()` (a query over a `_stays` view), `custom_feature()` (an R or Python function) or a full
+`study_feature()`, and register new kinds with `register_feature_factory()`. Vignettes: *Study-design features*, *Study features
+across sites* and *Study-design features in Python*.
+
+## Tools for a downstream study
+
+The package supports studies that use the validated OHDSI tools (FeatureExtraction, PatientLevelPrediction, CohortGenerator) on DuckDB
+and adds what they lack. `inst/examples/study_walkthrough.R` / `.py` run all of the following on a small synthetic CDM; each step is a
+few lines to copy.
+
+``` r
+# 1. Cohorts as Circe JSON, evaluated without Java or a WebAPI (the definitions ship in cohort_definitions_dir())
+cohort <- execute_circe_cohort(con, file.path(cohort_definitions_dir(), "target_cohort.circe.json"))
+
+# 2. A legacy patient list against that cohort: who is found, and the first step that excludes everyone else
+rec <- reconcile_cohort(con, "legacy_patients.csv", definition = file.path(cohort_definitions_dir(), "target_cohort.circe.json"),
+                        id_col = "patient_id", index_date_col = "admit_date", min_cell = 11)
+
+# 3. Your own version of a feature (a Charlson index, RUCA/SDI) next to the standard one, readable by FeatureExtraction / PLP
+#    (see 'Study-design features' above for feature_set(), which also fits and ships the transforms);
+#    concept ids are per database, so share a registry across sites and check it
+ids <- write_custom_features(con, features)               # person_id, date, one numeric column per feature
+export_custom_concept_registry(con, "custom_concepts.json")
+check_custom_concepts(con, "other_site_registry.json")
+
+# 4. Is the feature worth keeping? Are two model runs really different? (aggregate output only)
+ablate_feature_groups(x, y, list(charlson_site = "charlson_site"))
+compare_model_runs(run_a, run_b)
+
+# 5. A bundle that records the concept ids it was trained with and refuses a site where they differ
+score_cohort(bundle, new_patients, check_concepts = con)
+
+# data quality: the schema-driven DQD catalog (checked against the official DataQualityDashboard)
+run_dqd_catalog(con)
+```
+
+The same functions exist in Python (`from omop_etl import ...`). The native Circe compiler evaluates a subset of Circe and refuses the
+rest with an error naming the construct; see `OHDSI_INTEGRATION.md` for what was checked against the official engines.

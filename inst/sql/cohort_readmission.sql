@@ -10,11 +10,11 @@ CREATE OR REPLACE MACRO calc_los_days(start_date, end_date) AS
 
 -- Macro: Calculate Age at reference date
 CREATE OR REPLACE MACRO calc_age_at_date(birth_year, birth_month, birth_day, ref_date) AS 
-  date_diff('year', make_date(birth_year, COALESCE(birth_month, 1), COALESCE(birth_day, 1)), CAST(ref_date AS DATE));
+  date_sub('year', make_date(birth_year, COALESCE(birth_month, 1), COALESCE(birth_day, 1)), CAST(ref_date AS DATE));
 
 -- Macro: Standard Adult check (Age >= 18)
 CREATE OR REPLACE MACRO is_adult(birth_year, birth_month, birth_day, ref_date) AS 
-  (date_diff('year', make_date(birth_year, COALESCE(birth_month, 1), COALESCE(birth_day, 1)), CAST(ref_date AS DATE)) >= 18);
+  (date_sub('year', make_date(birth_year, COALESCE(birth_month, 1), COALESCE(birth_day, 1)), CAST(ref_date AS DATE)) >= 18);
 
 -- Macro: Discharged alive check (OMOP concept 4216643 = 'Patient died')
 CREATE OR REPLACE MACRO is_discharged_alive(discharged_to_concept_id) AS 

@@ -500,3 +500,54 @@ reference:
   - rollups
   - spec_hash
   - suggest_source_mappings
+- title: Other exported functions and constants
+  desc: Study-feature, disclosure, calibration and constant helpers not grouped above.
+  contents:
+  - BENCHMARK_VITAL_LOINCS
+  - DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS
+  - DEFAULT_ADMITTING_CONDITION_TYPE_CONCEPT_IDS
+  - DEFAULT_DISPENSED_TYPE_CONCEPT_IDS
+  - DEFAULT_EMERGENCY_VISIT_TYPE_CONCEPT_IDS
+  - DEFAULT_INPATIENT_VISIT_TYPE_CONCEPT_IDS
+  - DEFAULT_LAB_RESULT_MEASUREMENT_TYPE_CONCEPT_IDS
+  - DEFAULT_ORDER_MEASUREMENT_TYPE_CONCEPT_IDS
+  - DEFAULT_OUTPATIENT_VISIT_TYPE_CONCEPT_IDS
+  - DEFAULT_POC_MEASUREMENT_TYPE_CONCEPT_IDS
+  - DEFAULT_PRIMARY_CONDITION_TYPE_CONCEPT_IDS
+  - DEFAULT_PROBLEM_LIST_CONDITION_TYPE_CONCEPT_IDS
+  - DEFAULT_RESCALE
+  - MAX_LONGITUDINAL_VISITS
+  - MAX_TOKENS_PER_VISIT
+  - VOCAB_SIZE
+  - add_feature
+  - area_feature
+  - assert_disclosure_safe
+  - available_features
+  - calibration_summary
+  - check_etl_keys
+  - check_feature_set
+  - custom_feature
+  - export_feature_manifest
+  - extract_features
+  - feature_list
+  - feature_set_columns
+  - feature_set_extraction_r
+  - feature_set_manifest
+  - format_count
+  - import_concept_vocabulary
+  - isotonic_apply
+  - load_feature_state
+  - load_vital
+  - make_feature
+  - map_risk_tiers
+  - platt_scaling_apply
+  - remove_feature
+  - ruca_feature
+  - run_manifest_add_input
+  - sdi_feature
+  - small_cell_mask
+  - sql_feature
+  - suppress_attrition_table
+  - suppress_small_counts
+  - tier_load
+  - update_monitoring_log

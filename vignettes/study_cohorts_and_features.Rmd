@@ -1,0 +1,312 @@
+---
+title: "Study cohorts, comorbidity, sanitisation and Table 1"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Study cohorts, comorbidity, sanitisation and Table 1}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+The cohort engine, comorbidity profiling, measurement sanitisation, readmission cohorts, temporal features, concept rollups, Table 1 and benchmark reconciliation.
+
+Code blocks on this page are illustrative and are not run when the package is built. R and Python examples are labelled; a feature marked "Python only" has no R counterpart.
+
+The package provides an end-to-end epidemiological pipeline for
+observational studies, featuring flexible index stay definition,
+validated comorbidity profiling, physiologic range sanitization, Athena
+concept hierarchy rollups, LOINC laboratory consolidation, and
+publication Table 1 generation.
+
+## 1. Unified Study Cohort Engine (`define_study_cohort`)
+
+Generalizes acute inpatient, emergency department, and outpatient index
+cohorts with customizable wash-in windows, right-censoring verification,
+and outcome definitions:
+
+``` r
+library(omopduckdb)
+
+con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
+
+# Build general study cohort (or specialized build_readmission_cohort / build_end_of_life_cohort)
+cohort_df <- define_study_cohort(
+  con,
+  visit_type = "inpatient",
+  washin_days = 365,
+  followup_days = 30,
+  min_age = 18,
+  min_los_days = 1,
+  sampling_rule = "first",
+  require_verified_followup = TRUE,
+  table_name = "cohort"
+)
+```
+
+In Python:
+
+``` python
+from omop_etl import define_study_cohort
+
+cohort_df = define_study_cohort(
+    con,
+    visit_type="inpatient",
+    washin_days=365,
+    followup_days=30,
+    min_age=18,
+    min_los_days=1,
+    sampling_rule="first",
+    require_verified_followup=True,
+    table_name="cohort"
+)
+```
+
+## 2. Comorbidity Profiling: 31 Elixhauser Domains & Charlson Index
+
+Computes validated comorbidity profiles in one set-based DuckDB query
+over the cohort with zero object leakage on read-only connections.
+Automatically evaluates both ICD-9/10 prefixes
+(`condition_source_value`) and SNOMED descendants
+(`condition_concept_id`):
+
+``` r
+# Extract 31 Elixhauser domains + composite van Walraven score
+elix_df <- extract_elixhauser_comorbidities(con, cohort_table = "cohort", lookback_days = 365)
+
+# Extract 17 Quan-Charlson categories + Charlson Comorbidity Index
+cci_df <- extract_charlson_index(con, cohort_table = "cohort", lookback_days = 365)
+```
+
+In Python:
+
+``` python
+from omop_etl import extract_elixhauser_comorbidities, extract_charlson_index
+
+elix_df = extract_elixhauser_comorbidities(con, cohort_table="cohort", lookback_days=365)
+cci_df = extract_charlson_index(con, cohort_table="cohort", lookback_days=365)
+```
+
+## 3. Physiologic Measurement Sanitization & Outlier Winsorization (`sanitize_measurements`)
+
+Cleans laboratory and vital measurements against 136 standard OHDSI
+DataQualityDashboard biological plausibility limits or statistical
+IQR/z-score winsorization:
+
+``` r
+# Clamps out-of-bounds measurements to DQD biological plausibility limits
+clean_labs <- sanitize_measurements(
+  con,
+  method = "dqd_biologic_limits",
+  action = "clamp"
+)
+```
+
+In Python:
+
+``` python
+from omop_etl import sanitize_measurements
+
+clean_labs = sanitize_measurements(
+    con,
+    method="dqd_biologic_limits",
+    action="clamp"
+)
+```
+
+## 4. Build Inpatient Readmission Cohort (`build_readmission_cohort`)
+
+Constructs index inpatient stays (`visit_concept_id = 9201`) among adult
+patients ($\ge 18$) with length of stay $\ge 1$ day, discharged alive,
+and verified 30-day follow-up (requiring either a readmission or
+confirmed clinical contact $\ge 30$ days post-discharge to prevent
+right-censoring):
+
+``` r
+library(omopduckdb)
+
+con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
+
+# Build cohort into OMOP cohort table (cohort_definition_id = 1)
+cohort_df <- build_readmission_cohort(
+  con,
+  washin_days = 365,
+  followup_window_days = 30,
+  index_selection_rule = "random",
+  random_state = 42,
+  require_verified_followup = TRUE,
+  table_name = "cohort"
+)
+```
+
+In Python:
+
+``` python
+import duckdb
+from omop_etl import build_readmission_cohort
+
+con = duckdb.connect("omop_cdm.duckdb")
+cohort_df = build_readmission_cohort(
+    con,
+    washin_days=365,
+    followup_window_days=30,
+    index_selection_rule="random",
+    random_state=42,
+    require_verified_followup=True,
+    table_name="cohort"
+)
+```
+
+## 5. Extract Temporal Utilization & Demographic Features
+
+Aggregates windowed baseline healthcare utilization (IP, ED, OP
+encounter counts, days since prior visit, prior 30-day readmissions in
+lookback), index length of stay, discharge disposition, and
+demographics:
+
+``` r
+temporal_features <- extract_temporal_features(
+  con,
+  cohort_table = "cohort",
+  cohort_id = 1,
+  lookback_days = 365
+)
+```
+
+In Python:
+
+``` python
+from omop_etl import extract_temporal_features
+
+temporal_features = extract_temporal_features(
+    con,
+    cohort_table="cohort",
+    cohort_id=1,
+    lookback_days=365
+)
+```
+
+## 6. Athena Concept Hierarchy Rollup & Consolidated Measurements
+
+Traverse Athena’s `concept_ancestor` table to aggregate medication or
+condition classes, and extract consolidated lab panels and physical
+vitals using acute pre-discharge aggregation strategies:
+
+``` r
+# Aggregate medication exposure using Athena ancestor traversal
+med_features <- aggregate_concept_sets(
+  con,
+  cohort_table = "cohort",
+  cohort_id = 1,
+  domain = "drug",
+  concept_sets = DEFAULT_MEDICATION_CONCEPTS,
+  lookback_days = 365
+)
+
+# Extract acute pre-discharge laboratory and vital measurements
+lab_features <- extract_measurements(
+  con,
+  cohort_table = "cohort",
+  cohort_id = 1,
+  loinc_map = DEFAULT_LAB_LOINCS,
+  strategy = "last_before_discharge"
+)
+```
+
+In Python:
+
+``` python
+from omop_etl import (
+    aggregate_concept_sets,
+    extract_measurements,
+    DEFAULT_MEDICATION_CONCEPTS,
+    DEFAULT_LAB_LOINCS
+)
+
+med_features = aggregate_concept_sets(
+    con,
+    cohort_table="cohort",
+    cohort_id=1,
+    domain="drug",
+    concept_sets=DEFAULT_MEDICATION_CONCEPTS,
+    lookback_days=365
+)
+
+lab_features = extract_measurements(
+    con,
+    cohort_table="cohort",
+    cohort_id=1,
+    loinc_map=DEFAULT_LAB_LOINCS,
+    strategy="last_before_discharge"
+)
+```
+
+## 7. Stratified Table 1 Generation & Completeness Matrix
+
+Generates baseline descriptive tables (continuous: Mean +/- SD, Median
+\[IQR\]; categorical: N \[%\]) stratified by outcome (e.g.,
+`readmitted_30d`), calculating Standardized Mean Differences (SMD) and
+statistical tests, along with a Table 1b completeness audit:
+
+``` r
+table1_out <- generate_table1(
+  patient_df,
+  strata_col = "readmitted_30d",
+  continuous_vars = c("age_at_admission", "los_days", "prior_ed_visits"),
+  categorical_vars = c("gender", "race", "tobacco_status")
+)
+
+# Baseline summary with SMD and p-values
+print(table1_out$table1)
+
+# Missingness and completeness audit
+print(table1_out$table1b)
+```
+
+In Python:
+
+``` python
+from omop_etl import generate_table1
+
+res = generate_table1(
+    patient_df,
+    strata_col="readmitted_30d",
+    continuous_vars=["age_at_admission", "los_days", "prior_ed_visits"],
+    categorical_vars=["gender", "race", "tobacco_status"]
+)
+t1_df, t1b_df = res["table1"], res["table1b"]
+```
+
+## 8. Benchmark Reconciliation & Validation Harness
+
+Validates prospective OMOP Table 1 statistics against benchmark datasets
+with configurable absolute tolerance thresholds, flagging distribution
+drift and missing features:
+
+``` r
+reconciliation <- validate_table1_reconciliation(
+  omop_table1 = table1_out$table1,
+  source_table1 = benchmark_table1,
+  tolerance = 0.05
+)
+
+if (!isTRUE(reconciliation$is_concordant)) {
+  warning("Table 1 discrepancy detected!")
+  print(reconciliation$feature_comparisons)
+}
+```
+
+In Python:
+
+``` python
+from omop_etl import validate_table1_reconciliation
+
+reconciliation = validate_table1_reconciliation(
+    omop_table1=t1_df,
+    source_table1=benchmark_table1,
+    tolerance=0.05
+)
+print("Reconciliation passed:", reconciliation["is_concordant"])
+```

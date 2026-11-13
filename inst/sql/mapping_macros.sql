@@ -79,6 +79,7 @@ CREATE OR REPLACE MACRO parse_omop_date(col) AS (
         TRY_STRPTIME(col, '%d-%b-%Y'),
         TRY_STRPTIME(col, '%Y-%m-%d'),
         TRY_STRPTIME(col, '%m/%d/%Y'),
+        TRY_STRPTIME(col, '%Y%m%d'),
         TRY_CAST(TRY_CAST(col AS TIMESTAMP) AS DATE)
     )
 );
@@ -99,6 +100,11 @@ CREATE OR REPLACE MACRO normalize_time_str(t) AS (
         WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}$') THEN '0' || trim(t) || ':00'
         WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}:[0-9]{2}$') THEN '0' || trim(t)
         WHEN regexp_matches(trim(t), '^[0-9]{2}:[0-9]{2}$') THEN trim(t) || ':00'
+        -- bare digits: '415' / '0415' -> 04:15, '041530' -> 04:15:30
+        WHEN regexp_matches(trim(t), '^[0-9]{3,4}$') THEN
+            substr(lpad(trim(t), 4, '0'), 1, 2) || ':' || substr(lpad(trim(t), 4, '0'), 3, 2) || ':00'
+        WHEN regexp_matches(trim(t), '^[0-9]{6}$') THEN
+            substr(trim(t), 1, 2) || ':' || substr(trim(t), 3, 2) || ':' || substr(trim(t), 5, 2)
         ELSE trim(t)
     END
 );
@@ -112,6 +118,7 @@ CREATE OR REPLACE MACRO parse_omop_datetime(date_col, time_col) AS (
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d-%b-%Y %H:%M:%S'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d-%b-%Y %H:%M'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y-%m-%d %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y%m%d %H:%M:%S'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y-%m-%d %H:%M'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%m/%d/%Y %H:%M:%S'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%m/%d/%Y %H:%M'),

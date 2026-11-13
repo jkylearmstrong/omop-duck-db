@@ -12,11 +12,11 @@ Internal working notes on where this package came from, architecture decisions, 
 - **Schema is generated, never hand-declared.** `inst/extdata/5.4/duckdb/*.sql` (from OHDSI's `CommonDataModel` R package) is the single source of truth for both ETL paths — this is why `kyle_out_zip`'s bridging script calls this package's real entrypoint instead of writing new mapping SQL; a hand-rolled alternative (`kyle_out_zip/omop_duckdb_gpu_server_integration_plan.md`) diverged from this and would have produced a broken database (wrong ID scheme, wrong glob paths, invented columns).
 - **Consortium Zero-Copy Federation:** Base table views (`CREATE OR REPLACE VIEW {tbl} AS SELECT * FROM v_{tbl}`) alongside prefixed `v_{tbl}` views allow standard ETL routines, scoring calculators, and measurement extractors to run transparently against attached multi-site consortia without bespoke SQL rewriting.
 
-## Current status (v0.6.1)
+## Current status (v0.20.0; the capability list below was written at v0.6.1)
 
 Verified directly against source and comprehensive test suites:
 
-- **Full 1:1 Parity**: All ETL capabilities, feature extractions, phenotyping, scoring, and reporting exist in both Python (`omop_etl` / `omop_duck_db`) and R (`omopduckdb`).
+- **Close, not full, R/Python parity**: the ETL, cohort engine, comorbidity, sanitisation, Table 1 and scoring exist in both languages with near-identical signatures. Python-only: `extract_sard_visit_tensors()` (R has `extract_longitudinal_tensors()`), `extract_multimodal_deep_dataset()` and the tensor/memmap/Arrow/Zarr output, the manuscript pipeline (`run_study`, `build_study_tables`), `run_achilles()`, `mapping_coverage_report()`, `site_export`, FHIR and cluster helpers. R-only: `as_plp_data()`, `load_from_bigquery()`, `gdrive_*`, the HADES/tidymodels bridges, ONNX export. Deliberate shape differences (Python classes vs R functions/S3, `format=` on three extractors, `generate_table1` dict vs list) are listed in the README. The parity tests compare outputs, not the duplicated code tables.
 - **Core Capabilities (v0.6.0)**:
   1. *Staged Wide Measurements & Plausibility Bounds*: Sequential unpivot, BMI coalescing, physiologic plausible filters (`filter_bounds`, `DEFAULT_PHYSIOLOGIC_BOUNDS`, `POPULATION_PHYSIOLOGIC_BOUNDS`).
   2. *Standardized Phenotyping & Cohorts*: Composable criterion trees (`ConditionCriteria`, `DrugCriteria`, `MeasurementCriteria`), readmission cohorts (`define_study_cohort`), Elixhauser and Charlson comorbidity scoring with train/serve skew protection.

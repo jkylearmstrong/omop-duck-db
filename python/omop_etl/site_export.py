@@ -88,6 +88,7 @@ def export_site_summary(
     parity: Any = None,
     tables: Mapping[str, pd.DataFrame] | None = None,
     count_cols: Mapping[str, Sequence[str]] | None = None,
+    group_cols: Mapping[str, Sequence[str]] | None = None,
     min_cell: int = DEFAULT_MIN_CELL,
     con: Any = None,
     inputs: Sequence[str | Path] = (),
@@ -103,7 +104,11 @@ def export_site_summary(
             suppressed.
         parity: A :class:`~omop_etl.parity.ParityAudit` created with a ``min_cell``; its three CSVs are written.
         tables: Extra aggregate tables ``{name: DataFrame}`` -> ``<name>.csv``. ``count_cols[name]`` lists the count columns to
-            suppress; a table without count columns is checked for identifiers but written as it is.
+            suppress; a table without count columns is checked for identifiers but written as it is, and a table that
+            carries an unlisted count-like integer column (``n``, ``count``, ``*_n``, ``total``...) is refused.
+            ``group_cols[name]`` names the column(s) whose groups publish a total or margin beside the cells: with it a group
+            left with one blanked cell also has its smallest remaining cell blanked, so the blank cannot be recovered by
+            subtracting from the total (complementary suppression).
         min_cell: Counts from 1 to ``min_cell - 1`` are suppressed. Must be at least 2: a package never ships raw small cells.
         con: Optional DuckDB connection; its vocabulary release goes into the manifest.
         inputs: Input files (hashed into the manifest). Only their file names are recorded, never their paths.
@@ -143,8 +148,15 @@ def export_site_summary(
             raise SiteSummaryError(f"table name {name!r} is not a valid, unused file stem")
         assert_aggregate_only(frame, name, max_rows=max_rows)
         cc = list((count_cols or {}).get(name, []))
+        unlisted = _unlisted_count_columns(frame, cc)
+        if unlisted:
+            raise SiteSummaryError(
+                f"table {name!r} has count-like integer column(s) {unlisted} not listed in count_cols; "
+                "unsuppressed small counts would ship. List them in count_cols (or rename them if they are not counts)."
+            )
         if cc:
-            frame = suppress_small_counts(frame, cc, min_cell, complementary=False)
+            gb = list((group_cols or {}).get(name, [])) or None
+            frame = suppress_small_counts(frame, cc, min_cell, complementary=True, group_by=gb)
         _write(name, frame)
 
     if not written:
@@ -163,6 +175,17 @@ def export_site_summary(
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str), encoding="utf-8")
     written["manifest"] = path
     return written
+
+
+_COUNT_LIKE = re.compile(r"(^(n|count|cnt|num|total|freq|frequency)($|_))|(_(n|count|cnt|total|freq)$)", re.IGNORECASE)
+
+
+def _unlisted_count_columns(frame: pd.DataFrame, listed: Sequence[str]) -> list[str]:
+    """Integer columns whose name looks like a count but that the caller did not list for suppression."""
+    listed = set(listed)
+    return [c for c in frame.columns
+            if c not in listed and _COUNT_LIKE.search(str(c))
+            and pd.api.types.is_integer_dtype(frame[c]) and not pd.api.types.is_bool_dtype(frame[c])]
 
 
 def pool_site_packages(package_dirs: Mapping[str, str | Path], *, min_cell: int | None = DEFAULT_MIN_CELL,

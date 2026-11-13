@@ -3,10 +3,9 @@
 #' @param con Active DuckDB connection
 #' @param csv_path Path to the CSV file containing custom source-to-concept mappings
 #' @param default_vocabulary_id Fallback source_vocabulary_id if not present in CSV
-#' @return Number of total rows in source_to_concept_map
+#' @return Number of rows inserted. Errors when `source_code` or `target_concept_id` is missing from the CSV.
 #' @export
 import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = "Local") {
-  default_vocabulary_id <- gsub("'", "''", as.character(default_vocabulary_id), fixed = TRUE)
   if (!file.exists(csv_path)) {
     stop("Mapping file not found: ", csv_path)
   }
@@ -18,11 +17,17 @@ import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = 
 
   cols_df <- DBI::dbGetQuery(con, "DESCRIBE SELECT * FROM _stcm_raw LIMIT 0")
   cols <- stats::setNames(cols_df$column_name, toupper(cols_df$column_name))
+  on.exit(DBI::dbExecute(con, "DROP VIEW IF EXISTS _stcm_raw;"), add = TRUE)
+  missing_req <- setdiff(c("SOURCE_CODE", "TARGET_CONCEPT_ID"), names(cols))
+  if (length(missing_req)) {
+    stop("Mapping file ", csv_path, " is missing required column(s): ", paste(tolower(missing_req), collapse = ", "),
+         ". Found: ", paste(cols_df$column_name, collapse = ", "), call. = FALSE)
+  }
 
   col_expr <- function(target_name, default_expr) {
     cand <- toupper(target_name)
     if (cand %in% names(cols)) {
-      sprintf('"%s"', cols[[cand]])
+      paste0('"', gsub('"', '""', cols[[cand]], fixed = TRUE), '"')
     } else {
       default_expr
     }
@@ -32,7 +37,8 @@ import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = 
 
   source_code <- col_expr("source_code", "NULL")
   target_concept_id <- col_expr("target_concept_id", "0")
-  source_vocab <- col_expr("source_vocabulary_id", sprintf("'%s'", default_vocabulary_id))
+  vocab_lit <- .sql_str(default_vocabulary_id)
+  source_vocab <- col_expr("source_vocabulary_id", vocab_lit)
   source_desc <- col_expr("source_code_description", "NULL")
   target_vocab <- col_expr("target_vocabulary_id", "''")
   start_date <- col_expr("valid_start_date", today_lit)
@@ -54,7 +60,7 @@ import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = 
     SELECT
         %s AS source_code,
         0 AS source_concept_id,
-        COALESCE(%s, '%s') AS source_vocabulary_id,
+        COALESCE(%s, %s) AS source_vocabulary_id,
         %s AS source_code_description,
         TRY_CAST(%s AS INTEGER) AS target_concept_id,
         COALESCE(%s, '') AS target_vocabulary_id,
@@ -62,13 +68,13 @@ import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = 
         COALESCE(TRY_CAST(%s AS DATE), DATE '2099-12-31') AS valid_end_date,
         %s AS invalid_reason
     FROM _stcm_raw
-    WHERE %s IS NOT NULL AND %s IS NOT NULL;
-  ", source_code, source_vocab, default_vocabulary_id, source_desc, target_concept_id,
+    WHERE %s IS NOT NULL AND TRY_CAST(%s AS INTEGER) IS NOT NULL;
+  ", source_code, source_vocab, vocab_lit, source_desc, target_concept_id,
      target_vocab, start_date, today_lit, end_date, inv_reason, source_code, target_concept_id)
 
+  before <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM source_to_concept_map")$n
   DBI::dbExecute(con, sql)
-  DBI::dbExecute(con, "DROP VIEW IF EXISTS _stcm_raw;")
-  DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM source_to_concept_map")$n
+  as.integer(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM source_to_concept_map")$n - before)
 }
 
 #' Import mappings exported from OHDSI Usagi into source_to_concept_map
@@ -76,11 +82,12 @@ import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = 
 #' @param con Active DuckDB connection
 #' @param usagi_csv_path Path to the exported Usagi CSV
 #' @param source_vocabulary_id Name of the source vocabulary to assign
-#' @param approved_only Only import records where mappingStatus is 'APPROVED'
-#' @return Number of imported rows for this vocabulary
+#' @param approved_only Only import records whose mappingStatus is exactly 'APPROVED' (a blank status is
+#'   not approval). Rows with a missing or zero targetConceptId are never imported; when a code has several
+#'   qualifying targets the lowest concept id is kept, deterministically.
+#' @return Number of rows inserted
 #' @export
 import_usagi_mappings <- function(con, usagi_csv_path, source_vocabulary_id = "Custom", approved_only = TRUE) {
-  source_vocabulary_id <- gsub("'", "''", as.character(source_vocabulary_id), fixed = TRUE)
   if (!file.exists(usagi_csv_path)) {
     stop("Usagi mapping file not found: ", usagi_csv_path)
   }
@@ -90,9 +97,12 @@ import_usagi_mappings <- function(con, usagi_csv_path, source_vocabulary_id = "C
     sql_path_literal(usagi_csv_path)
   ))
 
-  # an unreviewed row (no status) is not an approved one; rows without a usable target are never imported
-  target_ok <- "COALESCE(TRY_CAST(targetConceptId AS INTEGER), 0) <> 0"
-  status_filter <- if (isTRUE(approved_only)) paste0("WHERE UPPER(TRIM(mappingStatus)) = 'APPROVED' AND ", target_ok) else paste0("WHERE ", target_ok)
+  on.exit(DBI::dbExecute(con, "DROP VIEW IF EXISTS _usagi_raw;"), add = TRUE)
+  where <- c("sourceCode IS NOT NULL", "TRY_CAST(targetConceptId AS INTEGER) IS NOT NULL",
+             "TRY_CAST(targetConceptId AS INTEGER) <> 0")
+  if (isTRUE(approved_only)) where <- c(where, "UPPER(TRIM(mappingStatus)) = 'APPROVED'")
+  status_filter <- paste("WHERE", paste(where, collapse = " AND "))
+  vocab_lit <- .sql_str(source_vocabulary_id)
   today_lit <- sprintf("DATE '%s'", format(Sys.Date(), "%Y-%m-%d"))
 
   sql <- sprintf("
@@ -110,7 +120,7 @@ import_usagi_mappings <- function(con, usagi_csv_path, source_vocabulary_id = "C
     SELECT
         sourceCode AS source_code,
         0 AS source_concept_id,
-        '%s' AS source_vocabulary_id,
+        %s AS source_vocabulary_id,
         sourceName AS source_code_description,
         TRY_CAST(targetConceptId AS INTEGER) AS target_concept_id,
         COALESCE(targetVocabularyId, '') AS target_vocabulary_id,
@@ -119,12 +129,13 @@ import_usagi_mappings <- function(con, usagi_csv_path, source_vocabulary_id = "C
         NULL AS invalid_reason
     FROM _usagi_raw
     %s
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY sourceCode ORDER BY TRY_CAST(targetConceptId AS INTEGER) DESC) = 1;
-  ", source_vocabulary_id, today_lit, status_filter)
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY sourceCode ORDER BY TRY_CAST(targetConceptId AS INTEGER) ASC) = 1;
+  ", vocab_lit, today_lit, status_filter)
 
+  count_sql <- sprintf("SELECT COUNT(*) AS n FROM source_to_concept_map WHERE source_vocabulary_id = %s", vocab_lit)
+  before <- DBI::dbGetQuery(con, count_sql)$n
   DBI::dbExecute(con, sql)
-  DBI::dbExecute(con, "DROP VIEW IF EXISTS _usagi_raw;")
-  DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM source_to_concept_map WHERE source_vocabulary_id = '%s'", source_vocabulary_id))$n
+  as.integer(DBI::dbGetQuery(con, count_sql)$n - before)
 }
 
 #' Export unmapped (concept_id = 0) codes aggregated by frequency ready for OHDSI Usagi

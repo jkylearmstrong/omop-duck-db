@@ -99,5 +99,5 @@ DEFAULT_DATETIME_FORMATS <- c(
   "%d%b%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M",
   "%d%b%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M",
   "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M",
-  "%d%b%Y", "%Y-%m-%d", "%m/%d/%Y"
+  "%d%b%Y", "%Y-%m-%d", "%m/%d/%Y", "%Y%m%d"
 )

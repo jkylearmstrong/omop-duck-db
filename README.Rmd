@@ -1,1010 +1,126 @@
 ---
-title: "omop-duck-db"
 format: gfm
 ---
 
 ```{r, include = FALSE}
-knitr::opts_chunk$set(collapse = TRUE, comment = "#>", message = FALSE)
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
 ```
+
+<!-- README.md is generated from README.Rmd. Edit README.Rmd, then run: quarto render README.Rmd (or scripts/render_readme.R). Do not edit README.md by hand. -->
 
 # omop-duck-db <a href="https://jkylearmstrong.github.io/omop-duck-db/"><img src="man/figures/logo.png" align="right" height="139" alt="omop-duck-db website" /></a>
 
 <!-- badges: start -->
+
 [![CI](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/ci.yml)
 [![R Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yaml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-coverage.yaml)
 [![Python Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/python-test-coverage.yaml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/python-test-coverage.yaml)
 [![Codecov](https://codecov.io/gh/jkylearmstrong/omop-duck-db/graph/badge.svg)](https://app.codecov.io/gh/jkylearmstrong/omop-duck-db)
 <!-- badges: end -->
 
-Tools for building an [OMOP Common Data Model](https://ohdsi.github.io/CommonDataModel/)
-(CDM) v5.4 database in [DuckDB](https://duckdb.org/), loading the OHDSI Athena
-vocabulary, and mapping PCORnet-format source data into the CDM. Provided as
-both an R package and a Python package, with parallel ETL implementations that
-share the same schema and concept-mapping SQL, so a human (or an AI agent)
-picking either language gets the same result.
+Tools for building an [OMOP Common Data Model](https://ohdsi.github.io/CommonDataModel/) (CDM) v5.4 database in
+[DuckDB](https://duckdb.org/), loading the OHDSI Athena vocabulary, mapping PCORnet-format source data into the CDM, and
+running cohort, feature and quality workflows on it. Provided as an R package (`omopduckdb`) and a Python package
+(`omop_etl`, also importable as `omop_duck_db`) that share the same schema and concept-mapping SQL.
 
-## Scope
+**Scope.** General-purpose mapping/ETL tooling and a small fabricated sample fixture. This repository does not ingest,
+store or process protected or identifiable data; real use happens against your own data infrastructure.
 
-This repo provides general-purpose mapping/ETL tooling and a small fabricated
-sample fixture for testing -- it does not itself ingest, store, or process
-any protected or identifiable data. Real-world use against production source
-data happens outside this repo, against your own data infrastructure.
+## Install
 
-## Layout
-
-- `inst/extdata/5.4/duckdb/*.sql` — OMOP CDM v5.4 DDL, generated once via the
-  `CommonDataModel` R package. This is the schema source of truth for **both**
-  the R and Python ETL paths — neither re-declares `CREATE TABLE` by hand.
-- `inst/sql/mapping_macros.sql` — DuckDB SQL macros for source-code →
-  standard-concept resolution, shared by both ETLs.
-- `R/` — the R package: schema build, vocabulary load/refresh, PCORnet ETL,
-  Google Drive snapshot sync, BigQuery live connector.
-- `inst/scripts/` — thin command-line wrappers around the R package's
-  functions, for scripting/automation use without writing R code.
-- `python/omop_etl/` — the Python package (`build_omop_cdm.py`), mirrors the R
-  package table-for-table.
-- `tests/fixtures/pcornet_sample/` — small fabricated sample rows used to
-  smoke-test both ETLs against each other.
-- `config/` — non-secret config templates (`*.yml.example`). Copy to `*.yml`
-  and fill in locally; the real files are gitignored.
-
-The generated database file and any vocabulary download archive are **not**
-committed to git — they're large binaries. See "Large files" below.
-
-## Installation
-
-R:
-```r
+``` r
 # install.packages("remotes")
 remotes::install_github("jkylearmstrong/omop-duck-db")
 ```
 
-Python:
-```bash
-pip install omop-duck-db
-# or for ML dependencies: pip install 'omop-duck-db[ml]'
+``` bash
+pip install omop-duck-db            # or: pip install 'omop-duck-db[ml]' for the ML dependencies
 ```
 
-### Developer Note: `renv` Workflow
+Working inside this repository with R? `.Rprofile` activates `renv`; run `renv::restore()`, or set
+`RENV_CONFIG_AUTOLOADER = FALSE` / use `Rscript --no-init-file` to use your system library.
 
-This repository includes an `.Rprofile` that activates `renv` automatically (`renv/activate.R`).
-- **If working within the project's isolated environment**: Run `renv::restore()` to populate local package libraries.
-- **If using pre-installed system R packages**: Set `RENV_CONFIG_AUTOLOADER = FALSE` in `.Renviron` or invoke `Rscript --no-init-file` so standalone scripts do not fail looking for unpopulated local `renv` libraries.
+## Quick start
 
-## Example
-
-A schema builds into a fresh, empty DuckDB file with a single call:
-
-```{r example}
+``` r
 library(omopduckdb)
 
-db_path <- tempfile(fileext = ".duckdb")
-build_schema(db_path)
+build_schema("omop_cdm.duckdb")                                    # empty CDM v5.4 schema
+load_vocabulary("path/to/athena_download", "omop_cdm.duckdb")      # Athena vocabulary
+etl_pcornet("path/to/pcornet_extract", "omop_cdm.duckdb")          # PCORnet -> CDM
 
-con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
-DBI::dbListTables(con)[1:10]
-DBI::dbDisconnect(con, shutdown = TRUE)
+con <- omop_connect("omop_cdm.duckdb")                             # also attaches a sibling central vocabulary
+cohort <- define_study_cohort(con, visit_type = "inpatient", min_age = 18, table_name = "cohort")
 ```
 
-From there, `load_vocabulary()` loads a vocabulary download, and
-`etl_pcornet()` maps a PCORnet-format source directory into the CDM tables
-just created — see "Building the database" below for the full workflow, or
-`inst/scripts/` for command-line equivalents of each step.
+``` python
+from omop_etl import build_schema, etl_pcornet, load_vocabulary, omop_connect, define_study_cohort
+import duckdb
 
-## Building the database
-
-1. Generate the CDM v5.4 schema and load the vocabulary:
-   ```r
-   library(omopduckdb)
-   build_schema("omop_cdm.duckdb")
-   load_vocabulary("path/to/vocabulary_download", "omop_cdm.duckdb")
-   ```
-2. Map a source directory into the CDM, with either implementation (they read
-   the same source layout and produce equivalent output):
-   ```r
-   etl_pcornet("path/to/source_extract", "omop_cdm.duckdb")
-   ```
-   ```bash
-   python -m omop_etl.build_omop_cdm --source-dir path/to/source_extract
-   ```
-
-Command-line equivalents of the R functions live in `inst/scripts/`, e.g.
-`Rscript inst/scripts/etl_pcornet.R --source-dir path/to/source_extract`.
-
-## Refreshing the vocabulary
-
-- From a new download: `load_vocabulary("path/to/new_download", "omop_cdm.duckdb")`.
-  Each table is deleted and reloaded inside its own transaction with a
-  row-count sanity check, so a bad/partial file can only fail that one table
-  (rolled back, left untouched), not half-clobber the rest of the vocabulary.
-- Live, from BigQuery (e.g. a public or your own OMOP-shaped dataset):
-  `load_from_bigquery(billing_project = "...", dataset = "...", tables = c("concept", "concept_ancestor", "concept_relationship"))`.
-  A GCP project ID is required for query billing/quota even against public
-  datasets (set one in `config/bigquery.yml`, copied from
-  `config/bigquery.yml.example`).
-
-  **First-time auth**: the BigQuery OAuth flow needs an interactive R session
-  to open a browser — it fails silently if run non-interactively before a
-  token exists. Run this once, in an interactive session (not `Rscript`), and
-  approve the browser prompt:
-  ```r
-  bigrquery::bq_auth()
-  ```
-  The resulting token is cached and reused by later non-interactive runs.
-
-## Transparent Central Vocabulary & Single-Store Architecture (`omop_connect`)
-
-Instead of duplicating 10–15 GB of Athena vocabulary tables inside every site-specific CDM database, `omop_connect()` attaches a shared central vocabulary database read-only (`central_vocab`) and automatically injects DuckDB's `search_path = 'main,central_vocab'`. All queries seamlessly resolve `concept`, `concept_ancestor`, and vocabulary macros without schema qualification:
-
-```r
-library(omopduckdb)
-
-# Auto-discovers sibling central_vocabulary.duckdb or connects with explicit path
-con <- omop_connect("omop_cdm.duckdb")
-DBI::dbGetQuery(con, "SELECT COUNT(*) FROM concept;")
-```
-
-In Python:
-```python
-from omop_etl import omop_connect
+con = duckdb.connect("omop_cdm.duckdb"); build_schema(con); con.close()
+load_vocabulary("path/to/athena_download", "omop_cdm.duckdb")
+etl_pcornet("path/to/pcornet_extract", "omop_cdm.duckdb")          # a second full run needs overwrite=True
 
 con = omop_connect("omop_cdm.duckdb")
-con.execute("SELECT COUNT(*) FROM concept").fetchone()
+cohort = define_study_cohort(con, visit_type="inpatient", min_age=18, table_name="cohort")
 ```
 
-## Custom mapping and retroactive remapping
-
-When standard Athena vocabularies lack mappings for site-specific or unmapped codes:
-
-1. **Audit unmapped codes**:
-   ```r
-   con <- omop_connect("omop_cdm.duckdb")
-    export_unmapped_codes(con, "condition_occurrence", "unmapped_conditions.csv")
-   ```
-2. **Import custom crosswalks or Usagi exports**:
-   ```r
-   # Load custom source_to_concept_map CSV
-   import_source_to_concept_map(con, "mappings.csv")
-
-   # Or import OHDSI Usagi review export CSV
-   import_usagi_mappings(con, "usagi_reviewed.csv")
-   ```
-3. **Retroactively remap populated CDM tables**:
-   ```r
-   # Preview changes without modifying data (dry run)
-   remap_cdm_table(con, "condition_occurrence", dry_run = TRUE)
-
-   # Apply remapping across all tables and rebuild condition/drug eras
-   remap_all(con)
-   ```
-
-Equivalent functions are available in Python via `from omop_etl import remap_all, import_usagi_mappings`.
-
-## Study Cohorts, Phenotyping & Clinical Pipeline
-
-The package provides an end-to-end epidemiological pipeline for observational studies, featuring flexible index stay definition, validated comorbidity profiling, physiologic range sanitization, Athena concept hierarchy rollups, LOINC laboratory consolidation, and publication Table 1 generation.
-
-### 1. Unified Study Cohort Engine (`define_study_cohort`)
-
-Generalizes acute inpatient, emergency department, and outpatient index cohorts with customizable wash-in windows, right-censoring verification, and outcome definitions:
-
-```r
-library(omopduckdb)
-
-con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
-
-# Build general study cohort (or specialized build_readmission_cohort / build_end_of_life_cohort)
-cohort_df <- define_study_cohort(
-  con,
-  visit_type = "inpatient",
-  washin_days = 365,
-  followup_days = 30,
-  min_age = 18,
-  min_los_days = 1,
-  sampling_rule = "first",
-  require_verified_followup = TRUE,
-  table_name = "cohort"
-)
-```
-
-In Python:
-```python
-from omop_etl import define_study_cohort
-
-cohort_df = define_study_cohort(
-    con,
-    visit_type="inpatient",
-    washin_days=365,
-    followup_days=30,
-    min_age=18,
-    min_los_days=1,
-    sampling_rule="first",
-    require_verified_followup=True,
-    table_name="cohort"
-)
-```
-
-### 2. Comorbidity Profiling: 31 Elixhauser Domains & Charlson Index
-
-Computes validated comorbidity profiles in one set-based DuckDB query over the cohort with zero object leakage on read-only connections. Automatically evaluates both ICD-9/10 prefixes (`condition_source_value`) and SNOMED descendants (`condition_concept_id`):
-
-```r
-# Extract 31 Elixhauser domains + composite van Walraven score
-elix_df <- extract_elixhauser_comorbidities(con, cohort_table = "cohort", lookback_days = 365)
-
-# Extract 17 Quan-Charlson categories + Charlson Comorbidity Index
-cci_df <- extract_charlson_index(con, cohort_table = "cohort", lookback_days = 365)
-```
-
-In Python:
-```python
-from omop_etl import extract_elixhauser_comorbidities, extract_charlson_index
-
-elix_df = extract_elixhauser_comorbidities(con, cohort_table="cohort", lookback_days=365)
-cci_df = extract_charlson_index(con, cohort_table="cohort", lookback_days=365)
-```
-
-### 3. Physiologic Measurement Sanitization & Outlier Winsorization (`sanitize_measurements`)
-
-Cleans laboratory and vital measurements against 136 standard OHDSI DataQualityDashboard biological plausibility limits or statistical IQR/z-score winsorization:
-
-```r
-# Clamps out-of-bounds measurements to DQD biological plausibility limits
-clean_labs <- sanitize_measurements(
-  con,
-  method = "dqd_biologic_limits",
-  action = "clamp"
-)
-```
-
-In Python:
-```python
-from omop_etl import sanitize_measurements
-
-clean_labs = sanitize_measurements(
-    con,
-    method="dqd_biologic_limits",
-    action="clamp"
-)
-```
-
-### 4. Build Inpatient Readmission Cohort (`build_readmission_cohort`)
-
-Constructs index inpatient stays (`visit_concept_id = 9201`) among adult patients ($\ge 18$) with length of stay $\ge 1$ day, discharged alive, and verified 30-day follow-up (requiring either a readmission or confirmed clinical contact $\ge 30$ days post-discharge to prevent right-censoring):
-
-```r
-library(omopduckdb)
-
-con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
-
-# Build cohort into OMOP cohort table (cohort_id = 1)
-cohort_df <- build_readmission_cohort(
-  con,
-  washin_days = 365,
-  followup_window_days = 30,
-  index_selection_rule = "random",
-  random_state = 42,
-  require_verified_followup = TRUE,
-  table_name = "cohort"
-)
-```
-
-In Python:
-```python
-import duckdb
-from omop_etl import build_readmission_cohort
-
-con = duckdb.connect("omop_cdm.duckdb")
-cohort_df = build_readmission_cohort(
-    con,
-    washin_days=365,
-    followup_window_days=30,
-    index_selection_rule="random",
-    random_state=42,
-    require_verified_followup=True,
-    table_name="cohort"
-)
-```
-
-### 5. Extract Temporal Utilization & Demographic Features
-
-Aggregates windowed baseline healthcare utilization (IP, ED, OP encounter counts, days since prior visit, prior 30-day readmissions in lookback), index length of stay, discharge disposition, and demographics:
-
-```r
-temporal_features <- extract_temporal_features(
-  con,
-  cohort_table = "cohort",
-  cohort_id = 1,
-  lookback_days = 365
-)
-```
-
-In Python:
-```python
-from omop_etl import extract_temporal_features
-
-temporal_features = extract_temporal_features(
-    con,
-    cohort_table="cohort",
-    cohort_id=1,
-    lookback_days=365
-)
-```
-
-### 6. Athena Concept Hierarchy Rollup & Consolidated Measurements
-
-Traverse Athena's `concept_ancestor` table to aggregate medication or condition classes, and extract consolidated lab panels and physical vitals using acute pre-discharge aggregation strategies:
-
-```r
-# Aggregate medication exposure using Athena ancestor traversal
-med_features <- aggregate_concept_sets(
-  con,
-  cohort_table = "cohort",
-  cohort_id = 1,
-  domain = "drug",
-  concept_sets = DEFAULT_MEDICATION_CONCEPTS,
-  lookback_days = 365
-)
-
-# Extract acute pre-discharge laboratory and vital measurements
-lab_features <- extract_measurements(
-  con,
-  cohort_table = "cohort",
-  cohort_id = 1,
-  loinc_map = DEFAULT_LAB_LOINCS,
-  strategy = "last_before_discharge"
-)
-```
-
-In Python:
-```python
-from omop_etl import (
-    aggregate_concept_sets,
-    extract_measurements,
-    DEFAULT_MEDICATION_CONCEPTS,
-    DEFAULT_LAB_LOINCS
-)
-
-med_features = aggregate_concept_sets(
-    con,
-    cohort_table="cohort",
-    cohort_id=1,
-    domain="drug",
-    concept_sets=DEFAULT_MEDICATION_CONCEPTS,
-    lookback_days=365
-)
-
-lab_features = extract_measurements(
-    con,
-    cohort_table="cohort",
-    cohort_id=1,
-    loinc_map=DEFAULT_LAB_LOINCS,
-    strategy="last_before_discharge"
-)
-```
-
-### 7. Stratified Table 1 Generation & Completeness Matrix
-
-Generates baseline descriptive tables (continuous: Mean +/- SD, Median [IQR]; categorical: N [%]) stratified by outcome (e.g., `readmitted_30d`), calculating Standardized Mean Differences (SMD) and statistical tests, along with a Table 1b completeness audit:
-
-```r
-table1_out <- generate_table1(
-  patient_df,
-  strata_col = "readmitted_30d",
-  continuous_vars = c("age_at_admission", "los_days", "prior_ed_visits"),
-  categorical_vars = c("gender", "race", "tobacco_status")
-)
-
-# Baseline summary with SMD and p-values
-print(table1_out$table1)
-
-# Missingness and completeness audit
-print(table1_out$table1b)
-```
-
-In Python:
-```python
-from omop_etl import generate_table1
-
-t1 = generate_table1(
-    patient_df,
-    strata_col="readmitted_30d",
-    continuous_vars=["age_at_admission", "los_days", "prior_ed_visits"],
-    categorical_vars=["gender", "race", "tobacco_status"]
-)
-```
-
-### 8. Benchmark Reconciliation & Validation Harness
-
-Validates prospective OMOP Table 1 statistics against benchmark datasets with configurable absolute tolerance thresholds, flagging distribution drift and missing features:
-
-```r
-reconciliation <- validate_table1_reconciliation(
-  omop_table1 = table1_out$table1,
-  source_table1 = benchmark_table1,
-  tolerance = 0.05
-)
-
-if (!reconciliation$is_concordant) {
-  warning("Table 1 discrepancy detected!")
-  print(reconciliation$feature_comparisons)
-}
-```
-
-In Python:
-```python
-from omop_etl import validate_table1_reconciliation
-
-reconciliation = validate_table1_reconciliation(
-    omop_table1=t1["table1"],
-    source_table1=benchmark_table1,
-    tolerance=0.05
-)
-print("Reconciliation concordant:", reconciliation["is_concordant"])
-```
-
-## ML bridge: omop-learn, scikit-learn, SARD & OHDSI PLP / DeepPLP
-
-omop-duck-db connects an OMOP-on-DuckDB database to three modelling
-ecosystems without ad-hoc SQL or per-patient query loops. Every extractor
-runs as one set-based DuckDB query over the whole cohort, and every window
-is **strictly before the index date** by default (`[index - lookback_days,
-index)`), so nothing at or after the index leaks into the features.
-Concept id `0` ("No matching concept") is always dropped.
-
-| You use | Entry point |
-|---|---|
-| scikit-learn / glmnet / LASSO | `extract_sparse_concept_matrix()` (Python: `scipy.sparse.csr_matrix`; R: `Matrix::dgCMatrix`) |
-| SARD / sequence models | `extract_sard_visit_tensors()` (padded `(N, max_nvisits, max_visit_len)`) |
-| omop-learn (`OMOPDataset`, its torch / sparse / windowed datasets and models) | `DuckDBBackend`, a DuckDB implementation of omop-learn's backend interface |
-| OHDSI PatientLevelPrediction / DeepPatientLevelPrediction | `plp_database_details()`, `hades_preflight()`, `as_plp_data()` |
-| tidymodels / in-database scoring | `as_tidymodels_data()`, `model_concepts()`, `materialize_concept_features()` |
-
-### 1. Sparse concept matrix and SARD visit tensors
-
-Both take a cohort parquet (one row per index event; person id and index
-date columns are auto-detected, an outcome column is carried through) and
-return arrays whose row `i` is parquet row `i`.
-
-```python
-import duckdb
-from omop_etl import extract_sparse_concept_matrix, extract_sard_visit_tensors
-
-con = duckdb.connect("derived/omop_duckdb/omop_site1.duckdb", read_only=True)
-con.execute("ATTACH 'derived/omop_duckdb/central_vocabulary.duckdb' AS central_vocab (READ_ONLY)")
-cohort = "derived/ederri_features/ederri_features_site1.parquet"
-
-res = extract_sparse_concept_matrix(con, cohort, min_patient_freq=50)
-res["X"].shape            # (N, V) csr_matrix; res["concepts"] has names, domains, patient counts
-
-sard = extract_sard_visit_tensors(con, cohort, min_patient_freq=50)
-sard["concept_tensor"].shape   # (N, max_nvisits, max_visit_len); also visit_lengths, n_visits, times
-```
-
-```r
-library(DBI); library(duckdb)
-con <- dbConnect(duckdb::duckdb(), "derived/omop_duckdb/omop_site1.duckdb", read_only = TRUE)
-dbExecute(con, "ATTACH 'derived/omop_duckdb/central_vocabulary.duckdb' AS central_vocab (READ_ONLY);")
-res <- extract_sparse_concept_matrix(con, "derived/ederri_features/ederri_features_site1.parquet",
-                                     min_patient_freq = 50)
-dim(res$X)
-```
-
-Conventions follow omop-learn so outputs drop into its models: special
-tokens `[BOS]=0 [EOS]=1 [SEP]=2 [PAD]=3 [UNK]=4`, concept tokens from 5
-(`"<concept_id> - <domain> - <concept_name>"`, sorted like omop-learn's
-`ConceptTokenizer`), visit times as days since 1900-01-01 with `-1` padding.
-Pass a train result's `tokenizer` (R: `tokens`) to a test cohort to get
-identical columns; pass explicit `max_nvisits` / `max_visit_len` for a fixed
-tensor shape. `pip install "omop-duck-db[ml]"` adds scipy.
-
-### 2. omop-learn backend
-
-omop-learn ships Postgres, BigQuery and Spark backends behind one
-interface; `DuckDBBackend` adds DuckDB. omop-learn's per-patient feature SQL
-runs as a single `LATERAL` join instead of one query per patient (about 70x
-faster in our benchmark), with DuckDB-dialect feature SQL bundled in
-`inst/sql/omop_learn`.
-
-```python
-from pathlib import Path
-from omop_learn.omop import OMOPDataset
-from omop_learn.utils.config import Config
-from omop_etl import DuckDBBackend, default_features, cohort_from_parquet
-
-backend = DuckDBBackend(con=con)
-dataset = OMOPDataset(name="temple", config=Config({"cdm_schema": "main"}),
-                      cohort=cohort_from_parquet(con, cohort), features=default_features(),
-                      backend=backend, data_dir=Path("datasets"))
-torch_ds = dataset.to_torch()      # omop-learn's own datasets and models from here on
-```
-
-omop-learn is not on PyPI:
-`pip install git+https://github.com/clinicalml/omop-learn`.
-
-### 3. OHDSI PatientLevelPrediction and DeepPatientLevelPrediction
-
-PLP, DeepPLP and FeatureExtraction read the CDM through DatabaseConnector,
-which opens the DuckDB file itself and **cannot `ATTACH` a central
-vocabulary**. The vocabulary tables must therefore be inside the file. It
-also opens the file read-write, so no *other process* (for example a Python
-session that still has the database open, even read-only) may hold it.
-`hades_preflight()` checks both, from a fresh connection:
-
-```r
-hades_preflight("omop_site1.duckdb")
-db <- plp_database_details("omop_site1.duckdb", target_id = 1, outcome_ids = 2)
-
-# Native OHDSI features (including DeepPLP's temporal transformer input):
-plp <- PatientLevelPrediction::getPlpData(db, FeatureExtraction::createCovariateSettings(
-         useConditionOccurrenceLongTerm = TRUE, longTermStartDays = -365, endDays = -1),
-       PatientLevelPrediction::createRestrictPlpDataSettings())
-
-# ...or hand PLP / DeepPLP the very same matrix you used in Python or glmnet:
-res <- extract_sparse_concept_matrix(con, cohort_parquet, value = "binary")
-plp <- as_plp_data(res, con, target_id = 1, outcome_id = 2)
-```
-
-`as_plp_data()` uses covariate ids `concept_id * 1000 + analysis_id` with
-FeatureExtraction's long-term analysis ids (102 / 302 / 502), so they match natively extracted
-covariates for the 365-day window (verified against FeatureExtraction in the
-test suite).
-
-### 4. tidymodels and in-database scoring (orbital, tidypredict)
-
-`as_tidymodels_data()` bridges sparse concept matrices into a tibble ready for
-tidymodels (`rsample`, `recipes`, `parsnip`, `workflows`, `yardstick`), with outcome `y`
-formatted with the event as the first factor level (`event_level = "first"`), and concept
-predictors named `<domain>_<concept_id>`.
-
-Once a model or workflow is fitted, `model_concepts()` identifies which concepts
-have non-zero coefficients. `materialize_concept_features()` exports matching wide
-feature tables inside DuckDB using identical windowing logic. Scoring can then run
-directly in-database with `orbital::orbital()` or `tidypredict` without feature drift:
-
-```r
-library(tidymodels)
-
-res <- extract_sparse_concept_matrix(con, "cohort.parquet", min_patient_freq = 50, value = "binary")
-dat <- as_tidymodels_data(res)
-
-split <- rsample::group_initial_split(dat, group = person_id)
-rec <- recipes::recipe(y ~ ., data = rsample::training(split)) |>
-  recipes::update_role(person_id, index_date, new_role = "id")
-spec <- parsnip::logistic_reg(penalty = 0.01, mixture = 1) |> parsnip::set_engine("glmnet")
-fit <- workflows::workflow(rec, spec) |> parsnip::fit(rsample::training(split))
-
-# In-database scoring on new patients without feature drift:
-used <- model_concepts(fit, res$concepts)
-materialize_concept_features(con, "new_cohort.parquet", used, table = "to_score", value = "binary")
-orb <- orbital::orbital(fit)
-scores <- orbital::augment(orb, dplyr::tbl(con, "to_score")) |> dplyr::collect()
-```
-
-## Wide tables, messy timestamps, medication classes, phenotypes & resource limits (Python and R)
-
-```python
-import duckdb
-from omop_etl import (configure_resources, load_wide_measurement, vectorized_strptime,
-                      extract_medication_classes, audit_medication_strategies,
-                      ConditionCriteria, MeasurementCriteria, DrugCriteria, execute_phenotype,
-                      DEFAULT_VITAL_CONCEPT_MAPPING, DEFAULT_VITAL_PLAUSIBILITY_FILTERS)
-
-con = duckdb.connect("omop_cdm.duckdb")
-configure_resources(con)                       # 75% of available RAM, best spill volume, cores - 1
-
-# staged, one-concept-per-commit unpivot of a wide table, with clinical plausibility bounds
-load_wide_measurement(con, "vital.csv", DEFAULT_VITAL_CONCEPT_MAPPING,
-                      value_plausibility_filters=DEFAULT_VITAL_PLAUSIBILITY_FILTERS, missing_columns="skip")
-
-# vectorized parsing of '05JAN2020' + '4:15', '01/05/2020' + '4:15 PM', ...
-con.sql(f"SELECT {vectorized_strptime('MEASURE_DATE', 'MEASURE_TIME', on_error='default_date')} FROM vital_raw")
-
-# two independent medication-class strategies and a per-site agreement audit
-flags, audit = extract_medication_classes(con, "my_cohort", {"statin": {"atc_codes": ["C10AA"]}},
-                                          strategy="both", crosswalk="site_drug_crosswalk.csv", return_audit=True)
-print(audit[audit.flagged])                    # kappa, concordance, reason per site/class
-
-# composable phenotype, compiled to one query
-t2dm = (ConditionCriteria(icd_codes=["E11"], concept_ids=[201826])
-        | MeasurementCriteria(loinc_codes=["4548-4"], value_gte=6.5)
-        | DrugCriteria(concept_ids=[21600712], min_days_supply=30))
-execute_phenotype(con, t2dm & ~ConditionCriteria(icd_codes=["E10"]), "cohort", cohort_definition_id=7)
-```
-
-The same functions exist in R with identical semantics (snake_case, `library(omopduckdb)`):
-
-```r
-library(omopduckdb)
-con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
-configure_resources(con)
-load_wide_measurement(con, "vital.csv", DEFAULT_VITAL_CONCEPT_MAPPING,
-                      value_plausibility_filters = DEFAULT_VITAL_PLAUSIBILITY_FILTERS, missing_columns = "skip")
-DBI::dbGetQuery(con, paste("SELECT", vectorized_strptime("MEASURE_DATE", "MEASURE_TIME", on_error = "default_date"), "FROM vital_raw"))
-res <- extract_medication_classes(con, "my_cohort", list(statin = list(atc_codes = "C10AA")),
-                                  strategy = "both", crosswalk = "site_drug_crosswalk.csv", return_audit = TRUE)
-res$audit[res$audit$flagged, ]
-t2dm <- condition_criteria(icd_codes = "E11", concept_ids = 201826) |
-  measurement_criteria(loinc_codes = "4548-4", value_gte = 6.5) |
-  drug_criteria(concept_ids = 21600712, min_days_supply = 30)
-execute_phenotype(con, t2dm & !condition_criteria(icd_codes = "E10"), "cohort", cohort_definition_id = 7)
-```
-
-All file paths handed to DuckDB go through `omop_etl.paths.sanitize_sql_path`, so Windows paths work in ATTACH, `read_csv`, `read_parquet` and `COPY`.
-
-## Clinical Risk Scores, Anthropometrics & Consortium Federation (Python & R)
-
-### 1. Bedside Benchmark Heuristics (LACE Index & HOSPITAL Score)
-Evaluate standardized clinical heuristics for 30-day readmissions and mortality directly inside DuckDB:
-
-```python
-from omop_duck_db.scores import calculate_lace_index, calculate_hospital_score
-
-# Compute LACE (Length of stay, Acuity, Charlson, ED visits)
-lace_df = calculate_lace_index(con, cohort_table="inpatient_cohort")
-
-# Compute HOSPITAL score (Hemoglobin, Oncology, Sodium, Procedure, Index type, Admissions, LOS)
-hosp_df = calculate_hospital_score(con, cohort_table="inpatient_cohort")
-```
-
-In R:
-```r
-lace_df <- calculate_lace_index(con, cohort_table = "inpatient_cohort")
-hosp_df <- calculate_hospital_score(con, cohort_table = "inpatient_cohort")
-```
-
-### 2. Anthropometric Harmonization & Derived BMI
-Standardize inches (`[in_us]`) and pounds (`[lb_av]`) to metric units (`cm` and `kg`), recalculate BMI $= \text{weight} / \text{height}^2$, and replace implausible raw values ($< 10$ or $> 120$):
-
-```python
-from omop_etl import harmonize_anthropometrics
-
-report = harmonize_anthropometrics(con, create_view=True, replace_implausible_bmi=True)
-# Created view: measurement_harmonized_anthropometrics
-```
-
-In R:
-```r
-report <- harmonize_anthropometrics(con, create_view = TRUE, replace_implausible_bmi = TRUE)
-```
-
-### 3. Transitions-of-Care Medication Trajectories
-Track medication continuation, initiation, and discontinuation across care transitions:
-
-```python
-from omop_etl import extract_medication_transitions
-
-transitions = extract_medication_transitions(con, cohort_table="inpatient_cohort")
-trans_df = transitions.to_dataframe()
-# Generates {class}_initiated_inpatient, {class}_discontinued_at_discharge, {class}_continued_across_stay
-summary = transitions.summary()
-ct = transitions.transition_matrix("raas_inhibitors")
-```
-
-In R:
-```r
-trans <- extract_medication_transitions(con, cohort_table = "inpatient_cohort")
-df <- trans$to_dataframe()
-summ <- trans$summary()
-matrix <- trans$transition_matrix("raas_inhibitors")
-```
-
-### 4. Multi-Site Federated Consortium Connector
-Orchestrate multi-center studies (e.g. eDERRI) with independent site databases attached to a shared Athena vocabulary:
-
-```python
-from omop_duck_db import FederatedConsortium
-
-consortium = FederatedConsortium(
-    sites={
-        "Site A": "omop_site1.duckdb",
-        "Site B": "omop_site2.duckdb",
-        "Site C": "omop_site3.duckdb"
-    },
-    central_vocabulary="central_vocabulary.duckdb"
-)
-
-# Cross-site Table 1 and Table 2 in a single call:
-t1 = consortium.generate_table1(domain="heart_failure")
-t2 = consortium.generate_table2(cohort_table="v_visit_occurrence")
-audit = consortium.site_summaries()
-
-# 5. Consortium Bedside Scoring
-scores = consortium.calculate_scores(cohort_table="inpatient_cohort")
-print(scores.summary())
-consortium.close()
-```
-
-In R:
-```r
-fc <- federated_consortium(
-  sites = c("Site A" = "omop_site1.duckdb", "Site B" = "omop_site2.duckdb"),
-  central_vocabulary = "central_vocabulary.duckdb"
-)
-t1 <- consortium_generate_table1(fc, domain = "heart_failure")
-t2 <- consortium_generate_table2(fc, cohort_table = "v_visit_occurrence")
-audit <- consortium_site_summaries(fc)
-scores <- consortium_calculate_scores(fc, cohort_table = "inpatient_cohort")
-summary(scores)
-consortium_close(fc)
-```
-
-### 5. Cross-Site Model Calibration & Decile Drift
-Quantify model transportability and risk calibration drift across consortium sites via Greenwood-Nam-D'Agostino $\chi^2$ goodness-of-fit, Brier score decomposition, and decile tracking:
-
-```python
-from omop_duck_db.ml import consortium_calibration
-
-cal = consortium_calibration(
-    y_true=y_val,
-    y_prob=oof_probs,
-    site_labels=site_series,
-    n_bins=10
-)
-print(cal.summary())
-fig = cal.plot()
-```
-
-In R:
-```r
-cal <- consortium_calibration(
-  y_true = y_val,
-  y_prob = oof_probs,
-  site_labels = site_series,
-  n_bins = 10
-)
-summary(cal)
-plot(cal)
-```
-
-### 6. Clinical Decision Curve Analysis (DCA)
-Demonstrate clinical utility of risk stratification models across actionable decision thresholds compared to "treat all" and "treat none" defaults:
-
-```python
-from omop_duck_db.ml import decision_curve_analysis
-
-dca = decision_curve_analysis(
-    y_true=y_val,
-    y_prob=oof_probs,
-    threshold_range=(0.05, 0.35)
-)
-print(dca.summary())
-fig = dca.plot()
-```
-
-In R:
-```r
-dca <- decision_curve_analysis(
-  y_true = y_val,
-  y_prob = oof_probs,
-  threshold_range = c(0.05, 0.35)
-)
-summary(dca)
-plot(dca)
-```
-
-### 7. Competing Risks Cumulative Incidence Function (CIF) & Fine-Gray Modeling
-Estimate non-parametric Aalen-Johansen CIF curves and Fine-Gray subdistribution hazards for 30-day readmissions accounting for inpatient and out-of-hospital mortality:
-
-```python
-from omop_duck_db.survival import estimate_cif, fine_gray_estimator, plot_cif
-
-cif = estimate_cif(surv_df, time_col="time_days", status_col="status")
-print(cif.summary())
-fig = plot_cif(cif)
-
-fg = fine_gray_estimator(surv_df, time_col="time_days", status_col="status", covar_cols=["age", "charlson_score"])
-print(fg.summary())
-```
-
-In R:
-```r
-cif <- estimate_cif(surv_df, time_col = "time_days", status_col = "status")
-summary(cif)
-plot_cif(cif)
-
-fg <- fine_gray_estimator(surv_df, time_col = "time_days", status_col = "status", covar_cols = c("age", "charlson_score"))
-summary(fg)
-```
-
-## Benchmark features, deep-learning datasets and leave-one-site-out evaluation (v0.13.0)
-
-Python, with R versions of the cohort arguments, `extract_benchmark_features()`, recalibration / capacity / leave-one-site-out and the vocabulary manifest (not the tensor dataset). All of it was tested on synthetic data; nothing here has been run on a production-size database.
-
-```python
-from omop_etl import (define_study_cohort, extract_benchmark_features, extract_multimodal_deep_dataset,
-                      export_concept_vocabulary, import_concept_vocabulary, evaluate_loso_transport,
-                      capacity_risk_tiers, map_risk_tiers)
-
-# 1. Cohort: calendar bounds (logged in the attrition table), one stay per patient drawn by a seeded MD5 rule
-cohort = define_study_cohort(con, min_admit_date="2010-01-01", max_admit_date="2022-09-30",
-                             sample_stay_rule="random", random_seed=20261104, table_name="cohort")
-
-# 2. One call for the leakage-free modelling table (labs: index-admission mean and latest in-stay value)
-df = extract_benchmark_features(con, "cohort", include_sdoh=False)       # df.attrs["feature_groups"] lists the groups
-
-# 3. Multimodal tensors; a lead site freezes the vocabulary, other sites import it so token ids match
-ds = extract_multimodal_deep_dataset(con, df, max_visits=20, max_tokens_per_visit=30, lookback_days=365,
-                                     output_format="torch_dict", include_intra_stay=True, pretraining_targets=True)
-export_concept_vocabulary(ds["tokenizer"], "vocabulary.json")
-tok = import_concept_vocabulary("vocabulary.json")                         # at the other sites: pass tokenizer=tok
-# big cohorts: output_format="memmap", "arrow" or "zarr" with output_dir=..., chunk_size=50_000 streams to disk
-
-# 4. Leave-one-site-out transport: balanced training on N-1 sites, natural-prevalence scoring of the held-out site
-res = evaluate_loso_transport(df, site_col="site_anon", model_type="xgboost", balance_ratio=1.0, n_bootstraps=100)
-res.per_site                                                                # AUROC, Brier, O/E, top-10% PPV with 95% CIs
-tiers = capacity_risk_tiers(res.predictions["p"], top_fraction=0.10)       # "the riskiest 10% get a care-management call"
-```
-
-## Disclosure control, CONSORT counts, parity audit & site summary packages (v0.12.0)
-
-Everything below works on synthetic or aggregate data and has no study-, site- or cohort-specific content. Python
-functions are in `omop_etl`; R has the disclosure helpers, `summarize_attrition_consort()` and `audit_matrix_parity()`.
-
-```python
-from omop_etl import (generate_consort_attrition, suppress_small_counts, audit_matrix_parity, summarize_table1_site,
-                      build_table1, export_site_summary, pool_site_packages, mapping_coverage_report)
-
-# CONSORT attrition from raw counts (one site), or pooled across sites. Counts below 11 are suppressed, and so is
-# anything that could be recovered from them by subtraction (retained[i-1] - dropped[i] == retained[i]).
-att = generate_consort_attrition(initial_n=10_000, exclusions=[("Wash-in", 1200), ("Age < 18", 400),
-                                                              ("Died in hospital", 310), ("Transferred out", 9)], min_cell=11)
-att.to_csv("attrition.csv"); att.to_mermaid(); att.to_tikz()
-pooled = generate_consort_attrition(sites={"site_a": table_a, "site_b": {"initial_n": 5000, "exclusions": [...]}})
-
-# Parity between a legacy table and its OMOP-derived counterpart: SMDs, missingness gaps, CCC, kappa, per-level counts
-audit = audit_matrix_parity(legacy_df, omop_df, key_col="person_id", by="site_label")
-audit.ledger, audit.flagged
-
-# Table 1 from aggregates: one site or many give the same table (exact pooled means/SDs), SMD between two groups
-kw = dict(continuous=["age"], categorical=["sex"], binary=["diabetes"], group_col="exposed")
-table1 = build_table1(pool_table1_summaries({"a": summarize_table1_site(df_a, **kw), "b": summarize_table1_site(df_b, **kw)}))
-
-# Aggregate-only site package (refuses identifier/date columns, suppresses small cells, hashes every file) and its pooling
-export_site_summary("out/site_a", "site_a", attrition=att, table1_summary=summarize_table1_site(df_a, **kw), parity=audit, con=con)
-pooled = pool_site_packages({"a": "out/site_a", "b": "out/site_b"})      # verifies each manifest first
-
-# After an ETL: how much of the source vocabulary reached a standard concept
-mapping_coverage_report(con)["summary"]
-```
-
-```r
-att <- summarize_attrition_consort(10000, c(`Wash-in` = 1200, `Age < 18` = 400, `Died in hospital` = 310), min_cell = 11)
-write_consort_csv(att, "attrition.csv"); to_mermaid(att)
-suppress_small_counts(df, "n", threshold = 11, also = "pct", group_by = "stratum")
-audit_matrix_parity(legacy_df, omop_df, "person_id")$ledger
-```
-
-- **Release the pooled table or the per-site tables, not both.** With a hidden site cell, the pooled total minus the other
-  sites gives it back. A site that suppressed a cell leaves the pooled cell unavailable; if the sites trust the coordinator,
-  export exact aggregates (inside the agreement) and suppress after pooling.
-- `load_vital()` maps `vital.csv` to the standard concepts 3004249 (systolic BP), 3012888 (diastolic BP), 3036277 (height),
-  3025315 (weight) and 3038553 (BMI) even when the vocabulary tables are not loaded yet, derives BMI where only height
-  and weight were recorded (`derive_bmi=True`) and can drop implausible readings (`plausible_ranges=True`); it returns the row counts.
-- `RunManifest(..., con=con, outputs=[...])` records the vocabulary release the run used and the SHA-256 of the files it wrote;
-  `verify_manifest()` checks both.
-- `run_bigquery_demo()` (Python and R) is the entry point of the CMS SynPUF smoke test (`vignettes/bigquery_synthetic_demo.Rmd`).
-- The Achilles-style checks (missingness, plausibility, orphaned foreign keys) are `run_dqd()`; `sanitize_measurements()` screens implausible values.
-
-## Testing
-
-`tests/fixtures/pcornet_sample/` is a small set of fabricated (not real)
-sample rows used to smoke-test both ETLs and check they produce identical
-output.
-
-R: `devtools::test()` (or `R CMD check`) runs the `testthat` suite.
-
-Python: `pytest` runs the Python-side tests, including a cross-language parity
-check that runs both ETLs against the fixture and diffs every row (skipped
-automatically if R isn't available on the machine running the tests).
-
-The ML bridge tests skip what they cannot import: omop-learn (point
-`OMOP_LEARN_SRC` at a source checkout's `src/` directory, or install it) and
-the HADES packages (FeatureExtraction, PatientLevelPrediction, Andromeda,
-DatabaseConnector).
-
-## Large files (Google Drive)
-
-Instead of git/git-LFS, the generated database and vocabulary archive can be
-synced through Google Drive:
-```r
-gdrive_upload_snapshot()    # push the current database + vocabulary archive
-gdrive_download_latest()    # pull the latest snapshot instead of rebuilding
-```
-Configure the target Drive folder in `config/gdrive.yml` (copy from
-`config/gdrive.yml.example`).
-
-## Study-design features: add your own person-level features (v0.14.0, Python and R)
-
-A protocol often needs something OMOP does not define: the rural-urban code of the home ZIP, an area deprivation index, ACS median
-household income. A `feature_set` collects such *study-design features*, computes them for the index stays (the address in effect at
-admission is resolved once), and writes them as `measurement` rows under site-defined concepts so **OHDSI FeatureExtraction,
-PatientLevelPrediction and DeepPatientLevelPrediction read them like any other covariate**. The package ships the framework and
-worked examples (RUCA, SDI, any ZIP-keyed table), never the reference data. SDI and RUCA keep the concept ids of
-`GEOGRAPHY_CONCEPT_IDS`, so earlier work stays compatible.
-
-```r
-fs <- feature_set() |>
-  add_feature(ruca_feature("ruca_crosswalk.csv")) |>
-  add_feature(sdi_feature("sdi.csv", cut_points = c(20.8, 40.6, 60.4, 80.2))) |>   # the training cohort's fixed cuts
-  add_feature(area_feature("income", "acs_b19013.csv", "median_income", transform = "log1p"))
-
-wide     <- compute_features(fs, con, stays_from_cohort(con, "cohort"))   # one row per stay, leakage-free
-concepts <- write_feature_set(fs, con, wide)                              # measurement rows
-cov      <- FeatureExtraction::getDbCovariateData(
-  connection = conn, cdmDatabaseSchema = "main", cohortTable = "cohort", cohortIds = 1, rowIdField = "subject_id",
-  covariateSettings = feature_set_covariate_settings(fs, concepts))       # or feature_set_extraction_r(fs, concepts) as text
-```
-
-```python
-fs = (FeatureSet().add(ruca_feature("ruca_crosswalk.csv"))
-      .add(sdi_feature("sdi.csv", cut_points=[20.8, 40.6, 60.4, 80.2]))
-      .add(area_feature("income", "acs_b19013.csv", "median_income", transform="log1p")))
-wide = fs.compute(con, stays_from_cohort(con, "cohort")); concepts = fs.write(con, wide)
-```
-
-Transforms that learn from data (SDI cut points, a percentile grid, a mean and sd, an imputation median) are fitted once on the
-training sites with `fit = TRUE`, stored as the feature's state, and shipped in a manifest; at another site they are loaded, never
-refitted, and refuse to run without them. This prevents quintile drift and keeps income comparable across sites (a *percentile of
-the training distribution* transports, raw dollars can identify the site). The manifest is the same JSON in Python and R.
-
-```r
-export_feature_manifest(fs_train, "study_features.json")     # after compute_features(fs_train, con, fit = TRUE)
-load_feature_state(fs_site, "study_features.json")           # at the replicating site
-```
-
-Add your own with `sql_feature()` (a query over a `_stays` view), `custom_feature()` (an R or Python function) or a full
-`study_feature()`, and register new kinds with `register_feature_factory()`. Vignettes: *Study-design features*, *Study features
-across sites* and *Study-design features in Python*.
-
-## Tools for a downstream study
-
-The package supports studies that use the validated OHDSI tools (FeatureExtraction, PatientLevelPrediction, CohortGenerator) on DuckDB
-and adds what they lack. `inst/examples/study_walkthrough.R` / `.py` run all of the following on a small synthetic CDM; each step is a
-few lines to copy.
-
-```r
-# 1. Cohorts as Circe JSON, evaluated without Java or a WebAPI (the definitions ship in cohort_definitions_dir())
-cohort <- execute_circe_cohort(con, file.path(cohort_definitions_dir(), "target_cohort.circe.json"))
-
-# 2. A legacy patient list against that cohort: who is found, and the first step that excludes everyone else
-rec <- reconcile_cohort(con, "legacy_patients.csv", definition = file.path(cohort_definitions_dir(), "target_cohort.circe.json"),
-                        id_col = "patient_id", index_date_col = "admit_date", min_cell = 11)
-
-# 3. Your own version of a feature (a Charlson index, RUCA/SDI) next to the standard one, readable by FeatureExtraction / PLP
-#    (see 'Study-design features' above for feature_set(), which also fits and ships the transforms);
-#    concept ids are per database, so share a registry across sites and check it
-ids <- write_custom_features(con, features)               # person_id, date, one numeric column per feature
-export_custom_concept_registry(con, "custom_concepts.json")
-check_custom_concepts(con, "other_site_registry.json")
-
-# 4. Is the feature worth keeping? Are two model runs really different? (aggregate output only)
-ablate_feature_groups(x, y, list(charlson_site = "charlson_site"))
-compare_model_runs(run_a, run_b)
-
-# 5. A bundle that records the concept ids it was trained with and refuses a site where they differ
-score_cohort(bundle, new_patients, check_concepts = con)
-
-# data quality: the schema-driven DQD catalog (checked against the official DataQualityDashboard)
-run_dqd_catalog(con)
-```
-
-The same functions exist in Python (`from omop_etl import ...`). The native Circe compiler evaluates a subset of Circe and refuses the
-rest with an error naming the construct; see `OHDSI_INTEGRATION.md` for what was checked against the official engines.
-
-## Known limitations
-
-- Athena vocabulary downloads do not include CPT4 concept names (AMA
-  copyright) — a separate licensed tool (bundled with the download) populates
-  them if you have a UMLS license. Until that's run, CPT4-coded procedures map
-  to concept_id 0.
-- A handful of source fields (e.g. admission source) aren't mapped yet; see
-  inline comments in the ETL code for specifics.
-- The Python side syncs vocabulary tables from BigQuery with `sync_vocabulary_from_bigquery()` (needs
-  `pip install omop-duck-db[bigquery]`); the R connector remains the route for other BigQuery tables. The Python
-  BigQuery sync and the Oracle cohort-SQL translation are unit-tested only (fake Arrow reader, generated SQL); neither
-  has been run against a live BigQuery project or an Oracle database.
-- `translate_cohort_sql(..., "oracle")` raises on constructs it cannot translate, but the translated SQL has never been
-  executed on Oracle. The R functions that mirror the Python ones (the cohort, consortium and feature functions) are
-  tested on small synthetic databases in both languages; the field tests on production databases so far ran the Python
-  side only, so R behaviour on production-size data is not yet verified.
+Command-line equivalents: `Rscript inst/scripts/etl_pcornet.R --source-dir ...` and
+`python -m omop_etl.build_omop_cdm --source-dir ...`. `etl_pcornet()` refuses to load into a database that already
+holds ETL output (it would duplicate every row); pass `overwrite = TRUE` to empty the CDM tables first.
+
+## Guides
+
+The long-form documentation lives in vignettes (the website's *Articles* menu).
+
+| Topic | Guide |
+|----|----|
+| Build the database, refresh the vocabulary, central vocabulary, custom and Usagi mappings | `vignette("database_and_mapping")` |
+| Study cohorts, comorbidity, measurement sanitisation, features, Table 1, reconciliation | `vignette("study_cohorts_and_features")` |
+| Add your own person-level features | `vignette("study_features")`, `vignette("study_design_tools")` |
+| scikit-learn, omop-learn, OHDSI PLP / DeepPLP, tidymodels | `vignette("ml_bridge")` |
+| Risk scores, wide tables, phenotypes, consortium federation, calibration, decision curves | `vignette("clinical_tools_and_consortium")` |
+| Benchmark features, deep-learning datasets, DGX Spark, Oracle | `vignette("deep_learning_and_benchmarks")` |
+| Small-cell suppression, CONSORT counts, site summary packages | `vignette("disclosure_and_site_packages")` |
+| Reproducing the delivered manuscript, decisions that move the numbers | `vignette("reproducing_the_manuscript")` |
+| Tests, large files | `vignette("operations")` |
+| What is claimed, verified and planned | `vignette("status_and_roadmap")` |
+
+## Works with the OHDSI ecosystem
+
+The package is built to sit beside the standard OMOP tools, not replace them. Status by tool (the evidence is in
+[`OHDSI_INTEGRATION.md`](OHDSI_INTEGRATION.md); `vignette("status_and_roadmap")` says what is claimed versus verified):
+
+| Status | Tools |
+|----|----|
+| **Compared against the official tool** (DuckDB, DatabaseConnector 8.0.0) | [CirceR](https://github.com/OHDSI/CirceR) + CohortGenerator (cohort definitions), [FeatureExtraction](https://github.com/OHDSI/FeatureExtraction) (visit counts, custom covariates), [PatientLevelPrediction](https://github.com/OHDSI/PatientLevelPrediction) (`getPlpData`, study population, `runPlp`), [DeepPatientLevelPrediction](https://github.com/OHDSI/DeepPatientLevelPrediction) (an MLP trained on `as_plp_data()` output), [CohortMethod](https://github.com/OHDSI/CohortMethod) (study population and an unadjusted odds ratio), [CohortConstructor](https://github.com/OHDSI/CohortConstructor) (concept and demographic cohorts), [DataQualityDashboard](https://github.com/OHDSI/DataQualityDashboard), Achilles, PhenotypeLibrary, CohortDiagnostics, via [HADES](https://github.com/OHDSI) DatabaseConnector; [omop-learn](https://github.com/clinicalml/omop-learn) (`DuckDBBackend` against the real classes) |
+| **Works, partly checked** | [ATLAS](https://github.com/OHDSI/Atlas) 2.x: `scripts/atlas/` imports the shipped Circe JSON and has WebAPI render SQL (verified on WebAPI 2.14; not a generation check). FeatureExtraction's Charlson index is **not** equivalent to the package's. |
+| **Not covered by any check** | ATLAS 3 (UI never run), [Data2Evidence](https://github.com/OHDSI/Data2Evidence), [Phenelope](https://github.com/OHDSI/Phenelope) (needs an LLM), [OHDSI GIS / Gaia](https://github.com/OHDSI/GIS) (PostgreSQL/PostGIS). Reasons in `OHDSI_INTEGRATION.md`. |
+
+Where the package overlaps an OHDSI tool (cohort engine, DQD catalog, Achilles subset, Table 1) it covers a subset and says so;
+prefer the official tool for anything you publish.
+
+## Repository layout
+
+- `inst/extdata/5.4/duckdb/*.sql` – CDM v5.4 DDL; the schema source of truth for **both** languages.
+- `inst/sql/*.sql` – DuckDB macros shared by both ETLs (ID hashing, date parsing, ancestry). Concept resolution itself
+  is written out in each loader.
+- `R/` – the R package. `python/omop_etl/` – the Python package, closely mirroring it (some features are
+  language-specific; see `NOTES.md`). `python/omop_duck_db/` re-exports `omop_etl`.
+- `inst/scripts/` – command-line wrappers; `inst/cohorts/` – shipped Circe cohort definitions; `inst/examples/`,
+  `scripts/` – worked examples and repository helper scripts; `vignettes/` – the guides above.
+
+## Things to know before you rely on results
+
+- **Age.** `define_study_cohort()` computes age in completed years. The old calendar-year method is still available as
+  `age_method = "year_difference"`, but it is deprecated: it admits people younger than `min_age`.
+- **Disclosure.** Aggregate helpers suppress counts from 1 to `min_cell_count - 1` (default 11) and blank what could be
+  recovered from them by subtraction. Only the duplicate/overlap helpers and the site-summary export were audited;
+  treat other helpers' output as pre-suppression. Details: `vignette("disclosure_and_site_packages")`.
+- **Vocabulary.** Athena downloads omit CPT4 concept names (AMA licence); until the licensed tool is run, CPT4
+  procedures map to concept 0. A few source fields (e.g. admission source) are not mapped yet.
+- **Not run live.** The BigQuery sync, Oracle cohort-SQL translation and Oracle transfers are unit-tested only;
+  the DGX Spark GPU path is untested on the device. R behaviour on production-size data is less field-tested than
+  Python's.
+
+See `NEWS.md` for changes and `NOTES.md` for architecture notes and the R/Python parity table.
