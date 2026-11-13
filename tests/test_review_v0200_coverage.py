@@ -135,3 +135,38 @@ def test_use_enrollment_and_macro_loader_guard():
 
     c = duckdb.connect()
     assert isinstance(load_macros(c, skip_unresolved=True), list)  # tolerates statements that need missing tables
+
+
+def _typed_tables(c):
+    c.execute("CREATE TABLE visit_occurrence (visit_occurrence_id INT, visit_type_concept_id INT)")
+    c.execute("INSERT INTO visit_occurrence VALUES (1, 32817), (2, 44818518)")
+    c.execute("CREATE TABLE condition_occurrence (condition_occurrence_id INT, condition_type_concept_id INT)")
+    c.execute("INSERT INTO condition_occurrence VALUES (1, 32840), (2, 32901)")
+    c.execute("CREATE TABLE measurement (measurement_id INT, measurement_type_concept_id INT, measurement_concept_id INT, value_as_number DOUBLE)")
+    c.execute("INSERT INTO measurement VALUES (1, 32817, 3004410, 5.0), (2, 44818702, 3004410, 6.0)")
+
+
+def test_filter_helpers_write_output_tables_and_reject_unsafe_names():
+    from omop_etl import filter_conditions, filter_measurements, filter_visits
+
+    c = duckdb.connect()
+    _typed_tables(c)
+    for fn, table, kw in ((filter_visits, "visit_occurrence", {"type_concept_ids": [32817]}),
+                          (filter_conditions, "condition_occurrence", {"type_concept_ids": [32840]}),
+                          (filter_measurements, "measurement", {"type_concept_ids": [32817]})):
+        out = fn(c, output_table=f"out_{table}", **kw)
+        assert len(out) == 1
+        assert c.execute(f"SELECT count(*) FROM out_{table}").fetchone()[0] == 1
+        with pytest.raises(ValueError, match="output_table"):
+            fn(c, output_table="x; DROP TABLE person", **kw)
+
+
+def test_normalize_units_validates_output_table():
+    from omop_etl import normalize_units
+
+    c = duckdb.connect()
+    _typed_tables(c)
+    with pytest.raises(ValueError, match="output_table"):
+        normalize_units(c, concept_id=3004410, output_table="bad name")
+    out = normalize_units(c, concept_id=3004410, output_table="norm_out")
+    assert len(out) == 2 and c.execute("SELECT count(*) FROM norm_out").fetchone()[0] == 2
