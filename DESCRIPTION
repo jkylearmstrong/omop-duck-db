@@ -20,6 +20,7 @@ Imports:
     digest,
     duckdb,
     jsonlite,
+    methods,
     parallel,
     stats,
     stringr,

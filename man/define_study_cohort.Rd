@@ -24,7 +24,7 @@ define_study_cohort(
   transfer_discharge_concept_ids = NULL,
   death_sources = NULL,
   followup_evidence = NULL,
-  age_method = "year_difference",
+  age_method = "completed_years",
   cohort_definition_id = 1,
   outcome_cohort_id = NULL,
   cohort_name = NULL,
@@ -117,10 +117,10 @@ for readmission / cohort-only, both for mortality outcomes.}
 \code{"drug"} (record dates) and \code{"death"}. Default: the four record types for readmission / cohort-only, all
 six for mortality outcomes.}
 
-\item{age_method}{\code{"year_difference"} (default; legacy, needed for equivalence) is
-\code{date_diff('year', birth, index_start)}, the number of calendar-year boundaries crossed, which overstates
-age by one year before the birthday. \code{"completed_years"} is the exact age in whole years. Missing birth
-month / day count as 1.}
+\item{age_method}{\code{"completed_years"} (default) is the exact age in whole years on the index date.
+\code{"year_difference"} (deprecated, kept to reproduce older results) is \code{date_diff('year', birth, index_start)},
+the number of calendar-year boundaries crossed, which overstates age by one year before the birthday and so
+admits people just under \code{min_age}; it warns. Missing birth month / day count as 1.}
 
 \item{cohort_definition_id}{Id written to \code{cohort} / \code{cohort_definition} (default 1).}
 
