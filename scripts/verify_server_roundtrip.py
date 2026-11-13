@@ -11,7 +11,10 @@ The connection URL is read from an environment variable so it never appears in s
 
 The record names the dialect, driver and server version, the character-set settings and the per-column results. It never contains the URL, host or
 user. On Oracle an empty string is stored as NULL, so the ``non_null`` count of the empty-string column is expected to differ; that row is reported
-as a known difference, not a failure. Exit code 1 when any other check fails.
+as a known difference, not a failure. Text, date, timestamp and boolean columns are also compared by value (``verify_transfer(content=True)``).
+On a database whose character set is not Unicode (for example WE8MSWIN1252) the Japanese test column cannot be stored; that mismatch is reported
+as a known difference and listed with the differing values, so a site learns that non-Latin text does not survive there. Exit code 1 when any
+other check fails.
 """
 import argparse
 import os
@@ -34,7 +37,8 @@ SELECT i::BIGINT AS id,
        (i % 2 = 0) AS flag,
        DATE '1960-01-01' + (i % 20000)::INTEGER AS d,
        TIMESTAMP '1999-12-31 23:59:59.123456' + to_seconds(i) AS ts,
-       CASE i % 4 WHEN 0 THEN 'plain ascii text ' || i WHEN 1 THEN 'café naïve résumé ' || i WHEN 2 THEN '日本語のテキスト ' || i ELSE repeat('x', 900) END AS txt,
+       CASE i % 3 WHEN 0 THEN 'plain ascii text ' || i WHEN 1 THEN 'café naïve résumé ' || i ELSE repeat('x', 900) END AS txt,
+       '日本語のテキスト ' || i AS txt_nonlatin,
        CASE WHEN i % 3 = 0 THEN '' ELSE NULL END AS txt_empty,
        CAST(NULL AS BIGINT) AS all_null
 FROM range(2000) t(i)
@@ -86,13 +90,16 @@ def run(url: str, schema=None, keep=False) -> tuple[pd.DataFrame, dict, list, bo
     info = _server_info(url)
     load = to_sql(con, spec, url, schema=schema, if_exists="fail")
     try:
-        res = verify_transfer(con, spec, url, schema=schema)
+        res = verify_transfer(con, spec, url, schema=schema, content=True, content_examples=2)   # synthetic data, so examples are safe to print
     finally:
         if not keep:
             _drop(url, target, schema)
     res["known_difference"] = False
     if info["dialect"] == "oracle":
         res.loc[res["column"] == "txt_empty:non_null", "known_difference"] = True
+        if str(info.get("NLS_CHARACTERSET", "")).upper() not in ("AL32UTF8", "UTF8", ""):
+            # a non-Unicode database character set cannot store the Japanese text; it is replaced on the way in. Reported, not hidden.
+            res.loc[res["column"] == "txt_nonlatin:content", "known_difference"] = True
     failed = res[(~res["match"]) & (~res["known_difference"])]
     return res, info, load, failed.empty
 
@@ -105,6 +112,9 @@ def render(res: pd.DataFrame, info: dict, load: list, ok: bool) -> str:
     for _, r in res.iterrows():
         tag = "known difference" if r["known_difference"] and not r["match"] else ("yes" if r["match"] else "NO")
         lines.append(f"| {r['column']} | {r['local']} | {r['remote']} | {tag} |")
+    if "detail" in res.columns and res["detail"].notna().any():
+        lines += ["", "## Differing values (synthetic data)", ""]
+        lines += [f"- {r['column']}: {r['detail']}" for _, r in res[res["detail"].notna()].iterrows()]
     return "\n".join(lines) + "\n"
 
 

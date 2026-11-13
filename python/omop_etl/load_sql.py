@@ -6,8 +6,9 @@ The other direction already exists: :func:`omop_etl.extract.import_omop` copies 
 * :func:`to_sql`           - copies DuckDB tables, or the result of a query (a study feature table, a cohort), into a server schema in
   chunks: creates the table with portable column types (``NUMBER(19)``, ``VARCHAR2``, ``DATE``, ``TIMESTAMP`` on Oracle), upper-cases and
   length-checks identifiers on Oracle, and appends / replaces / refuses per ``if_exists``.
-* :func:`verify_transfer`  - per table and column: row counts, non-null counts and, for numbers, sum / min / max on both sides, so a
-  round trip (DuckDB -> Oracle -> DuckDB) can be shown to be lossless.
+* :func:`verify_transfer`  - per table and column: row counts, non-null counts and, for numbers, sum / min / max on both sides (and,
+  with ``content=True``, a value-level fingerprint of text, date, timestamp and boolean columns), so a round trip
+  (DuckDB -> Oracle -> DuckDB) can be shown to be lossless.
 
 Credentials come from a SQLAlchemy URL or ``env:NAME`` and never appear in messages. The offline tests run the same code against SQLite
 and compile the Oracle DDL without a server. ``scripts/verify_server_roundtrip.py`` has been run against one live Oracle 19c server (see
@@ -80,6 +81,57 @@ def _source_sql(source: str) -> tuple[str, str]:
     return s, "table"
 
 
+_MASK = (1 << 64) - 1
+
+
+def _content_kind(duck_type: str) -> str | None:
+    """Column kinds whose values :func:`verify_transfer` can compare by value (text, DATE, TIMESTAMP, BOOLEAN); others return None."""
+    t = duck_type.upper()
+    if t.startswith(("VARCHAR", "TEXT", "STRING", "CHAR")):
+        return "text"
+    return {"DATE": "date", "TIMESTAMP": "timestamp", "BOOLEAN": "bool"}.get(t)
+
+
+def _norm(kind: str, v: Any, empty_is_null: bool) -> str | None:
+    """One comparable string per value, the same whichever side it came from (Oracle returns a DATE as a datetime and a CLOB as a LOB)."""
+    if v is None:
+        return None
+    if kind == "text":
+        s = v.read() if hasattr(v, "read") else str(v)
+        return None if (s == "" and empty_is_null) else s
+    if kind == "date":
+        if isinstance(v, str):                      # SQLite and some drivers return text for an untyped column
+            return v[:10]
+        return (v.date() if isinstance(v, _dt.datetime) else v).isoformat()
+    if kind == "timestamp":
+        if isinstance(v, str):
+            v = _dt.datetime.fromisoformat(v)
+        return v.replace(tzinfo=None).isoformat(timespec="microseconds")
+    return str(bool(v))
+
+
+def _column_values(fetchmany, kind: str, empty_is_null: bool, chunk: int = 50_000):
+    while True:
+        rows = fetchmany(chunk)
+        if not rows:
+            return
+        for (v,) in rows:
+            yield _norm(kind, v, empty_is_null)
+
+
+def _fingerprint(values) -> tuple[int, int, int]:
+    """Order-independent summary of a column: non-null count, sum and xor of the value hashes (valid within one process)."""
+    n = total = x = 0
+    for v in values:
+        if v is None:
+            continue
+        h = hash(v) & _MASK
+        n += 1
+        total = (total + h) & _MASK
+        x ^= h
+    return n, total, x
+
+
 def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, str], url: str, *, schema: str | None = None,
            if_exists: str = "fail", chunksize: int = 50_000, varchar_length: int = 4000, columns: Mapping[str, Sequence[str]] | None = None) -> list[dict[str, Any]]:
     """Copies DuckDB tables or queries into a server schema.
@@ -142,10 +194,18 @@ def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, 
 
 
 def verify_transfer(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, str], url: str, *, schema: str | None = None,
-                    rtol: float = 1e-9) -> pd.DataFrame:
+                    rtol: float = 1e-9, content: bool = False, content_examples: int = 0) -> pd.DataFrame:
     """Compares each DuckDB table (or query) with the copy on the server: row count, and per column the non-null count and, for numeric
     columns, the sum, minimum and maximum. Returns one row per table and column with ``match`` True / False; a lossless round trip
-    has no False. Column names are matched case-insensitively (Oracle upper-cases them)."""
+    has no False. Column names are matched case-insensitively (Oracle upper-cases them).
+
+    ``content=True`` also compares text, DATE, TIMESTAMP and BOOLEAN columns **by value**: both sides are read once (streamed) and each
+    column gets an order-independent fingerprint, reported as ``<column>:content`` (``local`` / ``remote`` are ``"<non-null count>:<hex>"``).
+    This catches what counts and sums cannot: text altered by the server's character set (non-Latin characters replaced by ``?`` in a
+    ``WE8MSWIN1252`` database), truncated strings, shifted dates. It reads every value, so it costs a full scan of each column. Time-zone
+    timestamps and binary columns are not compared. On Oracle an empty string is stored as NULL, so empty strings count as NULL on the
+    local side. ``content_examples=n`` adds a ``detail`` column listing up to n differing values per mismatching column; leave it at 0 for
+    real data, because the examples are data values."""
     sa = _sa()
     spec = dict(tables) if isinstance(tables, Mapping) else {t: t for t in tables}
     engine = _make_engine(url)
@@ -173,6 +233,25 @@ def verify_transfer(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapp
                         fy = None if y is None else float(y)
                         ok = (fx is None and fy is None) or (fx is not None and fy is not None and abs(fx - fy) <= rtol * max(1.0, abs(fx)))
                         rows.append({"table": target, "column": f"{name}:{label}", "local": fx, "remote": fy, "match": bool(ok)})
+                    kind = _content_kind(typ) if content else None
+                    if kind:
+                        eon = dialect == "oracle"
+                        cur = con.execute(f'SELECT "{name}" FROM {frm}')
+                        fl = _fingerprint(_column_values(cur.fetchmany, kind, eon))
+                        res = conn.execution_options(stream_results=True).execute(sa.text(f"SELECT {rc} FROM {qname}"))
+                        fr = _fingerprint(_column_values(res.fetchmany, kind, False))
+                        row = {"table": target, "column": f"{name}:content", "local": f"{fl[0]}:{fl[1]:016x}", "remote": f"{fr[0]}:{fr[1]:016x}", "match": fl == fr}
+                        if fl != fr and content_examples > 0:
+                            from collections import Counter
+
+                            cur = con.execute(f'SELECT "{name}" FROM {frm}')
+                            cl = Counter(_column_values(cur.fetchmany, kind, eon))
+                            res = conn.execution_options(stream_results=True).execute(sa.text(f"SELECT {rc} FROM {qname}"))
+                            cr = Counter(_column_values(res.fetchmany, kind, False))
+                            only_l = [repr(v)[:60] for v in (cl - cr) if v is not None][:content_examples]
+                            only_r = [repr(v)[:60] for v in (cr - cl) if v is not None][:content_examples]
+                            row["detail"] = f"local only: {only_l}; remote only: {only_r}"
+                        rows.append(row)
     except Exception as exc:
         raise _scrub(exc, url) from None
     finally:

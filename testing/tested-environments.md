@@ -18,15 +18,27 @@ What has been run for real, with the evidence, and what has not. Update this fil
 
 **What it does not show.**
 
-- **Text, dates and timestamps are checked by non-null count only**, not by value. The server's character set is `WE8MSWIN1252`, which cannot hold the Japanese test strings, so those characters were very likely replaced on the way in. The check could not see that. Do not read this record as proof that non-Latin text survives. A value-level comparison is a follow-up.
+- **Text, dates and timestamps are checked by non-null count only**, not by value. The server's character set is `WE8MSWIN1252`, which cannot hold the Japanese test strings, so those characters were very likely replaced on the way in. The check could not see that. Do not read this record as proof that non-Latin text survives. `verify_transfer(content=True)` (value-level comparison) was added afterwards; this record predates it, and a rerun on the same server is pending.
 - Only the account's default schema was used (`schema=` untested), with `if_exists="fail"` only. `replace` and `append` were not run.
 - NaN / Infinity doubles, `HUGEINT`, time-zone timestamps and a failed-login error message (credential scrubbing with the real driver) were not exercised.
 - One small run on one server with one account. Throughput at scale is unmeasured.
 - Oracle Free 23 in CI and other Oracle versions were not run.
 
-## DGX Spark
+## DGX Spark: `Dockerfile.dgx` and `scripts/dgx_smoke_test.py`
 
-**Not verified.** `scripts/dgx_smoke_test.py` and `Dockerfile.dgx` have not been run on a DGX Spark, and no record exists. Earlier DGX work on a study pipeline does not test this repository's image. When it is run, record the container image or tag, the PyTorch and CUDA versions, the output of `dgx_smoke_test.py` and the date, and add a section here.
+| | |
+|---|---|
+| Date | 2026-11-13 |
+| Host | aarch64 DGX Spark, NVIDIA GB10 (compute capability 12.1), driver 580.178.04, Docker 29.6.2 |
+| Image | built from this repository's `Dockerfile.dgx` (base `nvcr.io/nvidia/pytorch:25.01-py3`, torch 2.6.0a0 nv25.01, CUDA 12.8) |
+| `gpu-check` | passed (device visible: NVIDIA GB10, (12, 1)) |
+| `dgx-smoke` | **passed** after the NumPy pin below. Record: [`records/dgx-spark-smoke-2026-11-13.md`](records/dgx-spark-smoke-2026-11-13.md) |
+
+**A bug found by this run, and fixed here.** The image as it stood failed `dgx-smoke` with `RuntimeError: Numpy is not available`. The base image ships NumPy 1.26.4 and its torch is built against it; installing the package extras upgraded NumPy to 2.2.6, which that torch cannot use. `Dockerfile.dgx` now pins NumPy to the base image's version in the same constraint file that pins torch. With the pin, NumPy stays at 1.26.4 and the smoke test trains and scores on the GPU in about 10 s.
+
+**What it shows.** The image builds on aarch64, sees the GB10, and the package's MLP trains and is scored with the study tables on CUDA.
+
+**What it does not show.** The smoke test uses synthetic data (AUCs of about 0.66 to 0.72 say nothing about the study). It does not run the study pipeline, the Transformer or other trainers, multi-GPU, or long jobs. The base image prints a warning that GB10 "may not yet be supported" in this container version; the run worked regardless. Only one DGX Spark was tested.
 
 ## Everything else
 

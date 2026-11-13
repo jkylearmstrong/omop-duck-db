@@ -147,6 +147,31 @@ def test_verify_transfer_flags_a_changed_value(source, tmp_path):
     assert set(v.loc[~v["match"], "column"]) == {"score:sum", "score:max"}
 
 
+def test_verify_transfer_content_passes_on_a_faithful_copy(source, tmp_path):
+    url = f"sqlite:///{(tmp_path / 'c.db').as_posix()}"
+    load_sql.to_sql(source, ["person"], url)
+    v = load_sql.verify_transfer(source, ["person"], url, content=True)
+    assert v["match"].all()
+    assert {"sex:content", "d:content", "ts:content", "flag:content"} <= set(v["column"]) and "score:content" not in set(v["column"])
+    assert "detail" not in v.columns                       # no data values unless content_examples is asked for
+
+
+def test_verify_transfer_content_catches_changes_counts_and_sums_cannot_see(source, tmp_path):
+    url = f"sqlite:///{(tmp_path / 'd.db').as_posix()}"
+    load_sql.to_sql(source, ["person"], url)
+    eng = sa.create_engine(url)
+    with eng.begin() as c:
+        c.execute(sa.text("UPDATE person SET sex = '?' WHERE yob = 1980"))                  # same count, text altered
+        c.execute(sa.text("UPDATE person SET d = '2020-01-03' WHERE yob = 1980"))           # date shifted by a day
+    plain = load_sql.verify_transfer(source, ["person"], url)
+    assert plain["match"].all()                                                             # counts and sums alone miss both
+    v = load_sql.verify_transfer(source, ["person"], url, content=True, content_examples=2)
+    assert set(v.loc[~v["match"], "column"]) == {"sex:content", "d:content"}
+    detail = v.set_index("column")["detail"]
+    assert "'F'" in detail["sex:content"] and "'?'" in detail["sex:content"]
+    assert "2020-01-02" in detail["d:content"] and "2020-01-03" in detail["d:content"]
+
+
 def test_oracle_ddl_types_and_identifier_rules_offline():
     from sqlalchemy.dialects import oracle
 
