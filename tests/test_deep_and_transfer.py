@@ -147,6 +147,113 @@ def test_verify_transfer_flags_a_changed_value(source, tmp_path):
     assert set(v.loc[~v["match"], "column"]) == {"score:sum", "score:max"}
 
 
+def test_verify_transfer_content_passes_on_a_faithful_copy(source, tmp_path):
+    url = f"sqlite:///{(tmp_path / 'c.db').as_posix()}"
+    load_sql.to_sql(source, ["person"], url)
+    v = load_sql.verify_transfer(source, ["person"], url, content=True)
+    assert v["match"].all()
+    assert {"sex:content", "d:content", "ts:content", "flag:content"} <= set(v["column"]) and "score:content" not in set(v["column"])
+    assert "detail" not in v.columns                       # no data values unless content_examples is asked for
+
+
+def test_verify_transfer_content_catches_changes_counts_and_sums_cannot_see(source, tmp_path):
+    url = f"sqlite:///{(tmp_path / 'd.db').as_posix()}"
+    load_sql.to_sql(source, ["person"], url)
+    eng = sa.create_engine(url)
+    with eng.begin() as c:
+        c.execute(sa.text("UPDATE person SET sex = '?' WHERE yob = 1980"))                  # same count, text altered
+        c.execute(sa.text("UPDATE person SET d = '2020-01-03' WHERE yob = 1980"))           # date shifted by a day
+    plain = load_sql.verify_transfer(source, ["person"], url)
+    assert plain["match"].all()                                                             # counts and sums alone miss both
+    v = load_sql.verify_transfer(source, ["person"], url, content=True, content_examples=2)
+    assert set(v.loc[~v["match"], "column"]) == {"sex:content", "d:content"}
+    detail = v.set_index("column")["detail"]
+    assert "'F'" in detail["sex:content"] and "'?'" in detail["sex:content"]
+    assert "2020-01-02" in detail["d:content"] and "2020-01-03" in detail["d:content"]
+
+
+@pytest.fixture
+def text_source():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE notes AS SELECT * FROM (VALUES ('plain', 'cafe'), ('x', 'caf\u00e9'), ('y', '\u65e5\u672c\u8a9e')) t(a, b)")
+    return con
+
+
+def _pretend_ascii_database(monkeypatch):
+    monkeypatch.setattr(load_sql, "_target_codec", lambda engine, dialect: ("ascii", "WE8TEST"))
+
+
+def test_to_sql_warns_about_text_a_non_unicode_database_would_replace(text_source, tmp_path, monkeypatch):
+    _pretend_ascii_database(monkeypatch)
+    url = f"sqlite:///{(tmp_path / 'w.db').as_posix()}"
+    with pytest.warns(UserWarning, match="cannot store") as rec:
+        res = load_sql.to_sql(text_source, ["notes"], url)
+    assert res[0]["unencodable"] == {"b": 2} and res[0]["rows"] == 3            # column a is plain ASCII; two of three values in b are not
+    msg = str(rec[0].message)
+    assert "b (2 of 3 rows)" in msg and "nvarchar=True" in msg
+    assert "caf" not in msg and "\u65e5" not in msg                               # the warning names columns and counts, never values
+
+
+def test_to_sql_unencodable_error_refuses_the_load_and_ignore_skips_the_check(text_source, tmp_path, monkeypatch):
+    import warnings
+
+    _pretend_ascii_database(monkeypatch)
+    url = f"sqlite:///{(tmp_path / 'e.db').as_posix()}"
+    with pytest.raises(ValueError, match="Nothing was loaded"):
+        load_sql.to_sql(text_source, ["notes"], url, on_unencodable="error")
+    assert not sa.inspect(sa.create_engine(url)).has_table("notes") or sa.create_engine(url).connect().execute(sa.text("SELECT count(*) FROM notes")).scalar() == 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert load_sql.to_sql(text_source, ["notes"], url, if_exists="replace", on_unencodable="ignore")[0]["unencodable"] == {}
+    with pytest.raises(ValueError, match="on_unencodable"):
+        load_sql.to_sql(text_source, ["notes"], url, on_unencodable="sometimes")
+
+
+def test_nvarchar_columns_are_not_checked_and_oracle_gets_national_types(text_source, tmp_path, monkeypatch):
+    import warnings
+
+    from sqlalchemy.dialects import oracle
+
+    _pretend_ascii_database(monkeypatch)
+    url = f"sqlite:///{(tmp_path / 'n.db').as_posix()}"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert load_sql.to_sql(text_source, ["notes"], url, nvarchar=True)[0]["unencodable"] == {}
+        assert load_sql.to_sql(text_source, ["notes"], url, if_exists="replace", nvarchar=["B"])[0]["unencodable"] == {}   # case-insensitive names
+    md = sa.MetaData()
+    cols = [sa.Column("short", load_sql._sa_type(sa, "VARCHAR", "oracle", 1000, unicode_text=True)),
+            sa.Column("long_text", load_sql._sa_type(sa, "VARCHAR", "oracle", 9000, unicode_text=True)),
+            sa.Column("plain", load_sql._sa_type(sa, "VARCHAR", "oracle", 1000))]
+    ddl = str(sa.schema.CreateTable(sa.Table("T", md, *cols)).compile(dialect=oracle.dialect()))
+    assert "NVARCHAR2(1000)" in ddl and "NCLOB" in ddl and "VARCHAR2(1000 CHAR)" in ddl
+
+
+def test_nvarchar_length_stays_within_nvarchar2_unless_the_data_needs_a_lob():
+    assert load_sql._unicode_text_length(900, 4000) == 2000 and load_sql._unicode_text_length(50, 100) == 100
+    assert load_sql._unicode_text_length(None, 4000) == 2000                   # an all-NULL column
+    assert load_sql._unicode_text_length(2001, 4000) == 4001                   # too long for NVARCHAR2: NCLOB
+    from sqlalchemy.dialects import oracle
+
+    def ddl(n):
+        col = sa.Column("t", load_sql._sa_type(sa, "VARCHAR", "oracle", n, unicode_text=True))
+        return str(sa.schema.CreateTable(sa.Table("T", sa.MetaData(), col)).compile(dialect=oracle.dialect()))
+
+    assert "NVARCHAR2(2000)" in ddl(2000) and "NCLOB" in ddl(4001)
+
+
+def test_close_treats_nan_and_infinity_as_equal_to_themselves():
+    nan, inf = float("nan"), float("inf")
+    assert load_sql._close(None, None, 1e-9) and not load_sql._close(None, 1.0, 1e-9)
+    assert load_sql._close(nan, nan, 1e-9) and not load_sql._close(nan, 1.0, 1e-9)
+    assert load_sql._close(inf, inf, 1e-9) and not load_sql._close(inf, -inf, 1e-9) and not load_sql._close(inf, 1.0, 1e-9)
+    assert load_sql._close(199900.0, 199899.99999999997, 1e-9) and not load_sql._close(1.0, 1.1, 1e-9)
+
+
+def test_target_codec_is_only_used_for_oracle(tmp_path):
+    eng = sa.create_engine(f"sqlite:///{(tmp_path / 'c.db').as_posix()}")
+    assert load_sql._target_codec(eng, "sqlite") == (None, None)
+
+
 def test_oracle_ddl_types_and_identifier_rules_offline():
     from sqlalchemy.dialects import oracle
 
