@@ -18,19 +18,21 @@ copy_demo_sample_from_bigquery(
 
 \item{dataset}{Source CDM, \code{"project.dataset"}.}
 
-\item{db_path}{DuckDB file to write (tables are replaced).}
+\item{db_path}{DuckDB file to write: a new file, or one holding only an earlier copy (copied tables are replaced).}
 
 \item{sample_modulus, sample_remainder}{Which persons to copy.}
 
 \item{runner}{For tests: a list with \code{fetch(sql)} returning a data frame.}
 }
 \value{
-Invisibly, a data frame of table names and copied row counts.
+Invisibly, a data frame of table names and copied row counts (tables missing from the source are not listed).
 }
 \description{
 Copies every row of the persons with \code{MOD(person_id, sample_modulus) = sample_remainder} from \code{person},
 \code{observation_period}, \code{visit_occurrence}, \code{condition_occurrence}, \code{drug_exposure} and \code{measurement}, plus the
-\code{concept_ancestor} rows their events need. The cohort and features are per person, so \code{\link[=run_duckdb_demo]{run_duckdb_demo()}} on the copy
+\code{concept_ancestor} rows their events need. The database starts from the package's empty CDM schema (\code{\link[=build_schema]{build_schema()}}),
+so a table the source lacks (SynPUF has no \code{visit_occurrence} or \code{measurement}) stays empty, as its stand-in does on
+BigQuery. The cohort and features are per person, so \code{\link[=run_duckdb_demo]{run_duckdb_demo()}} on the copy
 must give exactly the BigQuery \code{demo_cohort} / \code{demo_features} rows for the same persons. Each query scans its source
 table once (BigQuery bills the columns read, whatever the sample size); the copy itself is small. Ids are kept
 exact (\code{integer64} on download, \code{BIGINT} in DuckDB).

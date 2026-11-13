@@ -187,6 +187,9 @@ A fixed sample of persons (`MOD(person_id, 1000) = 0`, about 0.1%) is copied who
 `copy_demo_sample_from_bigquery()`, with the `concept_ancestor` rows their events need. The cohort and the features
 are per person, so rebuilding them on the copy must give exactly the BigQuery `demo_cohort` and `demo_features` rows
 for the same persons. Each copy query scans its source table once; BigQuery bills the columns read, not the sample size.
+SynPUF has no `visit_occurrence` or `measurement` table: the BigQuery demo used empty stand-ins for them (section 2's
+report lists them), and the DuckDB copy keeps them empty too, so prior utilization is 0 on both sides and only the
+cohort, demographics and types say anything.
 
 ```{r live-sample}
 #| eval: !expr live

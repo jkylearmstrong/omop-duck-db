@@ -322,19 +322,21 @@ compare_demo_outputs <- function(left_dir, right_dir, tolerance = 0.051) {
   invisible(nrow(df))
 }
 
-.demo_sample_sql <- function(dataset, sample_modulus, sample_remainder) {
+.demo_sample_sql <- function(dataset, sample_modulus, sample_remainder,
+                             present = c("visit_occurrence", "measurement")) {
   .demo_dataset(dataset, "dataset")
   m <- as.integer(sample_modulus); r <- as.integer(sample_remainder)
   if (is.na(m) || m < 1L || is.na(r) || r < 0L || r >= m) stop("need sample_modulus >= 1 and 0 <= sample_remainder < sample_modulus", call. = FALSE)
   where <- sprintf("MOD(person_id, %d) = %d", m, r)
   tables <- c("person", "observation_period", "visit_occurrence", "condition_occurrence", "drug_exposure", "measurement")
+  tables <- tables[!tables %in% setdiff(c("visit_occurrence", "measurement"), present)]  # optional: SynPUF lacks both
   sql <- stats::setNames(sprintf("SELECT * FROM `%s.%s` WHERE %s", dataset, tables, where), tables)
   # the concept_ancestor rows whose descendant appears in the sample's events: enough for every concept-set lookup
-  sql[["concept_ancestor"]] <- sprintf(paste(
-    "SELECT ca.* FROM `%1$s.concept_ancestor` AS ca WHERE ca.descendant_concept_id IN (",
-    "SELECT condition_concept_id FROM `%1$s.condition_occurrence` WHERE %2$s UNION DISTINCT",
-    "SELECT drug_concept_id FROM `%1$s.drug_exposure` WHERE %2$s UNION DISTINCT",
-    "SELECT measurement_concept_id FROM `%1$s.measurement` WHERE %2$s)"), dataset, where)
+  events <- c(sprintf("SELECT condition_concept_id FROM `%s.condition_occurrence` WHERE %s", dataset, where),
+              sprintf("SELECT drug_concept_id FROM `%s.drug_exposure` WHERE %s", dataset, where),
+              if ("measurement" %in% tables) sprintf("SELECT measurement_concept_id FROM `%s.measurement` WHERE %s", dataset, where))
+  sql[["concept_ancestor"]] <- sprintf("SELECT ca.* FROM `%s.concept_ancestor` AS ca WHERE ca.descendant_concept_id IN (%s)",
+                                       dataset, paste(events, collapse = " UNION DISTINCT "))
   sql
 }
 
@@ -342,26 +344,32 @@ compare_demo_outputs <- function(left_dir, right_dir, tolerance = 0.051) {
 #'
 #' Copies every row of the persons with `MOD(person_id, sample_modulus) = sample_remainder` from `person`,
 #' `observation_period`, `visit_occurrence`, `condition_occurrence`, `drug_exposure` and `measurement`, plus the
-#' `concept_ancestor` rows their events need. The cohort and features are per person, so [run_duckdb_demo()] on the copy
+#' `concept_ancestor` rows their events need. The database starts from the package's empty CDM schema ([build_schema()]),
+#' so a table the source lacks (SynPUF has no `visit_occurrence` or `measurement`) stays empty, as its stand-in does on
+#' BigQuery. The cohort and features are per person, so [run_duckdb_demo()] on the copy
 #' must give exactly the BigQuery `demo_cohort` / `demo_features` rows for the same persons. Each query scans its source
 #' table once (BigQuery bills the columns read, whatever the sample size); the copy itself is small. Ids are kept
 #' exact (`integer64` on download, `BIGINT` in DuckDB).
 #'
 #' @param billing_project Your GCP project id.
 #' @param dataset Source CDM, `"project.dataset"`.
-#' @param db_path DuckDB file to write (tables are replaced).
+#' @param db_path DuckDB file to write: a new file, or one holding only an earlier copy (copied tables are replaced).
 #' @param sample_modulus,sample_remainder Which persons to copy.
 #' @param runner For tests: a list with `fetch(sql)` returning a data frame.
-#' @return Invisibly, a data frame of table names and copied row counts.
+#' @return Invisibly, a data frame of table names and copied row counts (tables missing from the source are not listed).
 #' @export
 copy_demo_sample_from_bigquery <- function(billing_project, dataset = .DEMO_PUBLIC_DATASET, db_path,
                                            sample_modulus = 1000L, sample_remainder = 0L, runner = NULL) {
-  sql <- .demo_sample_sql(dataset, sample_modulus, sample_remainder)
+  .demo_dataset(dataset, "dataset")
   if (is.null(runner)) {
     if (!requireNamespace("bigrquery", quietly = TRUE)) stop("copy_demo_sample_from_bigquery() needs bigrquery.", call. = FALSE)
     runner <- list(fetch = function(q) as.data.frame(bigrquery::bq_table_download(
       bigrquery::bq_project_query(billing_project, q, quiet = TRUE), bigint = "integer64", quiet = TRUE)))
   }
+  parts <- strsplit(dataset, ".", fixed = TRUE)[[1]]
+  present <- runner$fetch(sprintf("SELECT table_name FROM `%s.%s.INFORMATION_SCHEMA.TABLES`", parts[[1]], parts[[2]]))$table_name
+  sql <- .demo_sample_sql(dataset, sample_modulus, sample_remainder, present)
+  utils::capture.output(build_schema(db_path))  # every CDM table exists; copied ones are replaced below
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
   n <- vapply(names(sql), function(t) as.numeric(.write_bq_frame(con, t, runner$fetch(sql[[t]]))), numeric(1))

@@ -18,6 +18,35 @@ BIGQUERY_DEMO_UTILIZATION_NOTE <- paste(
 )
 
 .DEMO_PUBLIC_DATASET <- "bigquery-public-data.cms_synthetic_patient_data_omop"
+# CDM tables the demo can do without: the public SynPUF copy has neither. Each missing one is replaced by an EMPTY table
+# of the same shape in the scratch dataset (`stub_<table>`), so the cohort still compiles and runs; features that need
+# it then read nothing (utilization 0, labs unavailable) and the report says so.
+.DEMO_OPTIONAL_TABLES <- list(
+  visit_occurrence = c(visit_occurrence_id = "INT64", person_id = "INT64", visit_concept_id = "INT64",
+                       visit_start_date = "DATE", visit_start_datetime = "DATETIME", visit_end_date = "DATE",
+                       visit_end_datetime = "DATETIME", visit_type_concept_id = "INT64", provider_id = "INT64",
+                       care_site_id = "INT64", visit_source_value = "STRING", visit_source_concept_id = "INT64",
+                       admitting_source_concept_id = "INT64", admitting_source_value = "STRING",
+                       discharge_to_concept_id = "INT64", discharge_to_source_value = "STRING",
+                       preceding_visit_occurrence_id = "INT64"),
+  measurement = c(measurement_id = "INT64", person_id = "INT64", measurement_concept_id = "INT64", measurement_date = "DATE",
+                  measurement_datetime = "DATETIME", measurement_time = "STRING", measurement_type_concept_id = "INT64",
+                  operator_concept_id = "INT64", value_as_number = "FLOAT64", value_as_concept_id = "INT64",
+                  unit_concept_id = "INT64", range_low = "FLOAT64", range_high = "FLOAT64", provider_id = "INT64",
+                  visit_occurrence_id = "INT64", visit_detail_id = "INT64", measurement_source_value = "STRING",
+                  measurement_source_concept_id = "INT64", unit_source_value = "STRING", value_source_value = "STRING")
+)
+
+.demo_stub_sql <- function(scratch, table) {
+  cols <- .DEMO_OPTIONAL_TABLES[[table]]
+  sprintf("CREATE OR REPLACE TABLE `%s.stub_%s` (%s)", scratch, table, paste(names(cols), cols, collapse = ", "))
+}
+
+# point references to a missing source table at its empty stand-in
+.demo_use_stubs <- function(sql, dataset, scratch, stubs) {
+  for (t in stubs) sql <- gsub(sprintf("`%s.%s`", dataset, t), sprintf("`%s.stub_%s`", scratch, t), sql, fixed = TRUE)
+  sql
+}
 .DEMO_UTILIZATION <- c("prior_ip_os_ed_count", "readmission_count_twelve_months")
 .DEMO_TELEMETRY <- c(serum_creatinine = "n_creatinine", serum_glucose = "n_glucose", serum_albumin = "n_albumin",
                      systolic_bp = "n_systolic_bp", diastolic_bp = "n_diastolic_bp")
@@ -119,7 +148,11 @@ summarize_bigquery_demo <- function(features, availability = NULL) {
   f <- function(x) if (is.null(x)) "NA" else format(x)
   out <- c("# BigQuery SynPUF demonstration report", "", paste0("> **", BIGQUERY_DEMO_DISCLAIMER, "**"), "",
            "## Run", "", paste0("- Billing project: `", run$billing_project, "`"), paste0("- Source: `", run$dataset, "`"),
-           paste0("- Cohort: `", run$cohort_json, "` (cohort id ", run$cohort_id, ")"), "")
+           paste0("- Cohort: `", run$cohort_json, "` (cohort id ", run$cohort_id, ")"),
+           if (length(run$stubbed_tables)) paste0("- Not in the source, replaced by EMPTY tables: ",
+             paste0("`", run$stubbed_tables, "`", collapse = ", "),
+             if ("visit_occurrence" %in% run$stubbed_tables) " (prior utilization is therefore 0 for everyone and says nothing)" else ""),
+           "")
   if (isTRUE(run$dry_run)) return(paste(c(out, "Dry run: SQL was compiled and written; nothing was executed on BigQuery.", ""), collapse = "\n"))
   rows <- function(d) vapply(names(d), function(k) sprintf("| %s | %d (%s%%) |", k, d[[k]]$n, d[[k]]$pct), "")
   age <- summary$age_at_index
@@ -160,6 +193,10 @@ summarize_bigquery_demo <- function(features, availability = NULL) {
 #' dataset of **your** project, and writes `demo_report.md`, `demo_summary.json`, `demo_features.csv` and the SQL to
 #' `output_dir`. The data are synthetic claims with no labs or vital signs; those features are reported as 100%
 #' missing and never imputed. Results say nothing about clinical performance (see [BIGQUERY_DEMO_DISCLAIMER]).
+#'
+#' The public SynPUF copy has no `visit_occurrence` or `measurement` table. A missing one is replaced by an empty table
+#' of the same shape in the scratch dataset (`stub_visit_occurrence`, `stub_measurement`), so the cohort still runs;
+#' utilization is then 0 for everyone and labs are unavailable, and the report lists the stand-ins.
 #'
 #' Reading the public dataset needs only a project to bill; the run also needs permission to run BigQuery jobs and
 #' create a dataset in `billing_project` (or a `scratch_dataset` you already own). Authenticate once with
@@ -226,14 +263,22 @@ run_bigquery_demo <- function(billing_project = NULL, output_dir = "bigquery_dem
   runner <- runner %||% .bq_runner(billing_project)
   parts <- strsplit(dataset, ".", fixed = TRUE)[[1]]
   present <- timed("preflight", runner$fetch(sprintf("SELECT table_name FROM `%s.%s.INFORMATION_SCHEMA.TABLES`", parts[[1]], parts[[2]])))$table_name
-  needed <- c("person", "visit_occurrence", "observation_period", "condition_occurrence", "drug_exposure", "measurement",
+  needed <- c("person", "observation_period", "condition_occurrence", "drug_exposure",
               if (is.null(vocabulary_dataset)) "concept_ancestor")
   missing <- setdiff(needed, present)
   if (length(missing)) {
     stop(dataset, " is missing ", paste(missing, collapse = ", "), " (found: ", paste(sort(present), collapse = ", "),
          "); pass vocabulary_dataset= if concept_ancestor lives elsewhere", call. = FALSE)
   }
+  stubs <- setdiff(names(.DEMO_OPTIONAL_TABLES), present)
+  if (length(stubs)) {
+    run$stubbed_tables <- stubs
+    cohort_sql <- .demo_use_stubs(cohort_sql, dataset, scratch, stubs)
+    features_sql <- .demo_use_stubs(features_sql, dataset, scratch, stubs)
+    avail_sql <- .demo_use_stubs(avail_sql, dataset, scratch, stubs)
+  }
   timed("create_scratch_dataset", runner$ensure_dataset(scratch))
+  for (t in stubs) runner$execute(.demo_stub_sql(scratch, t))
   timed("build_cohort", for (stmt in cohort_sql) runner$execute(stmt))
   timed("extract_features", runner$execute(features_sql))
   features <- timed("download_features", runner$fetch(sprintf("SELECT * FROM `%s.demo_features`", .demo_dataset(scratch, "scratch"))))

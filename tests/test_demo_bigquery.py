@@ -160,3 +160,26 @@ def test_no_sqlglot_warnings_and_utilization_note(tmp_path, caplog):
     assert not [r for r in caplog.records if "NULLS LAST" in r.getMessage()]
     run_demo("my-proj", tmp_path, client=_FakeClient(ALL), cohort_json="inst/cohorts/diabetes_phenotype.circe.json")
     assert "FIRST qualifying diabetes event" in (tmp_path / "demo_report.md").read_text(encoding="utf-8")
+
+
+#: what the public SynPUF copy on BigQuery actually holds (no visit_occurrence, no measurement)
+SYNPUF = ["care_site", "concept", "concept_ancestor", "concept_class", "concept_relationship", "condition_era",
+          "condition_occurrence", "cost", "death", "device_exposure", "domain", "dose_era", "drug_era", "drug_exposure",
+          "drug_strength", "location", "observation", "observation_period", "payer_plan_period", "person",
+          "procedure_occurrence", "provider", "relationship", "vocabulary"]
+
+
+def test_missing_visit_and_measurement_tables_get_empty_stand_ins(tmp_path):
+    client = _FakeClient(SYNPUF)
+    s = run_demo("my-proj", tmp_path, client=client, cohort_json="inst/cohorts/diabetes_phenotype.circe.json")
+    assert s["run"]["stubbed_tables"] == ["visit_occurrence", "measurement"]
+    creates = [q for q in client.sql if "stub_" in q and q.startswith("CREATE OR REPLACE TABLE")]
+    assert any("`my-proj.omop_duckdb_demo.stub_visit_occurrence` (visit_occurrence_id INT64" in q for q in creates)
+    assert any("`my-proj.omop_duckdb_demo.stub_measurement` (measurement_id INT64" in q for q in creates)
+    later = [q for q in client.sql if "stub_" not in q[:80]]
+    assert not any(f"`{CDM}.visit_occurrence`" in q or f"`{CDM}.measurement`" in q for q in client.sql)
+    assert any("`my-proj.omop_duckdb_demo.stub_measurement`" in q for q in later)  # cohort and availability rewired
+    assert "replaced by EMPTY tables" in (tmp_path / "demo_report.md").read_text(encoding="utf-8")
+    for q in creates:
+        sqlglot.parse_one(q, read="bigquery")
+

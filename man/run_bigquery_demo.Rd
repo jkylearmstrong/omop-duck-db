@@ -46,6 +46,10 @@ dataset of \strong{your} project, and writes \code{demo_report.md}, \code{demo_s
 missing and never imputed. Results say nothing about clinical performance (see \link{BIGQUERY_DEMO_DISCLAIMER}).
 }
 \details{
+The public SynPUF copy has no \code{visit_occurrence} or \code{measurement} table. A missing one is replaced by an empty table
+of the same shape in the scratch dataset (\code{stub_visit_occurrence}, \code{stub_measurement}), so the cohort still runs;
+utilization is then 0 for everyone and labs are unavailable, and the report lists the stand-ins.
+
 Reading the public dataset needs only a project to bill; the run also needs permission to run BigQuery jobs and
 create a dataset in \code{billing_project} (or a \code{scratch_dataset} you already own). Authenticate once with
 \code{bigrquery::bq_auth()}.

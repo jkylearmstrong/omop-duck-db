@@ -136,20 +136,27 @@ def emulate_bigquery_demo(con: Any, cdm_schema: str = "main", cohort_json: str |
     """Run the GoogleSQL the BigQuery demo sends (cohort and features) on DuckDB; returns ``(cohort, features)``.
 
     The statements are exactly those :func:`omop_etl.demo_bigquery.run_demo` executes, transpiled back with sqlglot, so a
-    difference from :func:`run_duckdb_demo` is a dialect-translation bug. Tables are written to ``scratch_schema``.
+    difference from :func:`run_duckdb_demo` is a dialect-translation bug. Tables are written to ``scratch_schema``. An
+    optional table missing from ``cdm_schema`` (``visit_occurrence``, ``measurement``) gets the same empty stand-in the
+    demo creates on BigQuery.
     """
-    from omop_etl.demo_bigquery import compile_cohort_bigquery
+    from omop_etl.demo_bigquery import OPTIONAL_TABLES, compile_cohort_bigquery, stub_table_sql, use_stub_tables
 
     _ident(cdm_schema, "cdm_schema"), _ident(scratch_schema, "scratch_schema")
     cdm, scratch = "emulated-project.cdm", "emulated-project.scratch"
     schemas = {cdm: cdm_schema, scratch: scratch_schema}
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {scratch_schema}")
+    present = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+                                         [cdm_schema]).fetchall()}
+    stubs = [t for t in OPTIONAL_TABLES if t not in present]  # as run_demo does for a source without them
+    for t in stubs:
+        con.execute(googlesql_to_duckdb(stub_table_sql(scratch, t), schemas))
     cohort_sql = compile_cohort_bigquery(cohort_json or _default_cohort_json(), cdm, scratch, "demo_cohort", int(cohort_id))
-    con.execute(googlesql_to_duckdb(cohort_sql, schemas))
+    con.execute(googlesql_to_duckdb(use_stub_tables(cohort_sql, cdm, scratch, stubs), schemas))
     template = _resource("sql", "bigquery_demo_features.sql").read_text(encoding="utf-8")
     features_sql = _render(template, cdm=cdm, scratch=scratch, cohort_table="demo_cohort", features_table="demo_features",
                            cohort_id=int(cohort_id))
-    con.execute(googlesql_to_duckdb(features_sql, schemas))
+    con.execute(googlesql_to_duckdb(use_stub_tables(features_sql, cdm, scratch, stubs), schemas))
     cohort = con.execute(f"SELECT * FROM {scratch_schema}.demo_cohort ORDER BY subject_id, cohort_start_date").df()
     features = con.execute(f"SELECT * FROM {scratch_schema}.demo_features ORDER BY subject_id").df()
     return cohort, features

@@ -286,3 +286,23 @@ def test_r_and_python_duckdb_demo_agree(tmp_path):
     assert compare_cohorts(r_cohort, cohort)["match"]
     res = compare_demo_outputs(tmp_path / "r", py)
     assert res["match"], res
+
+
+def test_synpuf_shaped_cdm_without_visits_or_labs():
+    """The public SynPUF copy has no visit_occurrence or measurement: the GoogleSQL path runs on empty stand-ins and still
+    matches DuckDB run on the same CDM with those tables empty (which is what the sample copy gives)."""
+    con = _cdm()
+    con.execute("DROP TABLE visit_occurrence")
+    con.execute("DROP TABLE measurement")
+    con.execute("CREATE SCHEMA synpuf")
+    for t in ("person", "observation_period", "condition_occurrence", "drug_exposure", "concept_ancestor"):
+        con.execute(f"CREATE TABLE synpuf.{t} AS SELECT * FROM main.{t}")
+    bq_cohort, bq_feats = emulate_bigquery_demo(con, cdm_schema="synpuf")
+    con.execute("CREATE TABLE visit_occurrence AS SELECT * FROM bq_scratch.stub_visit_occurrence")
+    con.execute("CREATE TABLE measurement AS SELECT * FROM bq_scratch.stub_measurement")
+    cohort, feats = run_duckdb_demo(con)
+    assert compare_cohorts(cohort, bq_cohort)["match"]
+    assert set(cohort["subject_id"]) == {BEYOND_DOUBLE, 3, 6}  # person 4 entered only on an HbA1c value
+    assert compare_features(feats, bq_feats)["match"]
+    assert (bq_feats["prior_ip_os_ed_count"] == 0).all()
+    con.close()

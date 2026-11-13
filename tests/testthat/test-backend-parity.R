@@ -186,17 +186,29 @@ test_that("the BigQuery sample copy reads one person sample and keeps ids exact 
   expect_true(all(grepl("MOD(person_id, 1000) = 7", sql, fixed = TRUE)))
   expect_true(all(grepl("`bigquery-public-data.cms_synthetic_patient_data_omop.", sql, fixed = TRUE)))
   expect_error(omopduckdb:::.demo_sample_sql("x.y", 10L, 10L), "sample_remainder")
+  # the public SynPUF copy has neither visit_occurrence nor measurement
+  synpuf <- c("person", "observation_period", "condition_occurrence", "drug_exposure", "concept_ancestor", "concept")
   seen <- character()
   runner <- list(fetch = function(q) {
     seen <<- c(seen, q)
+    if (grepl("INFORMATION_SCHEMA", q)) return(data.frame(table_name = synpuf))
     data.frame(person_id = bit64::as.integer64(beyond_double), year_of_birth = 1950L, d = as.Date("2020-01-01"))
   })
   db <- tempfile(fileext = ".duckdb")
   n <- copy_demo_sample_from_bigquery("my-proj", db_path = db, runner = runner)
-  expect_equal(length(seen), 7L)
-  expect_equal(sum(n$rows), 7)
+  expect_equal(length(seen), 6L)  # the table listing, then five copies
+  expect_setequal(n$table, c("person", "observation_period", "condition_occurrence", "drug_exposure", "concept_ancestor"))
+  expect_false(any(grepl("measurement|visit_occurrence", seen)))
   con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db, read_only = TRUE)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
   expect_equal(DBI::dbGetQuery(con, "SELECT CAST(person_id AS VARCHAR) AS id FROM person")$id, beyond_double)
   expect_equal(DBI::dbGetQuery(con, "SELECT data_type FROM information_schema.columns WHERE table_name = 'person' AND column_name = 'person_id'")$data_type, "BIGINT")
+  expect_equal(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM visit_occurrence")$n, 0)  # empty, from the CDM schema
+  expect_equal(DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM measurement")$n, 0)
+})
+
+test_that("the sample SQL keeps measurement when the source has it", {
+  sql <- omopduckdb:::.demo_sample_sql("p.d", 10L, 0L)
+  expect_true(all(c("visit_occurrence", "measurement") %in% names(sql)))
+  expect_true(grepl("measurement_concept_id", sql[["concept_ancestor"]], fixed = TRUE))
 })

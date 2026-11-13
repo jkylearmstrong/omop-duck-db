@@ -131,3 +131,20 @@ test_that("the default runner sends queries through bigrquery with the billing p
   r$ensure_dataset("my-proj.scratch")
   expect_equal(calls$created, list(project = "my-proj", dataset = "scratch"))
 })
+
+test_that("a source without visit_occurrence or measurement (public SynPUF) gets empty stand-ins", {
+  synpuf <- c("person", "observation_period", "concept_ancestor", "condition_occurrence", "drug_exposure", "concept")
+  testthat::local_mocked_bindings(compile_cohort_bigquery = function(circe_json, cdm, ...) c(
+    "CREATE TABLE t", sprintf("SELECT * FROM `%s.measurement` JOIN `%s.person`", cdm, cdm)))
+  out <- withr::local_tempdir()
+  r <- fake_runner(synpuf)
+  s <- run_bigquery_demo("my-proj", out, cohort_json = demo_cohort_json, runner = r)
+  expect_equal(s$run$stubbed_tables, c("visit_occurrence", "measurement"))
+  sql <- r$log$sql
+  expect_true(any(grepl("CREATE OR REPLACE TABLE `my-proj.omop_duckdb_demo.stub_visit_occurrence` (visit_occurrence_id INT64", sql, fixed = TRUE)))
+  expect_true(any(grepl("CREATE OR REPLACE TABLE `my-proj.omop_duckdb_demo.stub_measurement` (measurement_id INT64", sql, fixed = TRUE)))
+  expect_false(any(grepl("cms_synthetic_patient_data_omop.measurement`|cms_synthetic_patient_data_omop.visit_occurrence`", sql)))
+  expect_true(any(grepl("`my-proj.omop_duckdb_demo.stub_measurement` JOIN `bigquery-public-data.cms_synthetic_patient_data_omop.person`", sql, fixed = TRUE)))
+  expect_true(any(grepl("replaced by EMPTY tables", readLines(file.path(out, "demo_report.md")), fixed = TRUE)))
+  expect_setequal(names(omopduckdb:::.DEMO_OPTIONAL_TABLES), c("visit_occurrence", "measurement"))
+})
