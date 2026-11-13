@@ -26,13 +26,32 @@ import pandas as pd
 from omop_etl.circe import compile_circe_to_duckdb
 
 __all__ = ["DEFAULT_DATASET", "DISCLAIMER", "UTILIZATION_NOTE", "CLINICAL_TELEMETRY", "UTILIZATION_FEATURES",
-           "compile_cohort_bigquery", "render_template", "run_demo", "summarize_features", "main"]
+           "OPTIONAL_TABLES", "compile_cohort_bigquery", "render_template", "run_demo", "stub_table_sql",
+           "summarize_features", "use_stub_tables", "main"]
 
 DEFAULT_DATASET = "bigquery-public-data.cms_synthetic_patient_data_omop"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = Path(__file__).resolve().parent
-REQUIRED_TABLES = ("person", "visit_occurrence", "observation_period", "concept_ancestor")
-ENTRY_TABLES = ("condition_occurrence", "drug_exposure", "measurement")
+REQUIRED_TABLES = ("person", "observation_period", "concept_ancestor")
+ENTRY_TABLES = ("condition_occurrence", "drug_exposure")
+#: tables the demo can do without (the public SynPUF copy has neither). A missing one is replaced by an EMPTY table of the
+#: same shape in the scratch dataset (``stub_<table>``), so the cohort still runs; features that need it read nothing
+#: (utilization 0, labs unavailable) and the report says so. Same columns as the R package.
+OPTIONAL_TABLES: dict[str, dict[str, str]] = {
+    "visit_occurrence": {
+        "visit_occurrence_id": "INT64", "person_id": "INT64", "visit_concept_id": "INT64", "visit_start_date": "DATE",
+        "visit_start_datetime": "DATETIME", "visit_end_date": "DATE", "visit_end_datetime": "DATETIME",
+        "visit_type_concept_id": "INT64", "provider_id": "INT64", "care_site_id": "INT64", "visit_source_value": "STRING",
+        "visit_source_concept_id": "INT64", "admitting_source_concept_id": "INT64", "admitting_source_value": "STRING",
+        "discharge_to_concept_id": "INT64", "discharge_to_source_value": "STRING", "preceding_visit_occurrence_id": "INT64"},
+    "measurement": {
+        "measurement_id": "INT64", "person_id": "INT64", "measurement_concept_id": "INT64", "measurement_date": "DATE",
+        "measurement_datetime": "DATETIME", "measurement_time": "STRING", "measurement_type_concept_id": "INT64",
+        "operator_concept_id": "INT64", "value_as_number": "FLOAT64", "value_as_concept_id": "INT64",
+        "unit_concept_id": "INT64", "range_low": "FLOAT64", "range_high": "FLOAT64", "provider_id": "INT64",
+        "visit_occurrence_id": "INT64", "visit_detail_id": "INT64", "measurement_source_value": "STRING",
+        "measurement_source_concept_id": "INT64", "unit_source_value": "STRING", "value_source_value": "STRING"},
+}
 #: the lab / vital-sign features a claims dataset cannot supply; reported as unavailable, never imputed
 CLINICAL_TELEMETRY = ("serum_creatinine", "serum_glucose", "serum_albumin", "systolic_bp", "diastolic_bp")
 #: the administrative sub-model
@@ -148,6 +167,19 @@ class _Runner:
         self.client.create_dataset(dataset, exists_ok=True)
 
 
+def stub_table_sql(scratch: str, table: str) -> str:
+    """``CREATE OR REPLACE`` an empty stand-in for an optional CDM table missing from the source."""
+    cols = ", ".join(f"{c} {t}" for c, t in OPTIONAL_TABLES[table].items())
+    return f"CREATE OR REPLACE TABLE `{_qualified(scratch, 'scratch')}.stub_{table}` ({cols})"
+
+
+def use_stub_tables(sql: str, dataset: str, scratch: str, stubs: Sequence[str]) -> str:
+    """Point references to missing source tables at their empty stand-ins in ``scratch``."""
+    for t in stubs:
+        sql = sql.replace(f"`{dataset}.{t}`", f"`{scratch}.stub_{t}`")
+    return sql
+
+
 def _timed(timings: dict, name: str, fn: Callable[[], Any]) -> Any:
     t0 = time.perf_counter()
     try:
@@ -199,7 +231,12 @@ def _report_markdown(summary: dict, run: dict) -> str:
 
     lines = ["# BigQuery SynPUF demonstration report", "", f"> **{DISCLAIMER}**", "",
              "## Run", "", f"- Billing project: `{run['billing_project']}`", f"- Source: `{run['dataset']}`",
-             f"- Cohort: `{run['cohort_json']}` (cohort id {run['cohort_id']})", ""]
+             f"- Cohort: `{run['cohort_json']}` (cohort id {run['cohort_id']})"]
+    if run.get("stubbed_tables"):
+        lines.append("- Not in the source, replaced by EMPTY tables: " + ", ".join(f"`{t}`" for t in run["stubbed_tables"])
+                     + (" (prior utilization is therefore 0 for everyone and says nothing)"
+                        if "visit_occurrence" in run["stubbed_tables"] else ""))
+    lines.append("")
     if run.get("dry_run"):
         lines += ["Dry run: SQL was compiled and written; nothing was executed on BigQuery.", ""]
     else:
@@ -244,8 +281,9 @@ def run_demo(billing_project: str, output_dir: str | Path = "bigquery_demo_out",
     features_sql = render_template(_resource("sql", "bigquery_demo_features.sql").read_text(encoding="utf-8"), **values)
     avail_sql = render_template(_resource("sql", "bigquery_demo_availability.sql").read_text(encoding="utf-8"), **values)
     (out / "cohort.googlesql.sql").write_text(cohort_sql + ";\n", encoding="utf-8")
-    (out / "features.googlesql.sql").write_text(features_sql + ";\n", encoding="utf-8")
-    (out / "availability.googlesql.sql").write_text(avail_sql + ";\n", encoding="utf-8")
+    # rstrip: the same bytes as the R writer, so the two languages' SQL can be compared file for file
+    (out / "features.googlesql.sql").write_text(features_sql.rstrip() + ";\n", encoding="utf-8")
+    (out / "availability.googlesql.sql").write_text(avail_sql.rstrip() + ";\n", encoding="utf-8")
 
     run = {"billing_project": billing_project, "dataset": dataset, "scratch_dataset": scratch,
            "cohort_json": cohort_json.name, "cohort_id": cohort_id, "dry_run": dry_run, "timings_seconds": timings}
@@ -264,8 +302,15 @@ def run_demo(billing_project: str, output_dir: str | Path = "bigquery_demo_out",
     if missing:
         raise RuntimeError(f"{dataset} is missing {', '.join(missing)} (found: {sorted(present)}); pass "
                            "vocabulary_dataset= if concept_ancestor lives elsewhere, or point dataset= at an OMOP CDM "
-                           "with these tables (the definition reads condition_occurrence, drug_exposure, measurement)")
+                           "with these tables (the definition reads condition_occurrence, drug_exposure)")
+    stubs = [t for t in OPTIONAL_TABLES if t not in present]
+    if stubs:
+        run["stubbed_tables"] = stubs
+        cohort_sql, features_sql, avail_sql = (use_stub_tables(q, dataset, scratch, stubs)
+                                               for q in (cohort_sql, features_sql, avail_sql))
     _timed(timings, "create_scratch_dataset", lambda: runner.ensure_dataset(scratch))
+    for t in stubs:
+        runner.execute(stub_table_sql(scratch, t))
     _timed(timings, "build_cohort", lambda: runner.execute(cohort_sql))
     _timed(timings, "extract_features", lambda: runner.execute(features_sql))
     features = _timed(timings, "download_features", lambda: runner.fetch(

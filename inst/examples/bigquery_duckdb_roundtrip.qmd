@@ -76,12 +76,66 @@ The same OMOP tables BigQuery serves must exist in the local DuckDB schema, with
 contract that keeps the two backends interchangeable.
 
 ```{r duckdb-contract}
-con <- DBI::dbConnect(duckdb::duckdb())
-# TODO(downstream): build the empty CDM schema with the package's DDL helper, then compare
-# DBI::dbListFields() per table against the BigQuery INFORMATION_SCHEMA.COLUMNS result in section 2.
-print(DBI::dbGetQuery(con, "SELECT version() AS duckdb_version"))
+cdm_db <- tempfile(fileext = ".duckdb")
+invisible(capture.output(build_schema(cdm_db)))
+con <- DBI::dbConnect(duckdb::duckdb(), cdm_db)
+demo_tables <- c("person", "observation_period", "visit_occurrence", "condition_occurrence", "drug_exposure",
+                 "measurement", "concept_ancestor")
+ddl_types <- DBI::dbGetQuery(con, sprintf(
+  "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_name IN (%s)",
+  paste0("'", demo_tables, "'", collapse = ", ")))
+key_ids <- ddl_types[omopduckdb:::.is_key_id(ddl_types$column_name), ]
+table(key_ids$data_type)
+stopifnot(all(key_ids$data_type == "BIGINT"))  # 64-bit, like BigQuery INT64
+```
+
+### 1d. DuckDB demo on a small CDM, ids above 2^53 kept exact
+
+`run_duckdb_demo()` builds the same cohort (native Circe compiler) and features (`inst/sql/duckdb_demo_features.sql`,
+the DuckDB twin of the GoogleSQL template) that the BigQuery demo builds. The person id below is 2^53 + 1, which a
+double cannot hold.
+
+```{r duckdb-demo}
+big_id <- "9007199254740993"
+invisible(DBI::dbExecute(con, paste0("INSERT INTO person (person_id, gender_concept_id, year_of_birth, race_concept_id, ",
+                           "ethnicity_concept_id) VALUES (", big_id, ", 8507, 1950, 8527, 0)")))
+invisible(DBI::dbExecute(con, paste0("INSERT INTO observation_period VALUES (1, ", big_id, ", DATE '2016-01-01', DATE '2022-12-31', 0)")))
+invisible(DBI::dbExecute(con, paste0("INSERT INTO condition_occurrence (condition_occurrence_id, person_id, condition_concept_id, ",
+                           "condition_start_date, condition_type_concept_id) VALUES (1, ", big_id, ", 201820, DATE '2019-03-01', 0)")))
+invisible(DBI::dbExecute(con, "INSERT INTO concept_ancestor VALUES (201820, 201820, 0, 0)"))
+local_demo <- run_duckdb_demo(con)
+local_demo$features
+stopifnot(identical(local_demo$features$subject_id, big_id), nrow(check_id_precision(local_demo$features)) == 0)
 DBI::dbDisconnect(con, shutdown = TRUE)
 ```
+
+### 1e. R and Python write the same BigQuery SQL
+
+The feature and availability queries come from the same templates in both languages; the cohort SQL differs by design
+(R: CirceR + SqlRender, Python: native compiler + sqlglot), which is why the live section compares their results.
+
+```{r py-dry-run}
+# the first Python that has the package (set OMOP_PYTHON to choose one); a bare python3 on the PATH often does not
+py_ok <- function(p, mods) nzchar(p) && system2(p, c("-c", shQuote(paste("import", mods))), stdout = FALSE, stderr = FALSE) == 0
+py_candidates <- unique(c(Sys.getenv("OMOP_PYTHON"), unname(Sys.which(c("python3", "python")))))
+py <- Find(function(p) py_ok(p, "omop_etl.demo_bigquery, sqlglot"), py_candidates[nzchar(py_candidates)])
+has_py <- !is.null(py)
+if (has_py) {
+  py_out <- tempfile("bq_demo_py_")
+  system2(py, c("-m", "omop_etl.demo_bigquery", "--dry-run", "--billing-project",
+                if (nzchar(billing)) billing else "example-project", "--output-dir", py_out), stdout = FALSE)
+  same <- vapply(c("features.googlesql.sql", "availability.googlesql.sql"), function(f)
+    identical(readLines(file.path(out_dir, f)), readLines(file.path(py_out, f))), NA)
+  print(same)
+  stopifnot(all(same))
+} else message("Python package omop_etl (with sqlglot) not importable: skipped.")
+# the live R vs Python check (4d) also needs the BigQuery client and application-default credentials
+has_py_bq <- has_py && py_ok(py, "google.cloud.bigquery, db_dtypes")
+```
+
+The offline check that the *cohort* GoogleSQL keeps its meaning is in `tests/test_backend_parity.py`: it runs the
+statements sent to BigQuery on DuckDB (transpiled back with sqlglot) and compares them with `run_duckdb_demo()` on a CDM
+that exercises every step of the definition.
 
 ## 2. Live: BigQuery side
 
@@ -109,7 +163,8 @@ copied here because `load_from_bigquery()` holds a table in memory.
 #| eval: !expr live
 db <- tempfile(fileext = ".duckdb")
 load_from_bigquery(billing_project = billing, dataset = dataset, tables = params$load_tables, db_path = db)
-bq <- function(sql) as.data.frame(bigrquery::bq_table_download(bigrquery::bq_project_query(billing, sql)))
+# integer64: a 32-bit read turns large values (SUM(year_of_birth) on SynPUF is about 4.5e9) into NA
+bq <- function(sql) as.data.frame(bigrquery::bq_table_download(bigrquery::bq_project_query(billing, sql), bigint = "integer64"))
 dk <- DBI::dbConnect(duckdb::duckdb(), db, read_only = TRUE)
 
 probe <- list(
@@ -129,16 +184,108 @@ stopifnot(all(cmp$match))
 DBI::dbDisconnect(dk, shutdown = TRUE)
 ```
 
-## 4. Downstream checks to fill in
+## 4. Live: same cohort, same features, same types
 
-These need a decision on scope or more data, so they are left as stubs rather than silently skipped.
+A fixed sample of persons (`MOD(person_id, 1000) = 0`, about 0.1%) is copied whole into DuckDB with
+`copy_demo_sample_from_bigquery()`, with the `concept_ancestor` rows their events need. The cohort and the features
+are per person, so rebuilding them on the copy must give exactly the BigQuery `demo_cohort` and `demo_features` rows
+for the same persons. Each copy query scans its source table once; BigQuery bills the columns read, not the sample size.
+SynPUF has no `visit_occurrence` or `measurement` table: the BigQuery demo used empty stand-ins for them (section 2's
+report lists them), and the DuckDB copy keeps them empty too, so prior utilization is 0 on both sides and only the
+cohort, demographics and types say anything.
+
+```{r live-sample}
+#| eval: !expr live
+scratch <- paste0(billing, ".omop_duckdb_demo")
+bq64 <- function(sql) as.data.frame(bigrquery::bq_table_download(bigrquery::bq_project_query(billing, sql, quiet = TRUE),
+                                                                 bigint = "integer64", quiet = TRUE))
+sample_db <- tempfile(fileext = ".duckdb")
+copied <- copy_demo_sample_from_bigquery(billing, dataset, sample_db, sample_modulus = 1000L)
+copied
+sk <- DBI::dbConnect(duckdb::duckdb(), sample_db)
+duck <- run_duckdb_demo(sk)
+```
+
+### 4a. Same Circe cohort
+
+BigQuery's cohort came from CirceR + SqlRender (GoogleSQL); DuckDB's from the native compiler.
+
+```{r live-cohort}
+#| eval: !expr live
+bq_cohort <- bq64(sprintf("SELECT * FROM `%s.demo_cohort` WHERE MOD(subject_id, 1000) = 0", scratch))
+cohort_cmp <- compare_cohorts(bq_cohort, duck$cohort, examples = 5L)  # synthetic ids, safe to show
+str(cohort_cmp)
+stopifnot(cohort_cmp$match, cohort_cmp$n_left_rows > 0)
+```
+
+### 4b. Same features
+
+```{r live-features-parity}
+#| eval: !expr live
+bq_feats <- bq64(sprintf("SELECT * FROM `%s.demo_features` WHERE MOD(subject_id, 1000) = 0", scratch))
+feat_cmp <- compare_features(bq_feats, duck$features)
+do.call(rbind, lapply(feat_cmp$columns, as.data.frame))
+stopifnot(feat_cmp$match)
+```
+
+### 4c. Same column types, ids not truncated
+
+BigQuery `INFORMATION_SCHEMA.COLUMNS` against the copied DuckDB tables and against the package's DDL. `only_*` rows
+are columns of one CDM version only (SynPUF predates CDM 5.4) and are listed, not failed.
+
+```{r live-types}
+#| eval: !expr live
+parts <- strsplit(dataset, ".", fixed = TRUE)[[1]]
+bq_types <- bq64(sprintf("SELECT table_name, column_name, data_type FROM `%s.%s.INFORMATION_SCHEMA.COLUMNS` WHERE table_name IN (%s)",
+                         parts[[1]], parts[[2]], paste0("'", demo_tables, "'", collapse = ", ")))
+copy_types <- DBI::dbGetQuery(sk, "SELECT table_name, column_name, data_type FROM information_schema.columns")
+vs_copy <- compare_column_types(bq_types, copy_types)
+vs_ddl <- compare_column_types(bq_types, ddl_types)
+table(vs_copy$status)
+table(vs_ddl$status)
+vs_ddl[!vs_ddl$status %in% c("ok", "only_bigquery", "only_duckdb"), ]
+stopifnot(!any(vs_copy$status %in% c("id_narrowed", "type_mismatch")),
+          !any(vs_ddl$status == "id_narrowed"))
+id_problems <- rbind(check_id_precision(bq_cohort), check_id_precision(bq_feats))
+id_problems
+stopifnot(nrow(id_problems) == 0)
+max_ids <- bq64(sprintf("SELECT MAX(person_id) AS max_id FROM `%s.person` WHERE MOD(person_id, 1000) = 0", dataset))
+stopifnot(identical(as.character(max_ids$max_id),
+                    DBI::dbGetQuery(sk, "SELECT CAST(MAX(person_id) AS VARCHAR) AS m FROM person")$m))
+DBI::dbDisconnect(sk, shutdown = TRUE)
+```
+
+### 4d. R and Python agree
+
+Runs `python -m omop_etl.demo_bigquery` into its own scratch dataset (so it does not overwrite R's tables) and compares
+its `demo_summary.json` and `demo_features.csv` with R's from section 2. It needs the Python BigQuery extra (`pip install "omop-duck-db[bigquery]"`,
+which includes `db-dtypes`) and application-default credentials (`gcloud auth application-default login`); the R token is not shared with Python.
+
+```{r live-python-skipped}
+#| eval: !expr live && !has_py_bq
+message("Skipped: Python with omop_etl, sqlglot, google-cloud-bigquery and db-dtypes is not available.")
+```
+
+```{r live-python}
+#| eval: !expr live && has_py_bq
+py_live <- tempfile("bq_demo_py_live_")
+status <- system2(py, c("-m", "omop_etl.demo_bigquery", "--billing-project", billing, "--output-dir", py_live,
+                        "--scratch-dataset", paste0(billing, ".omop_duckdb_demo_py")))
+stopifnot(status == 0)
+rp <- compare_demo_outputs(out_dir, py_live)
+rp$summary_differences
+str(rp$features[c("n_left", "n_right", "n_both", "match")])
+stopifnot(rp$match)
+```
+
+## 5. Status of the checks
 
 | Check | What it proves | Status |
 |---|---|---|
-| Same Circe cohort on DuckDB (copied `condition_occurrence`, `drug_exposure`, `concept_ancestor` subset) vs BigQuery `demo_cohort`: equal subject sets | Dialect translation preserves cohort semantics | TODO |
-| Feature parity: DuckDB feature extraction vs `demo_features` on the same persons | Utilization features agree across backends | TODO |
-| Column-type parity (`INFORMATION_SCHEMA.COLUMNS` vs DuckDB) incl. `INT64` -> `integer64` for ids | No silent id truncation | TODO |
-| Python path: `python -m omop_etl.demo_bigquery` output vs R `demo_summary.json` | R and Python agree | TODO |
+| Same Circe cohort on DuckDB vs BigQuery `demo_cohort`: equal (subject, start, end) rows | Dialect translation preserves cohort semantics | Offline: `tests/test_backend_parity.py` (GoogleSQL emulated on DuckDB). Live: 4a |
+| Feature parity: DuckDB feature extraction vs `demo_features` on the same persons | Utilization features agree across backends | Offline: same test, plus a hand-checked person. Live: 4b |
+| Column-type parity (`INFORMATION_SCHEMA.COLUMNS` vs DuckDB) incl. `INT64` -> `integer64` for ids | No silent id truncation | Offline: 1c, 1d and the tests (ids above 2^31 and 2^53). Live: 4c |
+| Python path: `python -m omop_etl.demo_bigquery` output vs R `demo_summary.json` | R and Python agree | Offline: 1e and `test_r_and_python_duckdb_demo_agree`. Live: 4d |
 | Vocabulary refresh: `sync_vocabulary_from_bigquery()` row counts vs source | Large-table streaming path | TODO (large, run manually) |
 | Cost guard: `dry_run` bytes processed per query under a threshold | Demo stays cheap | TODO |
 
