@@ -53,8 +53,7 @@ load_feature_state(fs_site, "study_features.json")           # at the replicatin
 ```
 
 Add your own with `sql_feature()` (a query over a `_stays` view), `custom_feature()` (an R or Python function) or a full
-`study_feature()`, and register new kinds with `register_feature_factory()`. Vignettes: *Study-design features*, *Study features
-across sites* and *Study-design features in Python*.
+`study_feature()`, and register new kinds with `register_feature_factory()`. See the `study_features` vignette (including its Python and across-sites sections).
 
 ## Tools for a downstream study
 
@@ -89,4 +88,4 @@ run_dqd_catalog(con)
 ```
 
 The same functions exist in Python (`from omop_etl import ...`). The native Circe compiler evaluates a subset of Circe and refuses the
-rest with an error naming the construct; see `OHDSI_INTEGRATION.md` for what was checked against the official engines.
+rest with an error naming the construct; see `vignette("ohdsi_integration")` for what was checked against the official engines.

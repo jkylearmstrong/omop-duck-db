@@ -1,0 +1,148 @@
+---
+title: "BigQuery <-> DuckDB check (CMS SynPUF)"
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: true
+params:
+  billing_project: ""      # or set OMOP_BQ_BILLING_PROJECT / config/bigquery.yml
+  live: false              # TRUE = run against BigQuery (bills your project, writes a scratch dataset)
+  load_tables: ["person", "observation_period"]
+---
+
+> **Synthetic data, software check only.** CMS DE-SynPUF
+> (`bigquery-public-data.cms_synthetic_patient_data_omop`) verifies that cohort SQL compiles to GoogleSQL, that
+> it executes, and that data copied into DuckDB matches BigQuery. It says nothing about clinical performance or
+> epidemiology, and SynPUF has no labs or vitals.
+
+**Modes.** The default (`live: false`) needs no credentials and no network: it compiles the SQL and checks it.
+`quarto render bigquery_duckdb_roundtrip.qmd -P live:true -P billing_project:<your-gcp-project>` runs the live
+sections. Authenticate once, interactively, with `bigrquery::bq_auth()`. Never paste keys into this file; the
+billing project is an id, not a secret.
+
+```{r setup}
+#| include: false
+src <- Sys.getenv("OMOPDUCKDB_SRC")  # set to a checkout to test unreleased code
+if (nzchar(src)) pkgload::load_all(src, quiet = TRUE) else library(omopduckdb)
+
+billing <- Reduce(function(a, b) if (nzchar(a)) a else b,
+  list(params$billing_project, Sys.getenv("OMOP_BQ_BILLING_PROJECT"),
+       as.character(tryCatch(omopduckdb:::read_local_config("bigquery.yml")$billing_project, error = function(e) NULL))[1]))
+if (is.na(billing) || identical(billing, "REPLACE_WITH_YOUR_GCP_PROJECT_ID")) billing <- ""
+live <- isTRUE(params$live) && nzchar(billing)
+if (isTRUE(params$live) && !nzchar(billing)) warning("live = TRUE but no billing project found; running offline.")
+dataset <- "bigquery-public-data.cms_synthetic_patient_data_omop"
+out_dir <- tempfile("bq_demo_")
+cat("mode:", if (live) "LIVE (BigQuery)" else "offline (no BigQuery calls)", "\n")
+```
+
+## 1. Offline checks (always run)
+
+### 1a. Cohort and feature SQL are produced
+
+A dry run compiles the diabetes phenotype to GoogleSQL and writes the feature queries. A placeholder project id is
+used offline because nothing is sent to BigQuery.
+
+```{r dry-run}
+dry <- run_bigquery_demo(billing_project = if (nzchar(billing)) billing else "example-project",
+                         output_dir = out_dir, dry_run = TRUE)
+files <- list.files(out_dir)
+files
+stopifnot("features.googlesql.sql" %in% files, "availability.googlesql.sql" %in% files)
+if (!"cohort.googlesql.sql" %in% files)
+  message("CirceR/Java not available: cohort SQL not compiled (install CirceR to cover this step).")
+```
+
+### 1b. The SQL is GoogleSQL, not leftover T-SQL/DuckDB
+
+Cheap static guards that catch dialect regressions without a BigQuery connection.
+
+```{r dialect-guards}
+sql <- vapply(list.files(out_dir, "[.]sql$", full.names = TRUE),
+              function(f) paste(readLines(f, warn = FALSE), collapse = " "), "")
+bad <- c(tsql_top = "SELECT[[:space:]]+TOP[[:space:]]", tsql_dateadd = "DATEADD[[:space:]]*[(]",
+         tsql_hash = "#[[:alnum:]_]+", duckdb_interval = "INTERVAL[[:space:]]+'[0-9]+",
+         unresolved_params = "@[[:alnum:]_]+")
+hits <- vapply(bad, function(p) any(grepl(p, sql, ignore.case = TRUE)), NA)
+data.frame(pattern = names(bad), found = hits)
+stopifnot(!any(hits))
+```
+
+### 1c. DuckDB side of the shared CDM contract
+
+The same OMOP tables BigQuery serves must exist in the local DuckDB schema, with the same columns. This is the
+contract that keeps the two backends interchangeable.
+
+```{r duckdb-contract}
+con <- DBI::dbConnect(duckdb::duckdb())
+# TODO(downstream): build the empty CDM schema with the package's DDL helper, then compare
+# DBI::dbListFields() per table against the BigQuery INFORMATION_SCHEMA.COLUMNS result in section 2.
+print(DBI::dbGetQuery(con, "SELECT version() AS duckdb_version"))
+DBI::dbDisconnect(con, shutdown = TRUE)
+```
+
+## 2. Live: BigQuery side
+
+```{r live-run}
+#| eval: !expr live
+res <- run_bigquery_demo(billing_project = billing, output_dir = out_dir, dry_run = FALSE)
+str(res[c("run", "n_cohort")], max.level = 2)
+stopifnot(res$n_cohort > 0)
+```
+
+Utilization features and lab availability (SynPUF should report no numeric lab values):
+
+```{r live-features}
+#| eval: !expr live
+res$clinical_telemetry
+```
+
+## 3. Live: BigQuery -> DuckDB copy and parity
+
+Copies small tables into a throwaway DuckDB file and compares them with BigQuery: row counts, key ranges and a
+column checksum. Large tables (`condition_occurrence`, `drug_exposure`, `concept_relationship`) are deliberately not
+copied here because `load_from_bigquery()` holds a table in memory.
+
+```{r live-copy}
+#| eval: !expr live
+db <- tempfile(fileext = ".duckdb")
+load_from_bigquery(billing_project = billing, dataset = dataset, tables = params$load_tables, db_path = db)
+bq <- function(sql) as.data.frame(bigrquery::bq_table_download(bigrquery::bq_project_query(billing, sql)))
+dk <- DBI::dbConnect(duckdb::duckdb(), db, read_only = TRUE)
+
+probe <- list(
+  person = "SELECT COUNT(*) n, MIN(person_id) min_id, MAX(person_id) max_id, SUM(year_of_birth) sum_yob FROM %s",
+  observation_period = "SELECT COUNT(*) n, MIN(observation_period_start_date) min_start,
+                        MAX(observation_period_end_date) max_end FROM %s")
+cmp <- do.call(rbind, lapply(intersect(names(probe), params$load_tables), function(t) {
+  b <- bq(sprintf(probe[[t]], sprintf("`%s`.%s", dataset, t)))
+  d <- DBI::dbGetQuery(dk, sprintf(probe[[t]], t))
+  data.frame(table = t, metric = names(b),
+             bigquery = vapply(b, function(x) format(x[[1]]), ""),
+             duckdb = vapply(d, function(x) format(x[[1]]), ""))
+}))
+cmp$match <- cmp$bigquery == cmp$duckdb
+cmp
+stopifnot(all(cmp$match))
+DBI::dbDisconnect(dk, shutdown = TRUE)
+```
+
+## 4. Downstream checks to fill in
+
+These need a decision on scope or more data, so they are left as stubs rather than silently skipped.
+
+| Check | What it proves | Status |
+|---|---|---|
+| Same Circe cohort on DuckDB (copied `condition_occurrence`, `drug_exposure`, `concept_ancestor` subset) vs BigQuery `demo_cohort`: equal subject sets | Dialect translation preserves cohort semantics | TODO |
+| Feature parity: DuckDB feature extraction vs `demo_features` on the same persons | Utilization features agree across backends | TODO |
+| Column-type parity (`INFORMATION_SCHEMA.COLUMNS` vs DuckDB) incl. `INT64` -> `integer64` for ids | No silent id truncation | TODO |
+| Python path: `python -m omop_etl.demo_bigquery` output vs R `demo_summary.json` | R and Python agree | TODO |
+| Vocabulary refresh: `sync_vocabulary_from_bigquery()` row counts vs source | Large-table streaming path | TODO (large, run manually) |
+| Cost guard: `dry_run` bytes processed per query under a threshold | Demo stays cheap | TODO |
+
+```{r session}
+sessionInfo()$R.version$version.string
+packageVersion("omopduckdb")
+```
