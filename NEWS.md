@@ -1,4 +1,6 @@
-# omopduckdb (development version)
+# omopduckdb 0.24.0
+
+Feature release: run records no longer name sites, an output privacy scanner, and a live-server `to_sql` round-trip check. Version bump 0.23.0 to 0.24.0.
 
 - **Run record no longer names sites (Python).** `<prefix>_run.json` keyed `timings_seconds` by real site name (`site_<site>`), and those timings follow site size, so a run record shared with the anonymous letters still identified the sites. The keys are now the anonymous letters (`site_Site A`). The per-site intermediates (`features_<site>.parquet`, `cohort_<site>.parquet`, `attrition_<site>.csv`) still carry the real name and stay private; they are written to the output folder for resuming, not for sharing.
 - **`scripts/check_run_privacy.py`.** Scans an output folder for real site names (file names, text, zip/xlsx parts, parquet columns and values) before it is shared; reports hits by name position so the report itself is safe to paste; exit code 1 on any hit.
