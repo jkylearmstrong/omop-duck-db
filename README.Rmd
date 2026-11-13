@@ -75,27 +75,35 @@ The long-form documentation lives in vignettes (the website's *Articles* menu).
 
 | Topic | Guide |
 |----|----|
-| Build the database, refresh the vocabulary, central vocabulary, custom and Usagi mappings | `vignette("database_and_mapping")` |
-| Study cohorts, comorbidity, measurement sanitisation, features, Table 1, reconciliation | `vignette("study_cohorts_and_features")` |
-| Add your own person-level features | `vignette("study_features")`, `vignette("study_design_tools")` |
-| scikit-learn, omop-learn, OHDSI PLP / DeepPLP, tidymodels | `vignette("ml_bridge")` |
-| Risk scores, wide tables, phenotypes, consortium federation, calibration, decision curves | `vignette("clinical_tools_and_consortium")` |
-| Benchmark features, deep-learning datasets, DGX Spark, Oracle | `vignette("deep_learning_and_benchmarks")` |
-| Small-cell suppression, CONSORT counts, site summary packages | `vignette("disclosure_and_site_packages")` |
-| Reproducing the delivered manuscript, decisions that move the numbers | `vignette("reproducing_the_manuscript")` |
-| Tests, large files | `vignette("operations")` |
-| What is claimed, verified and planned | `vignette("status_and_roadmap")` |
+| **Build and operate** | |
+| &nbsp;&nbsp;Build the database, refresh the vocabulary, central vocabulary, custom and Usagi mappings, run the tests, sync large files | `vignette("database_and_mapping")` |
+| **Cohorts and features** | |
+| &nbsp;&nbsp;Study cohorts, comorbidity, measurement sanitisation, features, Table 1, reconciliation, the shipped eDERRI cohort definitions | `vignette("study_cohorts_and_features")` |
+| &nbsp;&nbsp;Add your own person-level features (R and Python), and fit them once for use across sites | `vignette("study_features")` |
+| &nbsp;&nbsp;Circe evaluation, cohort reconciliation, bundles, feature ablation and the DQD catalog for a downstream study | `vignette("study_design_tools")` |
+| **Clinical tools and multi-site work** | |
+| &nbsp;&nbsp;Risk scores, wide tables, phenotypes, consortium federation, calibration, decision curves | `vignette("clinical_tools_and_consortium")` |
+| &nbsp;&nbsp;Small-cell suppression, CONSORT counts, site summary packages | `vignette("disclosure_and_site_packages")` |
+| **Machine learning and OHDSI** | |
+| &nbsp;&nbsp;scikit-learn, omop-learn, OHDSI PLP / DeepPLP, tidymodels | `vignette("ml_bridge")` |
+| &nbsp;&nbsp;Benchmark features, deep-learning datasets, DGX Spark, Oracle | `vignette("deep_learning_and_benchmarks")` |
+| &nbsp;&nbsp;What was checked against the official OHDSI tools, and what was not | `vignette("ohdsi_integration")` |
+| **Cloud and demos** | |
+| &nbsp;&nbsp;Run the diabetes cohort on public BigQuery data (CMS SynPUF); the runnable BigQuery-to-DuckDB check is `inst/examples/bigquery_duckdb_roundtrip.qmd` | `vignette("bigquery_synthetic_demo")` |
+| **Reproducibility and status** | |
+| &nbsp;&nbsp;Reproducing the delivered manuscript, decisions that move the numbers | `vignette("reproducing_the_manuscript")` |
+| &nbsp;&nbsp;What is claimed, verified and planned; architecture notes and the R/Python parity table | `vignette("status_and_roadmap")` |
 
 ## Works with the OHDSI ecosystem
 
 The package is built to sit beside the standard OMOP tools, not replace them. Status by tool (the evidence is in
-[`OHDSI_INTEGRATION.md`](OHDSI_INTEGRATION.md); `vignette("status_and_roadmap")` says what is claimed versus verified):
+`vignette("ohdsi_integration")`; `vignette("status_and_roadmap")` says what is claimed versus verified):
 
 | Status | Tools |
 |----|----|
 | **Compared against the official tool** (DuckDB, DatabaseConnector 8.0.0) | [CirceR](https://github.com/OHDSI/CirceR) + CohortGenerator (cohort definitions), [FeatureExtraction](https://github.com/OHDSI/FeatureExtraction) (visit counts, custom covariates), [PatientLevelPrediction](https://github.com/OHDSI/PatientLevelPrediction) (`getPlpData`, study population, `runPlp`), [DeepPatientLevelPrediction](https://github.com/OHDSI/DeepPatientLevelPrediction) (an MLP trained on `as_plp_data()` output), [CohortMethod](https://github.com/OHDSI/CohortMethod) (study population and an unadjusted odds ratio), [CohortConstructor](https://github.com/OHDSI/CohortConstructor) (concept and demographic cohorts), [DataQualityDashboard](https://github.com/OHDSI/DataQualityDashboard), Achilles, PhenotypeLibrary, CohortDiagnostics, via [HADES](https://github.com/OHDSI) DatabaseConnector; [omop-learn](https://github.com/clinicalml/omop-learn) (`DuckDBBackend` against the real classes) |
 | **Works, partly checked** | [ATLAS](https://github.com/OHDSI/Atlas) 2.x: `scripts/atlas/` imports the shipped Circe JSON and has WebAPI render SQL (verified on WebAPI 2.14; not a generation check). FeatureExtraction's Charlson index is **not** equivalent to the package's. |
-| **Not covered by any check** | ATLAS 3 (UI never run), [Data2Evidence](https://github.com/OHDSI/Data2Evidence), [Phenelope](https://github.com/OHDSI/Phenelope) (needs an LLM), [OHDSI GIS / Gaia](https://github.com/OHDSI/GIS) (PostgreSQL/PostGIS). Reasons in `OHDSI_INTEGRATION.md`. |
+| **Not covered by any check** | ATLAS 3 (UI never run), [Data2Evidence](https://github.com/OHDSI/Data2Evidence), [Phenelope](https://github.com/OHDSI/Phenelope) (needs an LLM), [OHDSI GIS / Gaia](https://github.com/OHDSI/GIS) (PostgreSQL/PostGIS). Reasons in `vignette("ohdsi_integration")`. |
 
 Where the package overlaps an OHDSI tool (cohort engine, DQD catalog, Achilles subset, Table 1) it covers a subset and says so;
 prefer the official tool for anything you publish.
@@ -106,7 +114,7 @@ prefer the official tool for anything you publish.
 - `inst/sql/*.sql` – DuckDB macros shared by both ETLs (ID hashing, date parsing, ancestry). Concept resolution itself
   is written out in each loader.
 - `R/` – the R package. `python/omop_etl/` – the Python package, closely mirroring it (some features are
-  language-specific; see `NOTES.md`). `python/omop_duck_db/` re-exports `omop_etl`.
+  language-specific; see `vignette("status_and_roadmap")`). `python/omop_duck_db/` re-exports `omop_etl`.
 - `inst/scripts/` – command-line wrappers; `inst/cohorts/` – shipped Circe cohort definitions; `inst/examples/`,
   `scripts/` – worked examples and repository helper scripts; `vignettes/` – the guides above.
 
@@ -123,4 +131,4 @@ prefer the official tool for anything you publish.
   the DGX Spark GPU path is untested on the device. R behaviour on production-size data is less field-tested than
   Python's.
 
-See `NEWS.md` for changes and `NOTES.md` for architecture notes and the R/Python parity table.
+See `NEWS.md` for changes and `vignette("status_and_roadmap")` for architecture notes and the R/Python parity table.

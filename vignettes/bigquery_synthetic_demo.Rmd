@@ -90,3 +90,7 @@ Python entry point has no SqlRender, so it compiles with the package's native co
 GoogleSQL with `sqlglot`. Both are covered by offline tests (`tests/test_demo_bigquery.py`,
 `tests/testthat/test-bigquery-demo.R`) that fail if the generated SQL stops parsing as GoogleSQL. Set
 `OMOP_BQ_BILLING_PROJECT` to run the opt-in live test against BigQuery (it bills that project).
+
+## Checking BigQuery against DuckDB
+
+`inst/examples/bigquery_duckdb_roundtrip.qmd` (installed under `system.file("examples", package = "omopduckdb")`) is a runnable example and test. Offline it compiles the SQL and runs dialect guards without credentials; with `-P live:true -P billing_project:<id>` it runs the demo on BigQuery, copies small tables into DuckDB with `load_from_bigquery()` and compares row counts, key ranges and checksums. It also lists the downstream parity checks still to be filled in (cohort subjects, features, column types, R versus Python).

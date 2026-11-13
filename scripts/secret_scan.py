@@ -74,8 +74,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{path}:{lineno}: possible {name} (value not shown)")  # never echo the match
             found += 1
     if found:
-        print(f"\n{found} potential secret(s) found. Revoke any real credential, remove it, and see NOTES.md "
-              "('Secret scanning and token revocation').", file=sys.stderr)
+        print(f"\n{found} potential secret(s) found. Revoke any real credential, remove it, and see "
+              "vignette('status_and_roadmap'), section 'Secret scanning and token revocation'.", file=sys.stderr)
         return 1
     return 0
 

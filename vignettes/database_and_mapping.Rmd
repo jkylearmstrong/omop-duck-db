@@ -125,3 +125,36 @@ unmapped codes:
 
 Equivalent functions are available in Python via
 `from omop_etl import remap_all, import_usagi_mappings`.
+
+## Testing and large files
+
+### Running the tests
+
+`tests/fixtures/pcornet_sample/` is a small set of fabricated (not real)
+sample rows used to smoke-test both ETLs and check they produce
+identical output.
+
+R: `devtools::test()` (or `R CMD check`) runs the `testthat` suite.
+
+Python: `pytest` runs the Python-side tests, including a cross-language
+parity check that runs both ETLs against the fixture and diffs every row
+(skipped automatically if R isn’t available on the machine running the
+tests).
+
+The ML bridge tests skip what they cannot import: omop-learn (point
+`OMOP_LEARN_SRC` at a source checkout’s `src/` directory, or install it)
+and the HADES packages (FeatureExtraction, PatientLevelPrediction,
+Andromeda, DatabaseConnector).
+
+### Large files (Google Drive)
+
+Instead of git/git-LFS, the generated database and vocabulary archive
+can be synced through Google Drive:
+
+``` r
+gdrive_upload_snapshot()    # push the current database + vocabulary archive
+gdrive_download_latest()    # pull the latest snapshot instead of rebuilding
+```
+
+Configure the target Drive folder in `config/gdrive.yml` (copy from
+`config/gdrive.yml.example`).
