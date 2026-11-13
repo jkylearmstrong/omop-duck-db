@@ -1,3 +1,7 @@
+# omopduckdb 0.22.0
+
+Documentation release: vignettes consolidated from 14 to 12 and grouped on the website; `OHDSI_INTEGRATION.md` is now the `ohdsi_integration` vignette; new runnable `inst/examples/bigquery_duckdb_roundtrip.qmd` (offline by default) checks the BigQuery demo and a BigQuery to DuckDB copy. No code changes. Version bump 0.21.0 to 0.22.0.
+
 # omopduckdb 0.21.0
 
 Fixes from the 2026-11-12 external review of 0.20.0. Most of the critical and major findings landed first in PR #59 (first bullet below); this release adds the items listed after it. Version bump 0.20.0 to 0.21.0.
