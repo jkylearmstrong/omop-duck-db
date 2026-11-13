@@ -1905,14 +1905,20 @@ def load_cdm_source(con, cdm_source_name=None, cdm_holder=None, site_id=None, si
     """)
 
 
+_ATOMIC_DEPTH = {}
+
+
 @contextlib.contextmanager
 def _atomic(con):
-    """Run the block in one transaction (or inside the caller's, if one is already open), rolling back on error (M-23)."""
-    owner = True
-    try:
+    """Run the block in one transaction (or inside the caller's, if one is already open), rolling back on error (M-23).
+
+    DuckDB aborts the open transaction when a nested ``BEGIN`` fails, so nesting is tracked here instead of probed for.
+    """
+    key = id(con)
+    owner = _ATOMIC_DEPTH.get(key, 0) == 0
+    if owner:
         con.execute("BEGIN TRANSACTION")
-    except duckdb.Error:
-        owner = False
+    _ATOMIC_DEPTH[key] = _ATOMIC_DEPTH.get(key, 0) + 1
     try:
         yield
     except BaseException:
@@ -1922,6 +1928,10 @@ def _atomic(con):
     else:
         if owner:
             con.execute("COMMIT")
+    finally:
+        _ATOMIC_DEPTH[key] -= 1
+        if _ATOMIC_DEPTH[key] <= 0:
+            _ATOMIC_DEPTH.pop(key, None)
 
 
 _FULL_RELOAD_TABLES = (
