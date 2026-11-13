@@ -12,6 +12,8 @@ Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/test-
 [![Python
 Coverage](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/python-test-coverage.yaml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/python-test-coverage.yaml)
 [![Codecov](https://codecov.io/gh/jkylearmstrong/omop-duck-db/graph/badge.svg)](https://app.codecov.io/gh/jkylearmstrong/omop-duck-db)
+[![Docker
+image](https://github.com/jkylearmstrong/omop-duck-db/actions/workflows/docker-release.yml/badge.svg)](https://github.com/jkylearmstrong/omop-duck-db/pkgs/container/omop-duck-db)
 <!-- badges: end -->
 
 Tools for building an [OMOP Common Data
@@ -73,6 +75,16 @@ Command-line equivalents:
 refuses to load into a database that already holds ETL output (it would
 duplicate every row); pass `overwrite = TRUE` to empty the CDM tables
 first.
+
+## Docker image
+
+Every version tag publishes an image to GitHub Container Registry (not
+Docker Hub); the build runs both test suites. The badge above shows the
+latest build and links to the package page.
+
+``` bash
+docker pull ghcr.io/jkylearmstrong/omop-duck-db:latest
+```
 
 ## Guides
 
