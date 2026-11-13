@@ -158,6 +158,12 @@ def _target_codec(engine: Any, dialect: str) -> tuple[str | None, str | None]:
     return (None if name in _ORACLE_UNICODE else _ORACLE_CODECS.get(name)), name or None
 
 
+def _unicode_text_length(max_len: int | None, varchar_length: int) -> int:
+    """Length passed to the NVARCHAR2 mapping: ``NVARCHAR2`` holds at most 2000 characters, so a column whose longest value fits gets one
+    (an ``NCLOB`` column cannot be counted or compared with plain SQL aggregates), and a longer one gets ``NCLOB`` (4001 selects it)."""
+    return min(varchar_length, 2000) if (max_len or 1) <= 2000 else 4001
+
+
 def _unencodable_message(table: str, bad: dict[str, int], charset: str | None, n: int) -> str:
     cols = ", ".join(f"{c} ({k} of {n} rows)" for c, k in bad.items())
     return (f"{table}: the database character set {charset} cannot store some text; the server would replace those characters. Affected columns: "
@@ -220,7 +226,11 @@ def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, 
             tname = _server_name(target, dialect)
             md = sa.MetaData(schema=schema)
             is_uni = {c: (nvarchar is True or (c.lower() in uni_cols) or (_server_name(c, dialect).lower() in uni_cols)) for c in names}
-            cols = [sa.Column(_server_name(c, dialect), _sa_type(sa, types[c], dialect, varchar_length, unicode_text=is_uni[c])) for c in names]
+            uni_len = {}
+            for c in names:
+                if is_uni[c] and dialect == "oracle" and types[c].upper().startswith("VARCHAR"):
+                    uni_len[c] = _unicode_text_length(con.execute(f'SELECT max(length("{c}")) FROM {frm}').fetchone()[0], varchar_length)
+            cols = [sa.Column(_server_name(c, dialect), _sa_type(sa, types[c], dialect, uni_len.get(c, varchar_length), unicode_text=is_uni[c])) for c in names]
             check = [c for c in names if codec and types[c].upper().startswith("VARCHAR") and not is_uni[c]]
             bad: dict[str, int] = {}
             table = sa.Table(tname, md, *cols)
@@ -292,7 +302,7 @@ def verify_transfer(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapp
                     numeric = any(k in typ.upper() for k in ("INT", "DOUBLE", "FLOAT", "DECIMAL", "REAL"))
                     rc = _server_name(name, dialect)
                     q_local = f'count("{name}")' + (f', sum("{name}"), min("{name}"), max("{name}")' if numeric else "")
-                    q_remote = f"count({rc})" + (f", sum({rc}), min({rc}), max({rc})" if numeric else "")
+                    q_remote = f"count(CASE WHEN {rc} IS NOT NULL THEN 1 END)" + (f", sum({rc}), min({rc}), max({rc})" if numeric else "")   # count(<LOB column>) is an error on Oracle
                     a = con.execute(f"SELECT {q_local} FROM {frm}").fetchone()
                     b = conn.execute(sa.text(f"SELECT {q_remote} FROM {qname}")).fetchone()
                     for label, x, y in zip(("non_null", "sum", "min", "max"), a, b):

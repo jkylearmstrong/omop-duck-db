@@ -228,6 +228,19 @@ def test_nvarchar_columns_are_not_checked_and_oracle_gets_national_types(text_so
     assert "NVARCHAR2(1000)" in ddl and "NCLOB" in ddl and "VARCHAR2(1000 CHAR)" in ddl
 
 
+def test_nvarchar_length_stays_within_nvarchar2_unless_the_data_needs_a_lob():
+    assert load_sql._unicode_text_length(900, 4000) == 2000 and load_sql._unicode_text_length(50, 100) == 100
+    assert load_sql._unicode_text_length(None, 4000) == 2000                   # an all-NULL column
+    assert load_sql._unicode_text_length(2001, 4000) == 4001                   # too long for NVARCHAR2: NCLOB
+    from sqlalchemy.dialects import oracle
+
+    def ddl(n):
+        col = sa.Column("t", load_sql._sa_type(sa, "VARCHAR", "oracle", n, unicode_text=True))
+        return str(sa.schema.CreateTable(sa.Table("T", sa.MetaData(), col)).compile(dialect=oracle.dialect()))
+
+    assert "NVARCHAR2(2000)" in ddl(2000) and "NCLOB" in ddl(4001)
+
+
 def test_target_codec_is_only_used_for_oracle(tmp_path):
     eng = sa.create_engine(f"sqlite:///{(tmp_path / 'c.db').as_posix()}")
     assert load_sql._target_codec(eng, "sqlite") == (None, None)
