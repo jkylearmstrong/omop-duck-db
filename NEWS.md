@@ -1,3 +1,10 @@
+# omopduckdb (development version)
+
+- **Run record no longer names sites (Python).** `<prefix>_run.json` keyed `timings_seconds` by real site name (`site_<site>`), and those timings follow site size, so a run record shared with the anonymous letters still identified the sites. The keys are now the anonymous letters (`site_Site A`). The per-site intermediates (`features_<site>.parquet`, `cohort_<site>.parquet`, `attrition_<site>.csv`) still carry the real name and stay private; they are written to the output folder for resuming, not for sharing.
+- **`scripts/check_run_privacy.py`.** Scans an output folder for real site names (file names, text, zip/xlsx parts, parquet columns and values) before it is shared; reports hits by name position so the report itself is safe to paste; exit code 1 on any hit.
+- **`scripts/verify_server_roundtrip.py`.** Loads a synthetic edge-case table through `to_sql`, checks it with `verify_transfer` on a live server (written for Oracle, runs on any SQLAlchemy URL), drops it and writes a record without the URL, host or user. The connection URL comes from an environment variable. Oracle's empty-string-is-NULL difference is reported as a known difference. It has been run on SQLite only; a live Oracle result is still outstanding.
+- **`testing/rerun-with-new-site-letters.md`.** Runbook for re-issuing results under a new random site mapping.
+
 # omopduckdb 0.23.0
 
 Feature release: Delta Lake export, `age_method` as a study decision, BigQuery vs DuckDB and R vs Python parity checks, and fixes for R BigQuery id precision, SQLite `DECIMAL` export and live SynPUF runs. Version bump 0.22.0 to 0.23.0.

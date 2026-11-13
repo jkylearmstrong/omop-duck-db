@@ -214,7 +214,7 @@ def test_run_study_full_history_attrition_options_and_timings(feats, tmp_path, m
     comb = consort[consort["Site"] == "All_Sites_Combined"]
     assert comb["Stage / Description"].iloc[-1].startswith("Index admission 2017-01-01 to 2022-09-30, one stay per patient")
     assert comb["Remaining Patients (P)"].iloc[-1] == len(feats)
-    assert {"site_A", "tables_figures", "total"} <= set(r["timings"])
+    assert {"site_Site A", "tables_figures", "total"} <= set(r["timings"])  # keyed by the anonymous letter, not the site name
     with pytest.raises(ValueError, match="attrition_mode"):
         run_study(db, tmp_path / "o2", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, attrition_mode="nope")
 
@@ -234,6 +234,10 @@ def test_random_site_labels_end_to_end_keep_the_mapping_out_of_the_outputs(feats
     assert set(r["data"].site_anon) == set(mapping.values())
     run = json.loads((tmp_path / "out" / "Study_run.json").read_text(encoding="utf-8"))
     assert run["labels"] == ["Site A", "Site B", "Site C"] and "sites" not in run and not any(s in json.dumps(run) for s in ('"A":', '"B":'))
+    # the run record names no site: timings are keyed by the anonymous letter
+    timing_keys = set(run["timings_seconds"])
+    assert timing_keys == {f"site_{v}" for v in mapping.values()} | {"tables_figures", "total"}
+    assert not ({"site_A", "site_B", "site_C"} & timing_keys)
     # the same seed rebuilds the mapping; a saved file is accepted as site_labels
     r2 = run_study(db, tmp_path / "out2", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, site_labels=priv)
     assert (r2["data"].groupby("site_anon").size().sort_index().tolist() == r["data"].groupby("site_anon").size().sort_index().tolist())
