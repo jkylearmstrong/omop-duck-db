@@ -778,7 +778,8 @@ consortium_patient_overlap <- function(site_tokens, min_cell_count = 11) {
     s1 <- sites[i]
     set1 <- token_sets[[s1]]
     n1 <- length(set1)
-    for (j in i:length(sites)) {
+    # distinct pairs only: a self-pair has shared == n_site_1 == n_site_2 and would leak a suppressed size
+    for (j in seq_len(length(sites) - i) + i) {
       s2 <- sites[j]
       set2 <- token_sets[[s2]]
       n2 <- length(set2)

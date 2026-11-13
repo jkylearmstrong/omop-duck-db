@@ -1,0 +1,62 @@
+---
+title: "Status, verification and roadmap"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Status, verification and roadmap}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+What is claimed, what is verified, and what is next.
+
+Code blocks on this page are illustrative and are not run when the package is built. R and Python examples are labelled; a feature marked "Python only" has no R counterpart.
+
+What is in the package and what has been run:
+
+- **Loading and building**: PCORnet to OMOP ETL, vocabulary loading, and building and "inflating" OMOP tables in DuckDB are the
+  core of the package and are field-tested on five production databases (see *Verification status*). Inflating with a full
+  vocabulary was not re-run for this section.
+- **OHDSI tools**: `OHDSI_INTEGRATION.md` is the authority. It records what was compared against the official tools
+  (CirceR, CohortGenerator, FeatureExtraction, Achilles, DataQualityDashboard, PhenotypeLibrary, CohortDiagnostics,
+  PatientLevelPrediction, CohortMethod, CohortConstructor, DeepPatientLevelPrediction and omop-learn) and where the package overlaps or defers. omop-learn, scikit-learn, SARD and the PLP / DeepPLP bridge
+  are documented in the ML bridge section. **Not covered by any check in the repo:** Atlas 3, Data2Evidence,
+  Phenelope and GIS integration (reasons in `OHDSI_INTEGRATION.md`). Strategus appears only as "prefer HADES for published
+  estimates". Treat those as planned, not delivered, until a row appears in `OHDSI_INTEGRATION.md`.
+- **Cohort and Circe**: "one random stay per patient" cannot be written in Circe. The eligibility part is available as Circe JSON
+  (`target_cohort.circe.json`); the random draw is a documented post-step in `define_study_cohort`.
+- **Federation**: sites run the same code locally and share aggregate outputs. Disclosure control (`min_cell`, small-cell
+  suppression) and site summary packages exist (v0.12.0). Not yet done: a run manifest stamped into every output (package
+  version, git commit, seed, options, vocabulary version, timings) and a check that all sites ran identical versions and options
+  before pooling. Deep models are evaluated leave-one-site-out on pooled data; training them federated (sharing weights or
+  gradients) is a separate design that does not exist yet.
+- **Defaults can drift the manuscript.** The 0.18 options (`tie_break`, `table5`, `sdi_missing_term`, `attrition_mode`) change
+  the published numbers. Done: the named presets in *Decisions that move the numbers*. Done: a golden-workbook test (synthetic, committed) and `scripts/check_golden.py` for the real delivered workbook.
+- **R**: `derive_geography_features(tie_break=, undated=)` and `extract_benchmark_features(address_tie_break=, address_undated=)` take the same options as Python (tested in `tests/testthat/test-geography.R`). Not yet checked: that R and Python give identical ZIPs on the real sites under `arbitrary` (engine order is not guaranteed to agree).
+- **Deep models and the DGX Spark**: see the DGX Spark section. The CPU path is tested; the GPU path, the arm64 container tag and
+  real-cohort training are not. The existing SARD and DeepPLP trainers (`pipeline/dgx_spark_sard_trainer.py`,
+  `ederri_sard_deep_model.py`, `train_clinical_deep_dgx.py`, `train_residual_deep_dgx.py`) still need `fit_predict` wrappers
+  before `deep_study_tables` can use them. A deep-model report builder needs a spec: there is no manuscript template for it.
+- **Data quality**: run DataQualityDashboard and Achilles on each site database and record the vocabulary version in the manifest.
+- **Oracle**: `to_sql`, `verify_transfer` and `from_sql` were verified on live Oracle 19c; `tests/test_live_databases.py` against
+  Oracle has not been run.
+
+Order of work: (1) agree the similarity thresholds and run once with pinned stays (and the new Table 5 default) to separate
+sampling from definition changes; (2) the manuscript profile and the run manifest; (3) an integration status row for every tool
+named above; (4) the Spark GPU run and the SARD / DeepPLP wrappers.
+
+## Verification status
+
+What the project's own tests cover and what they do not:
+
+- Python: the unit tests run on small synthetic DuckDB databases (`pytest tests`). R: the testthat suite runs on small
+  synthetic databases.
+- Field-tested on five production databases: the v0.11.0 cohort equivalence (Python). The 0.11.1 and later changes
+  (per-table feature aggregates, `cap_observation_period`, `remap_discharge_status`, the attrition list) were checked on
+  synthetic data only, and the R half of 0.11.1 and later on small synthetic databases only (the 0.11.2 R ports were run with testthat, not on production data).
+- Oracle (`translate_cohort_sql`) and the BigQuery sync are unit-tested only. `extract_patient_features` timing
+  on production-size cohorts: `scripts/benchmark_features.py` (synthetic fixture: 1.1M stays in about 4 s; a production
+  run will differ with the number of events per patient).

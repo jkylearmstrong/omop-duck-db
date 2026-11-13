@@ -85,12 +85,16 @@ def copy_to(con, source: str, path: Union[str, Path], *, format: str = "PARQUET"
 
     ``source`` is a table name or a parenthesized query; ``options`` become COPY options.
     """
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", str(format)):
+        raise ValueError(f"Invalid COPY format {format!r}.")
     opts = f"FORMAT {format}"
     for key, value in options.items():
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", str(key)):
+            raise ValueError(f"Invalid COPY option name {key!r}.")
         if isinstance(value, bool):
             opts += f", {key} {'TRUE' if value else 'FALSE'}"
         elif isinstance(value, (int, float)):
             opts += f", {key} {value}"
         else:
-            opts += f", {key} '{str(value)}'"
+            opts += f", {key} '{str(value).replace(chr(39), chr(39) * 2)}'"
     con.execute(f"COPY {source} TO {sql_path_literal(path)} ({opts})")

@@ -62,7 +62,7 @@ RFC_KWARGS = dict(
     target_outcome="all_cause_readmission_30d",
 )
 # CONSORT subject counts of the RFC example on the randomized fixture; the R suite asserts the same numbers
-RFC_ATTRITION_SUBJECTS = [216, 204, 189, 180, 107, 96, 90]
+RFC_ATTRITION_SUBJECTS = [216, 204, 178, 171, 101, 90, 84]  # completed_years age (11 under-18s the legacy method admitted)
 
 
 # ======================================================================================================
@@ -612,8 +612,9 @@ def test_min_age_on_the_boundary_day():
     assert c.ids(age_method="completed_years", **kw) == [1, 4]
     exact = c.define(age_method="completed_years", min_age=17, **{k: v for k, v in kw.items() if k != "min_age"})
     assert dict(zip(exact.subject_id, exact.age_at_index)) == {1: 18, 2: 17, 3: 17, 4: 18, 5: 17}
-    # the legacy default (year_difference) counts calendar-year boundaries, so everyone above passes
-    legacy = c.define(**kw)
+    # the deprecated year_difference method counts calendar-year boundaries, so everyone above passes
+    with pytest.warns(FutureWarning, match="deprecated"):
+        legacy = c.define(age_method="year_difference", **kw)
     assert list(legacy.subject_id) == [1, 2, 3, 4, 5]
     assert dict(zip(legacy.subject_id, legacy.age_at_index)) == {1: 18, 2: 18, 3: 18, 4: 18, 5: 18}
     # min_age=None disables the rule; min_age=0 keeps everyone with a birth year

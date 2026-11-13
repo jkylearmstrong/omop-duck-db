@@ -1,12 +1,29 @@
 """Source-to-concept mapping helpers and OHDSI Usagi integrations for OMOP CDM."""
 
-from omop_etl.paths import sql_path_literal
 import csv
 import os
+
+from omop_etl.paths import sql_path_literal
+from omop_etl.sqlutil import sql_int, sql_str
+
+_STCM_INSERT_COLUMNS = """
+            source_code,
+            source_concept_id,
+            source_vocabulary_id,
+            source_code_description,
+            target_concept_id,
+            target_vocabulary_id,
+            valid_start_date,
+            valid_end_date,
+            invalid_reason
+"""
 
 
 def import_source_to_concept_map(con, csv_path, default_vocabulary_id="Local"):
     """Ingest custom mappings from a CSV into the OMOP source_to_concept_map table.
+
+    Returns the number of rows inserted. Raises ``ValueError`` if a required column is absent
+    (a missing ``target_concept_id`` used to silently map every code to concept 0).
 
     Expected CSV columns (case-insensitive):
       source_code (required)
@@ -22,60 +39,66 @@ def import_source_to_concept_map(con, csv_path, default_vocabulary_id="Local"):
         raise FileNotFoundError(f"Mapping file not found: {csv_path}")
 
     con.execute(f"""
-        CREATE OR REPLACE TEMPORARY VIEW _stcm_raw AS 
+        CREATE OR REPLACE TEMPORARY VIEW _stcm_raw AS
         SELECT * FROM read_csv_auto({sql_path_literal(csv_path)}, union_by_name = true, all_varchar = true);
     """)
+    try:
+        cols = {r[0].upper(): r[0] for r in con.execute("DESCRIBE SELECT * FROM _stcm_raw LIMIT 0").fetchall()}
 
-    cols = {r[0].upper(): r[0] for r in con.execute("DESCRIBE SELECT * FROM _stcm_raw LIMIT 0").fetchall()}
+        missing = [c for c in ("source_code", "target_concept_id") if c.upper() not in cols]
+        if missing:
+            raise ValueError(
+                f"Mapping file {csv_path} is missing required column(s): {', '.join(missing)}. "
+                f"Found: {sorted(cols.values())}."
+            )
 
-    def col_expr(target_name, default_expr):
-        for candidate in [target_name.upper(), target_name.lower()]:
-            if candidate in cols:
-                return f'"{cols[candidate]}"'
-        return default_expr
+        def col_expr(target_name, default_expr):
+            actual = cols.get(target_name.upper())
+            if actual is None:
+                return default_expr
+            return '"' + actual.replace('"', '""') + '"'
 
-    source_code = col_expr("source_code", "NULL")
-    target_concept_id = col_expr("target_concept_id", "0")
-    source_vocab = col_expr("source_vocabulary_id", f"'{default_vocabulary_id}'")
-    source_desc = col_expr("source_code_description", "NULL")
-    target_vocab = col_expr("target_vocabulary_id", "''")
-    start_date = col_expr("valid_start_date", "CURRENT_DATE")
-    end_date = col_expr("valid_end_date", "DATE '2099-12-31'")
-    inv_reason = col_expr("invalid_reason", "NULL")
+        vocab_lit = sql_str(default_vocabulary_id)
+        source_code = col_expr("source_code", "NULL")
+        target_concept_id = col_expr("target_concept_id", "0")
+        source_vocab = col_expr("source_vocabulary_id", vocab_lit)
+        source_desc = col_expr("source_code_description", "NULL")
+        target_vocab = col_expr("target_vocabulary_id", "''")
+        start_date = col_expr("valid_start_date", "CURRENT_DATE")
+        end_date = col_expr("valid_end_date", "DATE '2099-12-31'")
+        inv_reason = col_expr("invalid_reason", "NULL")
 
-    sql = f"""
-        INSERT INTO source_to_concept_map (
-            source_code,
-            source_concept_id,
-            source_vocabulary_id,
-            source_code_description,
-            target_concept_id,
-            target_vocabulary_id,
-            valid_start_date,
-            valid_end_date,
-            invalid_reason
-        )
-        SELECT
-            {source_code} AS source_code,
-            0 AS source_concept_id,
-            COALESCE({source_vocab}, '{default_vocabulary_id}') AS source_vocabulary_id,
-            {source_desc} AS source_code_description,
-            TRY_CAST({target_concept_id} AS INTEGER) AS target_concept_id,
-            COALESCE({target_vocab}, '') AS target_vocabulary_id,
-            COALESCE(TRY_CAST({start_date} AS DATE), CURRENT_DATE) AS valid_start_date,
-            COALESCE(TRY_CAST({end_date} AS DATE), DATE '2099-12-31') AS valid_end_date,
-            {inv_reason} AS invalid_reason
-        FROM _stcm_raw
-        WHERE {source_code} IS NOT NULL AND {target_concept_id} IS NOT NULL;
-    """
-    con.execute(sql)
-    con.execute("DROP VIEW IF EXISTS _stcm_raw;")
-    n = con.execute("SELECT COUNT(*) FROM source_to_concept_map").fetchone()[0]
-    return n
+        sql = f"""
+            INSERT INTO source_to_concept_map ({_STCM_INSERT_COLUMNS})
+            SELECT
+                {source_code} AS source_code,
+                0 AS source_concept_id,
+                COALESCE({source_vocab}, {vocab_lit}) AS source_vocabulary_id,
+                {source_desc} AS source_code_description,
+                TRY_CAST({target_concept_id} AS INTEGER) AS target_concept_id,
+                COALESCE({target_vocab}, '') AS target_vocabulary_id,
+                COALESCE(TRY_CAST({start_date} AS DATE), CURRENT_DATE) AS valid_start_date,
+                COALESCE(TRY_CAST({end_date} AS DATE), DATE '2099-12-31') AS valid_end_date,
+                {inv_reason} AS invalid_reason
+            FROM _stcm_raw
+            WHERE {source_code} IS NOT NULL
+              AND TRY_CAST({target_concept_id} AS INTEGER) IS NOT NULL;
+        """
+        before = con.execute("SELECT COUNT(*) FROM source_to_concept_map").fetchone()[0]
+        con.execute(sql)
+        after = con.execute("SELECT COUNT(*) FROM source_to_concept_map").fetchone()[0]
+        return after - before
+    finally:
+        con.execute("DROP VIEW IF EXISTS _stcm_raw;")
 
 
 def import_usagi_mappings(con, usagi_csv_path, source_vocabulary_id="Custom", approved_only=True):
     """Import mappings exported from OHDSI Usagi into source_to_concept_map.
+
+    Returns the number of rows inserted. When ``approved_only`` is true only rows whose
+    ``mappingStatus`` is exactly APPROVED (case-insensitive) are imported - a blank status is *not*
+    approval. Rows with a NULL/0 ``targetConceptId`` are always skipped. When a code has several
+    qualifying targets the lowest concept id wins, deterministically.
 
     OHDSI Usagi outputs columns:
       sourceCode, sourceName, targetConceptId, targetConceptName,
@@ -85,42 +108,45 @@ def import_usagi_mappings(con, usagi_csv_path, source_vocabulary_id="Custom", ap
         raise FileNotFoundError(f"Usagi mapping file not found: {usagi_csv_path}")
 
     con.execute(f"""
-        CREATE OR REPLACE TEMPORARY VIEW _usagi_raw AS 
+        CREATE OR REPLACE TEMPORARY VIEW _usagi_raw AS
         SELECT * FROM read_csv_auto({sql_path_literal(usagi_csv_path)}, union_by_name = true, all_varchar = true);
     """)
+    try:
+        vocab_lit = sql_str(source_vocabulary_id)
+        where = [
+            "sourceCode IS NOT NULL",
+            "TRY_CAST(targetConceptId AS INTEGER) IS NOT NULL",
+            "TRY_CAST(targetConceptId AS INTEGER) <> 0",
+        ]
+        if approved_only:
+            where.append("UPPER(TRIM(mappingStatus)) = 'APPROVED'")
+        where_sql = "WHERE " + " AND ".join(where)
 
-    status_filter = "WHERE UPPER(COALESCE(mappingStatus, 'APPROVED')) = 'APPROVED'" if approved_only else ""
-
-    sql = f"""
-        INSERT INTO source_to_concept_map (
-            source_code,
-            source_concept_id,
-            source_vocabulary_id,
-            source_code_description,
-            target_concept_id,
-            target_vocabulary_id,
-            valid_start_date,
-            valid_end_date,
-            invalid_reason
-        )
-        SELECT
-            sourceCode AS source_code,
-            0 AS source_concept_id,
-            '{source_vocabulary_id}' AS source_vocabulary_id,
-            sourceName AS source_code_description,
-            TRY_CAST(targetConceptId AS INTEGER) AS target_concept_id,
-            COALESCE(targetVocabularyId, '') AS target_vocabulary_id,
-            CURRENT_DATE AS valid_start_date,
-            DATE '2099-12-31' AS valid_end_date,
-            NULL AS invalid_reason
-        FROM _usagi_raw
-        {status_filter}
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY sourceCode ORDER BY TRY_CAST(targetConceptId AS INTEGER) DESC) = 1;
-    """
-    con.execute(sql)
-    con.execute("DROP VIEW IF EXISTS _usagi_raw;")
-    n = con.execute(f"SELECT COUNT(*) FROM source_to_concept_map WHERE source_vocabulary_id = '{source_vocabulary_id}'").fetchone()[0]
-    return n
+        sql = f"""
+            INSERT INTO source_to_concept_map ({_STCM_INSERT_COLUMNS})
+            SELECT
+                sourceCode AS source_code,
+                0 AS source_concept_id,
+                {vocab_lit} AS source_vocabulary_id,
+                sourceName AS source_code_description,
+                TRY_CAST(targetConceptId AS INTEGER) AS target_concept_id,
+                COALESCE(targetVocabularyId, '') AS target_vocabulary_id,
+                CURRENT_DATE AS valid_start_date,
+                DATE '2099-12-31' AS valid_end_date,
+                NULL AS invalid_reason
+            FROM _usagi_raw
+            {where_sql}
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY sourceCode
+                ORDER BY TRY_CAST(targetConceptId AS INTEGER) ASC
+            ) = 1;
+        """
+        count_sql = f"SELECT COUNT(*) FROM source_to_concept_map WHERE source_vocabulary_id = {vocab_lit}"
+        before = con.execute(count_sql).fetchone()[0]
+        con.execute(sql)
+        return con.execute(count_sql).fetchone()[0] - before
+    finally:
+        con.execute("DROP VIEW IF EXISTS _usagi_raw;")
 
 
 def export_unmapped_codes(con, table_name, output_csv, min_frequency=1):
@@ -146,9 +172,10 @@ def export_unmapped_codes(con, table_name, output_csv, min_frequency=1):
         raise ValueError(f"Unsupported table: {table_name}. Choose from: {list(column_map.keys())}")
 
     concept_col, source_col = column_map[tbl]
+    min_frequency = sql_int(min_frequency, "min_frequency")
 
     sql = f"""
-        SELECT 
+        SELECT
             {source_col} AS sourceCode,
             {source_col} AS sourceName,
             COUNT(*) AS frequency
@@ -157,7 +184,7 @@ def export_unmapped_codes(con, table_name, output_csv, min_frequency=1):
           AND {source_col} IS NOT NULL
         GROUP BY {source_col}
         HAVING COUNT(*) >= {min_frequency}
-        ORDER BY frequency DESC;
+        ORDER BY frequency DESC, sourceCode;
     """
     rows = con.execute(sql).fetchall()
 

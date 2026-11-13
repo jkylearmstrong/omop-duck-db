@@ -20,6 +20,7 @@ from typing import Any, Sequence
 import duckdb
 import pandas as pd
 
+from omop_etl.sqlutil import fetch_arrow
 from omop_etl.build_omop_cdm import _resource_path
 from omop_etl.jsonio import strict_dumps
 
@@ -56,7 +57,16 @@ def run_dqd(
     Returns:
         dict: Standard OHDSI DQD result dictionary with CheckResults, Metadata, and Overview.
     """
-    check_levels_set = {lvl.upper() for lvl in check_levels}
+    if isinstance(check_levels, str):  # a bare 'TABLE' used to be iterated into characters -> zero checks, 100% "passed"
+        check_levels = (check_levels,)
+    check_levels_set = {str(lvl).upper() for lvl in check_levels}
+    _valid_levels = {"TABLE", "FIELD", "CONCEPT", "TEMPORAL"}
+    _unknown = check_levels_set - _valid_levels
+    if _unknown or not check_levels_set:
+        raise ValueError(
+            f"Unknown or empty check_levels {sorted(_unknown) or list(check_levels)}; "
+            f"choose from {sorted(_valid_levels)}."
+        )
     results: list[dict[str, Any]] = []
 
     def _has_table(tbl: str) -> bool:
@@ -314,8 +324,9 @@ def run_dqd(
             # Standard concept conformance (concepts != 0 should have standard_concept = 'S')
             non_std_count = con.execute(f"""
                 SELECT COUNT(*) FROM {tbl} t
-                JOIN concept c ON t.{fld} = c.concept_id
-                WHERE t.{fld} != 0 AND (c.standard_concept != 'S' OR c.standard_concept IS NULL);
+                LEFT JOIN concept c ON t.{fld} = c.concept_id
+                WHERE t.{fld} != 0
+                  AND (c.concept_id IS NULL OR c.standard_concept IS NULL OR c.standard_concept != 'S');
             """).fetchone()[0]
             pct_non_std = round((non_std_count / total * 100.0), 2)
             results.append({
@@ -880,8 +891,7 @@ def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, conce
 
 
 def _sanitize_arrow(result) -> Any:
-    reader = result.arrow()
-    return reader.read_all() if hasattr(reader, "read_all") else reader
+    return fetch_arrow(result)
 
 
 def _sanitize_warn_unscreened(report: pd.DataFrame) -> None:

@@ -260,8 +260,9 @@ run_dqd <- function(con,
 
       non_std_count <- as.integer(DBI::dbGetQuery(con, sprintf("
         SELECT COUNT(*) AS n FROM %s t
-        JOIN concept c ON t.%s = c.concept_id
-        WHERE t.%s != 0 AND (c.standard_concept != 'S' OR c.standard_concept IS NULL)
+        LEFT JOIN concept c ON t.%s = c.concept_id
+        WHERE t.%s != 0
+          AND (c.concept_id IS NULL OR c.standard_concept IS NULL OR c.standard_concept != 'S')
       ", tbl, fld, fld))$n[1])
       pct <- round((non_std_count / total * 100.0), 2)
       results[[length(results) + 1]] <- list(

@@ -68,7 +68,7 @@ def remap_cdm_table(con, table_name, dry_run=False):
     vocabs_str = ", ".join(f"'{v}'" for v in cfg["default_vocabs"])
 
     # Build resolution CTE for candidate target concepts
-    # Prioritizes STCM, then standard 'Maps to', then direct standard concepts
+    # Explicit priority column: 1 = STCM, 2 = 'Maps to', 3 = direct standard concept
     resolution_view = f"""
         CREATE OR REPLACE TEMPORARY VIEW _remap_candidates_{tbl} AS
         WITH target_resolution AS (
@@ -76,12 +76,13 @@ def remap_cdm_table(con, table_name, dry_run=False):
             SELECT
                 source_code,
                 target_concept_id AS resolved_concept_id,
-                0 AS resolved_source_concept_id
+                0 AS resolved_source_concept_id,
+                1 AS priority
             FROM (
                 SELECT 
                     source_code, 
                     target_concept_id,
-                    ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC) AS rn
+                    ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC, target_concept_id ASC) AS rn
                 FROM source_to_concept_map
                 WHERE (invalid_reason IS NULL OR invalid_reason = '')
                   AND (valid_end_date IS NULL OR valid_end_date >= CURRENT_DATE)
@@ -93,7 +94,8 @@ def remap_cdm_table(con, table_name, dry_run=False):
             SELECT
                 c.concept_code AS source_code,
                 cr.concept_id_2 AS resolved_concept_id,
-                c.concept_id AS resolved_source_concept_id
+                c.concept_id AS resolved_source_concept_id,
+                2 AS priority
             FROM concept c
             JOIN (
                 SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
@@ -109,7 +111,8 @@ def remap_cdm_table(con, table_name, dry_run=False):
             SELECT
                 c.concept_code AS source_code,
                 c.concept_id AS resolved_concept_id,
-                c.concept_id AS resolved_source_concept_id
+                c.concept_id AS resolved_source_concept_id,
+                3 AS priority
             FROM concept c
             WHERE c.vocabulary_id IN ({vocabs_str})
               AND c.standard_concept = 'S'
@@ -123,7 +126,12 @@ def remap_cdm_table(con, table_name, dry_run=False):
                 source_code,
                 resolved_concept_id,
                 resolved_source_concept_id,
-                ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY resolved_concept_id DESC) AS rnk
+                ROW_NUMBER() OVER (
+                    PARTITION BY source_code
+                    -- explicit precedence (custom map > 'Maps to' > direct standard), then the lowest
+                    -- concept id so the pick is deterministic; never "largest id wins"
+                    ORDER BY priority ASC, resolved_concept_id ASC, resolved_source_concept_id ASC
+                ) AS rnk
             FROM target_resolution
             WHERE resolved_concept_id != 0 AND resolved_concept_id IS NOT NULL
         ) WHERE rnk = 1;

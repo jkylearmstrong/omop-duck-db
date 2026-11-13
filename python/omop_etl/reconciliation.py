@@ -9,6 +9,7 @@ Provides tools for comparing and validating new OMOP pipelines against legacy im
 
 from __future__ import annotations
 
+from omop_etl.sqlutil import quote_ident
 import itertools
 import math
 from pathlib import Path
@@ -176,7 +177,7 @@ def cohort_from_index_stays(
 
     if target_table:
         con.register("_cohort_out", cohort_df)
-        con.execute(f"CREATE OR REPLACE TABLE {target_table} AS SELECT * FROM _cohort_out")
+        con.execute(f"CREATE OR REPLACE TABLE {quote_ident(target_table, 'target table', 3)} AS SELECT * FROM _cohort_out")
         con.unregister("_cohort_out")
 
     return cohort_df, audit

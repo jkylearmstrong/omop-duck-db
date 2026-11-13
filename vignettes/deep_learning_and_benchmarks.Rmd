@@ -1,0 +1,68 @@
+---
+title: "Benchmark features, deep-learning datasets, DGX Spark and Oracle"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Benchmark features, deep-learning datasets, DGX Spark and Oracle}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+Leakage-free benchmark features, multimodal tensors, leave-one-site-out evaluation, and the DGX Spark / Oracle transfer notes.
+
+Code blocks on this page are illustrative and are not run when the package is built. R and Python examples are labelled; a feature marked "Python only" has no R counterpart.
+
+Python, with R versions of the cohort arguments, `extract_benchmark_features()`, recalibration / capacity / leave-one-site-out and the vocabulary manifest (not the tensor dataset). All of it was tested on synthetic data; nothing here has been run on a production-size database.
+
+```python
+from omop_etl import (define_study_cohort, extract_benchmark_features, extract_multimodal_deep_dataset,
+                      export_concept_vocabulary, import_concept_vocabulary, evaluate_loso_transport,
+                      capacity_risk_tiers, map_risk_tiers)
+
+# 1. Cohort: calendar bounds (logged in the attrition table), one stay per patient drawn by a seeded MD5 rule
+cohort = define_study_cohort(con, min_admit_date="2010-01-01", max_admit_date="2022-09-30",
+                             sample_stay_rule="random", random_seed=20261104, table_name="cohort")
+
+# 2. One call for the leakage-free modelling table (labs: index-admission mean and latest in-stay value)
+df = extract_benchmark_features(con, "cohort", include_sdoh=False)       # df.attrs["feature_groups"] lists the groups
+
+# 3. Multimodal tensors; a lead site freezes the vocabulary, other sites import it so token ids match
+ds = extract_multimodal_deep_dataset(con, df, max_visits=20, max_tokens_per_visit=30, lookback_days=365,
+                                     output_format="torch_dict", include_intra_stay=True, pretraining_targets=True)
+export_concept_vocabulary(ds["tokenizer"], "vocabulary.json")
+tok = import_concept_vocabulary("vocabulary.json")                         # at the other sites: pass tokenizer=tok
+# big cohorts: output_format="memmap", "arrow" or "zarr" with output_dir=..., chunk_size=50_000 streams to disk
+
+# 4. Leave-one-site-out transport: balanced training on N-1 sites, natural-prevalence scoring of the held-out site
+res = evaluate_loso_transport(df, site_col="site_anon", model_type="xgboost", balance_ratio=1.0, n_bootstraps=100)
+res.per_site                                                                # AUROC, Brier, O/E, top-10% PPV with 95% CIs
+tiers = capacity_risk_tiers(res.predictions["p"], top_fraction=0.10)       # "the riskiest 10% get a care-management call"
+```
+
+
+## Running on the NVIDIA DGX Spark (deep models) and Oracle transfers
+
+
+**Status (0.20.0): written and tested on CPU only. The GPU path and the arm64 / GB10 base-image tag have not been run on a Spark yet.**
+
+On the Spark, from the parent `eDerri_data` directory (so omop-learn and `pipeline/` are in the build context):
+
+```bash
+docker build -f omop-duck-db/Dockerfile.dgx -t omop-duck-db:dgx .
+docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+    -v /workspace/ederri:/workspace/ederri omop-duck-db:dgx dgx-smoke
+```
+
+`dgx-smoke` (`scripts/dgx_smoke_test.py --require-gpu`) prints the torch / CUDA report, trains and scores a small MLP, and fails if no GPU is visible. If the build cannot pull the base image, set `--build-arg NGC_TAG=<tag you have verified>`; do not pip-install torch over the NGC build. Then:
+
+```python
+from omop_etl import make_mlp_fit_predict, deep_study_tables, device_report
+res = deep_study_tables(make_mlp_fit_predict(), X, y, sites=site_labels, model_name="MLP")   # Model_Performance row + leave-one-site-out
+```
+
+Any trainer (SARD, DeepPLP, `pipeline/*_dgx.py`) can be scored the same way by wrapping it as `fit_predict(x_train, y_train, x_test) -> probabilities`; such wrappers are not written yet.
+
+Oracle / server transfers (`to_sql`, `verify_transfer`, and `import_omop` / `from_sql` back) were run against a live Oracle 19c with `oracledb` in thick mode; credentials come from a SQLAlchemy URL or `env:NAME`, never from code.

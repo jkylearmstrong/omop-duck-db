@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 
+from omop_etl.sqlutil import quote_ident
 from omop_etl.jsonio import strict_dumps
 import math
 import os
@@ -886,7 +887,9 @@ def consortium_patient_overlap(
         s1 = sites[i]
         set1 = token_sets[s1]
         n1 = len(set1)
-        for j in range(i, len(sites)):
+        # Distinct pairs only: a site paired with itself has shared == n_site_1 == n_site_2, which would
+        # print the exact size of a site whose overlap cell is being suppressed.
+        for j in range(i + 1, len(sites)):
             s2 = sites[j]
             set2 = token_sets[s2]
             n2 = len(set2)
@@ -1103,7 +1106,7 @@ def planned_readmission_filter(
     clean_df = df[df["is_planned"] == 0].drop(columns=["is_planned"]).reset_index(drop=True)
 
     if target_table:
-        con.execute(f"CREATE OR REPLACE TABLE {target_table} AS SELECT * FROM df WHERE is_planned = 0")
+        con.execute(f"CREATE OR REPLACE TABLE {quote_ident(target_table, 'target table', 3)} AS SELECT * FROM df WHERE is_planned = 0")
 
     return pd.DataFrame(records), clean_df
 

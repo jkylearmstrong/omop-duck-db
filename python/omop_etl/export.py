@@ -11,7 +11,9 @@ Supports:
 from __future__ import annotations
 
 from omop_etl.paths import sanitize_sql_path
+from omop_etl.sqlutil import quote_ident, sql_str
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import duckdb
@@ -90,6 +92,9 @@ def export_cdm(
                 if row_cnt > 0:
                     existing_tables.append(tbl)
         tables = existing_tables or ALL_CDM_TABLES
+    tables = [t for t in tables]
+    for _t in tables:
+        quote_ident(_t, "table name", 2)  # rejects quotes, semicolons, spaces: names reach SQL and file names
 
     results = {}
 
@@ -105,25 +110,26 @@ def export_cdm(
                     COPY (
                         SELECT *, {part_expr} AS _part_col 
                         FROM {tbl}
-                    ) TO '{p_str}' 
+                    ) TO {sql_str(p_str)} 
                     (FORMAT PARQUET, PARTITION_BY (_part_col), COMPRESSION {compression});
                 """
             else:
                 out_file = out_dir / f"{tbl}.parquet"
                 p_str = _posix_path(out_file)
-                sql = f"COPY {tbl} TO '{p_str}' (FORMAT PARQUET, COMPRESSION {compression});"
+                sql = f"COPY {tbl} TO {sql_str(p_str)} (FORMAT PARQUET, COMPRESSION {compression});"
             con.execute(sql)
             results[tbl] = {"status": "EXPORTED", "format": "parquet"}
 
     elif tgt == "postgres":
         # DuckDB native postgres extension streaming
         con.execute("INSTALL postgres; LOAD postgres;")
-        pg_uri = str(output_path).replace("'", "''")
-        con.execute(f"ATTACH '{pg_uri}' AS target_pg (TYPE POSTGRES);")
-        for tbl in tables:
-            con.execute(f"INSERT INTO target_pg.{tbl} SELECT * FROM {tbl};")
-            results[tbl] = {"status": "STREAMED_TO_POSTGRES"}
-        con.execute("DETACH target_pg;")
+        con.execute(f"ATTACH {sql_str(output_path)} AS target_pg (TYPE POSTGRES);")
+        try:
+            for tbl in tables:
+                con.execute(f"INSERT INTO target_pg.{tbl} SELECT * FROM {tbl};")
+                results[tbl] = {"status": "STREAMED_TO_POSTGRES"}
+        finally:
+            con.execute("DETACH target_pg;")
 
     elif tgt in EXTRA_TARGETS:
         # DDL, data files and loader scripts all derive from the single CDM DDL source (see export_targets)
@@ -137,7 +143,7 @@ def export_cdm(
             cols = model[tbl.lower()]
             if tgt in ("oracle", "sqlserver"):
                 data = out_dir / f"{tbl}.csv"
-                con.execute(f"COPY ({csv_select(tbl, cols)}) TO '{_posix_path(data)}' (FORMAT CSV, HEADER TRUE);")
+                con.execute(f"COPY ({csv_select(tbl, cols)}) TO {sql_str(_posix_path(data))} (FORMAT CSV, HEADER TRUE);")
                 results[tbl] = {"status": "EXPORTED", "format": f"{tgt}_csv"}
                 if tgt == "oracle":
                     ctl = out_dir / f"{tbl}.ctl"
@@ -145,7 +151,7 @@ def export_cdm(
                     results[tbl].update(format="oracle_sqlldr", ctl_file=str(ctl))
             else:
                 data = out_dir / f"{tbl}.parquet"
-                con.execute(f"COPY {tbl} TO '{_posix_path(data)}' (FORMAT PARQUET, COMPRESSION {compression});")
+                con.execute(f"COPY {tbl} TO {sql_str(_posix_path(data))} (FORMAT PARQUET, COMPRESSION {compression});")
                 results[tbl] = {"status": "EXPORTED", "format": f"{tgt}_parquet"}
         if tgt == "oracle":
             (out_dir / "omop_oracle_ddl.sql").write_text(
@@ -166,7 +172,7 @@ def export_cdm(
         for tbl in tables:
             out_file = out_dir / f"{tbl}.{ext}"
             p_str = _posix_path(out_file)
-            con.execute(f"COPY {tbl} TO '{p_str}' (FORMAT CSV, HEADER TRUE, DELIMITER '{delim}');")
+            con.execute(f"COPY {tbl} TO {sql_str(p_str)} (FORMAT CSV, HEADER TRUE, DELIMITER '{delim}');")
             results[tbl] = {"status": "EXPORTED", "format": tgt}
 
     else:
@@ -198,6 +204,11 @@ def export_to_parquet(
     Returns:
         str: Absolute destination path.
     """
+    quote_ident(table_name, "table name", 2)
+    for _c in (partition_by or ()):
+        quote_ident(_c, "partition column", 1)
+    if not re.fullmatch(r"[A-Za-z0-9_]+", str(compression)):
+        raise ValueError(f"Invalid compression {compression!r}.")
     should_close = False
     if isinstance(db_path, (str, Path)):
         con = duckdb.connect(str(db_path), read_only=True)
@@ -213,11 +224,11 @@ def export_to_parquet(
             p_str = _posix_path(out_p)
             part_cols = ", ".join(partition_by)
             part_clause = f", PARTITION_BY ({part_cols})"
-            sql = f"COPY {table_name} TO '{p_str}' (FORMAT PARQUET, COMPRESSION '{compression}'{part_clause});"
+            sql = f"COPY {table_name} TO {sql_str(p_str)} (FORMAT PARQUET, COMPRESSION '{compression}'{part_clause});"
         else:
             out_file = out_p / f"{table_name}.parquet"
             p_str = _posix_path(out_file)
-            sql = f"COPY {table_name} TO '{p_str}' (FORMAT PARQUET, COMPRESSION '{compression}');"
+            sql = f"COPY {table_name} TO {sql_str(p_str)} (FORMAT PARQUET, COMPRESSION '{compression}');"
 
         con.execute(sql)
         return str(out_p.resolve())

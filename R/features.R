@@ -95,7 +95,7 @@ extract_patient_features <- function(con,
 
   if (do_demo) {
     select_items <- c(select_items,
-      sprintf("date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.%s) AS age_at_index", anchor_col),
+      sprintf("date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.%s) AS age_at_index", anchor_col),
       "p.gender_concept_id",
       "p.race_concept_id",
       "p.ethnicity_concept_id",
@@ -295,12 +295,12 @@ extract_temporal_features <- function(con,
 
   demo_select <- if (isTRUE(include_demographics)) {
     "
-      date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age_at_admission,
+      date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age_at_admission,
       CASE 
-          WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) < 18 THEN '<18'
-          WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 18 AND 44 THEN '18-44'
-          WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 45 AND 64 THEN '45-64'
-          WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 65 AND 74 THEN '65-74'
+          WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) < 18 THEN '<18'
+          WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 18 AND 44 THEN '18-44'
+          WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 45 AND 64 THEN '45-64'
+          WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 65 AND 74 THEN '65-74'
           ELSE '75+'
       END AS age_group,
       p.gender_concept_id,

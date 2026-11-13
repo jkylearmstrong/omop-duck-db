@@ -27,6 +27,7 @@ with the padding index.
 
 from __future__ import annotations
 
+from omop_etl.sqlutil import fetch_arrow
 from omop_etl.paths import sanitize_sql_path
 import json
 import re
@@ -816,9 +817,9 @@ def arrow_to_pytorch(
     if isinstance(query_or_table, str):
         if con is None:
             raise ValueError("Must provide active DuckDB connection `con` when query_or_table is a SQL query.")
-        pa_table = con.execute(query_or_table).arrow()
-    elif hasattr(query_or_table, "arrow"):
-        pa_table = query_or_table.arrow()
+        pa_table = fetch_arrow(con.execute(query_or_table))
+    elif hasattr(query_or_table, "to_arrow_table") or hasattr(query_or_table, "arrow"):
+        pa_table = fetch_arrow(query_or_table)
     elif isinstance(query_or_table, pa.Table):
         pa_table = query_or_table
     else:
@@ -878,9 +879,9 @@ def arrow_to_cuda_tensors(
     if isinstance(query_or_table, str):
         if con is None:
             raise ValueError("Must provide active DuckDB connection `con` when query_or_table is a SQL query.")
-        pa_table = con.execute(query_or_table).arrow()
-    elif hasattr(query_or_table, "arrow"):
-        pa_table = query_or_table.arrow()
+        pa_table = fetch_arrow(con.execute(query_or_table))
+    elif hasattr(query_or_table, "to_arrow_table") or hasattr(query_or_table, "arrow"):
+        pa_table = fetch_arrow(query_or_table)
     elif isinstance(query_or_table, (pa.Table, pa.RecordBatch)):
         pa_table = query_or_table
     else:

@@ -56,3 +56,4 @@ secrets/
 # local ATLAS stack artifacts
 scripts/atlas/jdbc/*.jar
 scripts/atlas/data/
+inst/scripts/debug_output.txt

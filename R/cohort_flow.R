@@ -376,7 +376,7 @@ plp_arrow_to_plp_data <- function(plp_arrow, con, target_id = 1L, outcome_id = 1
     SELECT c.row_id, c.person_id, c.index_date,
            date_diff('day', o.observation_period_start_date, c.index_date) AS days_from_obs_start,
            date_diff('day', c.index_date, o.observation_period_end_date) AS days_to_obs_end,
-           date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.index_date) AS age_year,
+           date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.index_date) AS age_year,
            p.gender_concept_id AS gender
     FROM _plp_cohort c
     JOIN observation_period o ON o.person_id = c.person_id

@@ -56,7 +56,9 @@ DEFAULT_MEDICATION_CONCEPTS <- list(
   v1 <- stats::var(s1)
   v0 <- stats::var(s0)
   pooled_sd <- sqrt((v1 + v0) / 2.0)
-  if (is.na(pooled_sd) || pooled_sd <= 1e-9) return(0.0)
+  if (is.na(pooled_sd)) return(NA_real_)
+  # Both groups constant: equal constants are balanced; different constants are perfectly separated (Inf).
+  if (pooled_sd <= 1e-9) return(if (abs(m1 - m0) <= 1e-9) 0.0 else Inf)
   abs(m1 - m0) / pooled_sd
 }
 
@@ -64,7 +66,8 @@ DEFAULT_MEDICATION_CONCEPTS <- list(
 #' @noRd
 .calc_smd_bin <- function(p1, p0) {
   denom <- sqrt((p1 * (1.0 - p1) + p0 * (1.0 - p0)) / 2.0)
-  if (is.na(denom) || denom <= 1e-9) return(0.0)
+  if (is.na(denom)) return(NA_real_)
+  if (denom <= 1e-9) return(if (abs(p1 - p0) <= 1e-9) 0.0 else Inf)
   abs(p1 - p0) / denom
 }
 

@@ -73,7 +73,7 @@ class CohortExtractor:
             COALESCE(v.visit_end_date, v.visit_start_date) AS discharge_date,
             p.gender_concept_id,
             p.year_of_birth,
-            date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), v.visit_start_date) AS age_at_index,
+            date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), v.visit_start_date) AS age_at_index,
             COALESCE(op.observation_period_end_date, DATE '2099-12-31') AS obs_end_date
         FROM visit_occurrence v
         JOIN person p ON v.person_id = p.person_id

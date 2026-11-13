@@ -28,6 +28,7 @@ DEFAULT_DATETIME_FORMATS: tuple[str, ...] = (
     "%d%b%Y",
     "%Y-%m-%d",
     "%m/%d/%Y",
+    "%Y%m%d",
 )
 
 _ON_ERROR = ("null", "default_date", "raise")

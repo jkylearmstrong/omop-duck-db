@@ -75,11 +75,21 @@ load_from_bigquery <- function(billing_project = NULL,
     duckdb::duckdb_register(con, stage, df)
     tryCatch({
       if (tbl %in% existing_tables) {
+        # An empty download must never wipe a populated table, and DELETE + INSERT is one transaction so a
+        # failed INSERT (type / column mismatch) restores the old rows.
+        if (nrow(df) == 0L && mode == "overwrite") {
+          stop("BigQuery returned zero rows for ", tbl, "; refusing to overwrite the existing local table.", call. = FALSE)
+        }
+        DBI::dbExecute(con, "BEGIN TRANSACTION")
+        ok <- FALSE
+        on.exit(if (!ok) try(DBI::dbExecute(con, "ROLLBACK"), silent = TRUE), add = TRUE)
         if (mode == "overwrite") {
-          DBI::dbExecute(con, paste0("DELETE FROM ", tbl))
+          DBI::dbExecute(con, paste0("DELETE FROM ", DBI::dbQuoteIdentifier(con, tbl)))
         }
         DBI::dbExecute(con, sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", DBI::dbQuoteIdentifier(con, tbl),
                                     paste(quoted, collapse = ", "), paste(select_list, collapse = ", "), stage))
+        DBI::dbExecute(con, "COMMIT")
+        ok <- TRUE
       } else {
         DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s", DBI::dbQuoteIdentifier(con, tbl),
                                     paste(select_list, collapse = ", "), stage))

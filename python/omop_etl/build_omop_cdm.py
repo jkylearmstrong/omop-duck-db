@@ -14,6 +14,7 @@ import re
 import warnings
 import duckdb
 from omop_etl.paths import sanitize_sql_path, sql_path_literal
+from omop_etl.sqlutil import sql_int, sql_str
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -195,13 +196,46 @@ def run_insert(con, label, sql):
     return n
 
 
-def build_schema(con):
+def build_schema(con, exists_ok=False, primary_keys=False):
+    """Create the OMOP CDM v5.4 tables from the bundled DDL, atomically.
+
+    The whole DDL runs in one transaction, so a failure part-way leaves no half-built schema.
+    If the CDM tables already exist this raises ``RuntimeError`` (re-running the DDL used to fail
+    with an opaque "Table ... already exists" catalog error); pass ``exists_ok=True`` to make the
+    call a no-op instead.
+
+    ``primary_keys=True`` additionally applies the bundled primary-key script. It is opt-in because
+    DuckDB enforces PKs with an index that slows bulk loading; apply it after the ETL if you want
+    uniqueness guarantees on the finished database.
+    """
+    existing = {r[0].lower() for r in con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()").fetchall()}
+    if "person" in existing:
+        if exists_ok:
+            print("Schema already present; build_schema skipped.")
+            return
+        raise RuntimeError(
+            "OMOP CDM tables already exist in this database (found 'person'). build_schema() only creates a "
+            "new schema; use a fresh database file or pass exists_ok=True to skip."
+        )
     ddl_path = _resource_path("extdata", "5.4", "duckdb", "OMOPCDM_duckdb_5.4_ddl.sql")
-    with open(ddl_path) as f:
+    with open(ddl_path, encoding="utf-8") as f:
         ddl = f.read()
     ddl = ddl.replace("@cdmDatabaseSchema.", "")
     ddl = ddl.replace(" NUMERIC ", " DOUBLE ")
-    con.execute(ddl)
+    scripts = [ddl]
+    if primary_keys:
+        pk_path = _resource_path("extdata", "5.4", "duckdb", "OMOPCDM_duckdb_5.4_primary_keys.sql")
+        with open(pk_path, encoding="utf-8") as f:
+            scripts.append(f.read().replace("@cdmDatabaseSchema.", ""))
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for script in scripts:
+            con.execute(script)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
     print("Schema built from", ddl_path)
 
 
@@ -278,11 +312,32 @@ def load_macros(con, temporary=None, skip_unresolved=False):
     return skipped
 
 
-def attach_central_vocabulary(con, vocab_db_path, temporary=True):
+def attach_central_vocabulary(con, vocab_db_path, temporary=True, force=False):
     """Attach an external DuckDB database containing Athena vocabulary tables and
-    create zero-copy views, avoiding copying 10-15 GB of vocabulary data into the local database."""
+    create zero-copy views, avoiding copying 10-15 GB of vocabulary data into the local database.
+
+    With ``temporary=False`` the views replace the local tables of the same name. A local vocabulary table
+    that already holds rows is never dropped silently: this raises ``RuntimeError`` (before changing anything)
+    unless ``force=True``. Empty tables - the state ``build_schema()`` leaves - are replaced without a prompt.
+    """
     if not os.path.exists(vocab_db_path):
         raise FileNotFoundError(f"Central vocabulary database not found: {vocab_db_path}")
+    if not temporary and not force:
+        populated = {}
+        for (t,) in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() "
+                "AND table_type = 'BASE TABLE' AND table_name IN "
+                "('concept','concept_relationship','concept_ancestor','concept_synonym','vocabulary',"
+                "'relationship','concept_class','domain','drug_strength')").fetchall():
+            n = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
+            if n:
+                populated[t] = n
+        if populated:
+            raise RuntimeError(
+                "Refusing to drop local vocabulary table(s) that hold data: "
+                + ", ".join(f"{t} ({n:,} rows)" for t, n in populated.items())
+                + ". Use temporary=True (session views, nothing dropped) or pass force=True to replace them."
+            )
 
     con.execute(f"ATTACH {sql_path_literal(vocab_db_path)} AS central_vocab (READ_ONLY);")
     vocab_tables = [
@@ -536,12 +591,24 @@ def load_person(con, source_dir, site_id=None, disambiguate_patids=False):
             DAY(parse_omop_date(src.BIRTH_DATE)) AS day_of_birth,
             parse_omop_datetime(src.BIRTH_DATE, NULL) AS birth_datetime,
             CASE src.RACE
-                WHEN '05' THEN 8527 -- White
-                WHEN '03' THEN 8516 -- Black or African American
+                WHEN '01' THEN 8657 -- American Indian or Alaska Native
                 WHEN '02' THEN 8515 -- Asian
+                WHEN '03' THEN 8516 -- Black or African American
+                WHEN '04' THEN 8557 -- Native Hawaiian or Other Pacific Islander
+                WHEN '05' THEN 8527 -- White
+                WHEN '06' THEN 8522 -- Multiple race -> OMOP 'Other Race'
+                WHEN 'OT' THEN 8522 -- Other
+                WHEN '07' THEN 8552 -- Refuse to answer -> 'Unknown'
+                WHEN 'NI' THEN 8552
+                WHEN 'UN' THEN 8552
                 ELSE 0
             END AS race_concept_id,
-            CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 ELSE 38003564 END AS ethnicity_concept_id,
+            -- Y / N only; NI, UN, OT, refuse and blanks stay 0 (unknown) rather than "not Hispanic".
+            CASE UPPER(TRIM(src.HISPANIC))
+                WHEN 'Y' THEN 38003563 -- Hispanic or Latino
+                WHEN 'N' THEN 38003564 -- Not Hispanic or Latino
+                ELSE 0
+            END AS ethnicity_concept_id,
             NULL AS location_id,
             COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
             {care_site_id_expr} AS care_site_id,
@@ -835,7 +902,12 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
             src.PDX AS condition_status_source_value
         FROM (
             SELECT *,
-                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' ELSE 'ICD10CM' END AS dx_vocabulary_id
+                CASE UPPER(TRIM(DX_TYPE))
+                    WHEN '09' THEN 'ICD9CM'
+                    WHEN '10' THEN 'ICD10CM'
+                    WHEN 'SM' THEN 'SNOMED'
+                    ELSE NULL -- unknown type: no vocabulary guess (concept stays 0)
+                END AS dx_vocabulary_id
             FROM _temp_diagnosis
         ) src
         LEFT JOIN person p
@@ -915,7 +987,7 @@ def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids
                     WHEN '02' THEN 'HCPCS'
                     WHEN '09' THEN 'ICD9Proc'
                     WHEN '10' THEN 'ICD10PCS'
-                    ELSE PX_TYPE
+                    ELSE NULL -- unknown type: no vocabulary guess
                 END AS px_vocabulary_id
             FROM _temp_procedures
         ) src
@@ -1100,7 +1172,7 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False, derive_
         run_insert(con, f"MEASUREMENT (from VITAL - {tag})", f"""
             INSERT INTO measurement
             SELECT
-                ROW_NUMBER() OVER () + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
+                ROW_NUMBER() OVER (ORDER BY src.VITALID) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
                 COALESCE(p.person_id, pcornet_id({patid_expr})) AS person_id,
                 COALESCE(
                     NULLIF(COALESCE(
@@ -1870,6 +1942,44 @@ def load_cdm_source(con, cdm_source_name=None, cdm_holder=None, site_id=None, si
     """)
 
 
+# CDM tables the ETL populates (vocabulary tables are deliberately absent).
+_ETL_TARGET_TABLES = (
+    "person_address_history", "condition_era", "drug_era", "observation_period", "death", "measurement",
+    "drug_exposure", "procedure_occurrence", "condition_occurrence", "visit_occurrence", "person", "location",
+    "provider", "care_site", "cdm_source",
+)
+
+
+def _prepare_full_load(con, overwrite=False):
+    """Make a full-mode load safe to repeat: refuse (or, with ``overwrite``, clear) a populated target.
+
+    Without PKs nothing else stops a second run from re-inserting every row with fresh surrogate keys.
+    """
+    existing = {r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()").fetchall()}
+    tables = [t for t in _ETL_TARGET_TABLES if t in existing]
+    populated = {t: con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables}
+    populated = {t: n for t, n in populated.items() if n}
+    if not populated:
+        return
+    if not overwrite:
+        listing = ", ".join(f"{t} ({n:,})" for t, n in populated.items())
+        raise RuntimeError(
+            "The target database already holds ETL output: " + listing + ". A second full run would duplicate "
+            "every row. Pass overwrite=True to empty these tables first, use mode='append' to add new rows, "
+            "or point db_path at a fresh file."
+        )
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for t in tables:
+            con.execute(f'DELETE FROM "{t}"')
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    print(f"overwrite=True: emptied {len(populated)} populated table(s) before the full load.")
+
+
 def etl_pcornet(
     source_dir,
     db_path="omop_cdm.duckdb",
@@ -1892,6 +2002,7 @@ def etl_pcornet(
     data_cutoff="auto",
     mode="full",
     since=None,
+    overwrite=False,
 ):
     """Run full PCORnet -> OMOP CDM v5.4 pipeline.
 
@@ -1901,6 +2012,10 @@ def etl_pcornet(
     current maximum. care_site/location are left as they are; observation_period and the eras are derived tables and
     are rebuilt (their ids are regenerated). Encounters are selected by admit date, so an encounter already loaded is
     never duplicated, but a stay admitted before ``since`` and discharged after it is not updated.
+
+    A ``mode="full"`` run is **idempotent only with ``overwrite=True``**: it refuses to load into a database whose
+    clinical tables already hold rows (a second run would double every table) and, with ``overwrite=True``, empties
+    those tables first, inside one transaction. Vocabulary tables are never touched.
 
     ``key_check`` ('warn' | 'raise' | 'ignore') compares distinct source ids with distinct surrogate keys at the end
     of the build (FR-C12, see ``omop_etl.key_checks.check_etl_keys``); ``key_check_callback`` receives the list of
@@ -1941,89 +2056,89 @@ def etl_pcornet(
         raise ValueError("disambiguate_patids requires site_id to be specified.")
 
     con = duckdb.connect(sanitize_sql_path(db_path))
-    if auto_resources:
-        from omop_etl.resources import configure_resources
+    try:
+        if auto_resources:
+            from omop_etl.resources import configure_resources
 
-        cfg = configure_resources(con, temp_directory=temp_dir, threads=threads)
-        print(f"Auto resources: memory_limit={cfg.memory_limit}, threads={cfg.threads}, temp={cfg.temp_directory}")
-    if memory_limit:
-        con.execute(f"SET memory_limit = '{memory_limit}';")
-    if threads:
-        con.execute(f"SET threads = {threads};")
-    if temp_dir:
-        os.makedirs(temp_dir, exist_ok=True)
-        con.execute(f"SET temp_directory = '{sanitize_sql_path(temp_dir)}';")
+            cfg = configure_resources(con, temp_directory=temp_dir, threads=threads)
+            print(f"Auto resources: memory_limit={cfg.memory_limit}, threads={cfg.threads}, temp={cfg.temp_directory}")
+        if memory_limit:
+            con.execute(f"SET memory_limit = {sql_str(memory_limit)};")
+        if threads:
+            con.execute(f"SET threads = {sql_int(threads, 'threads')};")
+        if temp_dir:
+            os.makedirs(temp_dir, exist_ok=True)
+            con.execute(f"SET temp_directory = '{sanitize_sql_path(temp_dir)}';")
 
-    if central_vocab:
-        attach_central_vocabulary(con, central_vocab, temporary=True)
+        if central_vocab:
+            attach_central_vocabulary(con, central_vocab, temporary=True)
 
-    if build_schema_flag:
-        build_schema(con)
-    load_macros(con)
+        if build_schema_flag:
+            build_schema(con, exists_ok=overwrite)
+        load_macros(con)
+        if not append:
+            _prepare_full_load(con, overwrite)
 
-    _APPEND.clear()
-    if append:
-        _APPEND["since"] = since
-        if disambiguate_patids:
-            _APPEND["patid_suffix"] = f"-{site_id}"
-        print(f"Append mode: new patients/providers/encounters and events dated >= {since}.")
-    else:
-        load_care_site(con, source_dir, site_id=site_id, site_anon=site_anon, site_name=site_name)
-    load_provider(con, source_dir)
-    load_person(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    if not append:
-        load_location(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_visit_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_condition_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_procedure_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_measurement(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_vital(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        _APPEND.clear()
+        if append:
+            _APPEND["since"] = since
+            if disambiguate_patids:
+                _APPEND["patid_suffix"] = f"-{site_id}"
+            print(f"Append mode: new patients/providers/encounters and events dated >= {since}.")
+        else:
+            load_care_site(con, source_dir, site_id=site_id, site_anon=site_anon, site_name=site_name)
+        load_provider(con, source_dir)
+        load_person(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        if not append:
+            load_location(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        load_visit_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        load_condition_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        load_procedure_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        load_measurement(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        load_vital(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+        load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
 
-    _APPEND.clear()
-    if append:
-        for t in ("observation_period", "drug_era", "condition_era"):
-            con.execute(f"DELETE FROM {t}")
-    cutoff = resolve_max_date(con, data_cutoff)
-    enrolled = False
-    if use_enrollment in ("auto", True):
-        # an inferred cutoff only replaces the build-date fill of open-ended spans; recorded end dates are kept
-        inferred = str(data_cutoff).lower() == "auto"
-        enrolled = load_enrollment_spans(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids,
-                                         max_date=None if inferred else cutoff,
-                                         open_end=cutoff if inferred else None) > 0
-        if use_enrollment is True and not enrolled:
-            raise FileNotFoundError(f"use_enrollment=True but {source_dir} has no ENROLLMENT file with usable rows.")
-    build_observation_period(con, max_date=cutoff, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
-    if cutoff is not None:
-        print(f"  -> observation periods capped at the data cutoff {cutoff}"
-              + (" (data_cutoff='auto': latest event before today)" if str(data_cutoff).lower() == "auto" else ""))
-    else:
-        print("  -> observation periods not capped (data_cutoff=None): periods may end on the build date; "
-              "cap_observation_period(con, cutoff) caps them afterwards")
-    build_drug_era(con)
-    build_condition_era(con)
-    if not append:
-        load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
+        _APPEND.clear()
+        if append:
+            for t in ("observation_period", "drug_era", "condition_era"):
+                con.execute(f"DELETE FROM {t}")
+        cutoff = resolve_max_date(con, data_cutoff)
+        enrolled = False
+        if use_enrollment in ("auto", True):
+            # an inferred cutoff only replaces the build-date fill of open-ended spans; recorded end dates are kept
+            inferred = str(data_cutoff).lower() == "auto"
+            enrolled = load_enrollment_spans(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids,
+                                             max_date=None if inferred else cutoff,
+                                             open_end=cutoff if inferred else None) > 0
+            if use_enrollment is True and not enrolled:
+                raise FileNotFoundError(f"use_enrollment=True but {source_dir} has no ENROLLMENT file with usable rows.")
+        build_observation_period(con, max_date=cutoff, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
+        if cutoff is not None:
+            print(f"  -> observation periods capped at the data cutoff {cutoff}"
+                  + (" (data_cutoff='auto': latest event before today)" if str(data_cutoff).lower() == "auto" else ""))
+        else:
+            print("  -> observation periods not capped (data_cutoff=None): periods may end on the build date; "
+                  "cap_observation_period(con, cutoff) caps them afterwards")
+        build_drug_era(con)
+        build_condition_era(con)
+        if not append:
+            load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
 
-    if key_check != "ignore" and not append:  # the check compares whole-source ids with whole-table keys
-        from omop_etl.key_checks import check_etl_keys
+        if key_check != "ignore" and not append:  # the check compares whole-source ids with whole-table keys
+            from omop_etl.key_checks import check_etl_keys
 
-        try:
             report = check_etl_keys(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids,
                                     on_collision=key_check)
-        except Exception:
-            con.close()
-            raise
-        for r in report:
-            print(f"Key check {r['table']}.{r['id_column']}: {r['distinct_ids']} ids -> {r['distinct_keys']} keys "
-                  f"({'ok' if r['ok'] else str(r['lost']) + ' lost'}); {r['cdm_table']} rows = {r['cdm_rows']}")
-        if key_check_callback is not None:
-            key_check_callback(report)
+            for r in report:
+                print(f"Key check {r['table']}.{r['id_column']}: {r['distinct_ids']} ids -> {r['distinct_keys']} keys "
+                      f"({'ok' if r['ok'] else str(r['lost']) + ' lost'}); {r['cdm_table']} rows = {r['cdm_rows']}")
+            if key_check_callback is not None:
+                key_check_callback(report)
 
-    con.close()
-    print("PCORnet ETL complete.")
+        print("PCORnet ETL complete.")
+    finally:
+        con.close()
     return db_path
 
 

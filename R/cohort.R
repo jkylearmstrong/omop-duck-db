@@ -492,7 +492,7 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 .STUDY_VISIT_TYPES <- c(inpatient = 9201, emergency = 9203, outpatient = 9202)
 .STUDY_SAMPLING_RULES <- c("first", "last", "random", "stable_random")
 .STUDY_SAMPLE_STAY_RULES <- c(random = "stable_random", earliest = "first", latest = "last", all = "stable_random")
-.STUDY_AGE_METHODS <- c("year_difference", "completed_years")
+.STUDY_AGE_METHODS <- c("completed_years", "year_difference")
 .STUDY_DEATH_SOURCES <- c("death_table", "discharge_disposition")
 .STUDY_FOLLOWUP_EVIDENCE <- c("observation_period", "visit", "measurement", "condition", "drug", "death")
 .STUDY_MORTALITY_TYPES <- c("in_hospital", "post_discharge", "fixed_window", "composite_readmit_or_death")
@@ -533,7 +533,7 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #' @noRd
 .new_study_spec <- function(cohort_id, outcome, label, schema = NULL, visit_ids = 9201,
                             outcome_visit_ids = 9201, study_start = NULL, study_end = NULL, min_age = 18,
-                            age_method = "year_difference", min_los_days = 1, washin_days = 365,
+                            age_method = "completed_years", min_los_days = 1, washin_days = 365,
                             exclude_death = TRUE, death_ids = 4216643, death_sources = "death_table",
                             window_days = 30, gap_days = 0, verified = TRUE,
                             evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42,
@@ -1491,10 +1491,10 @@ remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_r
 #'   `"observation_period"` (period end), `"visit"` (another visit's start), `"measurement"`, `"condition"`,
 #'   `"drug"` (record dates) and `"death"`. Default: the four record types for readmission / cohort-only, all
 #'   six for mortality outcomes.
-#' @param age_method `"year_difference"` (default; legacy, needed for equivalence) is
-#'   `date_diff('year', birth, index_start)`, the number of calendar-year boundaries crossed, which overstates
-#'   age by one year before the birthday. `"completed_years"` is the exact age in whole years. Missing birth
-#'   month / day count as 1.
+#' @param age_method `"completed_years"` (default) is the exact age in whole years on the index date.
+#'   `"year_difference"` (deprecated, kept to reproduce older results) is `date_diff('year', birth, index_start)`,
+#'   the number of calendar-year boundaries crossed, which overstates age by one year before the birthday and so
+#'   admits people just under `min_age`; it warns. Missing birth month / day count as 1.
 #' @param cohort_definition_id Id written to `cohort` / `cohort_definition` (default 1).
 #' @param outcome_cohort_id Optional id under which outcome events are written (when `materialise = TRUE`).
 #'   Readmission outcomes write each qualifying readmission visit (start, end); mortality and composite outcomes
@@ -1577,7 +1577,7 @@ define_study_cohort <- function(con,
                                 transfer_discharge_concept_ids = NULL,
                                 death_sources = NULL,
                                 followup_evidence = NULL,
-                                age_method = "year_difference",
+                                age_method = "completed_years",
                                 cohort_definition_id = 1,
                                 outcome_cohort_id = NULL,
                                 cohort_name = NULL,
@@ -1645,6 +1645,11 @@ define_study_cohort <- function(con,
   if (length(method) != 1L || !method %in% .STUDY_AGE_METHODS) {
     stop(sprintf("Unsupported age_method '%s'. Use one of (%s).", paste(age_method, collapse = " "),
                  paste(.STUDY_AGE_METHODS, collapse = ", ")), call. = FALSE)
+  }
+  if (identical(method, "year_difference")) {
+    warning("age_method = \"year_difference\" is deprecated: it counts calendar-year boundaries, so it overstates age ",
+            "by one year before the birthday and admits people younger than min_age. Use the default ",
+            "\"completed_years\".", call. = FALSE)
   }
   if (!is.null(schema)) .quote_ident_path(schema, "schema", 2L)
   if (!is.null(table_name)) .quote_ident_path(table_name, "table_name", 3L)
@@ -1864,7 +1869,7 @@ build_readmission_cohort <- function(con,
   spec <- .new_study_spec(
     cohort_id = as.numeric(cohort_id), outcome = "readmission", label = "all_cause_readmission",
     visit_ids = .legacy_ids(target_visit_concept_ids), outcome_visit_ids = .legacy_ids(outcome_visit_concept_ids),
-    min_age = 18, age_method = "year_difference", min_los_days = 1,
+    min_age = 18, age_method = "completed_years", min_los_days = 1,
     washin_days = if (!is.null(washin_days) && washin_days > 0) as.numeric(washin_days) else 0,
     exclude_death = TRUE, death_ids = conv$death_ids, death_sources = conv$death_sources,
     window_days = as.numeric(followup_window_days), gap_days = as.numeric(grace_days),
@@ -1961,7 +1966,7 @@ build_end_of_life_cohort <- function(con,
   spec <- .new_study_spec(
     cohort_id = as.numeric(cohort_id), outcome = outcome, label = m_type, schema = schema,
     visit_ids = .legacy_ids(target_visit_concept_ids), outcome_visit_ids = .legacy_ids(outcome_visit_concept_ids),
-    min_age = as.numeric(min_age), age_method = "year_difference", min_los_days = .STUDY_AUTO_MIN_LOS[[outcome]],
+    min_age = as.numeric(min_age), age_method = "completed_years", min_los_days = .STUDY_AUTO_MIN_LOS[[outcome]],
     washin_days = if (!is.null(washin_days) && washin_days > 0) as.numeric(washin_days) else 0,
     exclude_death = .STUDY_AUTO_EXCLUDE[[outcome]], death_ids = conv$death_ids,
     death_sources = conv$death_sources,

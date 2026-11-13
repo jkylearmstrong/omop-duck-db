@@ -67,12 +67,13 @@ remap_cdm_table <- function(con, table_name, dry_run = FALSE) {
         SELECT
             source_code,
             target_concept_id AS resolved_concept_id,
-            0 AS resolved_source_concept_id
+            0 AS resolved_source_concept_id,
+            1 AS priority
         FROM (
             SELECT
                 source_code,
                 target_concept_id,
-                ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC, target_concept_id ASC) AS rn
             FROM source_to_concept_map
             WHERE (invalid_reason IS NULL OR invalid_reason = '')
               AND (valid_end_date IS NULL OR valid_end_date >= %s)
@@ -83,7 +84,8 @@ remap_cdm_table <- function(con, table_name, dry_run = FALSE) {
         SELECT
             c.concept_code AS source_code,
             cr.concept_id_2 AS resolved_concept_id,
-            c.concept_id AS resolved_source_concept_id
+            c.concept_id AS resolved_source_concept_id,
+            2 AS priority
         FROM concept c
         JOIN (
             SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
@@ -98,7 +100,8 @@ remap_cdm_table <- function(con, table_name, dry_run = FALSE) {
         SELECT
             c.concept_code AS source_code,
             c.concept_id AS resolved_concept_id,
-            c.concept_id AS resolved_source_concept_id
+            c.concept_id AS resolved_source_concept_id,
+            3 AS priority
         FROM concept c
         WHERE c.vocabulary_id IN (%s)
           AND c.standard_concept = 'S'
@@ -112,7 +115,10 @@ remap_cdm_table <- function(con, table_name, dry_run = FALSE) {
             source_code,
             resolved_concept_id,
             resolved_source_concept_id,
-            ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY resolved_concept_id DESC) AS rnk
+            ROW_NUMBER() OVER (
+                PARTITION BY source_code
+                ORDER BY priority ASC, resolved_concept_id ASC, resolved_source_concept_id ASC
+            ) AS rnk
         FROM target_resolution
         WHERE resolved_concept_id != 0 AND resolved_concept_id IS NOT NULL
     ) WHERE rnk = 1;

@@ -7,6 +7,7 @@ windows (30d/180d/365d), demographics, and exports to PyArrow, Polars, or Pandas
 
 from __future__ import annotations
 
+from omop_etl.sqlutil import fetch_arrow
 import warnings
 from typing import Any, Sequence
 import duckdb
@@ -103,7 +104,7 @@ def extract_patient_features(
     demo_join = ""
     if do_demo:
         demo_select = f"""
-            date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.{anchor_col}) AS age_at_index,
+            date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.{anchor_col}) AS age_at_index,
             p.gender_concept_id,
             p.race_concept_id,
             p.ethnicity_concept_id,
@@ -176,7 +177,7 @@ def extract_patient_features(
         select_items.append("COALESCE(oc.outcome_flag, 0) AS y")
     if do_demo:
         select_items.extend([
-            f"date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.{anchor_col}) AS age_at_index",
+            f"date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.{anchor_col}) AS age_at_index",
             "p.gender_concept_id",
             "p.race_concept_id",
             "p.ethnicity_concept_id",
@@ -239,18 +240,15 @@ def extract_patient_features(
         return pd.DataFrame(sparse_rows)
 
     if fmt in ("arrow", "pyarrow"):
-        reader = con.execute(dense_sql).arrow()
-        return reader.read_all() if hasattr(reader, "read_all") else reader
+        return fetch_arrow(con.execute(dense_sql))
 
     if fmt == "polars":
         try:
             import polars as pl
-            reader = con.execute(dense_sql).arrow()
-            return pl.from_arrow(reader.read_all() if hasattr(reader, "read_all") else reader)
+            return pl.from_arrow(fetch_arrow(con.execute(dense_sql)))
         except ImportError:
             # Fall back to PyArrow table if polars is not installed
-            reader = con.execute(dense_sql).arrow()
-            return reader.read_all() if hasattr(reader, "read_all") else reader
+            return fetch_arrow(con.execute(dense_sql))
 
     return con.execute(dense_sql).df()
 
@@ -323,12 +321,12 @@ def extract_temporal_features(
     demo_join = ""
     if include_demographics:
         demo_select = """
-            date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age_at_admission,
+            date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) AS age_at_admission,
             CASE 
-                WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) < 18 THEN '<18'
-                WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 18 AND 44 THEN '18-44'
-                WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 45 AND 64 THEN '45-64'
-                WHEN date_diff('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 65 AND 74 THEN '65-74'
+                WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) < 18 THEN '<18'
+                WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 18 AND 44 THEN '18-44'
+                WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 45 AND 64 THEN '45-64'
+                WHEN date_sub('year', make_date(p.year_of_birth, COALESCE(p.month_of_birth, 1), COALESCE(p.day_of_birth, 1)), c.cohort_start_date) BETWEEN 65 AND 74 THEN '65-74'
                 ELSE '75+'
             END AS age_group,
             p.gender_concept_id,
@@ -399,16 +397,13 @@ def extract_temporal_features(
     """
 
     if fmt in ("arrow", "pyarrow"):
-        reader = con.execute(sql).arrow()
-        return reader.read_all() if hasattr(reader, "read_all") else reader
+        return fetch_arrow(con.execute(sql))
     if fmt == "polars":
         try:
             import polars as pl
-            reader = con.execute(sql).arrow()
-            return pl.from_arrow(reader.read_all() if hasattr(reader, "read_all") else reader)
+            return pl.from_arrow(fetch_arrow(con.execute(sql)))
         except ImportError:
-            reader = con.execute(sql).arrow()
-            return reader.read_all() if hasattr(reader, "read_all") else reader
+            return fetch_arrow(con.execute(sql))
     return con.execute(sql).df()
 
 

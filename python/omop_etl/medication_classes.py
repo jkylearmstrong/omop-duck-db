@@ -23,6 +23,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from omop_etl.sqlutil import quote_ident
 from omop_etl.integrity import (
     DEFAULT_PRESCRIBED_TYPE_CONCEPT_IDS,
     DEFAULT_ADMINISTERED_TYPE_CONCEPT_IDS,
@@ -1382,7 +1383,7 @@ def compute_drug_eras(
     """
 
     if output_table:
-        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        con.execute(f"CREATE OR REPLACE TABLE {quote_ident(output_table, 'output table', 3)} AS {sql}")
         return con.execute(f"SELECT * FROM {output_table}").fetchdf()
 
     return con.execute(sql).fetchdf()
