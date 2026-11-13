@@ -930,7 +930,7 @@ normalize_units <- function(con_or_df, concept_id = NULL, feature = NULL,
 
   if (!is.null(output_table) && nzchar(output_table) && is_con) {
     duckdb::duckdb_register(con_or_df, "_temp_norm_df", df)
-    DBI::dbExecute(con_or_df, sprintf("CREATE OR REPLACE TABLE %s AS SELECT * FROM _temp_norm_df", output_table))
+    DBI::dbExecute(con_or_df, sprintf("CREATE OR REPLACE TABLE %s AS SELECT * FROM _temp_norm_df", .check_ident(output_table, "output_table")))
     duckdb::duckdb_unregister(con_or_df, "_temp_norm_df")
   }
 
@@ -1101,7 +1101,7 @@ suggest_source_mappings <- function(con,
   res_df <- DBI::dbGetQuery(con, match_sql)
 
   if (!is.null(output_table) && nzchar(output_table)) {
-    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, match_sql))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", .check_ident(output_table, "output_table"), match_sql))
   }
 
   res_df

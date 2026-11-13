@@ -73,7 +73,7 @@ remap_cdm_table <- function(con, table_name, dry_run = FALSE) {
             SELECT
                 source_code,
                 target_concept_id,
-                ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC, target_concept_id ASC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC, target_concept_id) AS rn
             FROM source_to_concept_map
             WHERE (invalid_reason IS NULL OR invalid_reason = '')
               AND (valid_end_date IS NULL OR valid_end_date >= %s)
@@ -115,10 +115,7 @@ remap_cdm_table <- function(con, table_name, dry_run = FALSE) {
             source_code,
             resolved_concept_id,
             resolved_source_concept_id,
-            ROW_NUMBER() OVER (
-                PARTITION BY source_code
-                ORDER BY priority ASC, resolved_concept_id ASC, resolved_source_concept_id ASC
-            ) AS rnk
+            ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY priority, resolved_concept_id) AS rnk
         FROM target_resolution
         WHERE resolved_concept_id != 0 AND resolved_concept_id IS NOT NULL
     ) WHERE rnk = 1;
@@ -201,15 +198,17 @@ remap_cdm_table <- function(con, table_name, dry_run = FALSE) {
 #' @export
 remap_all <- function(con, dry_run = FALSE, rebuild_eras = TRUE) {
   results <- list()
-  for (tbl in names(.TABLE_REMAP_CONFIG)) {
-    results[[tbl]] <- remap_cdm_table(con, tbl, dry_run = dry_run)
-  }
-
-  if (!dry_run && isTRUE(rebuild_eras)) {
-    cat("Rebuilding condition_era and drug_era after remapping ...\n")
-    build_condition_era(con)
-    build_drug_era(con)
-  }
+  # one transaction: a failure part-way leaves no table remapped with stale eras (m-19)
+  DBI::dbWithTransaction(con, {
+    for (tbl in names(.TABLE_REMAP_CONFIG)) {
+      results[[tbl]] <- remap_cdm_table(con, tbl, dry_run = dry_run)
+    }
+    if (!dry_run && isTRUE(rebuild_eras)) {
+      cat("Rebuilding condition_era and drug_era after remapping ...\n")
+      build_condition_era(con)
+      build_drug_era(con)
+    }
+  })
 
   invisible(results)
 }

@@ -77,7 +77,6 @@ from_sql <- function(src, tables, out_dir, chunksize = 500000L, schema = NULL, t
       if (DBI::dbHasCompleted(res)) break
     }
     DBI::dbClearResult(res)
-    if (!grepl("^[A-Za-z0-9_]+$", expected)) stop("Invalid table name '", expected, "': use letters, digits and underscores only.", call. = FALSE)
     target <- file.path(out_dir, paste0(tolower(expected), ".parquet"))
     DBI::dbExecute(ddb, sprintf("COPY (SELECT * FROM read_parquet('%s/*.parquet')) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD)",
                                 sub("\\\\", "/", chunk_dir), sub("\\\\", "/", target)))
@@ -116,12 +115,12 @@ import_omop <- function(src, out, schema = NULL, tables = NULL, chunksize = 5000
   con <- DBI::dbConnect(duckdb::duckdb(), out)
   on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE, after = FALSE)
   report <- data.frame(table = setdiff(wanted, present), rows = NA_integer_, note = "not found on server", stringsAsFactors = FALSE)
-  # one transaction: a failure part-way rolls every table back rather than leaving a half-wiped CDM
-  DBI::dbExecute(con, "BEGIN TRANSACTION")
+  DBI::dbExecute(con, "BEGIN TRANSACTION")  # a failure part-way must not leave earlier tables emptied (M-22)
   committed <- FALSE
   on.exit(if (!committed) try(DBI::dbExecute(con, "ROLLBACK"), silent = TRUE), add = TRUE, after = FALSE)
   for (i in seq_len(nrow(ext))) {
     t <- ext$table[i]
+    if (!grepl("^[A-Za-z_][A-Za-z0-9_]*$", t)) stop("Refusing unsafe table name: ", t, call. = FALSE)
     target_cols <- DBI::dbGetQuery(con, sprintf("SELECT column_name FROM information_schema.columns WHERE lower(table_name) = '%s'", t))[[1]]
     if (!length(target_cols)) { report <- rbind(report, data.frame(table = t, rows = NA_integer_, note = "no such table in CDM v5.4 DDL")); next }
     src_cols <- strsplit(ext$columns[i], ",", fixed = TRUE)[[1]]

@@ -84,25 +84,23 @@ CREATE OR REPLACE MACRO parse_omop_date(col) AS (
     )
 );
 
--- Normalize a time string to 24-hour HH:MM:SS.
---   * single-digit hours:   '1:01'      -> '01:01:00'   (FR-C6)
---   * 12-hour clock:        '4:15 PM'   -> '16:15:00', '12:05 AM' -> '00:05:00'
---   * bare digits:          '415'/'0415' -> '04:15:00', '041530' -> '04:15:30'
--- AM/PM is resolved HERE, before any timestamp cast: DuckDB happily casts
--- '2020-01-01 4:15 PM' to 04:15 (ignoring the meridiem), so the clock must be
--- 24-hour by the time parse_omop_datetime() casts it.
+-- Normalize time string to ensure valid HH:MM:SS format (FR-C6: handles single-digit hours e.g. '1:01' -> '01:01:00')
 CREATE OR REPLACE MACRO normalize_time_str(t) AS (
     CASE
         WHEN t IS NULL OR trim(t) = '' THEN '00:00:00'
-        WHEN regexp_matches(trim(t), '^(0?[1-9]|1[0-2]):[0-5][0-9](:[0-5][0-9])?\s*[AaPp]\.?[Mm]\.?$') THEN
-            printf('%02d:%s:%s',
-                (CAST(regexp_extract(trim(t), '^([0-9]{1,2})', 1) AS INTEGER) % 12)
-                    + CASE WHEN upper(regexp_extract(trim(t), '([AaPp])\.?[Mm]\.?$', 1)) = 'P' THEN 12 ELSE 0 END,
-                regexp_extract(trim(t), '^[0-9]{1,2}:([0-9]{2})', 1),
-                COALESCE(NULLIF(regexp_extract(trim(t), '^[0-9]{1,2}:[0-9]{2}:([0-9]{2})', 1), ''), '00'))
+        -- 12-hour clock ('4:15 PM', '12:05:09 am'): convert to 24-hour so the
+        -- timestamp cast cannot silently drop the meridiem (C-01).
+        WHEN regexp_matches(upper(trim(t)), '^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})? ?(AM|PM)$') THEN
+            lpad(CAST(
+                (CAST(regexp_extract(trim(t), '^([0-9]{1,2}):', 1) AS INTEGER) % 12)
+                + CASE WHEN upper(trim(t)) LIKE '%PM' THEN 12 ELSE 0 END
+            AS VARCHAR), 2, '0')
+            || ':' || regexp_extract(trim(t), '^[0-9]{1,2}:([0-9]{2})', 1)
+            || ':' || coalesce(nullif(regexp_extract(trim(t), '^[0-9]{1,2}:[0-9]{2}:([0-9]{2})', 1), ''), '00')
         WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}$') THEN '0' || trim(t) || ':00'
         WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}:[0-9]{2}$') THEN '0' || trim(t)
         WHEN regexp_matches(trim(t), '^[0-9]{2}:[0-9]{2}$') THEN trim(t) || ':00'
+        -- bare digits: '415' / '0415' -> 04:15, '041530' -> 04:15:30
         WHEN regexp_matches(trim(t), '^[0-9]{3,4}$') THEN
             substr(lpad(trim(t), 4, '0'), 1, 2) || ':' || substr(lpad(trim(t), 4, '0'), 3, 2) || ':00'
         WHEN regexp_matches(trim(t), '^[0-9]{6}$') THEN
@@ -120,10 +118,12 @@ CREATE OR REPLACE MACRO parse_omop_datetime(date_col, time_col) AS (
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d-%b-%Y %H:%M:%S'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d-%b-%Y %H:%M'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y-%m-%d %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y%m%d %H:%M:%S'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y-%m-%d %H:%M'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%m/%d/%Y %H:%M:%S'),
         TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%m/%d/%Y %H:%M'),
-        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%Y%m%d %H:%M:%S'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d%b%Y %I:%M:%S %p'),
+        TRY_STRPTIME(date_col || ' ' || normalize_time_str(time_col), '%d%b%Y %I:%M %p'),
         TRY_CAST(parse_omop_date(date_col) AS TIMESTAMP)
     )
 );

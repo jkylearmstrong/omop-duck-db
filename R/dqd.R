@@ -261,8 +261,7 @@ run_dqd <- function(con,
       non_std_count <- as.integer(DBI::dbGetQuery(con, sprintf("
         SELECT COUNT(*) AS n FROM %s t
         LEFT JOIN concept c ON t.%s = c.concept_id
-        WHERE t.%s != 0
-          AND (c.concept_id IS NULL OR c.standard_concept IS NULL OR c.standard_concept != 'S')
+        WHERE t.%s != 0 AND (c.concept_id IS NULL OR c.standard_concept != 'S' OR c.standard_concept IS NULL)
       ", tbl, fld, fld))$n[1])
       pct <- round((non_std_count / total * 100.0), 2)
       results[[length(results) + 1]] <- list(
@@ -962,7 +961,8 @@ run_dqd <- function(con,
 #'   persons listed in its `person_col`. Duplicate cohort rows do not duplicate measurements. `NULL` =
 #'   everyone.
 #' @param method One of `"dqd_biologic_limits"` (default), `"winsorize_iqr"` or `"z_score_cutoff"`.
-#' @param action One of `"nullify"` (default), `"clamp"` or `"drop_row"`.
+#' @param action One of `"nullify"` (default), `"clamp"`, `"drop_row"` or `"flag_indicator"` (clamp and add an
+#'   `is_outlier` column).
 #' @param measurement_concept_ids Optional integer vector: only sanitize these `measurement_concept_id`
 #'   values. `NULL` = all concepts.
 #' @param limits Optional data.frame of custom limits for `"dqd_biologic_limits"` with columns

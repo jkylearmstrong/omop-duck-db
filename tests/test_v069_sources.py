@@ -161,3 +161,19 @@ def test_arrow_type_mapping_for_oracle_number_and_date():
     assert _arrow_type(oracle.NUMBER()) == pa.float64()
     assert _arrow_type(oracle.DATE()) == pa.timestamp("us")  # Oracle DATE carries a time of day
     assert _arrow_type(sa.Integer()) == pa.int64() and _arrow_type(sa.Numeric(12, 3)) == pa.decimal128(12, 3)
+
+
+def test_import_omop_rolls_back_and_refuses_unsafe_table_names(tmp_path, monkeypatch):
+    import omop_etl.extract as ex
+
+    url = _cdm_server(tmp_path)
+    monkeypatch.setattr(ex, "from_sql", lambda *a, **k: [
+        {"table": "person", "columns": ["person_id"], "file": str(tmp_path / "missing.parquet"), "rows": 0},
+    ])
+    out = tmp_path / "site.duckdb"
+    with pytest.raises(Exception):  # the parquet file does not exist: the transaction is rolled back, not half applied
+        ex.import_omop(url, out, tables=["person"])
+    monkeypatch.setattr(ex, "from_sql", lambda *a, **k: [
+        {"table": "person; DROP TABLE person", "columns": [], "file": "x", "rows": 0}])
+    with pytest.raises(ValueError, match="unsafe table name"):
+        ex.import_omop(url, tmp_path / "site2.duckdb", tables=["person"])

@@ -121,105 +121,49 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
                 saved_indexes.append((name, sql))
                 con.execute(f"DROP INDEX {_sql_identifier(name)}")
 
-    try:
-        all_ok = True
-        tables_loaded = 0
+    all_ok = True
+    loaded = 0
 
-        # 1. Load standard vocabulary tables
-        for table_name in EXPECTED_VOCAB_TABLES:
-            if wanted is not None and table_name not in wanted:
-                continue
-            if table_name not in existing_tables:
-                print(f"Skipping {table_name} - no matching table in schema")
-                if wanted is not None:  # explicitly requested, so silently skipping is a failure
-                    all_ok = False
-                continue
+    # 1. Load standard vocabulary tables
+    for table_name in EXPECTED_VOCAB_TABLES:
+        if wanted is not None and table_name not in wanted:
+            continue
+        if table_name not in existing_tables:
+            print(f"Skipping {table_name} - no matching table in schema")
+            continue
 
-            file_path = vocab_files.get(table_name)
-            if not file_path:
-                if wanted is not None:
-                    print(f"  Error: no {table_name}.csv found under {vocab_dir}")
-                    all_ok = False
-                continue
-
-            print(f"Reloading {table_name.upper()} from {os.path.basename(file_path)} ...")
-            con.execute("BEGIN TRANSACTION")
-            try:
-                con.execute(f"DELETE FROM {table_name}")
-
-                if table_name == "concept":
-                    name_sanitizer = "COALESCE(concept_name, 'CPT4 ' || concept_code)" if sanitize_all_null_names else (
-                        "COALESCE(concept_name, CASE WHEN vocabulary_id = 'CPT4' THEN 'CPT4 ' || concept_code ELSE NULL END)"
-                        if sanitize_cpt4 else "concept_name"
-                    )
-                    con.execute(f"""
-                        CREATE OR REPLACE TEMPORARY VIEW _temp_concept_raw AS 
-                        SELECT * FROM read_csv(
-                            {sql_path_literal(file_path)}, 
-                            delim = '\t', 
-                            header = true, 
-                            dateformat = '%Y%m%d', 
-                            all_varchar = true
-                        );
-                    """)
-                    con.execute(f"""
-                        INSERT INTO concept
-                        SELECT
-                            TRY_CAST(concept_id AS INTEGER),
-                            {name_sanitizer} AS concept_name,
-                            domain_id,
-                            vocabulary_id,
-                            concept_class_id,
-                            standard_concept,
-                            concept_code,
-                            COALESCE(TRY_STRPTIME(valid_start_date, '%Y%m%d')::DATE, TRY_CAST(valid_start_date AS DATE)),
-                            COALESCE(TRY_STRPTIME(valid_end_date, '%Y%m%d')::DATE, TRY_CAST(valid_end_date AS DATE)),
-                            invalid_reason
-                        FROM _temp_concept_raw;
-                    """)
-                    con.execute("DROP VIEW IF EXISTS _temp_concept_raw;")
-                else:
-                    con.execute(f"""
-                        COPY {table_name} FROM {sql_path_literal(file_path)} (
-                            DELIMITER '\t', 
-                            HEADER, 
-                            DATEFORMAT '%Y%m%d'
-                        );
-                    """)
-
-                row_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-                if row_count == 0:
-                    raise ValueError(f"Table {table_name} loaded with zero rows")
-
-                con.execute("COMMIT")
-                tables_loaded += 1
-                print(f"  -> {row_count} rows (committed)")
-            except Exception as e:
-                con.execute("ROLLBACK")
-                print(f"  Error loading {table_name}: {e} - rolled back, table unchanged")
+        file_path = vocab_files.get(table_name)
+        if not file_path:
+            if wanted is not None:
+                print(f"Error: no {table_name}.csv found in {vocab_dir}")
                 all_ok = False
+            continue
 
-        # 2. If separate CONCEPT_CPT4.csv exists, ingest/sanitize it into concept
-        if "concept_cpt4" in vocab_files and "concept" in existing_tables and (wanted is None or "concept" in wanted):
-            cpt4_path = vocab_files["concept_cpt4"]
-            print(f"Ingesting separate CPT4 concepts from {os.path.basename(cpt4_path)} ...")
-            con.execute("BEGIN TRANSACTION")
-            try:
+        print(f"Reloading {table_name.upper()} from {os.path.basename(file_path)} ...")
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(f"DELETE FROM {table_name}")
+
+            if table_name == "concept":
+                name_sanitizer = "COALESCE(concept_name, 'CPT4 ' || concept_code)" if sanitize_all_null_names else (
+                    "COALESCE(concept_name, CASE WHEN vocabulary_id = 'CPT4' THEN 'CPT4 ' || concept_code ELSE NULL END)"
+                    if sanitize_cpt4 else "concept_name"
+                )
                 con.execute(f"""
-                    CREATE OR REPLACE TEMPORARY VIEW _temp_cpt4_raw AS 
+                    CREATE OR REPLACE TEMPORARY VIEW _temp_concept_raw AS 
                     SELECT * FROM read_csv(
-                        {sql_path_literal(cpt4_path)}, 
+                        {sql_path_literal(file_path)}, 
                         delim = '\t', 
                         header = true, 
                         dateformat = '%Y%m%d', 
                         all_varchar = true
                     );
                 """)
-                con.execute("""
-                    INSERT OR REPLACE INTO concept
+                con.execute(f"""
+                    INSERT INTO concept
                     SELECT
                         TRY_CAST(concept_id AS INTEGER),
-                        COALESCE(concept_name, 'CPT4 ' || concept_code) AS concept_name,
+                        {name_sanitizer} AS concept_name,
                         domain_id,
                         vocabulary_id,
                         concept_class_id,
@@ -228,27 +172,78 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
                         COALESCE(TRY_STRPTIME(valid_start_date, '%Y%m%d')::DATE, TRY_CAST(valid_start_date AS DATE)),
                         COALESCE(TRY_STRPTIME(valid_end_date, '%Y%m%d')::DATE, TRY_CAST(valid_end_date AS DATE)),
                         invalid_reason
-                    FROM _temp_cpt4_raw;
+                    FROM _temp_concept_raw;
                 """)
-                con.execute("DROP VIEW IF EXISTS _temp_cpt4_raw;")
-                con.execute("COMMIT")
-                print("  -> CPT4 concepts sanitized and merged")
-            except Exception as e:
-                con.execute("ROLLBACK")
-                print(f"  Error: failed to load CONCEPT_CPT4.csv: {e} - rolled back")
-                all_ok = False
+                con.execute("DROP VIEW IF EXISTS _temp_concept_raw;")
+            else:
+                con.execute(f"""
+                    COPY {table_name} FROM {sql_path_literal(file_path)} (
+                        DELIMITER '\t', 
+                        HEADER, 
+                        DATEFORMAT '%Y%m%d'
+                    );
+                """)
 
-        if tables_loaded == 0 and not (wanted is None and "concept_cpt4" in vocab_files):
-            print("No vocabulary table was loaded (is the CDM schema built? see build_schema()).")
+            row_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            if row_count == 0:
+                raise ValueError(f"Table {table_name} loaded with zero rows")
+
+            con.execute("COMMIT")
+            print(f"  -> {row_count} rows (committed)")
+            loaded += 1
+        except Exception as e:
+            con.execute("ROLLBACK")
+            print(f"  Error loading {table_name}: {e} - rolled back, table unchanged")
             all_ok = False
 
-    finally:
-        # always restore dropped indexes and release the file lock, even if a load raised
+    # 2. If separate CONCEPT_CPT4.csv exists, ingest/sanitize it into concept
+    if "concept_cpt4" in vocab_files and "concept" in existing_tables and (wanted is None or "concept" in wanted):
+        cpt4_path = vocab_files["concept_cpt4"]
+        print(f"Ingesting separate CPT4 concepts from {os.path.basename(cpt4_path)} ...")
+        con.execute("BEGIN TRANSACTION")
         try:
-            for _name, sql in saved_indexes:
-                con.execute(sql)
-        finally:
-            con.close()
+            con.execute(f"""
+                CREATE OR REPLACE TEMPORARY VIEW _temp_cpt4_raw AS 
+                SELECT * FROM read_csv(
+                    {sql_path_literal(cpt4_path)}, 
+                    delim = '\t', 
+                    header = true, 
+                    dateformat = '%Y%m%d', 
+                    all_varchar = true
+                );
+            """)
+            con.execute("""
+                INSERT OR REPLACE INTO concept
+                SELECT
+                    TRY_CAST(concept_id AS INTEGER),
+                    COALESCE(concept_name, 'CPT4 ' || concept_code) AS concept_name,
+                    domain_id,
+                    vocabulary_id,
+                    concept_class_id,
+                    standard_concept,
+                    concept_code,
+                    COALESCE(TRY_STRPTIME(valid_start_date, '%Y%m%d')::DATE, TRY_CAST(valid_start_date AS DATE)),
+                    COALESCE(TRY_STRPTIME(valid_end_date, '%Y%m%d')::DATE, TRY_CAST(valid_end_date AS DATE)),
+                    invalid_reason
+                FROM _temp_cpt4_raw;
+            """)
+            con.execute("DROP VIEW IF EXISTS _temp_cpt4_raw;")
+            con.execute("COMMIT")
+            print("  -> CPT4 concepts sanitized and merged")
+        except Exception as e:
+            con.execute("ROLLBACK")
+            print(f"  Error: failed to load CONCEPT_CPT4.csv: {e} - rolled back")
+            all_ok = False
+
+    if loaded == 0:
+        print("Error: no vocabulary tables were loaded (does the database have the CDM schema, and do the files match?)")
+        all_ok = False
+
+    try:
+        for _name, sql in saved_indexes:
+            con.execute(sql)
+    finally:
+        con.close()
     return all_ok
 
 

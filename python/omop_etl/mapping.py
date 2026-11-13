@@ -4,7 +4,24 @@ import csv
 import os
 
 from omop_etl.paths import sql_path_literal
-from omop_etl.sqlutil import sql_int, sql_str
+
+def sql_str(value):
+    """Single-quoted SQL string literal with embedded quotes doubled."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def sql_int(value, what="value"):
+    """Coerce to int for interpolation; reject bools and non-integral values."""
+    if isinstance(value, bool):
+        raise ValueError(f"{what} must be an integer, got {value!r}.")
+    try:
+        out = int(value)
+        if isinstance(value, float) and out != value:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} must be an integer, got {value!r}.") from None
+    return out
+
 
 _STCM_INSERT_COLUMNS = """
             source_code,

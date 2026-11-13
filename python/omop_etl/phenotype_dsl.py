@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
+from omop_etl.sqlsafe import check_ident
 
 __all__ = [
     "PhenotypeExpr", "ConditionCriteria", "MeasurementCriteria", "DrugCriteria", "Everyone",
@@ -461,8 +462,8 @@ def execute_phenotype(
     con.execute(f"CREATE TABLE IF NOT EXISTS {cohort_table} (cohort_definition_id INTEGER, subject_id BIGINT, "
                 "cohort_start_date DATE, cohort_end_date DATE)")
     if replace:
-        con.execute(f"DELETE FROM {cohort_table} WHERE cohort_definition_id = {int(cohort_definition_id)}")
-    con.execute(f"INSERT INTO {cohort_table} {sql}")
+        con.execute(f"DELETE FROM {check_ident(cohort_table, 'cohort_table')} WHERE cohort_definition_id = {int(cohort_definition_id)}")
+    con.execute(f"INSERT INTO {check_ident(cohort_table, 'cohort_table')} {sql}")
     return con.execute(
         f"SELECT * FROM {cohort_table} WHERE cohort_definition_id = {int(cohort_definition_id)} "
         "ORDER BY subject_id").df()

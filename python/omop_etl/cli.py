@@ -72,7 +72,6 @@ def create_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--data-cutoff", default="auto", metavar="YYYY-MM-DD|auto|today",
                               help="Cap observation_period ends: an ISO date, 'auto' for the latest event before today "
                                    "(default), or 'today' to keep the extraction date.")
-    build_parser.add_argument("--overwrite", action="store_true", help="Empty already-populated CDM tables before a full load (a repeat full run otherwise refuses, because it would duplicate every row)")
     build_parser.add_argument("--mode", choices=["full", "append"], default="full",
                               help="'append' adds newly arrived rows to an existing --target database (needs --since).")
     build_parser.add_argument("--since", default=None, metavar="YYYY-MM-DD",
@@ -488,7 +487,6 @@ def handle_build(args: argparse.Namespace) -> int:
             args.target,
             build_schema_flag=args.mode != "append",
             mode=args.mode,
-            overwrite=getattr(args, "overwrite", False),
             since=args.since,
             central_vocab=args.vocab,
             site_id=args.site_id,

@@ -1309,7 +1309,7 @@ compute_drug_eras <- function(con, concept_set = NULL, persistence_window_days =
   ", drug_exposure_table, filter_clause, as.integer(persistence_window_days))
 
   if (!is.null(output_table) && nzchar(output_table)) {
-    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", .check_ident(output_table, "output_table"), sql))
     return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
   }
 

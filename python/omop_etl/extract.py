@@ -24,8 +24,6 @@ from typing import Any, Mapping, Sequence
 
 import duckdb
 
-from omop_etl.paths import sql_path_literal
-
 __all__ = ["from_sql", "import_omop", "resolve_url", "CDM_STUDY_TABLES", "CDM_VOCAB_TABLES"]
 
 log = logging.getLogger(__name__)
@@ -230,8 +228,6 @@ def from_sql(
             for n, ty in zip(names, types):
                 fields.append(pa.field(n, ty if ty is not None else pa.string()))
             schema_pa = pa.schema(fields)
-            if not re.fullmatch(r"[A-Za-z0-9_]+", str(expected)):
-                raise ValueError(f"Invalid table name {expected!r}: use letters, digits and underscores only.")
             target = out / f"{expected.lower()}.parquet"
             tmp = target.with_suffix(".parquet.tmp")
             rows = 0
@@ -336,14 +332,11 @@ def import_omop(
         con = duckdb.connect(str(out_path))
         try:
             build_schema(con)
-            # one transaction: a bad parquet / type error part-way rolls every table back instead of
-            # leaving the tables already processed emptied and the rest untouched
-            con.execute("BEGIN TRANSACTION")
+            con.execute("BEGIN TRANSACTION")  # a failure part-way must not leave earlier tables emptied (M-22)
             for item in extracted:
                 t = item["table"]
-                if not re.fullmatch(r"[A-Za-z0-9_]+", str(t)):
-                    con.execute("ROLLBACK")
-                    raise ValueError(f"Invalid table name {t!r}.")
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(t)):
+                    raise ValueError(f"Refusing unsafe table name: {t!r}")
                 target_cols = {r[1].lower(): r[1] for r in con.execute(f"PRAGMA table_info('{t}')").fetchall()} \
                     if con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [t]).fetchone()[0] else {}
                 if not target_cols:
@@ -354,7 +347,7 @@ def import_omop(
                 con.execute(f"DELETE FROM {t}")
                 con.execute(
                     f'INSERT INTO {t} ({col_sql}) SELECT {", ".join(chr(34) + c + chr(34) for c in cols)} '
-                    f"FROM read_parquet({sql_path_literal(Path(item['file']).as_posix())})"
+                    f"FROM read_parquet('{Path(item['file']).as_posix()}')"
                 )
                 n = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
                 dropped = [c for c in item["columns"] if c not in target_cols]

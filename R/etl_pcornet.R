@@ -33,9 +33,6 @@
 #'   continue from the current maximum, care sites / locations are left alone, and `observation_period` and the eras are rebuilt.
 #'   Encounters are selected by admit date. Mirror of Python `etl_pcornet(mode = "append")`.
 #' @param since With `mode = "append"`: ISO date; only events on/after it are loaded.
-#' @param overwrite `FALSE` (default): a `mode = "full"` run refuses to load into a database whose clinical
-#'   tables already hold rows, because a second run would insert every row again. `TRUE` empties those tables first,
-#'   inside one transaction (vocabulary tables are never touched).
 #' @param key_check `"warn"` (default), `"raise"` or `"ignore"`: at the end of the build, compare distinct source ids
 #'   with distinct surrogate keys via [check_etl_keys()] and report any encounters/patients that would be merged.
 #' @param key_check_callback Optional function called with the list returned by [check_etl_keys()].
@@ -67,8 +64,7 @@ etl_pcornet <- function(
     enrollment_type_concept_id = 0L,
     data_cutoff = "auto",
     mode = c("full", "append"),
-    since = NULL,
-    overwrite = FALSE
+    since = NULL
 ) {
   key_check <- match.arg(key_check)
   mode <- match.arg(mode)
@@ -112,7 +108,6 @@ etl_pcornet <- function(
   }
 
   load_mapping_macros(con)
-  if (!append) .prepare_full_load(con, overwrite = isTRUE(overwrite))
 
   rm(list = ls(.append_state), envir = .append_state)
   on.exit(rm(list = ls(.append_state), envir = .append_state), add = TRUE)
@@ -122,6 +117,7 @@ etl_pcornet <- function(
     if (isTRUE(disambiguate_patids)) .append_state$patid_suffix <- paste0("-", site_id)
     cat(sprintf("Append mode: new patients/providers/encounters and events dated >= %s.\n", since))
   } else {
+    .reset_clinical_tables(con)
     load_care_site(con, source_dir, site_id = site_id, site_anon = site_anon, site_name = site_name)
   }
   .load_provider(con, source_dir)
@@ -131,12 +127,12 @@ etl_pcornet <- function(
   .load_condition_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_procedure_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_measurement(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
 
   rm(list = ls(.append_state), envir = .append_state)
-  if (append) for (t in c("observation_period", "drug_era", "condition_era")) DBI::dbExecute(con, paste("DELETE FROM", t))
+  # the era and observation-period builders each clear their own table, so append mode needs no up-front delete
   cutoff <- .resolve_max_date(con, data_cutoff)
   enrolled <- FALSE
   if (!isFALSE(use_enrollment)) {
@@ -149,10 +145,12 @@ etl_pcornet <- function(
       stop("use_enrollment = TRUE but ", source_dir, " has no ENROLLMENT file with usable rows.")
     }
   }
-  build_observation_period(con, max_date = cutoff, use_enrollment = enrolled, enrollment_type_concept_id = enrollment_type_concept_id)
-  build_drug_era(con)
-  build_condition_era(con)
-  if (!append) .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name)
+  # each rebuild deletes then inserts: one transaction apiece so a failure cannot leave the table empty (M-23)
+  DBI::dbWithTransaction(con, build_observation_period(con, max_date = cutoff, use_enrollment = enrolled,
+                                                       enrollment_type_concept_id = enrollment_type_concept_id))
+  DBI::dbWithTransaction(con, build_drug_era(con))
+  DBI::dbWithTransaction(con, build_condition_era(con))
+  if (!append) DBI::dbWithTransaction(con, .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name))
 
   if (key_check != "ignore" && !append) {
     report <- check_etl_keys(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids,
@@ -168,35 +166,15 @@ etl_pcornet <- function(
   invisible(db_path)
 }
 
-.ETL_TARGET_TABLES <- c(
-  "person_address_history", "condition_era", "drug_era", "observation_period", "death", "measurement",
-  "drug_exposure", "procedure_occurrence", "condition_occurrence", "visit_occurrence", "person", "location",
-  "provider", "care_site", "cdm_source"
-)
-
-# Refuse (or, with `overwrite`, clear) a populated target so a repeated full run cannot double every table.
-.prepare_full_load <- function(con, overwrite = FALSE) {
-  existing <- DBI::dbGetQuery(con, "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()")$table_name
-  tables <- intersect(.ETL_TARGET_TABLES, tolower(existing))
-  counts <- vapply(tables, function(t) as.numeric(DBI::dbGetQuery(con, sprintf('SELECT COUNT(*) AS n FROM "%s"', t))$n), numeric(1))
-  populated <- counts[counts > 0]
-  if (!length(populated)) return(invisible(NULL))
-  if (!overwrite) {
-    stop("The target database already holds ETL output: ",
-         paste0(names(populated), " (", format(populated, big.mark = ",", trim = TRUE), ")", collapse = ", "),
-         ". A second full run would duplicate every row. Pass overwrite = TRUE to empty these tables first, ",
-         "use mode = \"append\" to add new rows, or point db_path at a fresh file.", call. = FALSE)
-  }
-  DBI::dbExecute(con, "BEGIN TRANSACTION")
-  tryCatch({
-    for (t in tables) DBI::dbExecute(con, sprintf('DELETE FROM "%s"', t))
-    DBI::dbExecute(con, "COMMIT")
-  }, error = function(e) {
-    try(DBI::dbExecute(con, "ROLLBACK"), silent = TRUE)
-    stop(e)
+# Empty the tables a full-mode ETL populates so a re-run replaces rather than doubles them (C-02).
+.reset_clinical_tables <- function(con) {
+  tables <- c("drug_era", "condition_era", "observation_period", "death", "drug_exposure", "observation", "measurement",
+              "procedure_occurrence", "condition_occurrence", "visit_occurrence", "person_address_history", "person",
+              "location", "provider", "care_site", "cdm_source")
+  have <- tolower(DBI::dbListTables(con))
+  DBI::dbWithTransaction(con, {
+    for (t in intersect(tables, have)) DBI::dbExecute(con, paste("DELETE FROM", t))
   })
-  cat(sprintf("overwrite = TRUE: emptied %d populated table(s) before the full load.
-", length(populated)))
   invisible(NULL)
 }
 
@@ -210,27 +188,11 @@ etl_pcornet <- function(
 #' @param vocab_db_path Path to the existing DuckDB database containing vocabulary tables.
 #' @param temporary Logical. If `TRUE` (default), creates temporary views for the current
 #'   session. If `FALSE`, creates persistent views in the database.
-#' @param force Logical. With `temporary = FALSE`, a local vocabulary table that already holds rows is
-#'   never dropped unless `force = TRUE` (the call errors first, changing nothing).
 #' @return Invisibly, `con`.
 #' @export
-attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE, force = FALSE) {
+attach_central_vocabulary <- function(con, vocab_db_path, temporary = TRUE) {
   if (!file.exists(vocab_db_path)) {
     stop("Central vocabulary database not found: ", vocab_db_path)
-  }
-  if (!isTRUE(temporary) && !isTRUE(force)) {
-    base_tables <- DBI::dbGetQuery(con, paste0(
-      "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ",
-      "AND table_type = 'BASE TABLE' AND table_name IN ",
-      "('concept','concept_relationship','concept_ancestor','concept_synonym','vocabulary',",
-      "'relationship','concept_class','domain','drug_strength')"))$table_name
-    counts <- vapply(base_tables, function(t) as.numeric(DBI::dbGetQuery(con, sprintf('SELECT COUNT(*) AS n FROM "%s"', t))$n), numeric(1))
-    populated <- counts[counts > 0]
-    if (length(populated)) {
-      stop("Refusing to drop local vocabulary table(s) that hold data: ",
-           paste0(names(populated), " (", format(populated, big.mark = ",", trim = TRUE), " rows)", collapse = ", "),
-           ". Use temporary = TRUE (session views, nothing dropped) or pass force = TRUE to replace them.", call. = FALSE)
-    }
   }
   DBI::dbExecute(con, sprintf("ATTACH %s AS central_vocab (READ_ONLY);", sql_path_literal(vocab_db_path)))
   vocab_tables <- c(
@@ -445,24 +407,14 @@ load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, si
         DAY(parse_omop_date(src.BIRTH_DATE)) AS day_of_birth,
         parse_omop_datetime(src.BIRTH_DATE, NULL) AS birth_datetime,
         CASE src.RACE
-            WHEN '01' THEN 8657 -- American Indian or Alaska Native
-            WHEN '02' THEN 8515 -- Asian
-            WHEN '03' THEN 8516 -- Black or African American
-            WHEN '04' THEN 8557 -- Native Hawaiian or Other Pacific Islander
             WHEN '05' THEN 8527 -- White
-            WHEN '06' THEN 8522 -- Multiple race -> OMOP 'Other Race'
-            WHEN 'OT' THEN 8522 -- Other
-            WHEN '07' THEN 8552 -- Refuse to answer -> 'Unknown'
-            WHEN 'NI' THEN 8552
-            WHEN 'UN' THEN 8552
+            WHEN '03' THEN 8516 -- Black or African American
+            WHEN '02' THEN 8515 -- Asian
+            WHEN '01' THEN 8657 -- American Indian or Alaska Native
+            WHEN '04' THEN 8557 -- Native Hawaiian or Other Pacific Islander
             ELSE 0
         END AS race_concept_id,
-        -- Y / N only; NI, UN, OT, refuse and blanks stay 0 (unknown) rather than 'not Hispanic'.
-        CASE UPPER(TRIM(src.HISPANIC))
-            WHEN 'Y' THEN 38003563 -- Hispanic or Latino
-            WHEN 'N' THEN 38003564 -- Not Hispanic or Latino
-            ELSE 0
-        END AS ethnicity_concept_id,
+        CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 WHEN 'N' THEN 38003564 ELSE 0 END AS ethnicity_concept_id,
         NULL AS location_id,
         COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
         %s AS care_site_id,
@@ -670,7 +622,8 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HH') THEN 32215 -- UB04 06: home care of organized home health service
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('RH') THEN 32228 -- UB04 62: inpatient rehabilitation facility
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
-            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A') THEN 4161979 -- Discharged alive (PCORnet A: disposition unspecified, not home)
             ELSE 0
         END AS discharged_to_concept_id,
         src.DISCHARGE_STATUS AS discharged_to_source_value,
@@ -745,12 +698,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         src.PDX AS condition_status_source_value
     FROM (
         SELECT *,
-            CASE UPPER(TRIM(DX_TYPE))
-                WHEN '09' THEN 'ICD9CM'
-                WHEN '10' THEN 'ICD10CM'
-                WHEN 'SM' THEN 'SNOMED'
-                ELSE NULL -- unknown type: no vocabulary guess (concept stays 0)
-            END AS dx_vocabulary_id
+            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id
         FROM _temp_diagnosis
     ) src
     LEFT JOIN person p
@@ -827,7 +775,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
                 WHEN '02' THEN 'HCPCS'
                 WHEN '09' THEN 'ICD9Proc'
                 WHEN '10' THEN 'ICD10PCS'
-                ELSE NULL -- unknown type: no vocabulary guess
+                ELSE PX_TYPE
             END AS px_vocabulary_id
         FROM _temp_procedures
     ) src
@@ -940,44 +888,30 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
 
 #' Load PCORnet VITAL into measurement and observation
 #'
-#' Each analyte (height, weight, BMI, systolic and diastolic blood pressure) is written as a
-#' standard LOINC-based concept. The vocabulary lookup (`source_to_concept_map`, then `Maps to`,
-#' then a standard LOINC concept) is tried first; when it finds nothing - an ETL run before the
-#' vocabulary is loaded - the fixed OMOP concept is used (3004249 systolic, 3012888 diastolic,
-#' 3036277 height, 3025315 weight, 3038553 BMI), never 0. Mirrors the Python `load_vital`.
+#' Loads `vital.csv` into `measurement` (height, weight, BMI, systolic and diastolic BP) and `observation` (smoking).
+#' Mirror of Python `load_vital()`. Each analyte takes the vocabulary-resolved standard LOINC concept and falls back to
+#' a fixed OMOP concept (3036277 height, 3025315 weight, 3038553 BMI, 3004249 systolic, 3012888 diastolic), never 0.
 #'
-#' @param con A DuckDB connection with the CDM schema built.
-#' @param source_dir Directory holding `vital.csv` (or parquet).
-#' @param site_id,disambiguate_patids See [etl_pcornet()].
-#' @param derive_bmi Add a BMI measurement (703 x lb / in^2, 2 dp) for rows with height and
-#'   weight but no BMI. Default `TRUE`.
-#' @param plausible_ranges `TRUE` for the default physiologic limits, or a named list such as
-#'   `list(SYSTOLIC = c(40, 300))`; values outside are dropped and counted. Zero and negative
-#'   values are always dropped. Default `NULL` (no range filter).
-#' @return Invisibly, `list(rows_loaded = , rows_dropped_implausible = )` with one count per analyte.
+#' @param con A DuckDB connection with the CDM tables and mapping macros loaded.
+#' @param source_dir Directory holding the PCORnet CSVs.
+#' @param site_id,disambiguate_patids As in [etl_pcornet()].
+#' @param derive_bmi Add a BMI row (703 x lb / in^2) where height and weight exist but BMI does not.
+#' @param plausible_ranges `NULL` (default), `TRUE` for the package defaults (HT 10-100 in, WT 1-1500 lb, BMI 5-200,
+#'   SYSTOLIC 40-300, DIASTOLIC 20-200), or a named list such as `list(SYSTOLIC = c(40, 300))`. Values outside are dropped.
+#'   Zero and negative values are always dropped.
+#' @return Invisibly, `list(rows_loaded = <named integer>, rows_dropped_implausible = <named integer>)`.
 #' @export
 load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE,
                        derive_bmi = TRUE, plausible_ranges = NULL) {
-  .load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids,
-              derive_bmi = derive_bmi, plausible_ranges = plausible_ranges)
-}
-
-.VITAL_ANALYTES <- list(
-  HT = list(loinc = "8302-2", fallback = 3036277L, unit = "[in_us]", unit_cid = 9326L),
-  WT = list(loinc = "29463-7", fallback = 3025315L, unit = "[lb_av]", unit_cid = 8739L),
-  BMI = list(loinc = "39156-5", fallback = 3038553L, unit = "kg/m2", unit_cid = 9531L),
-  SYSTOLIC = list(loinc = "8480-6", fallback = 3004249L, unit = "mm[Hg]", unit_cid = 8876L),
-  DIASTOLIC = list(loinc = "8462-4", fallback = 3012888L, unit = "mm[Hg]", unit_cid = 8876L)
-)
-.DEFAULT_VITAL_RANGES <- list(HT = c(10, 100), WT = c(1, 1500), BMI = c(5, 200), SYSTOLIC = c(40, 300), DIASTOLIC = c(20, 200))
-
-.load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE,
-                        derive_bmi = TRUE, plausible_ranges = NULL) {
+  summary <- list(rows_loaded = integer(0), rows_dropped_implausible = integer(0))
   path <- find_source_file(source_dir, "vital")
   if (is.null(path)) {
-    cat("Skipping VITAL - no vital.csv found (optional table)\n")
-    return(invisible(list(rows_loaded = list(), rows_dropped_implausible = list())))
+    cat("Skipping VITAL - no vital.csv found (optional table)
+")
+    return(invisible(summary))
   }
+  default_ranges <- list(HT = c(10, 100), WT = c(1, 1500), BMI = c(5, 200), SYSTOLIC = c(40, 300), DIASTOLIC = c(20, 200))
+  ranges <- if (isTRUE(plausible_ranges)) default_ranges else as.list(plausible_ranges)
   prepare_source_view(
     con, "_temp_vital", path,
     c("VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
@@ -985,47 +919,43 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
 
-  ranges <- if (isTRUE(plausible_ranges)) .DEFAULT_VITAL_RANGES else if (is.null(plausible_ranges) || isFALSE(plausible_ranges)) list() else plausible_ranges
-  summary <- list(rows_loaded = list(), rows_dropped_implausible = list())
-
   # Staged, single-analyte inserts (FR-C5) avoid DuckDB memory access violations
+  # analyte -> LOINC, fallback standard concept, UCUM unit, unit concept (same table as Python VITAL_ANALYTES)
+  meta <- list(
+    HT = list("8302-2", 3036277L, "[in_us]", 9326L), WT = list("29463-7", 3025315L, "[lb_av]", 8739L),
+    BMI = list("39156-5", 3038553L, "kg/m2", 9531L), SYSTOLIC = list("8480-6", 3004249L, "mm[Hg]", 8876L),
+    DIASTOLIC = list("8462-4", 3012888L, "mm[Hg]", 8876L)
+  )
   bmi_col <- "TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE)"
   ht_col <- "TRY_CAST(HT AS DOUBLE)"
   wt_col <- "TRY_CAST(WT AS DOUBLE)"
   stages <- list(
-    list(tag = "HT", analyte = "HT", val = ht_col),
-    list(tag = "WT", analyte = "WT", val = wt_col),
+    list(tag = "HT", analyte = "HT", val = ht_col), list(tag = "WT", analyte = "WT", val = wt_col),
     list(tag = "BMI", analyte = "BMI", val = bmi_col),
     list(tag = "SYSTOLIC", analyte = "SYSTOLIC", val = "TRY_CAST(SYSTOLIC AS DOUBLE)"),
     list(tag = "DIASTOLIC", analyte = "DIASTOLIC", val = "TRY_CAST(DIASTOLIC AS DOUBLE)")
   )
   if (isTRUE(derive_bmi)) {
-    stages[[length(stages) + 1L]] <- list(
-      tag = "BMI_DERIVED", analyte = "BMI",
-      val = sprintf("ROUND(703.0 * %s / (%s * %s), 2)", wt_col, ht_col, ht_col)
-    )
+    stages[[length(stages) + 1]] <- list(tag = "BMI_DERIVED", analyte = "BMI",
+                                         val = sprintf("ROUND(703.0 * %s / (%s * %s), 2)", wt_col, ht_col, ht_col))
   }
-
-  for (st in stages) {
-    a <- .VITAL_ANALYTES[[st$analyte]]
-    cond <- if (st$tag == "BMI_DERIVED") {
-      sprintf("%s IS NULL AND %s > 0 AND %s > 0", bmi_col, ht_col, wt_col)
-    } else {
-      sprintf("%s IS NOT NULL AND %s > 0", st$val, st$val)
-    }
-    if (!is.null(ranges[[st$analyte]])) {
-      lo <- format(as.numeric(ranges[[st$analyte]][1]), scientific = FALSE)
-      hi <- format(as.numeric(ranges[[st$analyte]][2]), scientific = FALSE)
-      bad <- DBI::dbGetQuery(con, sprintf(
-        "SELECT COUNT(*) AS n FROM _temp_vital WHERE %s AND NOT (%s BETWEEN %s AND %s)", cond, st$val, lo, hi))$n
-      summary$rows_dropped_implausible[[st$tag]] <- as.integer(bad)
-      cond <- sprintf("%s AND %s BETWEEN %s AND %s", cond, st$val, lo, hi)
+  today <- .today_iso()
+  for (a in stages) {
+    m <- meta[[a$analyte]]
+    cond <- if (a$tag == "BMI_DERIVED") sprintf("%s IS NULL AND %s > 0 AND %s > 0", bmi_col, ht_col, wt_col)
+            else sprintf("%s IS NOT NULL AND %s > 0", a$val, a$val)
+    if (!is.null(ranges[[a$analyte]])) {
+      lo <- as.numeric(ranges[[a$analyte]][1]); hi <- as.numeric(ranges[[a$analyte]][2])
+      bad <- DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM _temp_vital WHERE %s AND NOT (%s BETWEEN %s AND %s)",
+                                          cond, a$val, format(lo, scientific = FALSE), format(hi, scientific = FALSE)))$n
+      summary$rows_dropped_implausible[a$tag] <- as.integer(bad)
+      cond <- sprintf("%s AND %s BETWEEN %s AND %s", cond, a$val, format(lo, scientific = FALSE), format(hi, scientific = FALSE))
     }
     before <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM measurement")$n
-    run_insert(con, sprintf("MEASUREMENT (from VITAL - %s)", st$tag), sprintf("
+    run_insert(con, sprintf("MEASUREMENT (from VITAL - %s)", a$tag), sprintf("
       INSERT INTO measurement
       SELECT
-          ROW_NUMBER() OVER (ORDER BY src.VITALID) + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
+          ROW_NUMBER() OVER () + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
           COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
           COALESCE(
               NULLIF(COALESCE(
@@ -1081,10 +1011,10 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
         ON stcm.source_code = '%s'
       WHERE %s
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID, '%s') = 1;
-    ", patid_expr, a$fallback, .TYPE_CONCEPT_EHR_MEASUREMENT, st$val, a$unit_cid, a$loinc, a$unit,
-       a$unit_cid, st$val, patid_expr, a$loinc, .today_iso(), a$loinc, cond, st$tag))
+    ", patid_expr, m[[2]], .TYPE_CONCEPT_EHR_MEASUREMENT, a$val, m[[4]], m[[1]], m[[3]], m[[4]], a$val,
+       patid_expr, m[[1]], today, m[[1]], cond, a$tag))
     after <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM measurement")$n
-    summary$rows_loaded[[st$tag]] <- as.integer(after - before)
+    summary$rows_loaded[a$tag] <- as.integer(after - before)
   }
   # PCORnet VITAL.SMOKING -> OBSERVATION "Tobacco smoking status" (LOINC 72166-2, concept 43054909) with the
   # matching LOINC answer concept in value_as_concept_id. NI/UN/OT and unrecognized codes carry no status.

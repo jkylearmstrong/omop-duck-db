@@ -33,7 +33,7 @@ from typing import Any
 
 import duckdb
 
-from omop_etl.sqlutil import fetch_arrow
+from omop_etl._arrow import to_arrow_table
 from omop_etl.build_omop_cdm import _resource_path
 
 _CSV_HEADER = ["index", "domain", "column", "label", "weight", "code_system", "code", "note"]
@@ -453,7 +453,7 @@ def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, ind
         avg_score = float(out_df["mapping_fidelity_score"].mean()) if "mapping_fidelity_score" in out_df.columns else 1.0
         out_df.attrs["mapping_fidelity_score"] = round(avg_score, 4)
         return out_df
-    arrow = fetch_arrow(res)
+    arrow = to_arrow_table(res)
     if fmt == "polars":
         import polars as pl
         return pl.from_arrow(arrow)

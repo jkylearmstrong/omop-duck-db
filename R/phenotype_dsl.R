@@ -389,9 +389,9 @@ execute_phenotype <- function(con, expr, cohort_table = "cohort", cohort_definit
   DBI::dbExecute(con, sprintf(paste0("CREATE TABLE IF NOT EXISTS %s (cohort_definition_id INTEGER, subject_id BIGINT, ",
                                      "cohort_start_date DATE, cohort_end_date DATE)"), cohort_table))
   if (isTRUE(replace)) {
-    DBI::dbExecute(con, sprintf("DELETE FROM %s WHERE cohort_definition_id = %d", cohort_table, as.integer(cohort_definition_id)))
+    DBI::dbExecute(con, sprintf("DELETE FROM %s WHERE cohort_definition_id = %d", .check_ident(cohort_table, "cohort_table"), as.integer(cohort_definition_id)))
   }
-  DBI::dbExecute(con, paste0("INSERT INTO ", cohort_table, " ", sql))
+  DBI::dbExecute(con, paste0("INSERT INTO ", .check_ident(cohort_table, "cohort_table"), " ", sql))
   DBI::dbGetQuery(con, sprintf("SELECT * FROM %s WHERE cohort_definition_id = %d ORDER BY subject_id",
                                cohort_table, as.integer(cohort_definition_id)))
 }

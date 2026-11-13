@@ -24,8 +24,7 @@ etl_pcornet(
   enrollment_type_concept_id = 0L,
   data_cutoff = "auto",
   mode = c("full", "append"),
-  since = NULL,
-  overwrite = FALSE
+  since = NULL
 )
 }
 \arguments{
@@ -86,10 +85,6 @@ continue from the current maximum, care sites / locations are left alone, and \c
 Encounters are selected by admit date. Mirror of Python \code{etl_pcornet(mode = "append")}.}
 
 \item{since}{With \code{mode = "append"}: ISO date; only events on/after it are loaded.}
-
-\item{overwrite}{\code{FALSE} (default): a \code{mode = "full"} run refuses to load into a database whose clinical
-tables already hold rows, because a second run would insert every row again. \code{TRUE} empties those tables first,
-inside one transaction (vocabulary tables are never touched).}
 }
 \value{
 Invisibly, \code{db_path}.

@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import json
 
-from omop_etl.sqlutil import quote_ident
 from omop_etl.jsonio import strict_dumps
 import math
 import os
@@ -16,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Un
 import duckdb
 import numpy as np
 import pandas as pd
+from omop_etl.sqlsafe import check_ident
 
 
 # -----------------------------------------------------------------------------
@@ -887,9 +887,7 @@ def consortium_patient_overlap(
         s1 = sites[i]
         set1 = token_sets[s1]
         n1 = len(set1)
-        # Distinct pairs only: a site paired with itself has shared == n_site_1 == n_site_2, which would
-        # print the exact size of a site whose overlap cell is being suppressed.
-        for j in range(i + 1, len(sites)):
+        for j in range(i, len(sites)):
             s2 = sites[j]
             set2 = token_sets[s2]
             n2 = len(set2)
@@ -903,8 +901,10 @@ def consortium_patient_overlap(
             records.append({
                 "site_1": s1,
                 "site_2": s2,
-                "n_site_1": n1,
-                "n_site_2": n2,
+                # a site smaller than the threshold is itself a small cell: its size would equal the suppressed
+                # self-overlap (shared == n on the diagonal) and bound every pair involving it, so it is withheld (C-03)
+                "n_site_1": n1 if n1 >= min_cell_count else float("nan"),
+                "n_site_2": n2 if n2 >= min_cell_count else float("nan"),
                 "shared_patients": display_count,
                 # the percentage would reveal the suppressed count, so it is withheld too
                 "overlap_pct": float("nan") if suppressed else pct,
@@ -1106,7 +1106,7 @@ def planned_readmission_filter(
     clean_df = df[df["is_planned"] == 0].drop(columns=["is_planned"]).reset_index(drop=True)
 
     if target_table:
-        con.execute(f"CREATE OR REPLACE TABLE {quote_ident(target_table, 'target table', 3)} AS SELECT * FROM df WHERE is_planned = 0")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(target_table, 'target_table')} AS SELECT * FROM df WHERE is_planned = 0")
 
     return pd.DataFrame(records), clean_df
 

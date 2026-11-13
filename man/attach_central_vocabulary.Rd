@@ -4,7 +4,7 @@
 \alias{attach_central_vocabulary}
 \title{Attach a Central Vocabulary Database via DuckDB Zero-Copy Views}
 \usage{
-attach_central_vocabulary(con, vocab_db_path, temporary = TRUE, force = FALSE)
+attach_central_vocabulary(con, vocab_db_path, temporary = TRUE)
 }
 \arguments{
 \item{con}{Active DuckDB DBI connection.}
@@ -13,9 +13,6 @@ attach_central_vocabulary(con, vocab_db_path, temporary = TRUE, force = FALSE)
 
 \item{temporary}{Logical. If \code{TRUE} (default), creates temporary views for the current
 session. If \code{FALSE}, creates persistent views in the database.}
-
-\item{force}{Logical. With \code{temporary = FALSE}, a local vocabulary table that already holds rows is
-never dropped unless \code{force = TRUE} (the call errors first, changing nothing).}
 }
 \value{
 Invisibly, \code{con}.

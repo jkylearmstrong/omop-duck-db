@@ -272,3 +272,18 @@ build_safe_source_view <- function(con, table_name, csv_path, expected_columns, 
   prepare_source_view(con, view_name, csv_path, expected_columns, aliases)
   invisible(view_name)
 }
+
+
+#' Validate an operator-supplied SQL identifier (1 to `max_parts` dot-separated plain names) and return it unchanged.
+#' @keywords internal
+#' @noRd
+.check_ident <- function(name, what = "identifier", max_parts = 3L) {
+  if (!is.character(name) || length(name) != 1L || is.na(name) || !nzchar(name)) {
+    stop(sprintf("%s must be a non-empty string.", what), call. = FALSE)
+  }
+  parts <- strsplit(name, ".", fixed = TRUE)[[1]]
+  if (length(parts) == 0L || length(parts) > max_parts || !all(grepl("^[A-Za-z_][A-Za-z0-9_]*$", parts))) {
+    stop(sprintf("Invalid %s '%s': use up to %d dot-separated names of letters, digits and underscores.", what, name, max_parts), call. = FALSE)
+  }
+  name
+}

@@ -14,26 +14,23 @@ load_vital(
 )
 }
 \arguments{
-\item{con}{A DuckDB connection with the CDM schema built.}
+\item{con}{A DuckDB connection with the CDM tables and mapping macros loaded.}
 
-\item{source_dir}{Directory holding \code{vital.csv} (or parquet).}
+\item{source_dir}{Directory holding the PCORnet CSVs.}
 
-\item{site_id, disambiguate_patids}{See \code{\link[=etl_pcornet]{etl_pcornet()}}.}
+\item{site_id, disambiguate_patids}{As in \code{\link[=etl_pcornet]{etl_pcornet()}}.}
 
-\item{derive_bmi}{Add a BMI measurement (703 x lb / in^2, 2 dp) for rows with height and
-weight but no BMI. Default \code{TRUE}.}
+\item{derive_bmi}{Add a BMI row (703 x lb / in^2) where height and weight exist but BMI does not.}
 
-\item{plausible_ranges}{\code{TRUE} for the default physiologic limits, or a named list such as
-\code{list(SYSTOLIC = c(40, 300))}; values outside are dropped and counted. Zero and negative
-values are always dropped. Default \code{NULL} (no range filter).}
+\item{plausible_ranges}{\code{NULL} (default), \code{TRUE} for the package defaults (HT 10-100 in, WT 1-1500 lb, BMI 5-200,
+SYSTOLIC 40-300, DIASTOLIC 20-200), or a named list such as \code{list(SYSTOLIC = c(40, 300))}. Values outside are dropped.
+Zero and negative values are always dropped.}
 }
 \value{
-Invisibly, \code{list(rows_loaded = , rows_dropped_implausible = )} with one count per analyte.
+Invisibly, \code{list(rows_loaded = <named integer>, rows_dropped_implausible = <named integer>)}.
 }
 \description{
-Each analyte (height, weight, BMI, systolic and diastolic blood pressure) is written as a
-standard LOINC-based concept. The vocabulary lookup (\code{source_to_concept_map}, then \verb{Maps to},
-then a standard LOINC concept) is tried first; when it finds nothing - an ETL run before the
-vocabulary is loaded - the fixed OMOP concept is used (3004249 systolic, 3012888 diastolic,
-3036277 height, 3025315 weight, 3038553 BMI), never 0. Mirrors the Python \code{load_vital}.
+Loads \code{vital.csv} into \code{measurement} (height, weight, BMI, systolic and diastolic BP) and \code{observation} (smoking).
+Mirror of Python \code{load_vital()}. Each analyte takes the vocabulary-resolved standard LOINC concept and falls back to
+a fixed OMOP concept (3036277 height, 3025315 weight, 3038553 BMI, 3004249 systolic, 3012888 diastolic), never 0.
 }

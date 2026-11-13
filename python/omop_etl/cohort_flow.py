@@ -11,8 +11,8 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from omop_etl.sqlutil import fetch_arrow
 from omop_etl.cohort import ConsortAttrition
+from ._arrow import to_arrow_table
 
 __all__ = [
     "CohortFlow",
@@ -232,9 +232,9 @@ class CohortFlow:
         if self.cohort is None:
             self.run()
         if hasattr(self, "_cohort_sql") and self._cohort_sql:
-            return fetch_arrow(self.con.execute(self._cohort_sql))
+            return to_arrow_table(self.con.execute(self._cohort_sql))
         self.con.register("_cohort_flow_arrow_tmp", self.cohort)
-        res = fetch_arrow(self.con.execute("SELECT * FROM _cohort_flow_arrow_tmp"))
+        res = to_arrow_table(self.con.execute("SELECT * FROM _cohort_flow_arrow_tmp"))
         self.con.unregister("_cohort_flow_arrow_tmp")
         return res
 

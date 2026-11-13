@@ -68,7 +68,7 @@ def remap_cdm_table(con, table_name, dry_run=False):
     vocabs_str = ", ".join(f"'{v}'" for v in cfg["default_vocabs"])
 
     # Build resolution CTE for candidate target concepts
-    # Explicit priority column: 1 = STCM, 2 = 'Maps to', 3 = direct standard concept
+    # Prioritizes STCM, then standard 'Maps to', then direct standard concepts
     resolution_view = f"""
         CREATE OR REPLACE TEMPORARY VIEW _remap_candidates_{tbl} AS
         WITH target_resolution AS (
@@ -82,7 +82,7 @@ def remap_cdm_table(con, table_name, dry_run=False):
                 SELECT 
                     source_code, 
                     target_concept_id,
-                    ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC, target_concept_id ASC) AS rn
+                    ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY valid_start_date DESC, target_concept_id) AS rn
                 FROM source_to_concept_map
                 WHERE (invalid_reason IS NULL OR invalid_reason = '')
                   AND (valid_end_date IS NULL OR valid_end_date >= CURRENT_DATE)
@@ -126,12 +126,7 @@ def remap_cdm_table(con, table_name, dry_run=False):
                 source_code,
                 resolved_concept_id,
                 resolved_source_concept_id,
-                ROW_NUMBER() OVER (
-                    PARTITION BY source_code
-                    -- explicit precedence (custom map > 'Maps to' > direct standard), then the lowest
-                    -- concept id so the pick is deterministic; never "largest id wins"
-                    ORDER BY priority ASC, resolved_concept_id ASC, resolved_source_concept_id ASC
-                ) AS rnk
+                ROW_NUMBER() OVER (PARTITION BY source_code ORDER BY priority, resolved_concept_id) AS rnk
             FROM target_resolution
             WHERE resolved_concept_id != 0 AND resolved_concept_id IS NOT NULL
         ) WHERE rnk = 1;
@@ -202,16 +197,18 @@ def remap_cdm_table(con, table_name, dry_run=False):
 
 def remap_all(con, dry_run=False, rebuild_eras=True):
     """Remap all supported clinical tables and optionally rebuild eras."""
-    from omop_etl.build_omop_cdm import build_condition_era, build_drug_era
+    from omop_etl.build_omop_cdm import _atomic, build_condition_era, build_drug_era
 
     results = {}
-    for tbl in TABLE_REMAP_CONFIG.keys():
-        results[tbl] = remap_cdm_table(con, tbl, dry_run=dry_run)
+    # one transaction: a failure part-way leaves no table remapped with stale eras (m-19)
+    with _atomic(con):
+        for tbl in TABLE_REMAP_CONFIG.keys():
+            results[tbl] = remap_cdm_table(con, tbl, dry_run=dry_run)
 
-    if not dry_run and rebuild_eras:
-        print("Rebuilding condition_era and drug_era after remapping ...")
-        build_condition_era(con)
-        build_drug_era(con)
+        if not dry_run and rebuild_eras:
+            print("Rebuilding condition_era and drug_era after remapping ...")
+            build_condition_era(con)
+            build_drug_era(con)
 
     return results
 
