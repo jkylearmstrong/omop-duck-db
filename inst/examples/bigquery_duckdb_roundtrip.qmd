@@ -130,7 +130,7 @@ if (has_py) {
   stopifnot(all(same))
 } else message("Python package omop_etl (with sqlglot) not importable: skipped.")
 # the live R vs Python check (4d) also needs the BigQuery client and application-default credentials
-has_py_bq <- has_py && py_ok(py, "google.cloud.bigquery")
+has_py_bq <- has_py && py_ok(py, "google.cloud.bigquery, db_dtypes")
 ```
 
 The offline check that the *cohort* GoogleSQL keeps its meaning is in `tests/test_backend_parity.py`: it runs the
@@ -258,12 +258,12 @@ DBI::dbDisconnect(sk, shutdown = TRUE)
 ### 4d. R and Python agree
 
 Runs `python -m omop_etl.demo_bigquery` into its own scratch dataset (so it does not overwrite R's tables) and compares
-its `demo_summary.json` and `demo_features.csv` with R's from section 2. It needs `pip install google-cloud-bigquery`
-and application-default credentials (`gcloud auth application-default login`); the R token is not shared with Python.
+its `demo_summary.json` and `demo_features.csv` with R's from section 2. It needs the Python BigQuery extra (`pip install "omop-duck-db[bigquery]"`,
+which includes `db-dtypes`) and application-default credentials (`gcloud auth application-default login`); the R token is not shared with Python.
 
 ```{r live-python-skipped}
 #| eval: !expr live && !has_py_bq
-message("Skipped: Python with omop_etl, sqlglot and google-cloud-bigquery is not available.")
+message("Skipped: Python with omop_etl, sqlglot, google-cloud-bigquery and db-dtypes is not available.")
 ```
 
 ```{r live-python}
