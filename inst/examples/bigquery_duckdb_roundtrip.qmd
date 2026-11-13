@@ -115,9 +115,11 @@ The feature and availability queries come from the same templates in both langua
 (R: CirceR + SqlRender, Python: native compiler + sqlglot), which is why the live section compares their results.
 
 ```{r py-dry-run}
-py <- Sys.which(c("python3", "python"))
-py <- py[nzchar(py)][1]
-has_py <- !is.na(py) && system2(py, c("-c", shQuote("import omop_etl.demo_bigquery, sqlglot")), stdout = FALSE, stderr = FALSE) == 0
+# the first Python that has the package (set OMOP_PYTHON to choose one); a bare python3 on the PATH often does not
+py_ok <- function(p, mods) nzchar(p) && system2(p, c("-c", shQuote(paste("import", mods))), stdout = FALSE, stderr = FALSE) == 0
+py_candidates <- unique(c(Sys.getenv("OMOP_PYTHON"), unname(Sys.which(c("python3", "python")))))
+py <- Find(function(p) py_ok(p, "omop_etl.demo_bigquery, sqlglot"), py_candidates[nzchar(py_candidates)])
+has_py <- !is.null(py)
 if (has_py) {
   py_out <- tempfile("bq_demo_py_")
   system2(py, c("-m", "omop_etl.demo_bigquery", "--dry-run", "--billing-project",
@@ -128,7 +130,7 @@ if (has_py) {
   stopifnot(all(same))
 } else message("Python package omop_etl (with sqlglot) not importable: skipped.")
 # the live R vs Python check (4d) also needs the BigQuery client and application-default credentials
-has_py_bq <- has_py && system2(py, c("-c", shQuote("import google.cloud.bigquery")), stdout = FALSE, stderr = FALSE) == 0
+has_py_bq <- has_py && py_ok(py, "google.cloud.bigquery")
 ```
 
 The offline check that the *cohort* GoogleSQL keeps its meaning is in `tests/test_backend_parity.py`: it runs the
@@ -161,7 +163,8 @@ copied here because `load_from_bigquery()` holds a table in memory.
 #| eval: !expr live
 db <- tempfile(fileext = ".duckdb")
 load_from_bigquery(billing_project = billing, dataset = dataset, tables = params$load_tables, db_path = db)
-bq <- function(sql) as.data.frame(bigrquery::bq_table_download(bigrquery::bq_project_query(billing, sql)))
+# integer64: a 32-bit read turns large values (SUM(year_of_birth) on SynPUF is about 4.5e9) into NA
+bq <- function(sql) as.data.frame(bigrquery::bq_table_download(bigrquery::bq_project_query(billing, sql), bigint = "integer64"))
 dk <- DBI::dbConnect(duckdb::duckdb(), db, read_only = TRUE)
 
 probe <- list(
