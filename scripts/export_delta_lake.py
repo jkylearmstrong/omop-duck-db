@@ -20,6 +20,14 @@ from omop_etl.lakehouse import export_to_delta_lake
 
 
 def parse_args(args=None):
+    p = _parser()
+    a = p.parse_args(args)
+    if a.input.suffix.lower() in (".duckdb", ".db") and not a.table:
+        p.error("--table is required when --input is a DuckDB database file.")
+    return a
+
+
+def _parser():
     p = argparse.ArgumentParser(
         description="Export Parquet datasets or DuckDB tables to versioned Delta Lake tables.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -44,18 +52,15 @@ def parse_args(args=None):
         "--partition-by", "-p", nargs="*", default=None,
         help="Optional column name(s) to partition the Delta table by.",
     )
-    return p.parse_args(args)
+    return p
 
 
-def main():
-    a = parse_args()
+def main(argv=None):
+    a = parse_args(argv)
     input_path = a.input.resolve()
 
     if input_path.suffix.lower() in (".duckdb", ".db"):
         import duckdb
-        if not a.table:
-            p = argparse.ArgumentParser()
-            p.error("--table is required when --input is a DuckDB database file.")
         con = duckdb.connect(str(input_path), read_only=True)
         try:
             print(f"Exporting table '{a.table}' from {input_path} to Delta Lake at {a.output}...")

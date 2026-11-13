@@ -225,8 +225,10 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     attrition_mode, table5, sdi_missing_term, address_tie_break = (dec["attrition_mode"], dec["table5"], dec["sdi_missing_term"], dec["address_tie_break"])
     undated = dec["address_undated"]
     c_params = dict(cohort_params or PROTOCOL_COHORT_PARAMS)
-    if "age_method" in dec and "age_method" not in c_params:
+    # an explicit age_method wins over cohort_params; the preset's value only fills a cohort_params that does not set one
+    if age_method is not None or "age_method" not in c_params:
         c_params["age_method"] = dec["age_method"]
+    dec["age_method"] = c_params["age_method"]  # the run record shows the rule that was actually used
     db, out = Path(db_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     if isinstance(site_labels, (str, Path)) and str(site_labels) not in ("random", "ordered"):

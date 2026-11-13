@@ -50,8 +50,8 @@ def parse_args(args=None):
     return p.parse_args(args)
 
 
-def main():
-    a = parse_args()
+def main(argv=None):
+    a = parse_args(argv)
     if not a.new.exists():
         raise FileNotFoundError(f"New workbook does not exist: {a.new}")
     if not a.baseline.exists():

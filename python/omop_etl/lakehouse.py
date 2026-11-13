@@ -199,9 +199,10 @@ def export_to_delta_lake(
     with support for partition pruning and schema validation.
 
     Args:
-        data: A pandas DataFrame, DuckDB connection, or Path to a parquet file/dir.
+        data: A pandas DataFrame, a DuckDB relation, a DuckDB connection (with ``table_name``), or a path to a
+            parquet file or a directory of parquet files (searched recursively; the files are stacked by column name).
         table_uri: Target directory path or cloud URI (s3://, gcs://, abfs://) for the Delta table.
-        table_name: Table name if ``data`` is a DuckDB connection.
+        table_name: Table name (optionally schema-qualified) if ``data`` is a DuckDB connection.
         mode: Write mode ('overwrite', 'append', 'error', 'ignore'). Default 'overwrite'.
         partition_by: Optional sequence of column names to partition the Delta table by.
         storage_options: Optional storage options mapping for cloud object stores.
@@ -214,9 +215,11 @@ def export_to_delta_lake(
     except ImportError as exc:
         raise ImportError(
             "The 'deltalake' package is required for export_to_delta_lake(). "
-            "Install it with 'pip install deltalake'."
+            "Install it with 'pip install deltalake' or 'pip install omop-duck-db[delta]'."
         ) from exc
 
+    if mode not in ("overwrite", "append", "error", "ignore"):
+        raise ValueError(f"mode must be 'overwrite', 'append', 'error' or 'ignore', got {mode!r}.")
     is_remote = str(table_uri).startswith(("s3://", "s3a://", "http://", "https://", "azure://", "abfs://", "gcs://"))
     target_str = str(table_uri).rstrip("/\\")
 
@@ -227,16 +230,18 @@ def export_to_delta_lake(
 
     if isinstance(data, pd.DataFrame):
         df = data
-    elif hasattr(data, "execute") and hasattr(data, "df"):
+    elif isinstance(data, duckdb.DuckDBPyRelation):
+        df = data.df()
+    elif isinstance(data, duckdb.DuckDBPyConnection):
         if not table_name:
             raise ValueError("table_name must be specified when exporting from a DuckDB connection")
-        df = data.execute(f"SELECT * FROM {table_name}").df()
+        df = data.table(table_name).df()  # resolves (schema-qualified) names without splicing them into SQL
     elif isinstance(data, (str, Path)):
         p = Path(data)
         if p.is_file():
             df = pd.read_parquet(p)
         elif p.is_dir():
-            pq_files = list(p.glob("*.parquet")) + list(p.glob("**/*.parquet"))
+            pq_files = sorted(p.rglob("*.parquet"))  # rglob already includes the top level: each file once
             if not pq_files:
                 raise FileNotFoundError(f"No parquet files found under directory {p}")
             df = pd.concat([pd.read_parquet(f) for f in pq_files], ignore_index=True)

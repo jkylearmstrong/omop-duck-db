@@ -46,7 +46,9 @@ deep = ["torch>=2.0", "pyarrow>=14"]
 # scikit-learn for downstream modelling on the extracted tables (not imported by the library itself).
 sklearn = ["scikit-learn>=1.3"]
 shap = ["shap>=0.44"]  # SHAP panels for random forest / HistGBM in omop_etl.study_report
-dev = ["matplotlib>=3.5", "pytest>=7.0,<9.0", "pyyaml", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot", "statsmodels", "onnx>=1.14", "onnxruntime>=1.16", "zarr>=2.16", "scikit-learn>=1.3", "shap>=0.44"]
+# Delta Lake writer for omop_etl.export_to_delta_lake / scripts/export_delta_lake.py.
+delta = ["deltalake>=0.18"]
+dev = ["deltalake>=0.18", "matplotlib>=3.5", "pytest>=7.0,<9.0", "pyyaml", "pytest-cov>=4.0", "coverage>=7.0", "build>=1.0", "twine>=5.0", "scipy>=1.10", "tabulate", "jinja2", "openpyxl", "sqlalchemy>=1.4", "sqlglot", "statsmodels", "onnx>=1.14", "onnxruntime>=1.16", "zarr>=2.16", "scikit-learn>=1.3", "shap>=0.44"]
 
 [project.scripts]
 omop-etl-pcornet = "omop_etl.build_omop_cdm:main"
