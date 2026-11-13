@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as _dt
 import decimal
 import time
+import warnings
 from typing import Any, Mapping, Sequence
 
 import duckdb
@@ -32,7 +33,7 @@ __all__ = ["to_sql", "verify_transfer"]
 _ORACLE_MAX_IDENT = 30  # conservative: Oracle before 12.2 (and many sites' naming rules) allow 30 characters
 
 
-def _sa_type(sa: Any, duck_type: str, dialect: str, varchar_len: int):
+def _sa_type(sa: Any, duck_type: str, dialect: str, varchar_len: int, unicode_text: bool = False):
     t = duck_type.upper()
     if t.startswith("DECIMAL"):
         inner = t[t.index("(") + 1:t.index(")")] if "(" in t else "38,9"
@@ -53,6 +54,10 @@ def _sa_type(sa: Any, duck_type: str, dialect: str, varchar_len: int):
     if t.startswith("TIMESTAMP"):
         return sa.TIMESTAMP()
     if t == "VARCHAR" or t.startswith("VARCHAR"):
+        if unicode_text:                              # NVARCHAR2 / NCLOB on Oracle: the national character set (usually Unicode)
+            if dialect == "oracle":                   # explicit types: the generic Unicode type is VARCHAR2 unless the engine sets use_nchar_for_unicode
+                return sa.dialects.oracle.NCLOB() if varchar_len > 2000 else sa.dialects.oracle.NVARCHAR2(varchar_len)
+            return sa.UnicodeText() if varchar_len > 2000 else sa.Unicode(varchar_len)
         return sa.Text() if varchar_len > 4000 else sa.String(varchar_len)
     return sa.String(varchar_len)
 
@@ -132,8 +137,47 @@ def _fingerprint(values) -> tuple[int, int, int]:
     return n, total, x
 
 
+_ORACLE_UNICODE = {"AL32UTF8", "UTF8", "AL16UTF16"}
+_ORACLE_CODECS = {"WE8MSWIN1252": "cp1252", "WE8ISO8859P1": "latin-1", "WE8ISO8859P15": "iso8859-15", "US7ASCII": "ascii",
+                  "EE8MSWIN1250": "cp1250", "CL8MSWIN1251": "cp1251"}
+
+
+def _target_codec(engine: Any, dialect: str) -> tuple[str | None, str | None]:
+    """(Python codec, Oracle character set) when the target database stores VARCHAR2 in a known non-Unicode character set, else (None, name).
+
+    Anything that cannot be read (no privilege, other database) or is not in the table returns no codec, so no check is made."""
+    if dialect != "oracle":
+        return None, None
+    sa = _sa()
+    try:
+        with engine.connect() as c:
+            name = c.execute(sa.text("SELECT value FROM nls_database_parameters WHERE parameter = 'NLS_CHARACTERSET'")).scalar()
+    except Exception:
+        return None, None
+    name = str(name or "").upper()
+    return (None if name in _ORACLE_UNICODE else _ORACLE_CODECS.get(name)), name or None
+
+
+def _unencodable_message(table: str, bad: dict[str, int], charset: str | None, n: int) -> str:
+    cols = ", ".join(f"{c} ({k} of {n} rows)" for c, k in bad.items())
+    return (f"{table}: the database character set {charset} cannot store some text; the server would replace those characters. Affected columns: "
+            f"{cols}. Pass nvarchar=True (or a list of column names) to create them as NVARCHAR2, or on_unencodable='ignore' to skip this check.")
+
+
+def _count_unencodable(values, codec: str) -> int:
+    n = 0
+    for v in values:
+        if isinstance(v, str):
+            try:
+                v.encode(codec)
+            except UnicodeEncodeError:
+                n += 1
+    return n
+
+
 def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, str], url: str, *, schema: str | None = None,
-           if_exists: str = "fail", chunksize: int = 50_000, varchar_length: int = 4000, columns: Mapping[str, Sequence[str]] | None = None) -> list[dict[str, Any]]:
+           if_exists: str = "fail", chunksize: int = 50_000, varchar_length: int = 4000, columns: Mapping[str, Sequence[str]] | None = None,
+           nvarchar: bool | Sequence[str] = False, on_unencodable: str = "warn") -> list[dict[str, Any]]:
     """Copies DuckDB tables or queries into a server schema.
 
     ``tables``: DuckDB table names (created under the same name on the server), or ``{server_table: "table or SELECT query"}`` to load a
@@ -142,16 +186,28 @@ def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, 
     ``"replace"`` (drops and recreates), ``"append"``. ``columns``: optional ``{server_table: [column, ...]}`` subset. Oracle identifiers are
     upper-cased and limited to 30 characters; text columns become ``VARCHAR2(varchar_length)`` (``CLOB`` beyond 4000).
 
-    Returns one dict per table: ``table``, ``rows``, ``seconds``, ``ddl``. Nothing is committed for a table whose load fails."""
+    ``VARCHAR2`` uses the database character set. If that is not Unicode (for example ``WE8MSWIN1252``), characters it cannot hold (Japanese,
+    Cyrillic, many symbols) are silently replaced by the server, and counts and sums cannot show it. On Oracle, ``to_sql`` reads
+    ``NLS_CHARACTERSET`` and, for a known non-Unicode set, counts the values that cannot be encoded: ``on_unencodable="warn"`` (default) emits a
+    warning naming the columns and row counts (never the values), ``"error"`` refuses the load and rolls it back, ``"ignore"`` skips the check.
+    ``nvarchar=True`` (all text columns) or a list of server column names creates those columns as ``NVARCHAR2`` / ``NCLOB``, which use the
+    national character set (``AL16UTF16`` on most databases) and keep any text; ``NVARCHAR2`` is limited to 2000 characters, longer text becomes
+    ``NCLOB``. ``verify_transfer(..., content=True)`` confirms the result.
+
+    Returns one dict per table: ``table``, ``rows``, ``seconds``, ``ddl``, ``unencodable`` (``{column: rows}``, empty unless the check found some). Nothing is committed for a table whose load fails."""
     sa = _sa()
     if if_exists not in ("fail", "replace", "append"):
         raise ValueError("if_exists must be 'fail', 'replace' or 'append'.")
     if int(chunksize) < 1:
         raise ValueError("chunksize must be >= 1.")
+    if on_unencodable not in ("warn", "error", "ignore"):
+        raise ValueError("on_unencodable must be 'warn', 'error' or 'ignore'.")
+    uni_cols = None if nvarchar is True else {str(c).lower() for c in (nvarchar or [])}
     spec = dict(tables) if isinstance(tables, Mapping) else {t: t for t in tables}
     engine = _make_engine(url)
     dialect = engine.dialect.name
     out: list[dict[str, Any]] = []
+    codec, charset = (None, None) if (on_unencodable == "ignore" or nvarchar is True) else _target_codec(engine, dialect)
     try:
         for target, source in spec.items():
             t0 = time.time()
@@ -163,7 +219,10 @@ def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, 
                 names = [c for c in columns[target] if c in names]
             tname = _server_name(target, dialect)
             md = sa.MetaData(schema=schema)
-            cols = [sa.Column(_server_name(c, dialect), _sa_type(sa, types[c], dialect, varchar_length)) for c in names]
+            is_uni = {c: (nvarchar is True or (c.lower() in uni_cols) or (_server_name(c, dialect).lower() in uni_cols)) for c in names}
+            cols = [sa.Column(_server_name(c, dialect), _sa_type(sa, types[c], dialect, varchar_length, unicode_text=is_uni[c])) for c in names]
+            check = [c for c in names if codec and types[c].upper().startswith("VARCHAR") and not is_uni[c]]
+            bad: dict[str, int] = {}
             table = sa.Table(tname, md, *cols)
             ddl = str(sa.schema.CreateTable(table).compile(dialect=engine.dialect)).strip()
             with engine.begin() as conn:
@@ -185,7 +244,15 @@ def to_sql(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapping[str, 
                         break
                     conn.execute(insert, [dict(zip(keys, (_py(r[i]) for i in idx))) for r in rows])
                     n += len(rows)
-            out.append({"table": tname, "rows": n, "seconds": round(time.time() - t0, 2), "ddl": ddl})
+                    for c in check:
+                        k = _count_unencodable((r[list(types).index(c)] for r in rows), codec)
+                        if k:
+                            bad[c] = bad.get(c, 0) + k
+                if bad and on_unencodable == "error":
+                    raise ValueError(_unencodable_message(target, bad, charset, n) + " Nothing was loaded.")
+            if bad:
+                warnings.warn(_unencodable_message(tname, bad, charset, n), UserWarning, stacklevel=2)
+            out.append({"table": tname, "rows": n, "seconds": round(time.time() - t0, 2), "ddl": ddl, "unencodable": bad})
     except Exception as exc:
         raise _scrub(exc, url) from None
     finally:

@@ -8,6 +8,7 @@ The connection URL is read from an environment variable so it never appears in s
 
     $env:OMOP_SERVER_URL = "<SQLAlchemy URL: oracle+oracledb scheme, then your account, host:1521 and ?service_name=...>"   # PowerShell
     python scripts/verify_server_roundtrip.py --schema MY_TEST_SCHEMA --out roundtrip_record.md
+    python scripts/verify_server_roundtrip.py --nvarchar --out roundtrip_record_nvarchar.md     # text columns as NVARCHAR2
 
 The record names the dialect, driver and server version, the character-set settings and the per-column results. It never contains the URL, host or
 user. On Oracle an empty string is stored as NULL, so the ``non_null`` count of the empty-string column is expected to differ; that row is reported
@@ -82,13 +83,13 @@ def _drop(url: str, name: str, schema):
         engine.dispose()
 
 
-def run(url: str, schema=None, keep=False) -> tuple[pd.DataFrame, dict, list, bool]:
+def run(url: str, schema=None, keep=False, nvarchar=False) -> tuple[pd.DataFrame, dict, list, bool]:
     con = duckdb.connect()
     con.execute(EDGE_TABLE_SQL)
     target = "OMOP_RT_" + uuid.uuid4().hex[:8].upper()
     spec = {target: "edge"}
     info = _server_info(url)
-    load = to_sql(con, spec, url, schema=schema, if_exists="fail")
+    load = to_sql(con, spec, url, schema=schema, if_exists="fail", nvarchar=nvarchar)
     try:
         res = verify_transfer(con, spec, url, schema=schema, content=True, content_examples=2)   # synthetic data, so examples are safe to print
     finally:
@@ -97,7 +98,7 @@ def run(url: str, schema=None, keep=False) -> tuple[pd.DataFrame, dict, list, bo
     res["known_difference"] = False
     if info["dialect"] == "oracle":
         res.loc[res["column"] == "txt_empty:non_null", "known_difference"] = True
-        if str(info.get("NLS_CHARACTERSET", "")).upper() not in ("AL32UTF8", "UTF8", ""):
+        if not nvarchar and str(info.get("NLS_CHARACTERSET", "")).upper() not in ("AL32UTF8", "UTF8", ""):
             # a non-Unicode database character set cannot store the Japanese text; it is replaced on the way in. Reported, not hidden.
             res.loc[res["column"] == "txt_nonlatin:content", "known_difference"] = True
     failed = res[(~res["match"]) & (~res["known_difference"])]
@@ -123,12 +124,13 @@ def main(argv=None) -> int:
     ap.add_argument("--url-env", default="OMOP_SERVER_URL", help="environment variable holding the SQLAlchemy URL (default OMOP_SERVER_URL)")
     ap.add_argument("--schema", help="schema to create the scratch table in (default: the account's own)")
     ap.add_argument("--keep", action="store_true", help="leave the scratch table in place")
+    ap.add_argument("--nvarchar", action="store_true", help="create text columns as NVARCHAR2 (to_sql(nvarchar=True)); then the non-Latin column must match too")
     ap.add_argument("--out", help="write the record (Markdown) to this file")
     a = ap.parse_args(argv)
     url = os.environ.get(a.url_env)
     if not url:
         ap.error(f"environment variable {a.url_env} is not set")
-    res, info, load, ok = run(url, schema=a.schema, keep=a.keep)
+    res, info, load, ok = run(url, schema=a.schema, keep=a.keep, nvarchar=a.nvarchar)
     text = render(res, info, load, ok)
     print(text)
     if a.out:
