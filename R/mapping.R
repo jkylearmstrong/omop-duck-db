@@ -6,6 +6,7 @@
 #' @return Number of total rows in source_to_concept_map
 #' @export
 import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = "Local") {
+  default_vocabulary_id <- gsub("'", "''", as.character(default_vocabulary_id), fixed = TRUE)
   if (!file.exists(csv_path)) {
     stop("Mapping file not found: ", csv_path)
   }
@@ -79,6 +80,7 @@ import_source_to_concept_map <- function(con, csv_path, default_vocabulary_id = 
 #' @return Number of imported rows for this vocabulary
 #' @export
 import_usagi_mappings <- function(con, usagi_csv_path, source_vocabulary_id = "Custom", approved_only = TRUE) {
+  source_vocabulary_id <- gsub("'", "''", as.character(source_vocabulary_id), fixed = TRUE)
   if (!file.exists(usagi_csv_path)) {
     stop("Usagi mapping file not found: ", usagi_csv_path)
   }
@@ -88,7 +90,9 @@ import_usagi_mappings <- function(con, usagi_csv_path, source_vocabulary_id = "C
     sql_path_literal(usagi_csv_path)
   ))
 
-  status_filter <- if (isTRUE(approved_only)) "WHERE UPPER(COALESCE(mappingStatus, 'APPROVED')) = 'APPROVED'" else ""
+  # an unreviewed row (no status) is not an approved one; rows without a usable target are never imported
+  target_ok <- "COALESCE(TRY_CAST(targetConceptId AS INTEGER), 0) <> 0"
+  status_filter <- if (isTRUE(approved_only)) paste0("WHERE UPPER(TRIM(mappingStatus)) = 'APPROVED' AND ", target_ok) else paste0("WHERE ", target_ok)
   today_lit <- sprintf("DATE '%s'", format(Sys.Date(), "%Y-%m-%d"))
 
   sql <- sprintf("

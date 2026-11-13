@@ -11,7 +11,9 @@ Supports:
 from __future__ import annotations
 
 from omop_etl.paths import sanitize_sql_path
+from omop_etl.sqlsafe import check_ident
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import duckdb
@@ -49,7 +51,8 @@ ORACLE_TYPE_MAP = {
 
 
 def _posix_path(p: Path | str) -> str:
-    return sanitize_sql_path(p)
+    # callers place this inside '...' literals, so a quote in the path must be doubled (m-01)
+    return sanitize_sql_path(p).replace("'", "''")
 
 
 def export_cdm(
@@ -76,6 +79,10 @@ def export_cdm(
         dict: Summary of exported tables, row counts, and output files.
     """
     tgt = target_type.lower().strip()
+    if tables is not None:
+        tables = [check_ident(t, "table name", 1) for t in tables]
+    if not re.fullmatch(r"[A-Za-z0-9_]+", str(compression)):
+        raise ValueError(f"Invalid compression {compression!r}.")
     out_dir = Path(output_path) if tgt != "postgres" else None
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)

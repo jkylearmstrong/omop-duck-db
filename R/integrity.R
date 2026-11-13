@@ -792,8 +792,10 @@ consortium_patient_overlap <- function(site_tokens, min_cell_count = 11) {
       records[[length(records) + 1]] <- data.frame(
         site_1 = s1,
         site_2 = s2,
-        n_site_1 = n1,
-        n_site_2 = n2,
+        # a site smaller than the threshold is itself a small cell: its size equals the suppressed self-overlap
+        # and bounds every pair involving it, so it is withheld (C-03)
+        n_site_1 = if (n1 >= min_cell_count) as.numeric(n1) else NA_real_,
+        n_site_2 = if (n2 >= min_cell_count) as.numeric(n2) else NA_real_,
         shared_patients = display_count,
         overlap_pct = if (suppressed) NA_real_ else pct,
         is_suppressed = suppressed,
@@ -982,7 +984,7 @@ planned_readmission_filter <- function(
 
   if (!is.null(target_table)) {
     duckdb::duckdb_register(con, "_tmp_clean_readm", clean_df)
-    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS SELECT * FROM _tmp_clean_readm", target_table))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS SELECT * FROM _tmp_clean_readm", .check_ident(target_table, "target_table")))
     duckdb::duckdb_unregister(con, "_tmp_clean_readm")
   }
 

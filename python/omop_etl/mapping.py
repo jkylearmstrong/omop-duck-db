@@ -18,6 +18,7 @@ def import_source_to_concept_map(con, csv_path, default_vocabulary_id="Local"):
       valid_end_date (optional, default '2099-12-31')
       invalid_reason (optional, default NULL)
     """
+    default_vocabulary_id = str(default_vocabulary_id).replace("'", "''")
     if not os.path.isfile(csv_path):
         raise FileNotFoundError(f"Mapping file not found: {csv_path}")
 
@@ -81,6 +82,7 @@ def import_usagi_mappings(con, usagi_csv_path, source_vocabulary_id="Custom", ap
       sourceCode, sourceName, targetConceptId, targetConceptName,
       targetDomainId, targetVocabularyId, mappingStatus, ...
     """
+    source_vocabulary_id = str(source_vocabulary_id).replace("'", "''")
     if not os.path.isfile(usagi_csv_path):
         raise FileNotFoundError(f"Usagi mapping file not found: {usagi_csv_path}")
 
@@ -89,7 +91,10 @@ def import_usagi_mappings(con, usagi_csv_path, source_vocabulary_id="Custom", ap
         SELECT * FROM read_csv_auto({sql_path_literal(usagi_csv_path)}, union_by_name = true, all_varchar = true);
     """)
 
-    status_filter = "WHERE UPPER(COALESCE(mappingStatus, 'APPROVED')) = 'APPROVED'" if approved_only else ""
+    # an unreviewed row (no status) is not an approved one; rows without a usable target are never imported
+    target_ok = "COALESCE(TRY_CAST(targetConceptId AS INTEGER), 0) <> 0"
+    status_filter = (f"WHERE UPPER(TRIM(mappingStatus)) = 'APPROVED' AND {target_ok}" if approved_only
+                     else f"WHERE {target_ok}")
 
     sql = f"""
         INSERT INTO source_to_concept_map (

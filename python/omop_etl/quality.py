@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from omop_etl.measurement_filter import DEFAULT_PHYSIOLOGIC_BOUNDS
+from omop_etl.sqlsafe import check_ident
 
 __all__ = [
     "audit_code_list_coverage",
@@ -877,7 +878,7 @@ def normalize_units(
 
     if output_table and isinstance(con_or_df, duckdb.DuckDBPyConnection):
         con_or_df.register("_temp_norm_df", df)
-        con_or_df.execute(f"CREATE OR REPLACE TABLE {output_table} AS SELECT * FROM _temp_norm_df")
+        con_or_df.execute(f"CREATE OR REPLACE TABLE {check_ident(output_table, 'output_table')} AS SELECT * FROM _temp_norm_df")
         con_or_df.unregister("_temp_norm_df")
 
     return df
@@ -1039,7 +1040,7 @@ def suggest_source_mappings(
 
     if output_table:
         con.register("_tmp_suggested_out", res_df)
-        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS SELECT * FROM _tmp_suggested_out")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(output_table, 'output_table')} AS SELECT * FROM _tmp_suggested_out")
         con.unregister("_tmp_suggested_out")
 
     return res_df

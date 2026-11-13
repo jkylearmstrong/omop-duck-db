@@ -18,6 +18,7 @@ import decimal
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -331,8 +332,11 @@ def import_omop(
         con = duckdb.connect(str(out_path))
         try:
             build_schema(con)
+            con.execute("BEGIN TRANSACTION")  # a failure part-way must not leave earlier tables emptied (M-22)
             for item in extracted:
                 t = item["table"]
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(t)):
+                    raise ValueError(f"Refusing unsafe table name: {t!r}")
                 target_cols = {r[1].lower(): r[1] for r in con.execute(f"PRAGMA table_info('{t}')").fetchall()} \
                     if con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [t]).fetchone()[0] else {}
                 if not target_cols:
@@ -348,6 +352,13 @@ def import_omop(
                 n = con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
                 dropped = [c for c in item["columns"] if c not in target_cols]
                 report.append({"table": t, "rows": n, "source_rows": item["rows"], "dropped_columns": dropped})
+            con.execute("COMMIT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
         finally:
             con.close()
     return report

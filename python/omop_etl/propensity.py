@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
+from omop_etl.sqlsafe import check_ident
 
 
 def _fit_logistic_irls(
@@ -144,7 +145,7 @@ class PropensityResult:
             table_name: Destination table or view name.
         """
         con.register(f"_tmp_{table_name}", self.data)
-        con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM _tmp_{table_name};")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(table_name, 'table_name', 1)} AS SELECT * FROM _tmp_{table_name};")
         con.unregister(f"_tmp_{table_name}")
 
 

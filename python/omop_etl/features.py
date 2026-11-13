@@ -12,6 +12,7 @@ from typing import Any, Sequence
 import duckdb
 import numpy as np
 import pandas as pd
+from ._arrow import to_arrow_table
 
 
 def extract_patient_features(
@@ -239,17 +240,17 @@ def extract_patient_features(
         return pd.DataFrame(sparse_rows)
 
     if fmt in ("arrow", "pyarrow"):
-        reader = con.execute(dense_sql).arrow()
+        reader = to_arrow_table(con.execute(dense_sql))
         return reader.read_all() if hasattr(reader, "read_all") else reader
 
     if fmt == "polars":
         try:
             import polars as pl
-            reader = con.execute(dense_sql).arrow()
+            reader = to_arrow_table(con.execute(dense_sql))
             return pl.from_arrow(reader.read_all() if hasattr(reader, "read_all") else reader)
         except ImportError:
             # Fall back to PyArrow table if polars is not installed
-            reader = con.execute(dense_sql).arrow()
+            reader = to_arrow_table(con.execute(dense_sql))
             return reader.read_all() if hasattr(reader, "read_all") else reader
 
     return con.execute(dense_sql).df()
@@ -312,8 +313,8 @@ def extract_temporal_features(
             CASE 
                 WHEN COALESCE(v.discharged_to_concept_id, 0) IN (8536, 4132319) THEN 'Home'
                 WHEN COALESCE(v.discharged_to_concept_id, 0) IN (581476) THEN 'Home Health'
-                WHEN COALESCE(v.discharged_to_concept_id, 0) IN (38004284, 8676, 8863, 8920, 38004285) THEN 'SNF/Rehab'
-                WHEN COALESCE(v.discharged_to_concept_id, 0) = 44814650 THEN 'AMA'
+                WHEN COALESCE(v.discharged_to_concept_id, 0) IN (38004284, 8676, 8863, 8920, 38004285, 32228) THEN 'SNF/Rehab'
+                WHEN COALESCE(v.discharged_to_concept_id, 0) = 32216 THEN 'AMA'
                 WHEN COALESCE(v.discharged_to_concept_id, 0) = 4216643 THEN 'Expired'
                 ELSE 'Other'
             END AS discharge_category,
@@ -399,15 +400,15 @@ def extract_temporal_features(
     """
 
     if fmt in ("arrow", "pyarrow"):
-        reader = con.execute(sql).arrow()
+        reader = to_arrow_table(con.execute(sql))
         return reader.read_all() if hasattr(reader, "read_all") else reader
     if fmt == "polars":
         try:
             import polars as pl
-            reader = con.execute(sql).arrow()
+            reader = to_arrow_table(con.execute(sql))
             return pl.from_arrow(reader.read_all() if hasattr(reader, "read_all") else reader)
         except ImportError:
-            reader = con.execute(sql).arrow()
+            reader = to_arrow_table(con.execute(sql))
             return reader.read_all() if hasattr(reader, "read_all") else reader
     return con.execute(sql).df()
 

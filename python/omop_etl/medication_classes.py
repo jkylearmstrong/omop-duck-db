@@ -29,6 +29,7 @@ from omop_etl.integrity import (
     DEFAULT_DISPENSED_TYPE_CONCEPT_IDS,
 )
 from omop_etl.paths import read_csv_sql
+from omop_etl.sqlsafe import check_ident
 
 __all__ = [
     "extract_medication_classes",
@@ -1382,7 +1383,7 @@ def compute_drug_eras(
     """
 
     if output_table:
-        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(output_table, 'output_table')} AS {sql}")
         return con.execute(f"SELECT * FROM {output_table}").fetchdf()
 
     return con.execute(sql).fetchdf()

@@ -608,8 +608,8 @@ execute_circe_cohort <- function(con,
   if (!inherits(con, "duckdb_connection")) stop("`con` must be a DuckDB connection.", call. = FALSE)
   sql <- compile_circe_to_duckdb(circe_json, target_cohort_id = target_cohort_id, cdm_schema = cdm_schema)
   DBI::dbExecute(con, sprintf("CREATE TABLE IF NOT EXISTS %s (cohort_definition_id INT, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE);", cohort_table))
-  DBI::dbExecute(con, sprintf("DELETE FROM %s WHERE cohort_definition_id = %d;", cohort_table, as.integer(target_cohort_id)))
-  DBI::dbExecute(con, sprintf("INSERT INTO %s %s;", cohort_table, sql))
+  DBI::dbExecute(con, sprintf("DELETE FROM %s WHERE cohort_definition_id = %d;", .check_ident(cohort_table, "cohort_table"), as.integer(target_cohort_id)))
+  DBI::dbExecute(con, sprintf("INSERT INTO %s %s;", .check_ident(cohort_table, "cohort_table"), sql))
   DBI::dbGetQuery(con, sprintf("SELECT * FROM %s WHERE cohort_definition_id = %d;", cohort_table, as.integer(target_cohort_id)))
 }
 

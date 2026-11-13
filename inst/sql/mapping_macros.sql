@@ -87,6 +87,15 @@ CREATE OR REPLACE MACRO parse_omop_date(col) AS (
 CREATE OR REPLACE MACRO normalize_time_str(t) AS (
     CASE
         WHEN t IS NULL OR trim(t) = '' THEN '00:00:00'
+        -- 12-hour clock ('4:15 PM', '12:05:09 am'): convert to 24-hour so the
+        -- timestamp cast cannot silently drop the meridiem (C-01).
+        WHEN regexp_matches(upper(trim(t)), '^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})? ?(AM|PM)$') THEN
+            lpad(CAST(
+                (CAST(regexp_extract(trim(t), '^([0-9]{1,2}):', 1) AS INTEGER) % 12)
+                + CASE WHEN upper(trim(t)) LIKE '%PM' THEN 12 ELSE 0 END
+            AS VARCHAR), 2, '0')
+            || ':' || regexp_extract(trim(t), '^[0-9]{1,2}:([0-9]{2})', 1)
+            || ':' || coalesce(nullif(regexp_extract(trim(t), '^[0-9]{1,2}:[0-9]{2}:([0-9]{2})', 1), ''), '00')
         WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}$') THEN '0' || trim(t) || ':00'
         WHEN regexp_matches(trim(t), '^[0-9]:[0-9]{2}:[0-9]{2}$') THEN '0' || trim(t)
         WHEN regexp_matches(trim(t), '^[0-9]{2}:[0-9]{2}$') THEN trim(t) || ':00'

@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 import duckdb
 import numpy as np
 import pandas as pd
+from omop_etl.sqlsafe import check_ident
 
 
 def cohort_from_index_stays(
@@ -176,7 +177,7 @@ def cohort_from_index_stays(
 
     if target_table:
         con.register("_cohort_out", cohort_df)
-        con.execute(f"CREATE OR REPLACE TABLE {target_table} AS SELECT * FROM _cohort_out")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(target_table, 'target_table')} AS SELECT * FROM _cohort_out")
         con.unregister("_cohort_out")
 
     return cohort_df, audit

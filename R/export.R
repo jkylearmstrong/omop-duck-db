@@ -42,6 +42,8 @@ export_cdm <- function(con,
     dir.create(normalizePath(output_path, mustWork = FALSE), showWarnings = FALSE, recursive = TRUE)
   }
 
+  tables <- vapply(tables, function(t) .check_ident(t, "table name", 1L), character(1), USE.NAMES = FALSE)
+  if (!grepl("^[A-Za-z0-9_]+$", compression)) stop("Invalid compression: ", compression, call. = FALSE)
   results <- list()
 
   if (tgt == "parquet") {
