@@ -6,7 +6,7 @@ What has been run for real, with the evidence, and what has not. Update this fil
 
 | | |
 |---|---|
-| Date | 2026-11-13 (four runs the same day) |
+| Date | 2026-11-13 (five runs the same day) |
 | Check | `scripts/verify_server_roundtrip.py` (synthetic table, 2,000 rows) |
 | Server | Oracle Database 19c Enterprise Edition, Extreme Performance (19.0.0.0.0) |
 | Driver | `python-oracledb`, SQLAlchemy `oracle+oracledb`, connection by TNS alias |
@@ -15,6 +15,7 @@ What has been run for real, with the evidence, and what has not. Update this fil
 | Run 2 (adds value-level comparison, `content=True`) | PASS with two known differences. Record: [`records/oracle-19c-roundtrip-content-2026-11-13.md`](records/oracle-19c-roundtrip-content-2026-11-13.md) |
 | Run 3 (`--nvarchar`: text columns as `NVARCHAR2`) | **PASS** with one known difference (empty strings). The non-Latin column matches by value. Record: [`records/oracle-19c-roundtrip-nvarchar-2026-11-13.md`](records/oracle-19c-roundtrip-nvarchar-2026-11-13.md) |
 | Run 4 (`--extended --scrub-test`, default schema, default `VARCHAR2` columns) | **PASS**. `if_exists` fail / append / replace, NaN / +Infinity / -Infinity / NULL doubles and password scrubbing all passed (details below). Record: [`records/oracle-19c-roundtrip-extended-2026-11-13.md`](records/oracle-19c-roundtrip-extended-2026-11-13.md) |
+| Run 5 (`--extended --schema <own account>`) | **PASS**. The same checks as run 4 (without the wrong-password login) with an explicit `schema=` naming the account's own schema. Record: [`records/oracle-19c-roundtrip-schema-2026-11-13.md`](records/oracle-19c-roundtrip-schema-2026-11-13.md) |
 | Load speed | 2,000 rows in 0.22 to 0.26 s (a rough figure; one small run) |
 
 **What the runs show.** `to_sql` created the table and loaded the rows on a live 19c server, and the scratch table was dropped afterwards. For every column the non-null count matched, and for numeric columns (BIGINT near 2^62, DOUBLE, DECIMAL(18,4)) the sum, minimum and maximum matched. With the value-level comparison, these columns matched **by value**: Latin text including accented characters (`café naïve résumé`) and 900-character strings, DATE (including dates before 1970), TIMESTAMP with fractional seconds, and BOOLEAN.
@@ -33,7 +34,7 @@ What has been run for real, with the evidence, and what has not. Update this fil
 
 **What the runs do not show.**
 
-- **`schema=` is still untested.** Every run used the account's default schema; a second schema needs a schema this account may create tables in.
+- **`schema=` was tested with the account's own schema only** (run 5): the qualified-name code path works (table-exists check, create, insert, `if_exists`, `verify_transfer`, drop). Writing into **another** schema, which needs `CREATE ANY TABLE` / `DROP ANY TABLE` and related grants, was not tested.
 - `HUGEINT` and time-zone timestamps (not compared by value) were not exercised.
 - One small run on one server with one account. Throughput at scale is unmeasured, and the value comparison reads every value, so it is slower on large tables.
 - Oracle Free 23 in CI and other Oracle versions were not run.
