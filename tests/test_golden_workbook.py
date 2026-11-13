@@ -114,6 +114,15 @@ def test_consort_final_steps_decision_is_listed():
     assert resolve_decisions("package")["consort_final_steps"] is True and resolve_decisions("delivered_2026_11_11")["consort_final_steps"] is False
 
 
+def test_age_method_decision_is_listed():
+    from omop_etl.study_run import STUDY_DECISIONS, resolve_decisions
+
+    assert "age_method" in STUDY_DECISIONS
+    assert resolve_decisions("package")["age_method"] == "completed_years"
+    assert resolve_decisions("delivered_2026_11_11")["age_method"] == "completed_years"
+    assert resolve_decisions("delivered_2026_11_11", age_method="year_difference")["age_method"] == "year_difference"
+
+
 
 @pytest.mark.parametrize("k", [1, 2, 8, 30])
 def test_any_number_of_sites(tmp_path, k):

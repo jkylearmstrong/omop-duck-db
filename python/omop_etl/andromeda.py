@@ -7,12 +7,15 @@ SQLite databases, eliminating the intermediate disk serialization bottleneck.
 from __future__ import annotations
 
 from omop_etl.paths import sanitize_sql_path
+import decimal
 import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Sequence
 import duckdb
 import pandas as pd
+
+sqlite3.register_adapter(decimal.Decimal, float)
 
 
 def _posix_path(p: str | Path) -> str:
