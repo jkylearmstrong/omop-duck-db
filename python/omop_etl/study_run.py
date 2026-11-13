@@ -21,6 +21,9 @@ __all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "run_st
 # Every choice that moves the published numbers, with the options and what each does. Nothing is hard-wired: each can be set on
 # run_study (or on reproduce_study.py) and the values used are written to <prefix>_run.json.
 STUDY_DECISIONS: dict[str, dict[str, Any]] = {
+    "age_method": {"options": ("completed_years", "year_difference"),
+                   "about": "How age at index is computed: 'completed_years' (exact whole years on index date, the 0.21.0 default) "
+                            "or 'year_difference' (calendar year boundary difference, deprecated 0.20.0 default)."},
     "address_undated": {"options": ("last", "first"),
                         "about": "Rank of an address with no start date among those in effect at admission: after dated ones (documented rule) or before them "
                                  "(what the study pandas pipeline did; with first_listed it reproduces the delivered geography)."},
@@ -40,9 +43,9 @@ STUDY_DECISIONS: dict[str, dict[str, Any]] = {
                           "about": "Continuous Table 6 rows per 1 SD, or per clinical unit (10 mmHg, 30 days, ...) as delivered. Same model; only OR and CI are rescaled."},
 }
 STUDY_PRESETS: dict[str, dict[str, Any]] = {
-    "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "deterministic", "sdi_missing_term": True, "table5": "manuscript", "attrition_mode": "windowed", "table6_increments": "sd"},
+    "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "deterministic", "sdi_missing_term": True, "table5": "manuscript", "attrition_mode": "windowed", "table6_increments": "sd", "age_method": "completed_years"},
     "delivered_2026_11_11": {"consort_final_steps": False, "address_undated": "first", "address_tie_break": "first_listed", "sdi_missing_term": False, "table5": "manuscript", "attrition_mode": "full_history",
-                             "table6_increments": "clinical"},
+                             "table6_increments": "clinical", "age_method": "completed_years"},
 }
 
 
@@ -192,6 +195,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               reuse_features: bool = False, compare_to: str | Path | None = None, prefix: str = "Study", random_state: int = 42,
               min_cell: int | None = 11, attrition_mode: str | None = None, table5: str | None = None, sdi_missing_term: bool | None = None,
               address_tie_break: str | None = None, address_undated: str | None = None, table6_increments: str | None = None, consort_final_steps: bool | None = None,
+              age_method: str | None = None,
               sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package") -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
@@ -211,15 +215,20 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     :func:`omop_etl.manuscript_tables.manuscript_workbook`).
     ``address_tie_break``: see :func:`omop_etl.geography.derive_geography_features`. ``preset`` names a set of the decisions above
     (:data:`STUDY_PRESETS`: ``"package"`` or ``"delivered_2026_11_11"``); any of ``attrition_mode``, ``table5``, ``sdi_missing_term``,
-    ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps`` given (not None) overrides the preset. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage)."""
+    ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps``, ``age_method`` given (not None) overrides the preset. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage)."""
     from omop_etl.manuscript_tables import compare_workbooks, manuscript_workbook
     from omop_etl.study_report import build_study_tables
 
     dec = resolve_decisions(preset, attrition_mode=attrition_mode, table5=table5, sdi_missing_term=sdi_missing_term,
                             address_tie_break=address_tie_break, address_undated=address_undated, table6_increments=table6_increments,
-                            consort_final_steps=consort_final_steps)
+                            consort_final_steps=consort_final_steps, age_method=age_method)
     attrition_mode, table5, sdi_missing_term, address_tie_break = (dec["attrition_mode"], dec["table5"], dec["sdi_missing_term"], dec["address_tie_break"])
     undated = dec["address_undated"]
+    c_params = dict(cohort_params or PROTOCOL_COHORT_PARAMS)
+    # an explicit age_method wins over cohort_params; the preset's value only fills a cohort_params that does not set one
+    if age_method is not None or "age_method" not in c_params:
+        c_params["age_method"] = dec["age_method"]
+    dec["age_method"] = c_params["age_method"]  # the run record shows the rule that was actually used
     db, out = Path(db_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     if isinstance(site_labels, (str, Path)) and str(site_labels) not in ("random", "ordered"):
@@ -243,7 +252,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             frames.append(pd.read_parquet(f))
             atts.append(pd.read_csv(a))
             continue
-        df, att = _site_frame(db, site, start=start, end=end, params=cohort_params or PROTOCOL_COHORT_PARAMS, profile=profile, pinned=pinned,
+        df, att = _site_frame(db, site, start=start, end=end, params=c_params, profile=profile, pinned=pinned,
                               ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
                               transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=out,
                               attrition_mode=attrition_mode)

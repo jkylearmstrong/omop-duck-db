@@ -381,6 +381,7 @@ from omop_etl.synthetic import (
 )
 from omop_etl.lakehouse import (
     omop_connect_lakehouse,
+    export_to_delta_lake,
 )
 from omop_etl.remapping import (
     auto_remap_unmapped,
@@ -601,6 +602,7 @@ __all__ = [
     "SurvivalResult",
     # Lakehouse Connector
     "omop_connect_lakehouse",
+    "export_to_delta_lake",
     # Cluster Execution
     "cluster_submit",
     "build_cluster_command",

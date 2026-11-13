@@ -1,3 +1,7 @@
+# omopduckdb (development version)
+
+- **Study run and lakehouse additions (Python only).** `age_method` is a study decision: `run_study(age_method=)` and `reproduce_study.py --age-method` choose `"completed_years"` (both presets) or the deprecated `"year_difference"`; an explicit value overrides `cohort_params`, and `<prefix>_run.json` records the rule actually used. `export_to_delta_lake()` (new `[delta]` extra) writes a DataFrame, DuckDB relation, DuckDB table or Parquet file / directory to a Delta Lake table, with `scripts/export_delta_lake.py` as its command line; `scripts/compare_study_deltas.py` writes `<prefix>_Deltas.csv`, `<prefix>_Delta_Rows.csv` and an optional Markdown summary for two manuscript workbooks. `export_to_andromeda()` registers a `Decimal` adapter so DuckDB `DECIMAL` columns export to SQLite. R has no `run_study()` or Delta writer, so these stay Python-only; R's `define_study_cohort()` already takes `age_method`.
+
 # omopduckdb 0.22.0
 
 Documentation release: vignettes consolidated from 14 to 12 and grouped on the website; `OHDSI_INTEGRATION.md` is now the `ohdsi_integration` vignette; new runnable `inst/examples/bigquery_duckdb_roundtrip.qmd` (offline by default) checks the BigQuery demo and a BigQuery to DuckDB copy. No code changes. Version bump 0.21.0 to 0.22.0.
