@@ -6,7 +6,7 @@ What has been run for real, with the evidence, and what has not. Update this fil
 
 | | |
 |---|---|
-| Date | 2026-11-13 (three runs the same day) |
+| Date | 2026-11-13 (four runs the same day) |
 | Check | `scripts/verify_server_roundtrip.py` (synthetic table, 2,000 rows) |
 | Server | Oracle Database 19c Enterprise Edition, Extreme Performance (19.0.0.0.0) |
 | Driver | `python-oracledb`, SQLAlchemy `oracle+oracledb`, connection by TNS alias |
@@ -14,6 +14,7 @@ What has been run for real, with the evidence, and what has not. Update this fil
 | Run 1 (counts and sums) | PASS. Record: [`records/oracle-19c-roundtrip-2026-11-13.md`](records/oracle-19c-roundtrip-2026-11-13.md) |
 | Run 2 (adds value-level comparison, `content=True`) | PASS with two known differences. Record: [`records/oracle-19c-roundtrip-content-2026-11-13.md`](records/oracle-19c-roundtrip-content-2026-11-13.md) |
 | Run 3 (`--nvarchar`: text columns as `NVARCHAR2`) | **PASS** with one known difference (empty strings). The non-Latin column matches by value. Record: [`records/oracle-19c-roundtrip-nvarchar-2026-11-13.md`](records/oracle-19c-roundtrip-nvarchar-2026-11-13.md) |
+| Run 4 (`--extended --scrub-test`, default schema, default `VARCHAR2` columns) | **PASS**. `if_exists` fail / append / replace, NaN / +Infinity / -Infinity / NULL doubles and password scrubbing all passed (details below). Record: [`records/oracle-19c-roundtrip-extended-2026-11-13.md`](records/oracle-19c-roundtrip-extended-2026-11-13.md) |
 | Load speed | 2,000 rows in 0.22 to 0.26 s (a rough figure; one small run) |
 
 **What the runs show.** `to_sql` created the table and loaded the rows on a live 19c server, and the scratch table was dropped afterwards. For every column the non-null count matched, and for numeric columns (BIGINT near 2^62, DOUBLE, DECIMAL(18,4)) the sum, minimum and maximum matched. With the value-level comparison, these columns matched **by value**: Latin text including accented characters (`café naïve résumé`) and 900-character strings, DATE (including dates before 1970), TIMESTAMP with fractional seconds, and BOOLEAN.
@@ -23,10 +24,17 @@ What has been run for real, with the evidence, and what has not. Update this fil
 1. **Empty strings become NULL** (667 sent, 0 stored). This is Oracle's normal behaviour. The value comparison treats an empty string as NULL on the local side for Oracle, so that column's content matches and only its non-null count differs.
 2. **Non-Latin text is not preserved.** The database character set is `WE8MSWIN1252`, which cannot store Japanese characters. Every value of the Japanese test column came back with each character replaced by `¿` (each eight-character Japanese string came back as eight `¿` followed by the row number, for example `¿¿¿¿¿¿¿¿ 56`). `to_sql` raised no error and no warning, and counts and sums alone could not see it; only the value comparison did. **Do not push text that may contain non-Latin characters (for example patient names, addresses or free-text notes in other languages) to a database like this without checking.** A database with `AL32UTF8` should keep it; that was not tested. `to_sql` now warns when the target database cannot store text it is loading. **Fix, verified in run 3:** `to_sql(..., nvarchar=True)` creates the text columns as `NVARCHAR2` (national character set `AL16UTF16`), and the same Japanese strings then round-trip unchanged on this server. The first live attempt of that option failed (every text column became `NCLOB`, and Oracle cannot `count()` a LOB); that was fixed before run 3, which is why the run count above is three.
 
+**Run 4 results (extended checks).**
+
+- `if_exists='fail'` refused an existing table; `'append'` left the remote equal to the local rows twice; `'replace'` restored the original rows. All compared with `verify_transfer(content=True)`.
+- `NaN`, `+Infinity`, `-Infinity`, `NULL` and `1.5` stored as `BINARY_DOUBLE` read back unchanged, and `verify_transfer` agrees (it was changed to treat NaN as equal to NaN and infinities as exact; a first version that called `inf` and `-inf` close was caught by a unit test before this run).
+- **Credential scrubbing with the real driver:** one deliberate login with a wrong password failed with `ORA-01017`, and neither the wrong password nor the real one appeared in the error. This covers the `to_sql` error path only.
+- The default-column run printed the new `to_sql` warning (the character set `WE8MSWIN1252` cannot store the Japanese column, 2000 of 2000 rows), so the character-set detection works against a live server.
+
 **What the runs do not show.**
 
-- Only the account's default schema was used (`schema=` untested), with `if_exists="fail"` only. `replace` and `append` were not run.
-- NaN / Infinity doubles, `HUGEINT`, time-zone timestamps (not compared by value) and a failed-login error message (credential scrubbing with the real driver) were not exercised.
+- **`schema=` is still untested.** Every run used the account's default schema; a second schema needs a schema this account may create tables in.
+- `HUGEINT` and time-zone timestamps (not compared by value) were not exercised.
 - One small run on one server with one account. Throughput at scale is unmeasured, and the value comparison reads every value, so it is slower on large tables.
 - Oracle Free 23 in CI and other Oracle versions were not run.
 
@@ -48,4 +56,4 @@ What has been run for real, with the evidence, and what has not. Update this fil
 
 ## Everything else
 
-The offline test suite runs on every change (1,643 tests passed, 29 skipped, on 2026-11-13 on a Windows workstation with Python 3.13). Gaps still open are listed in [`real-world-testing-plan.md`](real-world-testing-plan.md).
+The offline test suite runs on every change (1,653 tests passed, 29 skipped, on 2026-11-13 on a Windows workstation with Python 3.13). Gaps still open are listed in [`real-world-testing-plan.md`](real-world-testing-plan.md).
