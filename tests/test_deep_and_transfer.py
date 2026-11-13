@@ -241,6 +241,14 @@ def test_nvarchar_length_stays_within_nvarchar2_unless_the_data_needs_a_lob():
     assert "NVARCHAR2(2000)" in ddl(2000) and "NCLOB" in ddl(4001)
 
 
+def test_close_treats_nan_and_infinity_as_equal_to_themselves():
+    nan, inf = float("nan"), float("inf")
+    assert load_sql._close(None, None, 1e-9) and not load_sql._close(None, 1.0, 1e-9)
+    assert load_sql._close(nan, nan, 1e-9) and not load_sql._close(nan, 1.0, 1e-9)
+    assert load_sql._close(inf, inf, 1e-9) and not load_sql._close(inf, -inf, 1e-9) and not load_sql._close(inf, 1.0, 1e-9)
+    assert load_sql._close(199900.0, 199899.99999999997, 1e-9) and not load_sql._close(1.0, 1.1, 1e-9)
+
+
 def test_target_codec_is_only_used_for_oracle(tmp_path):
     eng = sa.create_engine(f"sqlite:///{(tmp_path / 'c.db').as_posix()}")
     assert load_sql._target_codec(eng, "sqlite") == (None, None)

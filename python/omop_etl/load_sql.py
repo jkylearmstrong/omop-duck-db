@@ -158,6 +158,17 @@ def _target_codec(engine: Any, dialect: str) -> tuple[str | None, str | None]:
     return (None if name in _ORACLE_UNICODE else _ORACLE_CODECS.get(name)), name or None
 
 
+def _close(fx: float | None, fy: float | None, rtol: float) -> bool:
+    """Numbers agree: both missing, both NaN, equal (this includes equal infinities), or within ``rtol`` (relative to max(1, |fx|))."""
+    if fx is None or fy is None:
+        return fx is None and fy is None
+    if fx != fx or fy != fy:
+        return fx != fx and fy != fy
+    if abs(fx) == float("inf") or abs(fy) == float("inf"):
+        return fx == fy
+    return fx == fy or abs(fx - fy) <= rtol * max(1.0, abs(fx))
+
+
 def _unicode_text_length(max_len: int | None, varchar_length: int) -> int:
     """Length passed to the NVARCHAR2 mapping: ``NVARCHAR2`` holds at most 2000 characters, so a column whose longest value fits gets one
     (an ``NCLOB`` column cannot be counted or compared with plain SQL aggregates), and a longer one gets ``NCLOB`` (4001 selects it)."""
@@ -308,7 +319,7 @@ def verify_transfer(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapp
                     for label, x, y in zip(("non_null", "sum", "min", "max"), a, b):
                         fx = None if x is None else float(x)
                         fy = None if y is None else float(y)
-                        ok = (fx is None and fy is None) or (fx is not None and fy is not None and abs(fx - fy) <= rtol * max(1.0, abs(fx)))
+                        ok = _close(fx, fy, rtol)
                         rows.append({"table": target, "column": f"{name}:{label}", "local": fx, "remote": fy, "match": bool(ok)})
                     kind = _content_kind(typ) if content else None
                     if kind:
