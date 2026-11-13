@@ -29,6 +29,33 @@ navbar:
       text: Request a feature
       href: https://github.com/jkylearmstrong/omop-duck-db/issues/new?template=feature_request.yml
 
+articles:
+- title: Build and operate
+  desc: Create the CDM, load the vocabulary, map concepts, run the tests.
+  contents:
+  - database_and_mapping
+- title: Cohorts and features
+  contents:
+  - study_cohorts_and_features
+  - study_features
+  - study_design_tools
+- title: Clinical tools and multi-site work
+  contents:
+  - clinical_tools_and_consortium
+  - disclosure_and_site_packages
+- title: Machine learning and OHDSI
+  contents:
+  - ml_bridge
+  - deep_learning_and_benchmarks
+  - ohdsi_integration
+- title: Cloud and demos
+  contents:
+  - bigquery_synthetic_demo
+- title: Reproducibility and status
+  contents:
+  - reproducing_the_manuscript
+  - status_and_roadmap
+
 reference:
 - title: Schema and vocabulary
   desc: Initialize CDM tables and manage standard Athena vocabularies.

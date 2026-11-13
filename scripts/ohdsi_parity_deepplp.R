@@ -79,5 +79,5 @@ cat("All DeepPatientLevelPrediction parity checks passed.\n")
 # Notes
 # 1. With ~2% of patients having no covariate at all, DeepPLP 2.4.0 stopped with "index 3000 is out of bounds for dimension 0 with
 #    size 2924" on this bridged data. Whether native FeatureExtraction data behaves the same was not checked, so the fixture gives
-#    every patient at least one covariate and this limitation is recorded in OHDSI_INTEGRATION.md rather than hidden.
+#    every patient at least one covariate and this limitation is recorded in vignette("ohdsi_integration") rather than hidden.
 # 2. Python torch must be importable by reticulate (RETICULATE_PYTHON); a Windows venv with torch 2.14 (CPU) and polars was used.

@@ -1,4 +1,15 @@
-# omop-duck-db and the OHDSI tools
+---
+title: "omop-duck-db and the OHDSI tools"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{omop-duck-db and the OHDSI tools}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
 
 omop-duck-db exists to run OMOP studies on DuckDB databases. OHDSI already has tools for most of what a study needs, so the
 rule for this package is:
