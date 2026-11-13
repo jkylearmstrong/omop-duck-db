@@ -143,8 +143,9 @@ summarize_bigquery_demo <- function(features, availability = NULL) {
   if (!requireNamespace("bigrquery", quietly = TRUE)) stop("run_bigquery_demo() needs the bigrquery package.", call. = FALSE)
   list(
     execute = function(sql) bigrquery::bq_job_wait(bigrquery::bq_perform_query(sql, billing = billing_project, quiet = TRUE), quiet = TRUE),
-    fetch = function(sql) as.data.frame(bigrquery::bq_table_download(
-      bigrquery::bq_project_query(billing_project, sql, quiet = TRUE), bigint = "integer", quiet = TRUE)),
+    # integer64, not "integer": a 32-bit read turns every id above 2^31 - 1 into NA. Key ids stay integer64.
+    fetch = function(sql) .bq_int64_columns(as.data.frame(bigrquery::bq_table_download(
+      bigrquery::bq_project_query(billing_project, sql, quiet = TRUE), bigint = "integer64", quiet = TRUE))),
     ensure_dataset = function(dataset) {
       ds <- bigrquery::bq_dataset(strsplit(dataset, ".", fixed = TRUE)[[1]][[1]], strsplit(dataset, ".", fixed = TRUE)[[1]][[2]])
       if (!bigrquery::bq_dataset_exists(ds)) bigrquery::bq_dataset_create(ds)
@@ -245,7 +246,9 @@ run_bigquery_demo <- function(billing_project = NULL, output_dir = "bigquery_dem
   summary$disclaimer <- BIGQUERY_DEMO_DISCLAIMER
   summary$run <- run
   jsonlite::write_json(summary, file.path(output_dir, "demo_summary.json"), auto_unbox = TRUE, pretty = TRUE, null = "null")
-  utils::write.csv(features, file.path(output_dir, "demo_features.csv"), row.names = FALSE)
+  csv <- features
+  for (nm in names(csv)) if (inherits(csv[[nm]], "integer64")) csv[[nm]] <- as.character(csv[[nm]])  # exact ids
+  utils::write.csv(csv, file.path(output_dir, "demo_features.csv"), row.names = FALSE)
   writeLines(.demo_report(summary, run), file.path(output_dir, "demo_report.md"))
   invisible(summary)
 }

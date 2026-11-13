@@ -244,8 +244,9 @@ def run_demo(billing_project: str, output_dir: str | Path = "bigquery_demo_out",
     features_sql = render_template(_resource("sql", "bigquery_demo_features.sql").read_text(encoding="utf-8"), **values)
     avail_sql = render_template(_resource("sql", "bigquery_demo_availability.sql").read_text(encoding="utf-8"), **values)
     (out / "cohort.googlesql.sql").write_text(cohort_sql + ";\n", encoding="utf-8")
-    (out / "features.googlesql.sql").write_text(features_sql + ";\n", encoding="utf-8")
-    (out / "availability.googlesql.sql").write_text(avail_sql + ";\n", encoding="utf-8")
+    # rstrip: the same bytes as the R writer, so the two languages' SQL can be compared file for file
+    (out / "features.googlesql.sql").write_text(features_sql.rstrip() + ";\n", encoding="utf-8")
+    (out / "availability.googlesql.sql").write_text(avail_sql.rstrip() + ";\n", encoding="utf-8")
 
     run = {"billing_project": billing_project, "dataset": dataset, "scratch_dataset": scratch,
            "cohort_json": cohort_json.name, "cohort_id": cohort_id, "dry_run": dry_run, "timings_seconds": timings}

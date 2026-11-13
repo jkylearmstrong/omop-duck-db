@@ -29,6 +29,7 @@
 .dockerignore
 ^Dockerfile$
 ^scripts$
+^testing$
 ^\.Renviron$
 ^NOTES\.md$
 ^omop-duck-db-hex\.png$
