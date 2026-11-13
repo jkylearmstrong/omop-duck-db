@@ -10,7 +10,8 @@ The other direction already exists: :func:`omop_etl.extract.import_omop` copies 
   round trip (DuckDB -> Oracle -> DuckDB) can be shown to be lossless.
 
 Credentials come from a SQLAlchemy URL or ``env:NAME`` and never appear in messages. The offline tests run the same code against SQLite
-and compile the Oracle DDL without a server; nothing here has been run against a live Oracle database.
+and compile the Oracle DDL without a server. ``scripts/verify_server_roundtrip.py`` has been run against one live Oracle 19c server (see
+``testing/tested-environments.md`` for what that does and does not show).
 """
 
 from __future__ import annotations

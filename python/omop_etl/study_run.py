@@ -261,7 +261,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         att.to_csv(a, index=False)
         frames.append(df)
         atts.append(att)
-        timings[f"site_{site}"] = round(time.time() - t_site, 1)
+        timings[f"site_{labels.get(site, site)}"] = round(time.time() - t_site, 1)  # keyed by the anonymous letter: the run record is shareable and must not name sites
     pooled = pd.concat(frames, ignore_index=True, sort=False)
     attrition = pd.concat(atts, ignore_index=True)
     if not dec["consort_final_steps"]:
