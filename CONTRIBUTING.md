@@ -18,3 +18,7 @@ Several people (and AI sessions) often work from the same review report or issue
 ## Releases
 
 A release is a version bump (`DESCRIPTION`, `pyproject.toml`, `python/omop_etl/__init__.py`, `python/omop_duck_db/__init__.py`), a merged PR, then a `v*` tag pushed from `main`. The tag triggers the Docker workflow, which runs both test suites and publishes the image.
+
+## README
+
+`README.md` is generated from `README.Rmd`: edit the `.Rmd`, then run `Rscript scripts/render_readme.R` (needs Quarto, knitr and rmarkdown). `Rscript scripts/render_readme.R --check` exits non-zero if `README.md` is stale.

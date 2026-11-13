@@ -1,9 +1,12 @@
 ---
-title: "omop-duck-db"
 format: gfm
 ---
 
-<!-- README.md is generated from README.Rmd; edit this file, then render it. It holds no code chunks to run. -->
+```{r, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+<!-- README.md is generated from README.Rmd. Edit README.Rmd, then run: quarto render README.Rmd (or scripts/render_readme.R). Do not edit README.md by hand. -->
 
 # omop-duck-db <a href="https://jkylearmstrong.github.io/omop-duck-db/"><img src="man/figures/logo.png" align="right" height="139" alt="omop-duck-db website" /></a>
 
