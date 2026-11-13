@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 import duckdb
+import pandas as pd
 
 DEFAULT_LAKEHOUSE_TABLES = [
     "person",
@@ -181,3 +182,75 @@ def omop_connect_lakehouse(
                     pass
 
     return con
+
+
+def export_to_delta_lake(
+    data: Any,
+    table_uri: str | Path,
+    *,
+    table_name: str | None = None,
+    mode: str = "overwrite",
+    partition_by: Sequence[str] | None = None,
+    storage_options: Mapping[str, Any] | None = None,
+) -> Path | str:
+    """Exports a pandas DataFrame, DuckDB table, or Parquet dataset to Delta Lake.
+
+    Requires the ``deltalake`` package. Writes ACID-compliant, versioned Delta Lake tables
+    with support for partition pruning and schema validation.
+
+    Args:
+        data: A pandas DataFrame, DuckDB connection, or Path to a parquet file/dir.
+        table_uri: Target directory path or cloud URI (s3://, gcs://, abfs://) for the Delta table.
+        table_name: Table name if ``data`` is a DuckDB connection.
+        mode: Write mode ('overwrite', 'append', 'error', 'ignore'). Default 'overwrite'.
+        partition_by: Optional sequence of column names to partition the Delta table by.
+        storage_options: Optional storage options mapping for cloud object stores.
+
+    Returns:
+        Path | str: Path or URI to the target Delta Lake directory.
+    """
+    try:
+        import deltalake
+    except ImportError as exc:
+        raise ImportError(
+            "The 'deltalake' package is required for export_to_delta_lake(). "
+            "Install it with 'pip install deltalake'."
+        ) from exc
+
+    is_remote = str(table_uri).startswith(("s3://", "s3a://", "http://", "https://", "azure://", "abfs://", "gcs://"))
+    target_str = str(table_uri).rstrip("/\\")
+
+    if not is_remote:
+        target_path = Path(table_uri).resolve()
+        target_path.mkdir(parents=True, exist_ok=True)
+        target_str = str(target_path)
+
+    if isinstance(data, pd.DataFrame):
+        df = data
+    elif hasattr(data, "execute") and hasattr(data, "df"):
+        if not table_name:
+            raise ValueError("table_name must be specified when exporting from a DuckDB connection")
+        df = data.execute(f"SELECT * FROM {table_name}").df()
+    elif isinstance(data, (str, Path)):
+        p = Path(data)
+        if p.is_file():
+            df = pd.read_parquet(p)
+        elif p.is_dir():
+            pq_files = list(p.glob("*.parquet")) + list(p.glob("**/*.parquet"))
+            if not pq_files:
+                raise FileNotFoundError(f"No parquet files found under directory {p}")
+            df = pd.concat([pd.read_parquet(f) for f in pq_files], ignore_index=True)
+        else:
+            raise FileNotFoundError(f"Source path does not exist: {p}")
+    else:
+        raise TypeError(f"Unsupported data source type: {type(data)}")
+
+    deltalake.write_deltalake(
+        target_str,
+        df,
+        mode=mode,
+        partition_by=list(partition_by) if partition_by else None,
+        storage_options=dict(storage_options) if storage_options else None,
+    )
+
+    return Path(target_str) if not is_remote else target_str
