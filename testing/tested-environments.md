@@ -6,22 +6,27 @@ What has been run for real, with the evidence, and what has not. Update this fil
 
 | | |
 |---|---|
-| Date | 2026-11-13 |
+| Date | 2026-11-13 (two runs the same day) |
 | Check | `scripts/verify_server_roundtrip.py` (synthetic table, 2,000 rows) |
 | Server | Oracle Database 19c Enterprise Edition, Extreme Performance (19.0.0.0.0) |
 | Driver | `python-oracledb`, SQLAlchemy `oracle+oracledb`, connection by TNS alias |
 | Settings | `NLS_CHARACTERSET = WE8MSWIN1252`, `NLS_NCHAR_CHARACTERSET = AL16UTF16`, `NLS_LENGTH_SEMANTICS = BYTE` |
-| Result | **PASS**. Record: [`records/oracle-19c-roundtrip-2026-11-13.md`](records/oracle-19c-roundtrip-2026-11-13.md) |
-| Load speed | 2,000 rows in 0.26 s (a rough figure; one small run) |
+| Run 1 (counts and sums) | PASS. Record: [`records/oracle-19c-roundtrip-2026-11-13.md`](records/oracle-19c-roundtrip-2026-11-13.md) |
+| Run 2 (adds value-level comparison, `content=True`) | PASS with two known differences. Record: [`records/oracle-19c-roundtrip-content-2026-11-13.md`](records/oracle-19c-roundtrip-content-2026-11-13.md) |
+| Load speed | 2,000 rows in 0.22 to 0.26 s (a rough figure; one small run) |
 
-**What the pass shows.** `to_sql` created the table and loaded the rows on a live 19c server. For every column, the non-null count matched. For numeric columns (BIGINT near 2^62, DOUBLE, DECIMAL(18,4)) the sum, minimum and maximum matched. The scratch table was dropped afterwards. The known Oracle difference was seen as expected: empty strings are stored as NULL (667 local, 0 remote in the `txt_empty` column).
+**What the runs show.** `to_sql` created the table and loaded the rows on a live 19c server, and the scratch table was dropped afterwards. For every column the non-null count matched, and for numeric columns (BIGINT near 2^62, DOUBLE, DECIMAL(18,4)) the sum, minimum and maximum matched. With the value-level comparison, these columns matched **by value**: Latin text including accented characters (`café naïve résumé`) and 900-character strings, DATE (including dates before 1970), TIMESTAMP with fractional seconds, and BOOLEAN.
 
-**What it does not show.**
+**Two differences, both expected on this server.**
 
-- **Text, dates and timestamps are checked by non-null count only**, not by value. The server's character set is `WE8MSWIN1252`, which cannot hold the Japanese test strings, so those characters were very likely replaced on the way in. The check could not see that. Do not read this record as proof that non-Latin text survives. `verify_transfer(content=True)` (value-level comparison) was added afterwards; this record predates it, and a rerun on the same server is pending.
+1. **Empty strings become NULL** (667 sent, 0 stored). This is Oracle's normal behaviour. The value comparison treats an empty string as NULL on the local side for Oracle, so that column's content matches and only its non-null count differs.
+2. **Non-Latin text is not preserved.** The database character set is `WE8MSWIN1252`, which cannot store Japanese characters. Every value of the Japanese test column came back with each character replaced by `¿` (each eight-character Japanese string came back as eight `¿` followed by the row number, for example `¿¿¿¿¿¿¿¿ 56`). `to_sql` raised no error and no warning, and counts and sums alone could not see it; only the value comparison did. **Do not push text that may contain non-Latin characters (for example patient names, addresses or free-text notes in other languages) to a database like this without checking.** A database with `AL32UTF8` should keep it; that was not tested. A warning from `to_sql` for non-Unicode targets is a sensible follow-up.
+
+**What the runs do not show.**
+
 - Only the account's default schema was used (`schema=` untested), with `if_exists="fail"` only. `replace` and `append` were not run.
-- NaN / Infinity doubles, `HUGEINT`, time-zone timestamps and a failed-login error message (credential scrubbing with the real driver) were not exercised.
-- One small run on one server with one account. Throughput at scale is unmeasured.
+- NaN / Infinity doubles, `HUGEINT`, time-zone timestamps (not compared by value) and a failed-login error message (credential scrubbing with the real driver) were not exercised.
+- One small run on one server with one account. Throughput at scale is unmeasured, and the value comparison reads every value, so it is slower on large tables.
 - Oracle Free 23 in CI and other Oracle versions were not run.
 
 ## DGX Spark: `Dockerfile.dgx` and `scripts/dgx_smoke_test.py`
