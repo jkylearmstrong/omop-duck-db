@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Un
 import duckdb
 import numpy as np
 import pandas as pd
+from omop_etl.sqlsafe import check_ident
 
 
 # -----------------------------------------------------------------------------
@@ -900,8 +901,10 @@ def consortium_patient_overlap(
             records.append({
                 "site_1": s1,
                 "site_2": s2,
-                "n_site_1": n1,
-                "n_site_2": n2,
+                # a site smaller than the threshold is itself a small cell: its size would equal the suppressed
+                # self-overlap (shared == n on the diagonal) and bound every pair involving it, so it is withheld (C-03)
+                "n_site_1": n1 if n1 >= min_cell_count else float("nan"),
+                "n_site_2": n2 if n2 >= min_cell_count else float("nan"),
                 "shared_patients": display_count,
                 # the percentage would reveal the suppressed count, so it is withheld too
                 "overlap_pct": float("nan") if suppressed else pct,
@@ -1103,7 +1106,7 @@ def planned_readmission_filter(
     clean_df = df[df["is_planned"] == 0].drop(columns=["is_planned"]).reset_index(drop=True)
 
     if target_table:
-        con.execute(f"CREATE OR REPLACE TABLE {target_table} AS SELECT * FROM df WHERE is_planned = 0")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(target_table, 'target_table')} AS SELECT * FROM df WHERE is_planned = 0")
 
     return pd.DataFrame(records), clean_df
 

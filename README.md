@@ -87,7 +87,7 @@ library(omopduckdb)
 
 db_path <- tempfile(fileext = ".duckdb")
 build_schema(db_path)
-#> Schema built at C:\Users\jkyle\AppData\Local\Temp\RtmpoJ2PVA\file6a0864f2dde.duckdb
+#> Schema built at C:omop_cdm.duckdb
 
 con <- DBI::dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 DBI::dbListTables(con)[1:10]
@@ -132,7 +132,7 @@ e.g.
 
 - From a new download:
   `load_vocabulary("path/to/new_download", "omop_cdm.duckdb")`. Each
-  table is truncated and reloaded inside its own transaction with a
+  table is deleted and reloaded inside its own transaction with a
   row-count sanity check, so a bad/partial file can only fail that one
   table (rolled back, left untouched), not half-clobber the rest of the
   vocabulary.
@@ -189,27 +189,28 @@ unmapped codes:
 1.  **Audit unmapped codes**:
 
     ``` r
-    export_unmapped_codes("omop_cdm.duckdb", "condition_occurrence", "unmapped_conditions.csv")
+    con <- omop_connect("omop_cdm.duckdb")
+    export_unmapped_codes(con, "condition_occurrence", "unmapped_conditions.csv")
     ```
 
 2.  **Import custom crosswalks or Usagi exports**:
 
     ``` r
     # Load custom source_to_concept_map CSV
-    import_source_to_concept_map("mappings.csv", "omop_cdm.duckdb")
+    import_source_to_concept_map(con, "mappings.csv")
 
     # Or import OHDSI Usagi review export CSV
-    import_usagi_mappings("usagi_reviewed.csv", "omop_cdm.duckdb")
+    import_usagi_mappings(con, "usagi_reviewed.csv")
     ```
 
 3.  **Retroactively remap populated CDM tables**:
 
     ``` r
     # Preview changes without modifying data (dry run)
-    remap_cdm_table("condition_occurrence", "omop_cdm.duckdb", dry_run = TRUE)
+    remap_cdm_table(con, "condition_occurrence", dry_run = TRUE)
 
     # Apply remapping across all tables and rebuild condition/drug eras
-    remap_all("omop_cdm.duckdb")
+    remap_all(con)
     ```
 
 Equivalent functions are available in Python via
@@ -237,14 +238,14 @@ con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
 # Build general study cohort (or specialized build_readmission_cohort / build_end_of_life_cohort)
 cohort_df <- define_study_cohort(
   con,
-  visit_types = "inpatient",
+  visit_type = "inpatient",
   washin_days = 365,
   followup_days = 30,
   min_age = 18,
   min_los_days = 1,
   sampling_rule = "first",
   require_verified_followup = TRUE,
-  target_table = "cohort"
+  table_name = "cohort"
 )
 ```
 
@@ -255,14 +256,14 @@ from omop_etl import define_study_cohort
 
 cohort_df = define_study_cohort(
     con,
-    visit_types="inpatient",
+    visit_type="inpatient",
     washin_days=365,
     followup_days=30,
     min_age=18,
     min_los_days=1,
     sampling_rule="first",
     require_verified_followup=True,
-    target_table="cohort"
+    table_name="cohort"
 )
 ```
 
@@ -331,15 +332,15 @@ library(omopduckdb)
 
 con <- DBI::dbConnect(duckdb::duckdb(), "omop_cdm.duckdb")
 
-# Build cohort into OMOP cohort table (cohort_definition_id = 1)
+# Build cohort into OMOP cohort table (cohort_id = 1)
 cohort_df <- build_readmission_cohort(
   con,
   washin_days = 365,
-  followup_days = 30,
-  index_rule = "random",
-  random_seed = 42,
+  followup_window_days = 30,
+  index_selection_rule = "random",
+  random_state = 42,
   require_verified_followup = TRUE,
-  target_table = "cohort"
+  table_name = "cohort"
 )
 ```
 
@@ -353,11 +354,11 @@ con = duckdb.connect("omop_cdm.duckdb")
 cohort_df = build_readmission_cohort(
     con,
     washin_days=365,
-    followup_days=30,
-    index_rule="random",
-    random_seed=42,
+    followup_window_days=30,
+    index_selection_rule="random",
+    random_state=42,
     require_verified_followup=True,
-    target_table="cohort"
+    table_name="cohort"
 )
 ```
 
@@ -372,7 +373,7 @@ demographics:
 temporal_features <- extract_temporal_features(
   con,
   cohort_table = "cohort",
-  cohort_definition_id = 1,
+  cohort_id = 1,
   lookback_days = 365
 )
 ```
@@ -385,7 +386,7 @@ from omop_etl import extract_temporal_features
 temporal_features = extract_temporal_features(
     con,
     cohort_table="cohort",
-    cohort_definition_id=1,
+    cohort_id=1,
     lookback_days=365
 )
 ```
@@ -401,7 +402,7 @@ vitals using acute pre-discharge aggregation strategies:
 med_features <- aggregate_concept_sets(
   con,
   cohort_table = "cohort",
-  cohort_definition_id = 1,
+  cohort_id = 1,
   domain = "drug",
   concept_sets = DEFAULT_MEDICATION_CONCEPTS,
   lookback_days = 365
@@ -411,7 +412,7 @@ med_features <- aggregate_concept_sets(
 lab_features <- extract_measurements(
   con,
   cohort_table = "cohort",
-  cohort_definition_id = 1,
+  cohort_id = 1,
   loinc_map = DEFAULT_LAB_LOINCS,
   strategy = "last_before_discharge"
 )
@@ -430,7 +431,7 @@ from omop_etl import (
 med_features = aggregate_concept_sets(
     con,
     cohort_table="cohort",
-    cohort_definition_id=1,
+    cohort_id=1,
     domain="drug",
     concept_sets=DEFAULT_MEDICATION_CONCEPTS,
     lookback_days=365
@@ -439,7 +440,7 @@ med_features = aggregate_concept_sets(
 lab_features = extract_measurements(
     con,
     cohort_table="cohort",
-    cohort_definition_id=1,
+    cohort_id=1,
     loinc_map=DEFAULT_LAB_LOINCS,
     strategy="last_before_discharge"
 )
@@ -455,16 +456,16 @@ statistical tests, along with a Table 1b completeness audit:
 ``` r
 table1_out <- generate_table1(
   patient_df,
-  strata = "readmitted_30d",
+  strata_col = "readmitted_30d",
   continuous_vars = c("age_at_admission", "los_days", "prior_ed_visits"),
-  cat_vars = c("gender", "race", "tobacco_status")
+  categorical_vars = c("gender", "race", "tobacco_status")
 )
 
 # Baseline summary with SMD and p-values
 print(table1_out$table1)
 
 # Missingness and completeness audit
-print(table1_out$table1b_missingness)
+print(table1_out$table1b)
 ```
 
 In Python:
@@ -472,11 +473,11 @@ In Python:
 ``` python
 from omop_etl import generate_table1
 
-t1_df, t1b_df = generate_table1(
+t1 = generate_table1(
     patient_df,
-    strata="readmitted_30d",
+    strata_col="readmitted_30d",
     continuous_vars=["age_at_admission", "los_days", "prior_ed_visits"],
-    cat_vars=["gender", "race", "tobacco_status"]
+    categorical_vars=["gender", "race", "tobacco_status"]
 )
 ```
 
@@ -493,9 +494,9 @@ reconciliation <- validate_table1_reconciliation(
   tolerance = 0.05
 )
 
-if (!reconciliation$passed) {
+if (!reconciliation$is_concordant) {
   warning("Table 1 discrepancy detected!")
-  print(reconciliation$discrepancies)
+  print(reconciliation$feature_comparisons)
 }
 ```
 
@@ -505,11 +506,11 @@ In Python:
 from omop_etl import validate_table1_reconciliation
 
 reconciliation = validate_table1_reconciliation(
-    omop_table1=t1_df,
+    omop_table1=t1["table1"],
     source_table1=benchmark_table1,
     tolerance=0.05
 )
-print("Reconciliation Passed:", reconciliation["passed"])
+print("Reconciliation concordant:", reconciliation["is_concordant"])
 ```
 
 ## Running on the NVIDIA DGX Spark (deep models) and Oracle transfers

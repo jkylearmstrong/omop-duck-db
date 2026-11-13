@@ -4,13 +4,15 @@
 \alias{build_schema}
 \title{Build the OMOP CDM v5.4 schema into a DuckDB database file}
 \usage{
-build_schema(db_path = "omop_cdm.duckdb", regenerate_ddl = FALSE)
+build_schema(db_path = "omop_cdm.duckdb", regenerate_ddl = FALSE, keys = FALSE)
 }
 \arguments{
 \item{db_path}{Path to the DuckDB database file to create/open.}
 
 \item{regenerate_ddl}{Regenerate the DDL via \code{CommonDataModel::buildRelease()}
 before building the schema. Requires the \code{CommonDataModel} package.}
+
+\item{keys}{Also apply the primary keys and indices (default \code{FALSE}: a primary key makes the bulk loads reject duplicate ids, and DuckDB cannot apply the CDM foreign-key constraints). Re-running on an existing schema is a no-op.}
 }
 \value{
 Invisibly, \code{db_path}.

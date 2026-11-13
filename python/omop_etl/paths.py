@@ -8,6 +8,7 @@ of parser errors. Everything that puts a filesystem path into SQL should go thro
 
 from __future__ import annotations
 
+from omop_etl.sqlsafe import check_ident
 import re
 from pathlib import Path
 from typing import Any, Mapping, Union
@@ -71,9 +72,10 @@ def read_parquet_sql(path: Union[str, Path], **options: Any) -> str:
 def attach_database(con, path: Union[str, Path], alias: str, *, read_only: bool = False,
                     db_type: str | None = None) -> None:
     """``ATTACH`` a database file with a sanitized path."""
+    alias = check_ident(alias, "alias", 1)
     opts = []
     if db_type:
-        opts.append(f"TYPE {db_type}")
+        opts.append(f"TYPE {check_ident(db_type, 'db_type', 1)}")
     if read_only:
         opts.append("READ_ONLY")
     suffix = f" ({', '.join(opts)})" if opts else ""
@@ -85,12 +87,13 @@ def copy_to(con, source: str, path: Union[str, Path], *, format: str = "PARQUET"
 
     ``source`` is a table name or a parenthesized query; ``options`` become COPY options.
     """
-    opts = f"FORMAT {format}"
+    opts = f"FORMAT {check_ident(format, 'format', 1)}"
     for key, value in options.items():
+        check_ident(key, "COPY option", 1)
         if isinstance(value, bool):
             opts += f", {key} {'TRUE' if value else 'FALSE'}"
         elif isinstance(value, (int, float)):
             opts += f", {key} {value}"
         else:
-            opts += f", {key} '{str(value)}'"
+            opts += f", {key} '{str(value).replace(chr(39), chr(39) * 2)}'"
     con.execute(f"COPY {source} TO {sql_path_literal(path)} ({opts})")

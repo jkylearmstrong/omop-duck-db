@@ -20,6 +20,7 @@ from typing import Any, Sequence
 import duckdb
 import numpy as np
 import pandas as pd
+from omop_etl.sqlsafe import check_ident
 
 
 def ensure_cohort_tables(con: duckdb.DuckDBPyConnection) -> None:
@@ -2747,7 +2748,7 @@ def build_treatment_episodes(
     """
 
     if output_table:
-        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(output_table, 'output_table')} AS {sql}")
         return con.execute(f"SELECT * FROM {output_table}").df()
     return con.execute(sql).df()
 
@@ -2815,7 +2816,7 @@ def filter_visits(
     cid_str = ", ".join(str(int(c)) for c in cids)
     sql = f"SELECT * FROM {visit_table} WHERE visit_type_concept_id IN ({cid_str})"
     if output_table:
-        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(output_table, 'output_table')} AS {sql}")
         return con.execute(f"SELECT * FROM {output_table}").df()
     return con.execute(sql).df()
 
@@ -2842,7 +2843,7 @@ def filter_conditions(
     cid_str = ", ".join(str(int(c)) for c in cids)
     sql = f"SELECT * FROM {condition_table} WHERE condition_type_concept_id IN ({cid_str})"
     if output_table:
-        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(output_table, 'output_table')} AS {sql}")
         return con.execute(f"SELECT * FROM {output_table}").df()
     return con.execute(sql).df()
 
@@ -2869,7 +2870,7 @@ def filter_measurements(
     cid_str = ", ".join(str(int(c)) for c in cids)
     sql = f"SELECT * FROM {measurement_table} WHERE measurement_type_concept_id IN ({cid_str})"
     if output_table:
-        con.execute(f"CREATE OR REPLACE TABLE {output_table} AS {sql}")
+        con.execute(f"CREATE OR REPLACE TABLE {check_ident(output_table, 'output_table')} AS {sql}")
         return con.execute(f"SELECT * FROM {output_table}").df()
     return con.execute(sql).df()
 

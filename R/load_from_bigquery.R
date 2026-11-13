@@ -73,13 +73,17 @@ load_from_bigquery <- function(billing_project = NULL,
     select_list <- ifelse(is64, sprintf("CAST(%s AS BIGINT) AS %s", quoted, quoted), quoted)
     stage <- "_bq_stage"
     duckdb::duckdb_register(con, stage, df)
+    if (nrow(df) == 0L && tbl %in% existing_tables && mode == "overwrite") {
+      stop("BigQuery returned zero rows for ", tbl, "; refusing to overwrite the local table with nothing.", call. = FALSE)
+    }
     tryCatch({
       if (tbl %in% existing_tables) {
-        if (mode == "overwrite") {
-          DBI::dbExecute(con, paste0("DELETE FROM ", tbl))
-        }
-        DBI::dbExecute(con, sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", DBI::dbQuoteIdentifier(con, tbl),
-                                    paste(quoted, collapse = ", "), paste(select_list, collapse = ", "), stage))
+        # DELETE + INSERT in one transaction: a failed INSERT leaves the previous table intact (M-21)
+        DBI::dbWithTransaction(con, {
+          if (mode == "overwrite") DBI::dbExecute(con, paste0("DELETE FROM ", DBI::dbQuoteIdentifier(con, tbl)))
+          DBI::dbExecute(con, sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", DBI::dbQuoteIdentifier(con, tbl),
+                                      paste(quoted, collapse = ", "), paste(select_list, collapse = ", "), stage))
+        })
       } else {
         DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s", DBI::dbQuoteIdentifier(con, tbl),
                                     paste(select_list, collapse = ", "), stage))

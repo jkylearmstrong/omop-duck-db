@@ -17,6 +17,7 @@ EXPECTED_VOCAB_TABLES = [
     "relationship",
     "concept_class",
     "domain",
+    "drug_strength",
 ]
 
 
@@ -121,6 +122,7 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
                 con.execute(f"DROP INDEX {_sql_identifier(name)}")
 
     all_ok = True
+    loaded = 0
 
     # 1. Load standard vocabulary tables
     for table_name in EXPECTED_VOCAB_TABLES:
@@ -132,6 +134,9 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
 
         file_path = vocab_files.get(table_name)
         if not file_path:
+            if wanted is not None:
+                print(f"Error: no {table_name}.csv found in {vocab_dir}")
+                all_ok = False
             continue
 
         print(f"Reloading {table_name.upper()} from {os.path.basename(file_path)} ...")
@@ -185,6 +190,7 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
 
             con.execute("COMMIT")
             print(f"  -> {row_count} rows (committed)")
+            loaded += 1
         except Exception as e:
             con.execute("ROLLBACK")
             print(f"  Error loading {table_name}: {e} - rolled back, table unchanged")
@@ -194,6 +200,7 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
     if "concept_cpt4" in vocab_files and "concept" in existing_tables and (wanted is None or "concept" in wanted):
         cpt4_path = vocab_files["concept_cpt4"]
         print(f"Ingesting separate CPT4 concepts from {os.path.basename(cpt4_path)} ...")
+        con.execute("BEGIN TRANSACTION")
         try:
             con.execute(f"""
                 CREATE OR REPLACE TEMPORARY VIEW _temp_cpt4_raw AS 
@@ -221,13 +228,22 @@ def load_vocabulary(vocab_dir, db_path="omop_cdm.duckdb", sanitize_cpt4=True, sa
                 FROM _temp_cpt4_raw;
             """)
             con.execute("DROP VIEW IF EXISTS _temp_cpt4_raw;")
+            con.execute("COMMIT")
             print("  -> CPT4 concepts sanitized and merged")
         except Exception as e:
-            print(f"  Warning: failed to load CONCEPT_CPT4.csv: {e}")
+            con.execute("ROLLBACK")
+            print(f"  Error: failed to load CONCEPT_CPT4.csv: {e} - rolled back")
+            all_ok = False
 
-    for _name, sql in saved_indexes:
-        con.execute(sql)
-    con.close()
+    if loaded == 0:
+        print("Error: no vocabulary tables were loaded (does the database have the CDM schema, and do the files match?)")
+        all_ok = False
+
+    try:
+        for _name, sql in saved_indexes:
+            con.execute(sql)
+    finally:
+        con.close()
     return all_ok
 
 

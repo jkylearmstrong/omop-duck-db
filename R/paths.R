@@ -85,6 +85,8 @@ read_parquet_sql <- function(path, ...) {
 #' @rdname sql_path_helpers
 #' @export
 attach_database <- function(con, path, alias, read_only = FALSE, db_type = NULL) {
+  alias <- .check_ident(alias, "alias", 1L)
+  if (!is.null(db_type)) db_type <- .check_ident(db_type, "db_type", 1L)
   opts <- c(if (!is.null(db_type)) paste0("TYPE ", db_type), if (isTRUE(read_only)) "READ_ONLY")
   suffix <- if (length(opts)) paste0(" (", paste(opts, collapse = ", "), ")") else ""
   DBI::dbExecute(con, paste0("ATTACH ", sql_path_literal(path), " AS ", alias, suffix))
@@ -94,15 +96,16 @@ attach_database <- function(con, path, alias, read_only = FALSE, db_type = NULL)
 #' @rdname sql_path_helpers
 #' @export
 sql_copy_to <- function(con, source, path, format = "PARQUET", options = list()) {
-  opts <- paste0("FORMAT ", format)
+  opts <- paste0("FORMAT ", .check_ident(format, "format", 1L))
   for (key in names(options)) {
+    .check_ident(key, "COPY option", 1L)
     value <- options[[key]]
     opts <- paste0(opts, ", ", key, " ", if (is.logical(value)) {
       if (isTRUE(value)) "TRUE" else "FALSE"
     } else if (is.numeric(value)) {
       as.character(value)
     } else {
-      paste0("'", value, "'")
+      paste0("'", gsub("'", "''", as.character(value), fixed = TRUE), "'")
     })
   }
   DBI::dbExecute(con, paste0("COPY ", source, " TO ", sql_path_literal(path), " (", opts, ")"))

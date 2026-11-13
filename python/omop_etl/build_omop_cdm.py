@@ -9,6 +9,7 @@ source directory, share the same schema and concept-resolution logic, and genera
 """
 
 import argparse
+import contextlib
 import os
 import re
 import warnings
@@ -195,14 +196,43 @@ def run_insert(con, label, sql):
     return n
 
 
-def build_schema(con):
-    ddl_path = _resource_path("extdata", "5.4", "duckdb", "OMOPCDM_duckdb_5.4_ddl.sql")
-    with open(ddl_path) as f:
-        ddl = f.read()
-    ddl = ddl.replace("@cdmDatabaseSchema.", "")
-    ddl = ddl.replace(" NUMERIC ", " DOUBLE ")
-    con.execute(ddl)
-    print("Schema built from", ddl_path)
+def _read_cdm_sql(name):
+    path = _resource_path("extdata", "5.4", "duckdb", f"OMOPCDM_duckdb_5.4_{name}.sql")
+    with open(path, encoding="utf-8") as f:
+        return path, f.read().replace("@cdmDatabaseSchema.", "").replace(" NUMERIC ", " DOUBLE ")
+
+
+def build_schema(con, keys=False):
+    """Create the OMOP CDM v5.4 tables from the bundled DDL.
+
+    Re-running on a database that already has the schema is a no-op (a partly built schema raises, naming the tables
+    found). The DDL runs in one transaction. ``keys=True`` also applies the primary keys and indices; it is opt-in
+    because a primary key makes the bulk loads reject duplicate ids instead of storing them, and DuckDB cannot apply
+    the CDM's foreign-key constraints at all.
+    """
+    ddl_path, ddl = _read_cdm_sql("ddl")
+    wanted = {m.lower() for m in re.findall(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)", ddl, re.IGNORECASE)}
+    have = {r[0].lower() for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    present = wanted & have
+    if present and present == wanted:
+        print("Schema already present - nothing to build")
+    elif present:
+        raise RuntimeError(f"Database already has part of the CDM schema ({sorted(present)}); refusing to build over it.")
+    else:
+        with _atomic(con):
+            con.execute(ddl)
+        print("Schema built from", ddl_path)
+    if keys:
+        _, pks = _read_cdm_sql("primary_keys")
+        _, idx = _read_cdm_sql("indices")
+        existing = {r[0].lower() for r in con.execute("SELECT constraint_name FROM duckdb_constraints() WHERE constraint_type = 'PRIMARY KEY'").fetchall()}
+        if not existing:
+            with _atomic(con):
+                con.execute(pks)
+        have_idx = {r[0].lower() for r in con.execute("SELECT index_name FROM duckdb_indexes()").fetchall()}
+        if not have_idx:
+            with _atomic(con):
+                con.execute(idx)
 
 
 MACRO_FILES = ["mapping_macros.sql", "cohort_readmission.sql", "table1_aggregations.sql", "cohort_mortality.sql"]
@@ -274,7 +304,9 @@ def load_macros(con, temporary=None, skip_unresolved=False):
             try:
                 con.execute(stmt)
             except (duckdb.CatalogException, duckdb.BinderException):
-                skipped.append(re.search(r"\bMACRO\s+(\w+)", stmt).group(1))
+                _m = re.search(r"\bMACRO\s+(\w+)", stmt)
+                if _m is not None:
+                    skipped.append(_m.group(1))
     return skipped
 
 
@@ -539,9 +571,11 @@ def load_person(con, source_dir, site_id=None, disambiguate_patids=False):
                 WHEN '05' THEN 8527 -- White
                 WHEN '03' THEN 8516 -- Black or African American
                 WHEN '02' THEN 8515 -- Asian
+                WHEN '01' THEN 8657 -- American Indian or Alaska Native
+                WHEN '04' THEN 8557 -- Native Hawaiian or Other Pacific Islander
                 ELSE 0
             END AS race_concept_id,
-            CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 ELSE 38003564 END AS ethnicity_concept_id,
+            CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 WHEN 'N' THEN 38003564 ELSE 0 END AS ethnicity_concept_id,
             NULL AS location_id,
             COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
             {care_site_id_expr} AS care_site_id,
@@ -759,7 +793,8 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HH') THEN 32215 -- UB04 06: home care of organized home health service
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('RH') THEN 32228 -- UB04 62: inpatient rehabilitation facility
                 WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
+                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A') THEN 4161979 -- Discharged alive (PCORnet A: disposition unspecified, not home)
                 ELSE 0
             END AS discharged_to_concept_id,
             src.DISCHARGE_STATUS AS discharged_to_source_value,
@@ -835,7 +870,7 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
             src.PDX AS condition_status_source_value
         FROM (
             SELECT *,
-                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' ELSE 'ICD10CM' END AS dx_vocabulary_id
+                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id
             FROM _temp_diagnosis
         ) src
         LEFT JOIN person p
@@ -1870,6 +1905,46 @@ def load_cdm_source(con, cdm_source_name=None, cdm_holder=None, site_id=None, si
     """)
 
 
+@contextlib.contextmanager
+def _atomic(con):
+    """Run the block in one transaction (or inside the caller's, if one is already open), rolling back on error (M-23)."""
+    owner = True
+    try:
+        con.execute("BEGIN TRANSACTION")
+    except duckdb.Error:
+        owner = False
+    try:
+        yield
+    except BaseException:
+        if owner:
+            con.execute("ROLLBACK")
+        raise
+    else:
+        if owner:
+            con.execute("COMMIT")
+
+
+_FULL_RELOAD_TABLES = (
+    "drug_era", "condition_era", "observation_period", "death", "drug_exposure", "observation", "measurement",
+    "procedure_occurrence", "condition_occurrence", "visit_occurrence", "person_address_history", "person",
+    "location", "provider", "care_site", "cdm_source",
+)
+
+
+def _reset_clinical_tables(con):
+    """Empty the tables a full-mode ETL populates so a re-run replaces rather than doubles them (C-02)."""
+    have = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    con.execute("BEGIN")
+    try:
+        for t in _FULL_RELOAD_TABLES:
+            if t in have:
+                con.execute(f"DELETE FROM {t}")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
 def etl_pcornet(
     source_dir,
     db_path="omop_cdm.duckdb",
@@ -1940,6 +2015,12 @@ def etl_pcornet(
     if disambiguate_patids and site_id is None:
         raise ValueError("disambiguate_patids requires site_id to be specified.")
 
+    if not (use_enrollment is True or use_enrollment is False or use_enrollment == "auto"):
+        raise ValueError('use_enrollment must be "auto", True or False.')
+    if memory_limit and not re.fullmatch(r"\d+(\.\d+)?\s*[A-Za-z]{1,3}", str(memory_limit).strip()):
+        raise ValueError(f"memory_limit must look like '8GB', got {memory_limit!r}.")
+    if threads:
+        threads = int(threads)
     con = duckdb.connect(sanitize_sql_path(db_path))
     if auto_resources:
         from omop_etl.resources import configure_resources
@@ -1968,6 +2049,7 @@ def etl_pcornet(
             _APPEND["patid_suffix"] = f"-{site_id}"
         print(f"Append mode: new patients/providers/encounters and events dated >= {since}.")
     else:
+        _reset_clinical_tables(con)
         load_care_site(con, source_dir, site_id=site_id, site_anon=site_anon, site_name=site_name)
     load_provider(con, source_dir)
     load_person(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
@@ -1982,9 +2064,7 @@ def etl_pcornet(
     load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
 
     _APPEND.clear()
-    if append:
-        for t in ("observation_period", "drug_era", "condition_era"):
-            con.execute(f"DELETE FROM {t}")
+    # the era and observation-period builders each clear their own table, so append mode needs no up-front delete
     cutoff = resolve_max_date(con, data_cutoff)
     enrolled = False
     if use_enrollment in ("auto", True):
@@ -1995,17 +2075,21 @@ def etl_pcornet(
                                          open_end=cutoff if inferred else None) > 0
         if use_enrollment is True and not enrolled:
             raise FileNotFoundError(f"use_enrollment=True but {source_dir} has no ENROLLMENT file with usable rows.")
-    build_observation_period(con, max_date=cutoff, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
+    with _atomic(con):
+        build_observation_period(con, max_date=cutoff, use_enrollment=enrolled, enrollment_type_concept_id=enrollment_type_concept_id)
     if cutoff is not None:
         print(f"  -> observation periods capped at the data cutoff {cutoff}"
               + (" (data_cutoff='auto': latest event before today)" if str(data_cutoff).lower() == "auto" else ""))
     else:
         print("  -> observation periods not capped (data_cutoff=None): periods may end on the build date; "
               "cap_observation_period(con, cutoff) caps them afterwards")
-    build_drug_era(con)
-    build_condition_era(con)
+    with _atomic(con):
+        build_drug_era(con)
+    with _atomic(con):
+        build_condition_era(con)
     if not append:
-        load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
+        with _atomic(con):
+            load_cdm_source(con, site_id=site_id, site_anon=site_anon, site_name=site_name)
 
     if key_check != "ignore" and not append:  # the check compares whole-source ids with whole-table keys
         from omop_etl.key_checks import check_etl_keys

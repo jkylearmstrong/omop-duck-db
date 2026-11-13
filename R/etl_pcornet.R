@@ -117,6 +117,7 @@ etl_pcornet <- function(
     if (isTRUE(disambiguate_patids)) .append_state$patid_suffix <- paste0("-", site_id)
     cat(sprintf("Append mode: new patients/providers/encounters and events dated >= %s.\n", since))
   } else {
+    .reset_clinical_tables(con)
     load_care_site(con, source_dir, site_id = site_id, site_anon = site_anon, site_name = site_name)
   }
   .load_provider(con, source_dir)
@@ -126,12 +127,12 @@ etl_pcornet <- function(
   .load_condition_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_procedure_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_measurement(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
 
   rm(list = ls(.append_state), envir = .append_state)
-  if (append) for (t in c("observation_period", "drug_era", "condition_era")) DBI::dbExecute(con, paste("DELETE FROM", t))
+  # the era and observation-period builders each clear their own table, so append mode needs no up-front delete
   cutoff <- .resolve_max_date(con, data_cutoff)
   enrolled <- FALSE
   if (!isFALSE(use_enrollment)) {
@@ -144,10 +145,12 @@ etl_pcornet <- function(
       stop("use_enrollment = TRUE but ", source_dir, " has no ENROLLMENT file with usable rows.")
     }
   }
-  build_observation_period(con, max_date = cutoff, use_enrollment = enrolled, enrollment_type_concept_id = enrollment_type_concept_id)
-  build_drug_era(con)
-  build_condition_era(con)
-  if (!append) .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name)
+  # each rebuild deletes then inserts: one transaction apiece so a failure cannot leave the table empty (M-23)
+  DBI::dbWithTransaction(con, build_observation_period(con, max_date = cutoff, use_enrollment = enrolled,
+                                                       enrollment_type_concept_id = enrollment_type_concept_id))
+  DBI::dbWithTransaction(con, build_drug_era(con))
+  DBI::dbWithTransaction(con, build_condition_era(con))
+  if (!append) DBI::dbWithTransaction(con, .load_cdm_source(con, site_id = site_id, site_anon = site_anon, site_name = site_name))
 
   if (key_check != "ignore" && !append) {
     report <- check_etl_keys(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids,
@@ -161,6 +164,18 @@ etl_pcornet <- function(
 
   cat("PCORnet ETL complete.\n")
   invisible(db_path)
+}
+
+# Empty the tables a full-mode ETL populates so a re-run replaces rather than doubles them (C-02).
+.reset_clinical_tables <- function(con) {
+  tables <- c("drug_era", "condition_era", "observation_period", "death", "drug_exposure", "observation", "measurement",
+              "procedure_occurrence", "condition_occurrence", "visit_occurrence", "person_address_history", "person",
+              "location", "provider", "care_site", "cdm_source")
+  have <- tolower(DBI::dbListTables(con))
+  DBI::dbWithTransaction(con, {
+    for (t in intersect(tables, have)) DBI::dbExecute(con, paste("DELETE FROM", t))
+  })
+  invisible(NULL)
 }
 
 #' Attach a Central Vocabulary Database via DuckDB Zero-Copy Views
@@ -395,9 +410,11 @@ load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, si
             WHEN '05' THEN 8527 -- White
             WHEN '03' THEN 8516 -- Black or African American
             WHEN '02' THEN 8515 -- Asian
+            WHEN '01' THEN 8657 -- American Indian or Alaska Native
+            WHEN '04' THEN 8557 -- Native Hawaiian or Other Pacific Islander
             ELSE 0
         END AS race_concept_id,
-        CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 ELSE 38003564 END AS ethnicity_concept_id,
+        CASE UPPER(src.HISPANIC) WHEN 'Y' THEN 38003563 WHEN 'N' THEN 38003564 ELSE 0 END AS ethnicity_concept_id,
         NULL AS location_id,
         COALESCE(pr.provider_id, pcornet_id(src.PROVIDERID)) AS provider_id,
         %s AS care_site_id,
@@ -605,7 +622,8 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HH') THEN 32215 -- UB04 06: home care of organized home health service
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('RH') THEN 32228 -- UB04 62: inpatient rehabilitation facility
             WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
-            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A', 'HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
+            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A') THEN 4161979 -- Discharged alive (PCORnet A: disposition unspecified, not home)
             ELSE 0
         END AS discharged_to_concept_id,
         src.DISCHARGE_STATUS AS discharged_to_source_value,
@@ -680,7 +698,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         src.PDX AS condition_status_source_value
     FROM (
         SELECT *,
-            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' ELSE 'ICD10CM' END AS dx_vocabulary_id
+            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id
         FROM _temp_diagnosis
     ) src
     LEFT JOIN person p
@@ -868,12 +886,32 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_lab_result;")
 }
 
-.load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
+#' Load PCORnet VITAL into measurement and observation
+#'
+#' Loads `vital.csv` into `measurement` (height, weight, BMI, systolic and diastolic BP) and `observation` (smoking).
+#' Mirror of Python `load_vital()`. Each analyte takes the vocabulary-resolved standard LOINC concept and falls back to
+#' a fixed OMOP concept (3036277 height, 3025315 weight, 3038553 BMI, 3004249 systolic, 3012888 diastolic), never 0.
+#'
+#' @param con A DuckDB connection with the CDM tables and mapping macros loaded.
+#' @param source_dir Directory holding the PCORnet CSVs.
+#' @param site_id,disambiguate_patids As in [etl_pcornet()].
+#' @param derive_bmi Add a BMI row (703 x lb / in^2) where height and weight exist but BMI does not.
+#' @param plausible_ranges `NULL` (default), `TRUE` for the package defaults (HT 10-100 in, WT 1-1500 lb, BMI 5-200,
+#'   SYSTOLIC 40-300, DIASTOLIC 20-200), or a named list such as `list(SYSTOLIC = c(40, 300))`. Values outside are dropped.
+#'   Zero and negative values are always dropped.
+#' @return Invisibly, `list(rows_loaded = <named integer>, rows_dropped_implausible = <named integer>)`.
+#' @export
+load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE,
+                       derive_bmi = TRUE, plausible_ranges = NULL) {
+  summary <- list(rows_loaded = integer(0), rows_dropped_implausible = integer(0))
   path <- find_source_file(source_dir, "vital")
   if (is.null(path)) {
-    cat("Skipping VITAL - no vital.csv found (optional table)\n")
-    return(invisible(NULL))
+    cat("Skipping VITAL - no vital.csv found (optional table)
+")
+    return(invisible(summary))
   }
+  default_ranges <- list(HT = c(10, 100), WT = c(1, 1500), BMI = c(5, 200), SYSTOLIC = c(40, 300), DIASTOLIC = c(20, 200))
+  ranges <- if (isTRUE(plausible_ranges)) default_ranges else as.list(plausible_ranges)
   prepare_source_view(
     con, "_temp_vital", path,
     c("VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
@@ -882,25 +920,50 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
 
   # Staged, single-analyte inserts (FR-C5) avoid DuckDB memory access violations
-  analytes <- list(
-    list(tag = "HT", loinc = "8302-2", val = "TRY_CAST(HT AS DOUBLE)", unit = "[in_us]", cid = 9326L, cond = "HT IS NOT NULL AND TRY_CAST(HT AS DOUBLE) IS NOT NULL AND TRY_CAST(HT AS DOUBLE) > 0"),
-    list(tag = "WT", loinc = "29463-7", val = "TRY_CAST(WT AS DOUBLE)", unit = "[lb_av]", cid = 8739L, cond = "WT IS NOT NULL AND TRY_CAST(WT AS DOUBLE) IS NOT NULL AND TRY_CAST(WT AS DOUBLE) > 0"),
-    list(tag = "BMI", loinc = "39156-5", val = "TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE)", unit = "kg/m2", cid = 9531L, cond = "COALESCE(ORIGINAL_BMI, BMI) IS NOT NULL AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) IS NOT NULL AND TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE) > 0"),
-    list(tag = "SYSTOLIC", loinc = "8480-6", val = "TRY_CAST(SYSTOLIC AS DOUBLE)", unit = "mm[Hg]", cid = 8876L, cond = "SYSTOLIC IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(SYSTOLIC AS DOUBLE) > 0"),
-    list(tag = "DIASTOLIC", loinc = "8462-4", val = "TRY_CAST(DIASTOLIC AS DOUBLE)", unit = "mm[Hg]", cid = 8876L, cond = "DIASTOLIC IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) IS NOT NULL AND TRY_CAST(DIASTOLIC AS DOUBLE) > 0")
+  # analyte -> LOINC, fallback standard concept, UCUM unit, unit concept (same table as Python VITAL_ANALYTES)
+  meta <- list(
+    HT = list("8302-2", 3036277L, "[in_us]", 9326L), WT = list("29463-7", 3025315L, "[lb_av]", 8739L),
+    BMI = list("39156-5", 3038553L, "kg/m2", 9531L), SYSTOLIC = list("8480-6", 3004249L, "mm[Hg]", 8876L),
+    DIASTOLIC = list("8462-4", 3012888L, "mm[Hg]", 8876L)
   )
-
-  for (a in analytes) {
+  bmi_col <- "TRY_CAST(COALESCE(ORIGINAL_BMI, BMI) AS DOUBLE)"
+  ht_col <- "TRY_CAST(HT AS DOUBLE)"
+  wt_col <- "TRY_CAST(WT AS DOUBLE)"
+  stages <- list(
+    list(tag = "HT", analyte = "HT", val = ht_col), list(tag = "WT", analyte = "WT", val = wt_col),
+    list(tag = "BMI", analyte = "BMI", val = bmi_col),
+    list(tag = "SYSTOLIC", analyte = "SYSTOLIC", val = "TRY_CAST(SYSTOLIC AS DOUBLE)"),
+    list(tag = "DIASTOLIC", analyte = "DIASTOLIC", val = "TRY_CAST(DIASTOLIC AS DOUBLE)")
+  )
+  if (isTRUE(derive_bmi)) {
+    stages[[length(stages) + 1]] <- list(tag = "BMI_DERIVED", analyte = "BMI",
+                                         val = sprintf("ROUND(703.0 * %s / (%s * %s), 2)", wt_col, ht_col, ht_col))
+  }
+  today <- .today_iso()
+  for (a in stages) {
+    m <- meta[[a$analyte]]
+    cond <- if (a$tag == "BMI_DERIVED") sprintf("%s IS NULL AND %s > 0 AND %s > 0", bmi_col, ht_col, wt_col)
+            else sprintf("%s IS NOT NULL AND %s > 0", a$val, a$val)
+    if (!is.null(ranges[[a$analyte]])) {
+      lo <- as.numeric(ranges[[a$analyte]][1]); hi <- as.numeric(ranges[[a$analyte]][2])
+      bad <- DBI::dbGetQuery(con, sprintf("SELECT COUNT(*) AS n FROM _temp_vital WHERE %s AND NOT (%s BETWEEN %s AND %s)",
+                                          cond, a$val, format(lo, scientific = FALSE), format(hi, scientific = FALSE)))$n
+      summary$rows_dropped_implausible[a$tag] <- as.integer(bad)
+      cond <- sprintf("%s AND %s BETWEEN %s AND %s", cond, a$val, format(lo, scientific = FALSE), format(hi, scientific = FALSE))
+    }
+    before <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM measurement")$n
     run_insert(con, sprintf("MEASUREMENT (from VITAL - %s)", a$tag), sprintf("
       INSERT INTO measurement
       SELECT
           ROW_NUMBER() OVER () + (SELECT COALESCE(MAX(measurement_id), 0) FROM measurement) AS measurement_id,
           COALESCE(p.person_id, pcornet_id(%s)) AS person_id,
           COALESCE(
-              stcm.target_concept_id,
-              cr.concept_id_2,
-              CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
-              0
+              NULLIF(COALESCE(
+                  stcm.target_concept_id,
+                  cr.concept_id_2,
+                  CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END
+              ), 0),
+              %d
           ) AS measurement_concept_id,
           parse_omop_date(src.MEASURE_DATE) AS measurement_date,
           parse_omop_datetime(src.MEASURE_DATE, src.MEASURE_TIME) AS measurement_datetime,
@@ -948,7 +1011,10 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         ON stcm.source_code = '%s'
       WHERE %s
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID, '%s') = 1;
-    ", patid_expr, .TYPE_CONCEPT_EHR_MEASUREMENT, a$val, a$cid, a$loinc, a$unit, a$cid, a$val, patid_expr, a$loinc, .today_iso(), a$loinc, a$cond, a$tag))
+    ", patid_expr, m[[2]], .TYPE_CONCEPT_EHR_MEASUREMENT, a$val, m[[4]], m[[1]], m[[3]], m[[4]], a$val,
+       patid_expr, m[[1]], today, m[[1]], cond, a$tag))
+    after <- DBI::dbGetQuery(con, "SELECT COUNT(*) AS n FROM measurement")$n
+    summary$rows_loaded[a$tag] <- as.integer(after - before)
   }
   # PCORnet VITAL.SMOKING -> OBSERVATION "Tobacco smoking status" (LOINC 72166-2, concept 43054909) with the
   # matching LOINC answer concept in value_as_concept_id. NI/UN/OT and unrecognized codes carry no status.
@@ -987,6 +1053,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID) = 1;
   "))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_vital;")
+  invisible(summary)
 }
 
 .load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {

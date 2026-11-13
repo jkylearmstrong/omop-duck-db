@@ -2469,7 +2469,7 @@ build_treatment_episodes <- function(con,
      concept_id_col, concept_id_col, as.integer(max_gap_days))
 
   if (!is.null(output_table)) {
-    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", .check_ident(output_table, "output_table"), sql))
     return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
   }
   DBI::dbGetQuery(con, sql)
@@ -2567,7 +2567,7 @@ filter_visits <- function(con,
   cid_str <- paste(cids, collapse = ", ")
   sql <- sprintf("SELECT * FROM %s WHERE visit_type_concept_id IN (%s)", visit_table, cid_str)
   if (!is.null(output_table) && nzchar(output_table)) {
-    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", .check_ident(output_table, "output_table"), sql))
     return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
   }
   DBI::dbGetQuery(con, sql)
@@ -2597,7 +2597,7 @@ filter_conditions <- function(con,
   cid_str <- paste(cids, collapse = ", ")
   sql <- sprintf("SELECT * FROM %s WHERE condition_type_concept_id IN (%s)", condition_table, cid_str)
   if (!is.null(output_table) && nzchar(output_table)) {
-    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", .check_ident(output_table, "output_table"), sql))
     return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
   }
   DBI::dbGetQuery(con, sql)
@@ -2627,7 +2627,7 @@ filter_measurements <- function(con,
   cid_str <- paste(cids, collapse = ", ")
   sql <- sprintf("SELECT * FROM %s WHERE measurement_type_concept_id IN (%s)", measurement_table, cid_str)
   if (!is.null(output_table) && nzchar(output_table)) {
-    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", output_table, sql))
+    DBI::dbExecute(con, sprintf("CREATE OR REPLACE TABLE %s AS %s", .check_ident(output_table, "output_table"), sql))
     return(DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", output_table)))
   }
   DBI::dbGetQuery(con, sql)

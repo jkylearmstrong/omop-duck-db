@@ -283,8 +283,8 @@ extract_temporal_features <- function(con,
       CASE 
           WHEN COALESCE(v.discharged_to_concept_id, 0) IN (8536, 4132319) THEN 'Home'
           WHEN COALESCE(v.discharged_to_concept_id, 0) IN (581476) THEN 'Home Health'
-          WHEN COALESCE(v.discharged_to_concept_id, 0) IN (38004284, 8676, 8863, 8920, 38004285) THEN 'SNF/Rehab'
-          WHEN COALESCE(v.discharged_to_concept_id, 0) = 44814650 THEN 'AMA'
+          WHEN COALESCE(v.discharged_to_concept_id, 0) IN (38004284, 8676, 8863, 8920, 38004285, 32228) THEN 'SNF/Rehab'
+          WHEN COALESCE(v.discharged_to_concept_id, 0) = 32216 THEN 'AMA'
           WHEN COALESCE(v.discharged_to_concept_id, 0) = 4216643 THEN 'Expired'
           ELSE 'Other'
       END AS discharge_category,

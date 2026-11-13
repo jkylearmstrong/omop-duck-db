@@ -41,14 +41,19 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
     gc()
   })
   existing_tables <- tolower(DBI::dbListTables(con))
+  known_vocab <- c("concept", "concept_relationship", "concept_ancestor", "concept_synonym", "vocabulary",
+                   "relationship", "concept_class", "domain", "drug_strength")
   wanted <- if (is.null(tables)) NULL else tolower(tables)
   if (!is.null(wanted)) {
-    known_vocab <- c("concept", "concept_relationship", "concept_ancestor", "concept_synonym", "vocabulary",
-                     "relationship", "concept_class", "domain", "drug_strength")
     bad <- setdiff(wanted, known_vocab)
     if (length(bad)) stop("Unknown vocabulary tables: ", paste(bad, collapse = ", "))
+    missing_files <- setdiff(wanted, names(vocab_files))
     vocab_files <- vocab_files[names(vocab_files) %in% c(wanted, if ("concept" %in% wanted) "concept_cpt4")]
+  } else {
+    missing_files <- character(0)
   }
+  # only files named after a vocabulary table are ever loaded (a stray CSV never becomes a DELETE/COPY target)
+  vocab_files <- vocab_files[names(vocab_files) %in% c(known_vocab, "concept_cpt4")]
 
   saved_indexes <- list()
   if (isTRUE(drop_indexes)) {
@@ -63,6 +68,11 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
   }
 
   all_ok <- TRUE
+  loaded <- 0L
+  for (m in missing_files) {
+    cat("Error: no", paste0(m, ".csv"), "found under", vocab_dir, "\n")
+    all_ok <- FALSE
+  }
   for (table_name in names(vocab_files)) {
     if (table_name == "concept_cpt4") next # handled separately below
     if (!(table_name %in% existing_tables)) {
@@ -118,6 +128,7 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
         if (row_count == 0) stop("table loaded with zero rows")
         DBI::dbExecute(con, "COMMIT")
         cat("  ->", row_count, "rows (committed)\n")
+        loaded <- loaded + 1L
         TRUE
       },
       error = function(e) {
@@ -133,6 +144,7 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
   if ("concept_cpt4" %in% names(vocab_files) && "concept" %in% existing_tables) {
     cpt4_path <- vocab_files[["concept_cpt4"]]
     cat("Ingesting separate CPT4 concepts from", basename(cpt4_path), "...\n")
+    DBI::dbExecute(con, "BEGIN TRANSACTION")
     tryCatch({
       DBI::dbExecute(con, sprintf("
         CREATE OR REPLACE TEMPORARY VIEW _temp_cpt4_raw AS
@@ -154,10 +166,18 @@ load_vocabulary <- function(vocab_dir, db_path = "omop_cdm.duckdb", sanitize_cpt
         FROM _temp_cpt4_raw;
       ")
       DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_cpt4_raw;")
+      DBI::dbExecute(con, "COMMIT")
       cat("  -> CPT4 concepts sanitized and merged\n")
     }, error = function(e) {
-      cat("  Warning: failed to load CONCEPT_CPT4.csv:", conditionMessage(e), "\n")
+      try(DBI::dbExecute(con, "ROLLBACK"), silent = TRUE)
+      cat("  Error: failed to load CONCEPT_CPT4.csv:", conditionMessage(e), "- rolled back\n")
+      all_ok <<- FALSE
     })
+  }
+
+  if (loaded == 0L) {
+    cat("Error: no vocabulary tables were loaded (does the database have the CDM schema, and do the files match?)\n")
+    all_ok <- FALSE
   }
 
   for (sql in saved_indexes) DBI::dbExecute(con, sql)

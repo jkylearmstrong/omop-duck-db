@@ -205,7 +205,7 @@ def test_pcornet_discharge_status_home_is_not_hospice(tmp_path):
 
     load_visit_occurrence(con, str(src))
     got = dict(con.execute("SELECT discharged_to_source_value, discharged_to_concept_id FROM visit_occurrence").fetchall())
-    assert got["HO"] == 8536 and got["A"] == 8536 and got["HS"] == 8546
+    assert got["HO"] == 8536 and got["A"] == 4161979 and got["HS"] == 8546
     assert got["EX"] == 4216643 and got["AM"] == 32216 and got["SN"] == 8863
     assert got["NH"] == 8676 and got["HH"] == 32215 and got["RH"] == 32228
 

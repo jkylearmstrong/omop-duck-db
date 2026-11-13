@@ -22,6 +22,7 @@ import pandas as pd
 
 from omop_etl.build_omop_cdm import _resource_path
 from omop_etl.jsonio import strict_dumps
+from ._arrow import to_arrow_table
 
 
 _PLAUSIBLE_DATE_TABLES = [
@@ -56,7 +57,12 @@ def run_dqd(
     Returns:
         dict: Standard OHDSI DQD result dictionary with CheckResults, Metadata, and Overview.
     """
+    if isinstance(check_levels, str):
+        check_levels = (check_levels,)
     check_levels_set = {lvl.upper() for lvl in check_levels}
+    _known_levels = {"TABLE", "FIELD", "CONCEPT", "TEMPORAL"}
+    if not check_levels_set <= _known_levels:
+        raise ValueError(f"Unknown check_levels {sorted(check_levels_set - _known_levels)}; expected a subset of {sorted(_known_levels)}.")
     results: list[dict[str, Any]] = []
 
     def _has_table(tbl: str) -> bool:
@@ -314,8 +320,9 @@ def run_dqd(
             # Standard concept conformance (concepts != 0 should have standard_concept = 'S')
             non_std_count = con.execute(f"""
                 SELECT COUNT(*) FROM {tbl} t
-                JOIN concept c ON t.{fld} = c.concept_id
-                WHERE t.{fld} != 0 AND (c.standard_concept != 'S' OR c.standard_concept IS NULL);
+                LEFT JOIN concept c ON t.{fld} = c.concept_id
+                -- an id absent from the vocabulary entirely is as unmapped as a non-standard one (M-14)
+                WHERE t.{fld} != 0 AND (c.concept_id IS NULL OR c.standard_concept != 'S' OR c.standard_concept IS NULL);
             """).fetchone()[0]
             pct_non_std = round((non_std_count / total * 100.0), 2)
             results.append({
@@ -880,8 +887,7 @@ def _sanitize_build_sql(*, method, action, extras, cohort_ref, person_ref, conce
 
 
 def _sanitize_arrow(result) -> Any:
-    reader = result.arrow()
-    return reader.read_all() if hasattr(reader, "read_all") else reader
+    return to_arrow_table(result)
 
 
 def _sanitize_warn_unscreened(report: pd.DataFrame) -> None:
