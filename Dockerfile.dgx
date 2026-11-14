@@ -31,6 +31,8 @@ WORKDIR /workspace/ederri
 #   oracle  -> sqlalchemy>=2 + oracledb (thin mode: no Oracle Instant Client needed)
 #   bundle / zarr -> model bundles and zarr output of extract_multimodal_deep_dataset
 #   sklearn -> downstream modelling
+#   postgres-embedded -> PostgreSQL inside Python (omop_etl.embedded_postgres); it refuses to run as root, so use the omop user:
+#                        docker run --user omop ... (the user is created below)
 # The constraint file keeps pip from replacing the NGC build with a CPU wheel, and pins NumPy to the base image's version: the NGC torch is
 # built against NumPy 1.x, and an extra that pulls NumPy 2 makes torch.from_numpy fail with 'Numpy is not available' (seen on a DGX Spark).
 RUN python -c "import torch; print('NGC torch', torch.__version__)" \
@@ -40,7 +42,7 @@ COPY omop-duck-db/pyproject.toml omop-duck-db/README.md /workspace/ederri/omop-d
 COPY omop-duck-db/python /workspace/ederri/omop-duck-db/python
 COPY omop-duck-db/inst /workspace/ederri/omop-duck-db/inst
 COPY omop-duck-db/scripts /workspace/ederri/omop-duck-db/scripts
-RUN pip install -c /tmp/torch-constraint.txt -e "/workspace/ederri/omop-duck-db[deep,oracle,bundle,zarr,sklearn,ml,plot,shap,delta]" \
+RUN pip install -c /tmp/torch-constraint.txt -e "/workspace/ederri/omop-duck-db[deep,oracle,bundle,zarr,sklearn,ml,plot,shap,delta,postgres-embedded]" \
     && pip install -c /tmp/torch-constraint.txt statsmodels openpyxl
 
 # Quarto CLI (arm64 on the Spark; bundles Pandoc and Typst, so no LaTeX) renders the study manuscript DOCX / PDF.
@@ -62,7 +64,7 @@ COPY pipeline /workspace/ederri/pipeline
 
 # Build-time smoke test: imports only (no GPU is visible during `docker build`).
 RUN python - <<'EOF'
-import torch, duckdb, oracledb, sqlalchemy, shap, matplotlib, openpyxl, xgboost, deltalake, pypdf
+import torch, duckdb, oracledb, sqlalchemy, shap, matplotlib, openpyxl, xgboost, deltalake, pypdf, pg0, psycopg2
 import omop_etl
 from omop_etl import extract_sard_visit_tensors, extract_benchmark_features
 from omop_etl.deep_dataset import extract_multimodal_deep_dataset
@@ -77,8 +79,12 @@ EOF
 RUN printf '#!/usr/bin/env bash\npython - <<PY\nimport torch\nassert torch.cuda.is_available(), "CUDA not visible: run with --gpus all"\nprint(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))\nPY\n' > /usr/local/bin/gpu-check \
     && chmod +x /usr/local/bin/gpu-check
 
-# Manuscript (Quarto DOCX/PDF), privacy scan and Delta Lake check, no GPU needed: `study-smoke`
-RUN printf '#!/usr/bin/env bash\npython /workspace/ederri/omop-duck-db/scripts/container_smoke_test.py --skip-r "$@"\n' > /usr/local/bin/study-smoke \
+# Non-root user for the embedded PostgreSQL, which refuses to run as root: `docker run --user omop ...`, or `runuser -u omop -- <cmd>`.
+RUN id -u omop >/dev/null 2>&1 || useradd -m -s /bin/bash omop
+
+# Manuscript (Quarto DOCX/PDF), privacy scan, Delta Lake and embedded PostgreSQL checks, no GPU needed: `study-smoke`
+# (run as root, it switches to the omop user so the PostgreSQL check can start a server)
+RUN printf '#!/usr/bin/env bash\nset -e\ncmd=(python /workspace/ederri/omop-duck-db/scripts/container_smoke_test.py --skip-r "$@")\nif [ "$(id -u)" = 0 ]; then cd /tmp; exec runuser -u omop -- "${cmd[@]}"; else exec "${cmd[@]}"; fi\n' > /usr/local/bin/study-smoke \
     && chmod +x /usr/local/bin/study-smoke
 
 # Full deep-model smoke test on the GPU: torch/CUDA report, an MLP trained and scored with the study tables (see scripts/dgx_smoke_test.py)

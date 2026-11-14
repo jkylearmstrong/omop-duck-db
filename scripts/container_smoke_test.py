@@ -1,4 +1,5 @@
-"""Smoke test run inside a built image: renders a small manuscript to DOCX and PDF with Quarto, scans it, and writes and reads a Delta table.
+"""Smoke test run inside a built image: renders a small manuscript to DOCX and PDF with Quarto, scans it, writes and reads a Delta table, and
+round-trips a small table through an embedded PostgreSQL.
 
 Synthetic data only. Used by CI on the amd64 and arm64 images (see .github/workflows/ci.yml) and handy on a new machine:
 
@@ -45,8 +46,42 @@ def _figure(path: Path) -> Path:
     return path
 
 
+def _postgres_check(check, tmp: Path, skip: bool) -> None:
+    """DuckDB -> embedded PostgreSQL -> DuckDB on a small synthetic site (the postgres-embedded extra)."""
+    import os
+
+    if skip:
+        return
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        check("embedded PostgreSQL round trip", False, "running as root; PostgreSQL refuses it: docker run --user <non-root user>")
+        return
+    try:
+        import duckdb
+
+        from omop_etl.embedded_postgres import EmbeddedPostgres, compare_duckdb, load_site, store_site
+    except ImportError as exc:
+        check("embedded PostgreSQL round trip", False, f"not installed: {exc}")
+        return
+    src = tmp / "omop_smoke.duckdb"
+    con = duckdb.connect(str(src))
+    con.execute("CREATE TABLE smoke_table AS SELECT i::BIGINT AS person_id, 8507 + (i % 2) * 25 AS gender_concept_id, "
+                "1950 + i % 50 AS year_of_birth, CASE i % 3 WHEN 0 THEN '' WHEN 1 THEN NULL ELSE 'café 日本' END AS person_source_value "
+                "FROM range(500) t(i)")
+    con.close()
+    try:
+        with EmbeddedPostgres(tmp / "pg") as pg:
+            version = pg.query("SHOW server_version").iloc[0, 0]
+            store_site(pg, src, "site_a")
+            load_site(pg, "site_a", tmp / "omop_smoke_back.duckdb", tables=["smoke_table"])
+        ok = bool(compare_duckdb(src, tmp / "omop_smoke_back.duckdb", tables=["smoke_table"])["match"].all())
+        check("embedded PostgreSQL round trip", ok, f"PostgreSQL {version}, backend {pg.backend}")
+    except Exception as exc:  # report, do not crash the other checks
+        check("embedded PostgreSQL round trip", False, f"{type(exc).__name__}: {str(exc)[:200]}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--skip-postgres", action="store_true", help="skip the embedded PostgreSQL round trip")
     ap.add_argument("--skip-r", action="store_true", help="skip the R checks (Python-only images such as Dockerfile.dgx)")
     a = ap.parse_args(argv)
     import pandas as pd
@@ -82,6 +117,7 @@ def main(argv=None) -> int:
 
         back = DeltaTable(str(tmp / "delta" / "smoke")).to_pandas()
         check("Delta Lake write and read", len(back) == 3 and set(back.site_anon) == {"Site A", "Site B", "Site C"})
+        _postgres_check(check, tmp, a.skip_postgres)
     if not a.skip_r:
         rs = shutil.which("Rscript")
         out = subprocess.run([rs, "-e", "suppressMessages({library(omopduckdb); library(rmarkdown); library(knitr)}); "

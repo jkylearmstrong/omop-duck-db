@@ -39,7 +39,7 @@ RUN cd /build/tests && R_LIBS=/rlib Rscript testthat.R
 
 RUN python3 -m venv /pyvenv \
     && /pyvenv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.0" \
-    && /pyvenv/bin/pip install --no-cache-dir "/build[dev,bundle,deep]" \
+    && /pyvenv/bin/pip install --no-cache-dir "/build[dev,bundle,deep,postgres-embedded]" \
     && R_LIBS=/rlib PATH="/pyvenv/bin:$PATH" /pyvenv/bin/python -m pytest /build/tests -v
 
 # Stage 2: final runtime
@@ -86,6 +86,7 @@ RUN chown -R ruser:ruser /workspace
 # Switch to non-root user
 USER ruser
 
-# Check the image: python scripts/container_smoke_test.py (manuscript DOCX/PDF, privacy scan, Delta Lake, R + rmarkdown)
+# Check the image: python scripts/container_smoke_test.py (manuscript DOCX/PDF, privacy scan, Delta Lake, embedded PostgreSQL, R + rmarkdown)
+# The embedded PostgreSQL (postgres-embedded extra) refuses to run as root, which is one more reason the image runs as ruser.
 # Default: R interactive
 CMD ["R", "--no-save"]

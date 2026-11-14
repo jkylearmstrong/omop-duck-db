@@ -31,6 +31,9 @@ sql = ["sqlalchemy>=1.4"]
 # Run/compare the portable cohort SQL on DuckDB (FR-D7/D8): translates OHDSI SQL with sqlglot.
 cohorts = ["sqlglot"]
 postgres = ["sqlalchemy>=1.4", "psycopg2-binary"]
+# PostgreSQL inside Python with no install or admin rights (omop_etl.embedded_postgres): pg0-embedded ships the server binaries.
+# Alternative on Python 3.12+ / older Linux (glibc 2.28): pip install pgembed, then EmbeddedPostgres(backend="pgembed").
+postgres-embedded = ["pg0-embedded>=0.16", "sqlalchemy>=1.4", "psycopg2-binary"]
 mssql = ["sqlalchemy>=1.4", "pyodbc"]
 oracle = ["sqlalchemy>=2.0", "oracledb"]  # the oracle+oracledb dialect needs SQLAlchemy 2.x
 snowflake = ["sqlalchemy>=1.4", "snowflake-sqlalchemy"]
