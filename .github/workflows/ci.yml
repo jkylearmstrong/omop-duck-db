@@ -113,7 +113,17 @@ jobs:
   docker-build:
     # Docker isn't available the same way on windows-latest/macos-latest
     # runners; this validates the containerized path on Linux only.
-    runs-on: ubuntu-latest
+    # Built natively on amd64 and on arm64 (the DGX Spark's architecture), then checked inside the image:
+    # manuscript DOCX/PDF with Quarto, privacy scan, Delta Lake write/read, R + rmarkdown.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -124,6 +134,10 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: omopduckdb:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
+
+      - name: Smoke test inside the image (${{ matrix.arch }})
+        run: docker run --rm omopduckdb:ci python scripts/container_smoke_test.py

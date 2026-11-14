@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install R packages into a dedicated library
-RUN mkdir -p /rlib && Rscript -e 'install.packages(c("bigrquery", "CommonDataModel", "DBI", "digest", "duckdb", "googledrive", "quarto", "stringr", "testthat", "usethis", "yaml", "Matrix", "arrow", "jsonlite", "dplyr", "withr"), repos = "https://packagemanager.posit.co/cran/__linux__/noble/latest", lib = "/rlib")'
+RUN mkdir -p /rlib && Rscript -e 'install.packages(c("bigrquery", "CommonDataModel", "DBI", "digest", "duckdb", "googledrive", "quarto", "stringr", "testthat", "usethis", "yaml", "Matrix", "arrow", "jsonlite", "dplyr", "withr", "rmarkdown", "knitr"), repos = "https://packagemanager.posit.co/cran/__linux__/noble/latest", lib = "/rlib")'
 
 # Build + test both packages in the builder stage, so a failing test fails
 # the image build, not just a later `docker run`.
@@ -52,8 +52,21 @@ RUN id -u ruser >/dev/null 2>&1 || useradd -m -u 1000 ruser
 
 # Install runtime system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git python3 python3-venv libicu-dev \
+        git python3 python3-venv libicu-dev ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Quarto CLI renders the study manuscript (run_study -> <prefix>_Manuscript.docx / .pdf). It bundles Pandoc and Typst, so the PDF
+# needs no LaTeX. TARGETARCH (amd64 / arm64) is set by buildx, so the same Dockerfile builds the image for a DGX Spark (arm64).
+# Pandoc and Typst are linked onto the PATH too, for rmarkdown::render() and the Pandoc fallback.
+ARG QUARTO_VERSION=1.10.19
+ARG TARGETARCH
+RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && curl -fsSL "https://github.com/quarto-dev/quarto-cli/releases/download/v${QUARTO_VERSION}/quarto-${QUARTO_VERSION}-linux-${arch}.tar.gz" \
+       | tar -xz -C /opt \
+    && ln -s "/opt/quarto-${QUARTO_VERSION}/bin/quarto" /usr/local/bin/quarto \
+    && ln -s "$(find /opt/quarto-${QUARTO_VERSION}/bin/tools -name pandoc -type f | head -n 1)" /usr/local/bin/pandoc \
+    && ln -s "$(find /opt/quarto-${QUARTO_VERSION}/bin/tools -name typst -type f | head -n 1)" /usr/local/bin/typst \
+    && quarto --version && pandoc --version | head -n 1 && typst --version
 
 WORKDIR /workspace
 
@@ -73,5 +86,6 @@ RUN chown -R ruser:ruser /workspace
 # Switch to non-root user
 USER ruser
 
+# Check the image: python scripts/container_smoke_test.py (manuscript DOCX/PDF, privacy scan, Delta Lake, R + rmarkdown)
 # Default: R interactive
 CMD ["R", "--no-save"]
