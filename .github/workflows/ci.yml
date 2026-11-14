@@ -103,6 +103,10 @@ jobs:
       - name: Install Python package (+ dev extras) -- no R anywhere in this job
         run: pip install -e ".[dev]"
 
+      # Quarto (with its bundled Typst) renders the study manuscript to DOCX and PDF; with it installed,
+      # tests/test_multisite_anonymous.py checks the real DOCX and PDF for site letters and real names.
+      - uses: quarto-dev/quarto-actions/setup@v2
+
       - name: Run pytest (parity test should skip, not fail)
         run: pytest tests/ -v
 

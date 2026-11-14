@@ -859,12 +859,16 @@ __all__ += [
     "manuscript_workbook",
 ]
 
-from omop_etl.study_run import assign_site_labels, load_site_labels, save_site_labels, PROTOCOL_COHORT_PARAMS, STUDY_DECISIONS, STUDY_PRESETS, pin_stays, resolve_decisions, run_study  # noqa: E402
+from omop_etl.study_run import assign_site_labels, load_site_labels, save_site_labels, validate_site_labels, RunPrivacyError, PROTOCOL_COHORT_PARAMS, STUDY_DECISIONS, STUDY_PRESETS, pin_stays, resolve_decisions, run_study  # noqa: E402
+from omop_etl.study_relabel import label_translation, relabel_outputs, relabel_text  # noqa: E402
+from omop_etl.manuscript_document import render_manuscript_document  # noqa: E402
+from omop_etl.run_privacy import scan as scan_run_privacy, scan_files as scan_files_privacy  # noqa: E402
 
 from omop_etl.study_report import balanced_training_indices, performance_from_predictions, study_folds  # noqa: E402
 from omop_etl.manuscript_report import manuscript_facts, read_workbook_tables, render_results_report  # noqa: E402
 
-__all__ += ["manuscript_facts", "read_workbook_tables", "render_results_report"]
+__all__ += ["manuscript_facts", "read_workbook_tables", "render_results_report", "render_manuscript_document", "validate_site_labels", "RunPrivacyError",
+            "label_translation", "relabel_outputs", "relabel_text", "scan_run_privacy", "scan_files_privacy"]
 
 __all__ += ["assign_site_labels", "load_site_labels", "save_site_labels", "PROTOCOL_COHORT_PARAMS", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions", "pin_stays", "run_study", "balanced_training_indices", "performance_from_predictions", "study_folds"]
 

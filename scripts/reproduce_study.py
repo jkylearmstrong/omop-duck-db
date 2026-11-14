@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-from omop_etl.study_run import STUDY_DECISIONS, STUDY_PRESETS, run_study  # noqa: E402
+from omop_etl.study_run import STUDY_DECISIONS, STUDY_PRESETS, RunPrivacyError, run_study  # noqa: E402
 
 
 def main(argv=None) -> int:
@@ -46,6 +46,14 @@ def main(argv=None) -> int:
     p.add_argument("--tie-break", choices=["deterministic", "highest_zip", "ambiguous_missing", "arbitrary", "first_listed"])
     p.add_argument("--address-undated", choices=["last", "first"], help="rank of an address with no start date")
     p.add_argument("--age-method", choices=["completed_years", "year_difference"], help="age calculation method in cohort definition")
+    p.add_argument("--private-dir", help="folder for the per-site intermediates that carry site names (default <out>_private; never share it)")
+    p.add_argument("--no-document", action="store_true", help="skip <prefix>_Manuscript.docx / .pdf (the workbook is always written)")
+    p.add_argument("--document-formats", nargs="+", default=["docx", "pdf"], choices=["docx", "pdf"])
+    p.add_argument("--doc-title", help="manuscript title (default '<prefix> manuscript')")
+    p.add_argument("--doc-author", default="", help="author shown in the manuscript and its file properties (default none)")
+    p.add_argument("--names-file", help="text file, one real site name per line (kept outside the repository): the outputs are scanned for them")
+    p.add_argument("--names", nargs="*", default=[], help="real site names to scan for (they end up in shell history; prefer --names-file)")
+    p.add_argument("--no-privacy-check", action="store_true", help="skip the scan of the outputs for site names")
     p.add_argument("--list-decisions", action="store_true", help="print every decision, its options and the presets, then exit")
     a = p.parse_args(argv)
     if a.list_decisions:
@@ -56,16 +64,35 @@ def main(argv=None) -> int:
         p.error("--db-dir, --out and --sites are required")
     if a.labels and len(a.labels) == 1 and len(a.sites) != 1:
         labels = a.labels[0]
+    elif a.labels and len(a.labels) != len(a.sites):
+        p.error(f"--labels has {len(a.labels)} label(s) for {len(a.sites)} site(s); give one per site in the same order, or a JSON mapping file, or 'random'")
     else:
         labels = dict(zip(a.sites, a.labels)) if a.labels else None
-    r = run_study(a.db_dir, a.out, sites=a.sites, site_labels=labels, label_seed=a.label_seed, labels_out=a.labels_out, start=a.start, end=a.end, profile=None if a.profile == "none" else a.profile,
-                  pinned_stays=a.pinned_stays, ruca_crosswalk=a.ruca, sdi_table=a.sdi, address_table=a.address_table, n_bootstraps=a.bootstraps,
-                  loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix,
-                  attrition_mode=a.attrition, table5=a.table5, sdi_missing_term=a.sdi_missing_term, address_tie_break=a.tie_break, address_undated=a.address_undated,
-                  table6_increments=a.table6_increments, consort_final_steps=a.consort_final_steps, age_method=a.age_method,
-                  sheet_site_labels=({"Table S1": dict(zip(labels.values(), a.s1_s3_labels)), "Table S3": dict(zip(labels.values(), a.s1_s3_labels))}
-                                     if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset)
+    names = list(a.names)
+    if a.names_file:
+        from omop_etl.run_privacy import read_names_file
+
+        names += read_names_file(a.names_file)
+    try:
+        r = run_study(a.db_dir, a.out, sites=a.sites, site_labels=labels, label_seed=a.label_seed, labels_out=a.labels_out, start=a.start, end=a.end, profile=None if a.profile == "none" else a.profile,
+                      pinned_stays=a.pinned_stays, ruca_crosswalk=a.ruca, sdi_table=a.sdi, address_table=a.address_table, n_bootstraps=a.bootstraps,
+                      loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix,
+                      attrition_mode=a.attrition, table5=a.table5, sdi_missing_term=a.sdi_missing_term, address_tie_break=a.tie_break, address_undated=a.address_undated,
+                      table6_increments=a.table6_increments, consort_final_steps=a.consort_final_steps, age_method=a.age_method,
+                      sheet_site_labels=({"Table S1": dict(zip(labels.values(), a.s1_s3_labels)), "Table S3": dict(zip(labels.values(), a.s1_s3_labels))}
+                                         if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset,
+                      private_dir=a.private_dir, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
+                      document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check)
+    except RunPrivacyError as e:
+        print(f"PRIVACY CHECK FAILED: {e}", file=sys.stderr)
+        return 1
     print(f"N = {len(r['data']):,}; workbook: {r['workbook']}; seconds: {r['timings']}")
+    doc = r["document"]
+    if doc.get("requested"):
+        print(f"manuscript: {', '.join(doc.get('files', []))}" + (f"; not rendered: {', '.join(doc['missing'])} ({doc['note']})" if doc.get("missing") else ""))
+    pc = r["privacy_check"]
+    print(f"privacy check: {pc['hits']} hit(s) for {pc['n_names']} name(s)" if pc.get("checked") else "privacy check: no names to scan for (give --names-file)")
+    print(f"per-site intermediates (private, do not share): {r['private_dir']}")
     if r["comparison"] is not None:
         print(r["comparison"][0].to_string(index=False))
     return 0
