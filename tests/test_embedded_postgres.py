@@ -82,6 +82,18 @@ def test_bad_names_are_refused_before_anything_runs(tmp_path):
         store_site("postgresql+psycopg2://x@localhost/x", tmp_path / "a.duckdb", "Site A")  # not a schema name
 
 
+def test_generated_password_is_safe_on_the_command_line(tmp_path):
+    """pg0 passes the password as a command-line argument; one starting with '-' was read as an option (seen in CI)."""
+    if not BACKENDS:
+        pytest.skip("no embedded backend installed")
+    import re
+
+    for i in range(64):
+        pw = EmbeddedPostgres(tmp_path / str(i))._password()
+        assert re.fullmatch(r"[0-9a-f]{48}", pw)
+        assert EmbeddedPostgres(tmp_path / str(i))._password() == pw     # stable across restarts
+
+
 def test_repr_never_shows_a_password(tmp_path):
     if not BACKENDS:
         pytest.skip("no embedded backend installed")
