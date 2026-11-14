@@ -9,7 +9,12 @@ pip install "omop-duck-db[postgres-embedded]"          # add ,delta for the Delt
 
 The server is a child process. It listens on `127.0.0.1` only, on a free port, with a password generated on first use and stored in
 `<folder>/credentials.json`. Its data stays in the folder you give, so a site database stored there is still there next time.
-Run it as an ordinary user: PostgreSQL refuses to start as root, so it does not run inside the Docker image, which runs as root.
+Run it as an ordinary user: PostgreSQL refuses to start as root.
+
+**Docker images.** Both images include the extra. The GHCR image (`Dockerfile`, amd64 and arm64) already runs as the non-root user
+`ruser`, so it works as is; `python scripts/container_smoke_test.py` includes a PostgreSQL round trip and CI runs it in the amd64 and
+arm64 images. `Dockerfile.dgx` runs as root, so start the container with `--user omop` (or `runuser -u omop -- <command>` inside it)
+for PostgreSQL work; `study-smoke` switches to `omop` by itself. Mounted folders must be writable by that user.
 
 ## Which package, and why
 
