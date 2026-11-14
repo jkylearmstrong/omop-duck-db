@@ -1,4 +1,6 @@
-# omopduckdb (development version)
+# omopduckdb 0.25.0
+
+Feature release: anonymous multi-site study runs for any number of sites, a DOCX / PDF manuscript from the run, relabelling a finished run, a privacy scan before write-out, and arm64 (DGX Spark) Docker images with Quarto. Version bump 0.24.0 to 0.25.0.
 
 Multi-site studies that stay anonymous with any number of sites (issue 69). Python runs the study; R and Python share the label helpers.
 
