@@ -62,3 +62,12 @@ test_that("relabel_output_files rewrites text outputs and the privacy scan finds
   expect_equal(dirty$hits$file, "log.txt")
   expect_equal(dirty$hits$name_number, 1L)
 })
+
+test_that("image bytes inside a docx are not read as text (no false positive from compressed data)", {
+  f <- testthat::test_path("testdata", "embedded_image_bytes.docx")
+  d <- tempfile("scan_"); dir.create(d)
+  file.copy(f, file.path(d, "Study_Manuscript.docx"))
+  res <- check_run_privacy(d, c("Brockway", "Site Q"))
+  expect_equal(nrow(res$hits), 0L)
+  expect_equal(nrow(check_run_privacy(d, "Site A")$hits) > 0, TRUE)  # the document text is still scanned
+})

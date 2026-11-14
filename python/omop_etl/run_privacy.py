@@ -5,7 +5,7 @@ A run's workbook, tables and manuscript use anonymous letters, but a folder can 
 
 What is scanned: file and folder names; the text of csv / json / md / txt / html / log / yaml / sql / py / qmd / typ files; every part of an
 xlsx, docx or other zip-based file (names are matched in the XML, and for a docx also in the paragraph text with the XML tags removed, so a
-name Word split across runs is still found); the page text, metadata and embedded file names of a PDF (needs ``pypdf``); column names and
+name Word split across runs is still found; embedded images and fonts are not read as text, only a PNG's text chunks); the page text, metadata and embedded file names of a PDF (needs ``pypdf``); column names and
 string values of parquet files. Images and other binary files are listed as not scanned. Matching is case-insensitive on whole words, and a
 hit is reported by the position of the name in the list, never by the name, so the report itself can be pasted into an issue. Exact
 per-site counts can identify a site whatever its letter; this check does not look for them.
@@ -17,7 +17,7 @@ import zipfile
 from pathlib import Path
 from typing import Iterable, Sequence
 
-__all__ = ["TEXT_SUFFIXES", "ZIP_SUFFIXES", "read_names_file", "scan", "scan_files", "docx_text", "pdf_text"]
+__all__ = ["TEXT_SUFFIXES", "ZIP_SUFFIXES", "read_names_file", "scan", "scan_files", "docx_text", "pdf_text", "png_text"]
 
 TEXT_SUFFIXES = {".csv", ".tsv", ".json", ".md", ".txt", ".html", ".htm", ".log", ".yaml", ".yml", ".sql", ".py", ".r", ".qmd", ".rmd", ".xml", ".typ"}
 ZIP_SUFFIXES = {".xlsx", ".xlsm", ".docx", ".pptx", ".zip"}
@@ -79,6 +79,49 @@ def pdf_text(path: str | Path) -> str:
     return "\n".join(out)
 
 
+_BINARY_PARTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".emf", ".wmf", ".ico", ".webp", ".bin", ".odttf", ".ttf", ".otf", ".wdp")
+
+
+def png_text(data: bytes) -> str:
+    """The text chunks of a PNG (``tEXt``, ``zTXt``, ``iTXt``: title, author, software, description), not its pixels."""
+    import struct
+    import zlib
+
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ""
+    out, i = [], 8
+    while i + 8 <= len(data):
+        n, kind = struct.unpack(">I4s", data[i:i + 8])
+        body = data[i + 8:i + 8 + n]
+        i += 12 + n
+        try:
+            if kind == b"tEXt":
+                out.append(body.replace(b"\x00", b" ").decode("latin-1"))
+            elif kind == b"zTXt":
+                key, _, rest = body.partition(b"\x00")
+                out.append(key.decode("latin-1") + " " + zlib.decompress(rest[1:]).decode("latin-1"))
+            elif kind == b"iTXt":
+                key, _, rest = body.partition(b"\x00")
+                flag, rest = rest[0], rest[2:]
+                _lang, _, rest = rest.partition(b"\x00")
+                _tkey, _, text = rest.partition(b"\x00")
+                out.append(key.decode("latin-1") + " " + (zlib.decompress(text) if flag else text).decode("utf-8", errors="ignore"))
+            elif kind == b"IEND":
+                break
+        except Exception:  # a damaged chunk: keep what was read
+            continue
+    return "\n".join(out)
+
+
+def _part_text(name: str, data: bytes) -> str:
+    """Text of one part of a zip-based file. Images, fonts and other binary parts are not read as text: compressed bytes match a
+    short name by chance (a false positive that withheld a real manuscript). For a PNG its text chunks are scanned instead."""
+    low = name.lower()
+    if low.endswith(_BINARY_PARTS) or b"\x00" in data[:4096]:
+        return png_text(data)
+    return data.decode("utf-8", errors="ignore")
+
+
 def _scan_parquet(path: Path, pats: Sequence[re.Pattern]) -> list[tuple[int, str]]:
     import pandas as pd
 
@@ -104,11 +147,14 @@ def _scan_one(p: Path, rel: str, pats: Sequence[re.Pattern]) -> tuple[list[tuple
         elif suf in ZIP_SUFFIXES:
             with zipfile.ZipFile(p) as z:
                 for part in z.namelist():
-                    hits += [(rel, i, f"part {part}") for i in _hits(part + "\n" + z.read(part).decode("utf-8", errors="ignore"), pats)]
+                    hits += [(rel, i, f"part {part}") for i in _hits(part + "\n" + _part_text(part, z.read(part)), pats)]
             if suf == ".docx":
                 hits += [(rel, i, "document text") for i in _hits(docx_text(p), pats)]
         elif suf == ".pdf":
             hits += [(rel, i, "PDF text or metadata") for i in _hits(pdf_text(p), pats)]
+        elif suf == ".png":  # the text chunks are scanned; the pixels cannot be, so the file is still listed as not scanned
+            hits += [(rel, i, "PNG text chunk") for i in _hits(png_text(p.read_bytes()), pats)]
+            return hits, rel
         elif suf == ".parquet":
             hits += [(rel, i, where) for i, where in _scan_parquet(p, pats)]
         else:
