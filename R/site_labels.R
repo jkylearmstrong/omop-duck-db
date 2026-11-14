@@ -199,7 +199,7 @@ relabel_output_files <- function(run_dir, out_dir, old_labels, new_labels) {
 #'
 #' Looks for each name (case-insensitive, whole words) in file and folder names, in the text of CSV / JSON / Markdown / text / HTML /
 #' YAML / SQL / R / Python / Quarto files, and in every part of xlsx, docx and other zip-based files (in the XML and, for a docx, in
-#' the paragraph text with the tags removed). PDFs, images and other binary files are listed as not scanned (the Python scanner,
+#' the paragraph text with the tags removed; embedded images and fonts are skipped). PDFs, images and other binary files are listed as not scanned (the Python scanner,
 #' `scripts/check_run_privacy.py`, also reads PDF text). Hits are reported by the position of the name in `names`, never by the name, so
 #' the result can be shared.
 #'
@@ -234,6 +234,12 @@ check_run_privacy <- function(dir, names) {
       ok <- tryCatch({ utils::unzip(p, exdir = tmp); TRUE }, error = function(e) FALSE, warning = function(w) FALSE)
       if (!ok) { not_scanned <- c(not_scanned, f); next }
       for (part in list.files(tmp, recursive = TRUE)) {
+        # images, fonts and other binary parts are not read as text: compressed bytes can match a short name by chance
+        head_bytes <- readBin(file.path(tmp, part), "raw", n = 4096L)
+        if (grepl("\\.(png|jpe?g|gif|bmp|tiff?|emf|wmf|ico|webp|bin|odttf|ttf|otf|wdp)$", tolower(part)) || any(head_bytes == as.raw(0L))) {
+          add(f, found(part), "part name")
+          next
+        }
         x <- paste(suppressWarnings(readLines(file.path(tmp, part), warn = FALSE, encoding = "UTF-8")), collapse = "\n")
         add(f, found(x), paste("part", part))
         if (ext == "docx" && grepl("\\.xml$", part)) {

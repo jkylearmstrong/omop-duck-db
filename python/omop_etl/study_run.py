@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 # Every choice that moves the published numbers, with the options and what each does. Nothing is hard-wired: each can be set on
 # run_study (or on reproduce_study.py) and the values used are written to <prefix>_run.json.
@@ -110,6 +110,21 @@ def validate_site_labels(sites: Sequence[str], labels: Mapping[str, str]) -> dic
     if any(v in keys for v in vals):
         raise ValueError("A label is the same as a site name; labels must be anonymous.")
     return used
+
+
+def run_environment() -> dict[str, str | None]:
+    """Versions of Python and the libraries that move the model numbers, for ``<prefix>_run.json``: two runs on the same data that differ
+    in a model-performance cell usually differ here (a newer scikit-learn or XGBoost), not in the package's seeds."""
+    import platform
+    from importlib import metadata
+
+    out: dict[str, str | None] = {"python": platform.python_version()}
+    for pkg in ("omop-duck-db", "numpy", "pandas", "scikit-learn", "xgboost", "scipy", "duckdb", "pyarrow", "shap"):
+        try:
+            out[pkg] = metadata.version(pkg)
+        except metadata.PackageNotFoundError:
+            out[pkg] = None
+    return out
 
 
 class RunPrivacyError(RuntimeError):
@@ -388,11 +403,14 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         for p_ in staged:
             shutil.move(str(p_), out / p_.name)
         files += [str(out / p_.name) for p_ in staged]
+    elif staged:  # the record must not say the manuscript was written when it was held back
+        doc_record.update({"withheld": True, "files": [], "rendered": doc_record.get("files", []), "missing": list(document_formats),
+                           "note": "; ".join(x for x in [doc_record.get("note"), "withheld: the privacy check found a site name; nothing was written to the output folder"] if x)})
     shutil.rmtree(stage, ignore_errors=True)
     timings["total"] = round(time.time() - t_start, 1)
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
                                                        "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
-                                                       "document": doc_record, "privacy_check": privacy}, indent=1), encoding="utf-8")
+                                                       "document": doc_record, "privacy_check": privacy, "environment": run_environment()}, indent=1), encoding="utf-8")
     if hits:
         where = "; ".join(sorted({f"{h[0]} ({h[2]})" for h in hits})[:20])
         raise RunPrivacyError(f"{len(hits)} privacy finding(s) in the study outputs, reported by file only: {where}. "

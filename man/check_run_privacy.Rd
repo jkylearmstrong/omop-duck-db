@@ -17,7 +17,7 @@ A list: \code{hits} (data frame with \code{file}, \code{name_number}, \code{wher
 \description{
 Looks for each name (case-insensitive, whole words) in file and folder names, in the text of CSV / JSON / Markdown / text / HTML /
 YAML / SQL / R / Python / Quarto files, and in every part of xlsx, docx and other zip-based files (in the XML and, for a docx, in
-the paragraph text with the tags removed). PDFs, images and other binary files are listed as not scanned (the Python scanner,
+the paragraph text with the tags removed; embedded images and fonts are skipped). PDFs, images and other binary files are listed as not scanned (the Python scanner,
 \verb{scripts/check_run_privacy.py}, also reads PDF text). Hits are reported by the position of the name in \code{names}, never by the name, so
 the result can be shared.
 }

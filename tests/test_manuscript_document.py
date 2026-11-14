@@ -231,3 +231,86 @@ def test_pdf_scan_reads_attachments_outline_annotations_and_xmp(tmp_path):
     text = rp.pdf_text(tmp_path / "m.pdf")
     for n in ("Capital City", "Ogdenville", "Brockway", "Shelbyville"):
         assert n in text, n
+
+
+def _png(text_chunks=(), pixels=b"\x00\x01zzBrockwayzz\x00"):
+    import struct
+    import zlib
+
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+
+    out = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+    for kind, body in text_chunks:
+        out += chunk(kind, body)
+    return out + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")
+
+
+def test_image_bytes_inside_a_docx_are_not_a_hit_but_png_text_chunks_are(tmp_path):
+    """Regression: a short site name matched by chance inside a compressed figure in the DOCX and withheld a real manuscript."""
+    import zlib
+
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    with zipfile.ZipFile(clean / "Study_Manuscript.docx", "w") as z:
+        z.writestr("word/document.xml", "<w:document><w:body><w:p><w:r><w:t>Site A</w:t></w:r></w:p></w:body></w:document>")
+        z.writestr("word/media/image1.png", _png())
+        z.writestr("word/fonts/font1.odttf", b"\x00\x00Brockway")
+        z.writestr("word/embeddings/blob.dat", b"\x00binary Brockway")
+    (clean / "Study_Figure.png").write_bytes(_png())
+    hits, skipped = rp.scan(clean, ["Brockway"])
+    assert hits == [] and skipped == ["Study_Figure.png"]
+    assert rp.scan(clean, ["Site A"])[0]  # the document text is still scanned
+
+    tagged = tmp_path / "tagged"
+    tagged.mkdir()
+    chunks = [(b"tEXt", b"Author\x00Ogdenville"), (b"zTXt", b"Title\x00\x00" + zlib.compress(b"Capital City")),
+              (b"iTXt", b"Description\x00\x00\x00\x00\x00Shelbyville")]
+    with zipfile.ZipFile(tagged / "m.docx", "w") as z:
+        z.writestr("word/media/image1.png", _png(chunks))
+    (tagged / "f.png").write_bytes(_png(chunks))
+    got = {(h[0], h[1], h[2]) for h in rp.scan(tagged, ["Ogdenville", "Capital City", "Shelbyville"])[0]}
+    assert {("m.docx", i, "part word/media/image1.png") for i in (1, 2, 3)} <= got
+    assert {("f.png", i, "PNG text chunk") for i in (1, 2, 3)} <= got
+    assert rp.png_text(b"not a png") == ""
+
+
+def test_withheld_manuscript_is_recorded_as_withheld(tmp_path, monkeypatch):
+    from test_multisite_anonymous import NAMES, _study
+
+    db, keys = _study(tmp_path, monkeypatch, 3)
+    with pytest.raises(RunPrivacyError):
+        run_study(db, tmp_path / "o", sites=keys, n_bootstraps=3, loso=False, figures=False, profile=None,
+                  document_title=f"{NAMES[0]} study", site_names=NAMES[:3])
+    doc = json.loads((tmp_path / "o" / "Study_run.json").read_text(encoding="utf-8"))["document"]
+    assert doc["withheld"] is True and doc["files"] == [] and doc["missing"] == ["docx", "pdf"] and "withheld" in doc["note"]
+    assert "Study_Manuscript.qmd" in doc["rendered"]
+
+
+def test_two_runs_on_the_same_data_are_identical_and_record_their_environment(tmp_path, monkeypatch):
+    """The model grid is seeded: two runs give the same workbook cell for cell. A difference between machines comes from library versions,
+    which the run record now lists."""
+    from test_multisite_anonymous import _study
+
+    db, keys = _study(tmp_path, _KeepGrid(monkeypatch), 3)  # the real model grid (and XGBoost when installed)
+    wbs = []
+    for i in range(2):
+        r = run_study(db, tmp_path / f"o{i}", sites=keys, n_bootstraps=5, loso=True, figures=False, profile=None, document=False)
+        wbs.append(r["workbook"])
+    a, b = (pd.read_excel(w, sheet_name=None, header=None) for w in wbs)
+    assert a.keys() == b.keys()
+    for k in a:
+        pd.testing.assert_frame_equal(a[k], b[k], obj=k)
+    env = json.loads((tmp_path / "o0" / "Study_run.json").read_text(encoding="utf-8"))["environment"]
+    assert env["python"] and env["scikit-learn"] and "xgboost" in env
+
+
+class _KeepGrid:
+    """Applies the study stand-ins for cohort and features but keeps the real model grid."""
+
+    def __init__(self, mp):
+        self.mp = mp
+
+    def setattr(self, obj, name, value):
+        if name != "default_model_grid":
+            self.mp.setattr(obj, name, value)

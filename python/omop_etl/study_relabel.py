@@ -170,6 +170,8 @@ def relabel_outputs(run_dir: str | Path, out_dir: str | Path, *, old_labels: Map
         for p_ in staged:
             shutil.move(str(p_), out / p_.name)
             files.append(out / p_.name)
+    elif staged:
+        doc_record.update({"withheld": True, "files": [], "missing": list(document_formats)})
     shutil.rmtree(stage, ignore_errors=True)
     if hits:
         where = "; ".join(sorted({f"{h[0]} ({h[2]})" for h in hits})[:20])
