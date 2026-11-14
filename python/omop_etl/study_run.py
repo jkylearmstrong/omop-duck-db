@@ -11,12 +11,14 @@ one. Site databases are read-only. ``scripts/reproduce_study.py`` is the command
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 # Every choice that moves the published numbers, with the options and what each does. Nothing is hard-wired: each can be set on
 # run_study (or on reproduce_study.py) and the values used are written to <prefix>_run.json.
@@ -84,6 +86,45 @@ def save_site_labels(labels: Mapping[str, str], path: str | Path) -> Path:
 def load_site_labels(path: str | Path) -> dict[str, str]:
     """Reads a mapping written by :func:`save_site_labels`."""
     return {str(k): str(v) for k, v in json.loads(Path(path).read_text(encoding="utf-8")).items()}
+
+
+def validate_site_labels(sites: Sequence[str], labels: Mapping[str, str]) -> dict[str, str]:
+    """Checks a ``site -> label`` mapping for a run over ``sites`` and returns the part of it those sites use.
+
+    Raises ``ValueError`` when a site has no label (it would appear in the tables under its own name), when two sites share a label,
+    when a label is empty, or when a label is one of the site names. Extra entries are allowed, so one consortium-wide mapping file can be
+    handed to every site and each runs with only its own databases. Any number of sites is fine."""
+    sites = list(dict.fromkeys(str(s) for s in sites))
+    lab = {str(k): str(v).strip() for k, v in dict(labels).items()}
+    missing = [s for s in sites if s not in lab]
+    if missing:
+        raise ValueError(f"{len(missing)} of {len(sites)} site(s) have no label (site number(s) {[sites.index(m) + 1 for m in missing]} in the order "
+                         "given); every site needs one, or it would appear under its own name. Give one label per site.")
+    used = {s: lab[s] for s in sites}
+    if any(not v for v in used.values()):
+        raise ValueError("A site label is empty.")
+    vals = [v.casefold() for v in used.values()]
+    if len(set(vals)) != len(vals):
+        raise ValueError("Two sites share a label; each site needs its own.")
+    keys = {s.casefold() for s in sites}
+    if any(v in keys for v in vals):
+        raise ValueError("A label is the same as a site name; labels must be anonymous.")
+    return used
+
+
+class RunPrivacyError(RuntimeError):
+    """A shareable study output contains a real site name (raised by :func:`run_study` after the scan; the message names files, never sites)."""
+
+
+def _privacy_names(sites: Sequence[str], labels: Mapping[str, str], site_names: Sequence[str] | str | Path | None) -> list[str]:
+    """Names the output scan looks for: the given real names plus the site keys, except keys too short or too label-like to search for
+    (a key ``A`` would match ``Site A``)."""
+    from omop_etl.run_privacy import read_names_file
+
+    names = (read_names_file(site_names) if isinstance(site_names, (str, Path)) else list(site_names or []))
+    words = {w.casefold() for v in labels.values() for w in re.split(r"[^A-Za-z0-9]+", v) if w}
+    names += [s for s in sites if len(s) >= 3 and s.casefold() not in words and not any(s.casefold() == v.casefold() for v in labels.values())]
+    return list(dict.fromkeys(n for n in names if n.strip()))
 
 
 def resolve_decisions(preset: str = "package", **overrides: Any) -> dict[str, Any]:
@@ -196,7 +237,10 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               min_cell: int | None = 11, attrition_mode: str | None = None, table5: str | None = None, sdi_missing_term: bool | None = None,
               address_tie_break: str | None = None, address_undated: str | None = None, table6_increments: str | None = None, consort_final_steps: bool | None = None,
               age_method: str | None = None,
-              sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package") -> dict[str, Any]:
+              sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package",
+              private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
+              document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
+              privacy_check: bool = True) -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
@@ -213,6 +257,15 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     cohort build per site). ``table5`` / ``sdi_missing_term``: see :func:`omop_etl.manuscript_tables.manuscript_workbook`.
     ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (see
     :func:`omop_etl.manuscript_tables.manuscript_workbook`).
+    **Anonymity and sharing.** ``out_dir`` holds only shareable, anonymous outputs. The per-site intermediates (``features_<site>.parquet``,
+    ``cohort_<site>.parquet``, ``attrition_<site>.csv``) carry the site key in their name and a ``site_source`` column, so they go to
+    ``private_dir`` (default ``<out_dir>_private`` next to ``out_dir``; keep it unshared). Every site must have its own label
+    (:func:`validate_site_labels`; a site without one used to appear under its own name). ``document=True`` (default) also writes
+    ``<prefix>_Manuscript.docx`` / ``.pdf`` / ``.qmd`` from the workbook (:func:`omop_etl.manuscript_document.render_manuscript_document`,
+    formats ``document_formats``; without Quarto the run record says what was not rendered). ``privacy_check=True`` (default) then scans
+    every file in ``out_dir`` (text, workbook, DOCX and PDF text and metadata, :mod:`omop_etl.run_privacy`) for ``site_names`` (a list or
+    a names file, one per line) and the site keys; a hit raises :class:`RunPrivacyError` after the run record is written, and the
+    manuscript files are not moved into ``out_dir``.
     ``address_tie_break``: see :func:`omop_etl.geography.derive_geography_features`. ``preset`` names a set of the decisions above
     (:data:`STUDY_PRESETS`: ``"package"`` or ``"delivered_2026_11_11"``); any of ``attrition_mode``, ``table5``, ``sdi_missing_term``,
     ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps``, ``age_method`` given (not None) overrides the preset. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage)."""
@@ -235,7 +288,11 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         site_labels = load_site_labels(site_labels)  # a JSON file written by save_site_labels
     elif isinstance(site_labels, str):
         site_labels = assign_site_labels(sites, mode=site_labels, seed=label_seed)
-    labels = dict(site_labels or assign_site_labels(sites, mode="ordered"))
+    labels = validate_site_labels(sites, site_labels or assign_site_labels(sites, mode="ordered"))
+    priv = Path(private_dir) if private_dir is not None else out.parent / f"{out.name}_private"
+    if priv.resolve() == out.resolve():
+        raise ValueError("private_dir must not be out_dir: out_dir is the shareable folder.")
+    priv.mkdir(parents=True, exist_ok=True)
     if labels_out is not None:
         save_site_labels(labels, labels_out)
     pinned = None if pinned_stays is None else (pd.read_csv(pinned_stays) if isinstance(pinned_stays, (str, Path)) else pinned_stays)
@@ -246,15 +303,20 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     frames, atts = [], []
     for site in sites:
         t_site = time.time()
-        f = out / f"features_{site}.parquet"
-        a = out / f"attrition_{site}.csv"
+        f = priv / f"features_{site}.parquet"
+        a = priv / f"attrition_{site}.csv"
+        if reuse_features and not (f.exists() and a.exists()) and (out / f.name).exists() and (out / a.name).exists():
+            shutil.move(str(out / f.name), f)  # a folder from 0.24.0 or earlier: move the site-named files out of the shareable folder
+            shutil.move(str(out / a.name), a)
+            if (out / f"cohort_{site}.parquet").exists():
+                shutil.move(str(out / f"cohort_{site}.parquet"), priv / f"cohort_{site}.parquet")
         if reuse_features and f.exists() and a.exists():
-            frames.append(pd.read_parquet(f))
+            frames.append(pd.read_parquet(f).assign(site_anon=labels[site]))  # the current labels, even if the saved run used others
             atts.append(pd.read_csv(a))
             continue
         df, att = _site_frame(db, site, start=start, end=end, params=c_params, profile=profile, pinned=pinned,
                               ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
-                              transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=out,
+                              transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=priv,
                               attrition_mode=attrition_mode)
         df["site_anon"] = labels.get(site, site)
         df.to_parquet(f)
@@ -276,7 +338,6 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     wb = manuscript_workbook(pooled, res["tables"], out / f"{prefix}_Manuscript_Tables.xlsx", attrition=attrition, site_labels=labels, min_cell=min_cell,
                              title=f"{prefix} manuscript tables", table5=table5, sdi_missing_term=sdi_missing_term,
                              table6_increments=dec["table6_increments"], sheet_site_labels=sheet_site_labels)
-    timings["total"] = round(time.time() - t_start, 1)
     comparison = None
     if compare_to is not None:
         summary, diffs = compare_workbooks(wb["path"], compare_to)
@@ -291,6 +352,50 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         d_cells.to_csv(out / f"{prefix}_Deltas.csv", index=False)
         d_rows.to_csv(out / f"{prefix}_Delta_Rows.csv", index=False)
         comparison = (summary, diffs)
+    files = res["files"] + [str(wb["path"])]
+    doc_record: dict[str, Any] = {"requested": bool(document)}
+    staged: list[Path] = []
+    stage = priv / f"{prefix}_manuscript_build"
+    if document:
+        from omop_etl.manuscript_document import render_manuscript_document
+
+        t_doc = time.time()
+        shutil.rmtree(stage, ignore_errors=True)
+        figs = [Path(x) for x in res["files"] if str(x).lower().endswith(".png")]
+        d = render_manuscript_document(wb["path"], stage, prefix=prefix, figures=figs, window=(start, end), title=document_title,
+                                       author=document_author, formats=document_formats, min_cell=min_cell)
+        staged = [d["qmd"], *d["files"].values()]
+        doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"]})
+        timings["document"] = round(time.time() - t_doc, 1)
+    privacy: dict[str, Any] = {"checked": False}
+    hits: list = []
+    if privacy_check:
+        from omop_etl.run_privacy import scan, scan_files
+
+        names = _privacy_names(sites, labels, site_names)
+        if names:
+            hits, skipped = scan(out, names)
+            s_hits, s_skipped = scan_files(staged, names)
+            hits += s_hits
+            skipped += s_skipped
+            # a document that could not be read is not called clean; images carry no searchable text here
+            unread = [x for x in skipped if not x.split(" (")[0].lower().endswith((".png", ".jpg", ".jpeg", ".svg"))]
+            privacy = {"checked": True, "n_names": len(names), "hits": len(hits), "not_scanned": skipped,
+                       "hit_files": sorted({h[0] for h in hits}), "unreadable": unread}
+            if unread and not hits:
+                hits = [(x, 0, "not readable, so not shown to be clean") for x in unread]
+    if staged and not hits:
+        for p_ in staged:
+            shutil.move(str(p_), out / p_.name)
+        files += [str(out / p_.name) for p_ in staged]
+    shutil.rmtree(stage, ignore_errors=True)
+    timings["total"] = round(time.time() - t_start, 1)
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
-                                                       "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings}, indent=1), encoding="utf-8")
-    return {"data": pooled, "tables": res["tables"], "workbook": wb["path"], "files": res["files"] + [str(wb["path"])], "comparison": comparison, "summary": res["summary"], "timings": timings}
+                                                       "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
+                                                       "document": doc_record, "privacy_check": privacy}, indent=1), encoding="utf-8")
+    if hits:
+        where = "; ".join(sorted({f"{h[0]} ({h[2]})" for h in hits})[:20])
+        raise RunPrivacyError(f"{len(hits)} privacy finding(s) in the study outputs, reported by file only: {where}. "
+                              "The manuscript DOCX/PDF were not written to the output folder. Do not share the folder until this is fixed.")
+    return {"data": pooled, "tables": res["tables"], "workbook": wb["path"], "files": files, "comparison": comparison, "summary": res["summary"], "timings": timings,
+            "document": doc_record, "privacy_check": privacy, "private_dir": priv}

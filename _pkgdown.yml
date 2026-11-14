@@ -114,6 +114,12 @@ reference:
   - export_to_circe_json
   - build_manuscript_scaffold
   - federated_meta_analysis
+  - assign_site_labels
+  - save_site_labels
+  - validate_site_labels
+  - relabel_sites
+  - relabel_output_files
+  - check_run_privacy
   - load_care_site
   - load_cdm_source
   - load_location

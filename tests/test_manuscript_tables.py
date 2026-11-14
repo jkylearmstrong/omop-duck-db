@@ -236,7 +236,7 @@ def test_random_site_labels_end_to_end_keep_the_mapping_out_of_the_outputs(feats
     assert run["labels"] == ["Site A", "Site B", "Site C"] and "sites" not in run and not any(s in json.dumps(run) for s in ('"A":', '"B":'))
     # the run record names no site: timings are keyed by the anonymous letter
     timing_keys = set(run["timings_seconds"])
-    assert timing_keys == {f"site_{v}" for v in mapping.values()} | {"tables_figures", "total"}
+    assert timing_keys == {f"site_{v}" for v in mapping.values()} | {"tables_figures", "document", "total"}
     assert not ({"site_A", "site_B", "site_C"} & timing_keys)
     # the same seed rebuilds the mapping; a saved file is accepted as site_labels
     r2 = run_study(db, tmp_path / "out2", sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, site_labels=priv)
