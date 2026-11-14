@@ -305,6 +305,26 @@ def test_two_runs_on_the_same_data_are_identical_and_record_their_environment(tm
     assert env["python"] and env["scikit-learn"] and "xgboost" in env
 
 
+def test_model_tables_do_not_depend_on_sites_order_or_labels(tmp_path, monkeypatch):
+    """The folds are drawn by row position, so the pooled rows are put in an order fixed by the data. A real five-site run with --sites
+    in another order changed 118 model cells before. A new mapping may move rows of the by-site tables, but no model number."""
+    from test_multisite_anonymous import _study
+
+    db, keys = _study(tmp_path, _KeepGrid(monkeypatch), 3)
+    lab = {k: f"Site {c}" for k, c in zip(keys, "ABC")}
+    kw = dict(n_bootstraps=5, loso=True, figures=False, profile=None, document=False)
+    a = run_study(db, tmp_path / "o0", sites=keys, site_labels=lab, **kw)
+    b = run_study(db, tmp_path / "o1", sites=list(reversed(keys)), site_labels=lab, **kw)
+    c = run_study(db, tmp_path / "o2", sites=keys, site_labels={k: f"Site {x}" for k, x in zip(keys, "CAB")}, **kw)
+    A, B, C = (pd.read_excel(r["workbook"], sheet_name=None, header=None) for r in (a, b, c))
+    for k in A:
+        pd.testing.assert_frame_equal(A[k], B[k], obj=k)
+    for k in A:
+        if k.startswith(("Table 2", "Table 3", "Table 4", "Table S4")):
+            pd.testing.assert_frame_equal(A[k], C[k], obj=k)
+    pd.testing.assert_frame_equal(a["data"], b["data"])
+
+
 class _KeepGrid:
     """Applies the study stand-ins for cohort and features but keeps the real model grid."""
 

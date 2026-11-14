@@ -243,6 +243,20 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
     return df, att
 
 
+def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
+    """Pools the site frames in an order that depends only on the data: sites by their key (``site_source``), then rows by person and
+    stay. The cross-validation folds and the upsampled training rows are drawn by row position, so before this the model tables changed
+    with the order of ``--sites`` (and with any change in the order a query returned rows), not only with the data."""
+    def key(d: pd.DataFrame) -> str:
+        return str(d["site_source"].iloc[0]) if "site_source" in d and len(d) else ""
+
+    pooled = pd.concat(sorted(frames, key=key), ignore_index=True, sort=False)
+    cols = [c for c in ("site_source", "person_id", "visit_occurrence_id", "admit_date") if c in pooled]
+    if cols:
+        pooled = pooled.sort_values(cols, kind="mergesort", na_position="last").reset_index(drop=True)
+    return pooled
+
+
 def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], site_labels: Mapping[str, str] | str | Path | None = None, label_seed: int | None = None, labels_out: str | Path | None = None,
               start: str = "2017-01-01", end: str = "2022-09-30", cohort_params: Mapping[str, Any] | None = None, profile: str | None = "ederri",
               pinned_stays: str | Path | pd.DataFrame | None = None, ruca_crosswalk: str | Path | None = None, sdi_table: str | Path | None = None,
@@ -339,7 +353,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         frames.append(df)
         atts.append(att)
         timings[f"site_{labels.get(site, site)}"] = round(time.time() - t_site, 1)  # keyed by the anonymous letter: the run record is shareable and must not name sites
-    pooled = pd.concat(frames, ignore_index=True, sort=False)
+    pooled = _canonical_order(frames)
     attrition = pd.concat(atts, ignore_index=True)
     if not dec["consort_final_steps"]:
         final = attrition["step_name"].astype(str).str.startswith("Index admission ") | attrition["step_name"].astype(str).str.startswith("Stay selected for the patient")

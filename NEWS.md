@@ -1,3 +1,7 @@
+# omopduckdb (development version)
+
+- **Fixed: model tables depended on the order of `--sites`.** `run_study()` pooled the site frames in the order given, and the cross-validation folds and the upsampled training rows are drawn by row position, so the same data with `--sites` in another order gave slightly different Tables 2 to 5 and S4 (a real five-site rerun changed 118 cells; the descriptive tables did not change). The pooled rows are now ordered by site key, person and stay before modelling, so the order of `--sites`, the anonymous labels and the order a query returns rows no longer change any model number. Results differ slightly from runs made with 0.25.0 or earlier for this reason only.
+
 # omopduckdb 0.25.0
 
 Feature release: anonymous multi-site study runs for any number of sites, a DOCX / PDF manuscript from the run, relabelling a finished run, a privacy scan before write-out, and arm64 (DGX Spark) Docker images with Quarto. Version bump 0.24.0 to 0.25.0.
