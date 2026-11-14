@@ -184,12 +184,12 @@ def test_raw_text_files_copy_matches_duckdb_read_csv(pg, tmp_path):
     for f in (ROOT / "tests" / "fixtures" / "pcornet_sample").glob("*.csv"):
         (raw / f.name).write_bytes(f.read_bytes())
     # a pipe-delimited extract with quotes, an embedded delimiter and newline, non-Latin text, empty fields and a byte-order mark
-    (raw / "encounter_extra.csv").write_text(
+    (raw / "encounter_extra.csv").write_bytes(   # bytes: text mode on Windows would turn \n into \r\n
         '﻿ENCOUNTERID|PATID|NOTE|ADMIT_DATE\n'
         'E1|P1|"has | pipe"|2020-01-02\n'
         'E2|P2|"two\nlines"|\n'
         'E3|P3|日本語|2021-05-06\n'
-        'E4||"say ""hi"""|2019-12-31\n', encoding="utf-8")
+        'E4||"say ""hi"""|2019-12-31\n'.encode("utf-8"))
     rep = load_text_files(pg, raw, "raw_site_a")
     assert bool(rep["match"].all())
     assert rep.attrs["files"]["encounter_extra.csv"] == "encounter_extra"
