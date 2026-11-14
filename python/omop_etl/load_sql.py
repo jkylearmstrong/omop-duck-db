@@ -306,12 +306,13 @@ def verify_transfer(con: duckdb.DuckDBPyConnection, tables: Sequence[str] | Mapp
                 frm = src if kind == "table" else f"{src} AS q"
                 desc = con.execute(f"DESCRIBE SELECT * FROM {frm}").fetchall()
                 n_local = con.execute(f"SELECT count(*) FROM {frm}").fetchone()[0]
-                qname = (f"{schema}." if schema else "") + _server_name(target, dialect)
+                prep = engine.dialect.identifier_preparer   # quotes reserved words (note_nlp.offset) and nothing else
+                qname = (f"{prep.quote_schema(schema)}." if schema else "") + prep.quote(_server_name(target, dialect))
                 n_remote = conn.execute(sa.text(f"SELECT count(*) FROM {qname}")).scalar()
                 rows.append({"table": target, "column": "(rows)", "local": n_local, "remote": int(n_remote), "match": n_local == int(n_remote)})
                 for name, typ, *_ in desc:
                     numeric = any(k in typ.upper() for k in ("INT", "DOUBLE", "FLOAT", "DECIMAL", "REAL"))
-                    rc = _server_name(name, dialect)
+                    rc = prep.quote(_server_name(name, dialect))
                     q_local = f'count("{name}")' + (f', sum("{name}"), min("{name}"), max("{name}")' if numeric else "")
                     q_remote = f"count(CASE WHEN {rc} IS NOT NULL THEN 1 END)" + (f", sum({rc}), min({rc}), max({rc})" if numeric else "")   # count(<LOB column>) is an error on Oracle
                     a = con.execute(f"SELECT {q_local} FROM {frm}").fetchone()

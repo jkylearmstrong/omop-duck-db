@@ -38,6 +38,7 @@ remotes::install_github("jkylearmstrong/omop-duck-db")
 
 ``` bash
 pip install omop-duck-db            # or: pip install 'omop-duck-db[ml]' for the ML dependencies
+pip install 'omop-duck-db[postgres-embedded]'   # optional: PostgreSQL inside Python, see testing/postgres-in-python.md
 ```
 
 Working inside this repository with R? `.Rprofile` activates `renv`; run
@@ -95,6 +96,7 @@ menu).
 |----|----|
 | **Build and operate** |  |
 |   Build the database, refresh the vocabulary, central vocabulary, custom and Usagi mappings, run the tests, sync large files | `vignette("database_and_mapping")` |
+|   Keep site databases in a PostgreSQL that runs inside Python (no install, no admin rights) and check the DuckDB <-> PostgreSQL round trip | [`testing/postgres-in-python.md`](testing/postgres-in-python.md) |
 | **Cohorts and features** |  |
 |   Study cohorts, comorbidity, measurement sanitisation, features, Table 1, reconciliation, the shipped eDERRI cohort definitions | `vignette("study_cohorts_and_features")` |
 |   Add your own person-level features (R and Python), and fit them once for use across sites | `vignette("study_features")` |

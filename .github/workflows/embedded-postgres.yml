@@ -1,0 +1,55 @@
+name: Embedded PostgreSQL
+
+# DuckDB <-> PostgreSQL round trips against a PostgreSQL started from Python (omop_etl.embedded_postgres), no service container.
+# Synthetic data only. OMOP_REQUIRE_EMBEDDED_PG makes tests/test_embedded_postgres.py fail instead of skip if the server cannot start.
+
+on:
+  pull_request:
+    paths:
+      - "python/omop_etl/embedded_postgres.py"
+      - "python/omop_etl/load_sql.py"
+      - "python/omop_etl/extract.py"
+      - "python/omop_etl/lakehouse.py"
+      - "scripts/postgres_roundtrip_check.py"
+      - "tests/test_embedded_postgres.py"
+      - "pyproject.toml"
+      - ".github/workflows/embedded-postgres.yml"
+  push:
+    branches: [main]
+    paths:
+      - "python/omop_etl/embedded_postgres.py"
+      - "python/omop_etl/load_sql.py"
+      - "scripts/postgres_roundtrip_check.py"
+      - "tests/test_embedded_postgres.py"
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  embedded-postgres:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    python: "3.10", backend: pg0 }
+          - { os: ubuntu-24.04-arm, python: "3.12", backend: pg0 }      # arm64, as on a DGX Spark
+          - { os: windows-latest,   python: "3.11", backend: pg0 }
+          - { os: macos-latest,     python: "3.13", backend: pg0 }
+          - { os: ubuntu-latest,    python: "3.12", backend: pgembed }
+    env:
+      OMOP_REQUIRE_EMBEDDED_PG: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install (pg0-embedded through the extra)
+        if: matrix.backend == 'pg0'
+        run: pip install -e ".[dev,postgres-embedded]"
+      - name: Install (pgembed)
+        if: matrix.backend == 'pgembed'
+        run: pip install -e ".[dev,postgres]" pgembed
+      - name: Round-trip tests
+        run: pytest tests/test_embedded_postgres.py tests/test_deep_and_transfer.py tests/test_verify_server_roundtrip.py -v -rA -p no:cacheprovider
