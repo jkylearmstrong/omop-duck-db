@@ -85,8 +85,10 @@ def _all_text(path: Path) -> str:
 
         d = docx.Document(str(path))
         return "\n".join([p.text for p in d.paragraphs] + [c.text for t in d.tables for r in t.rows for c in r.cells])
-    if suf == ".pdf":
-        return pdf_text(path)
+    if suf == ".pdf":  # page text only: the metadata carries the render time, which differs between two renders
+        from pypdf import PdfReader
+
+        return "\n".join(pg.extract_text() or "" for pg in PdfReader(str(path)).pages)
     return path.read_text(encoding="utf-8")
 
 
