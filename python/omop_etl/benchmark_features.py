@@ -16,6 +16,7 @@ Leakage policy (all windows are fixed by the code, not by the caller):
 from __future__ import annotations
 
 import os
+import re
 import warnings
 from typing import Any, Mapping, Sequence
 
@@ -449,6 +450,7 @@ def extract_benchmark_features(
     groups: dict[str, list[str]] = {}
     skipped: list[str] = []
     address_used: str | None = None
+    geography: dict[str, Any] | None = None
 
     blocks: list[pd.DataFrame] = []     # joined once at the end: 100+ single-column inserts fragment a DataFrame
 
@@ -520,7 +522,9 @@ def extract_benchmark_features(
                                                      lookback_days=lookback_days, **window_kw)
                 # a class that resolves to no concept is an all-zero column: keep the reason (it used to be silenced)
                 for w in sorted({str(w.message) for w in med_warnings if issubclass(w.category, UserWarning)}):
-                    warnings.warn(f"medication classes: {w}", UserWarning, stacklevel=2)
+                    cls = re.search(r"Medication class '([^']+)'", w)
+                    warnings.warn(DataGapWarning(f"medication classes: {w}", "feature_skipped",
+                                                 f"{prefix}med_{cls.group(1)}" if cls else None), stacklevel=2)
                 add("medications" if not prefix else "medications_ederri", _align(cohort, med, prefix=prefix + "med_", only=list(specs)))
         if include_protocol_history:
             try:
@@ -616,6 +620,12 @@ def extract_benchmark_features(
                     "sdi_quintile and ruca_category are all missing. Pass address_table= the name of your dated address table.", "sdoh"),
                     stacklevel=2)
             address_used = geo.attrs.get("address_table")
+            has_zip = geo["zip5"].notna()
+            n_zip = int(has_zip.sum())
+            geography = {"address_table": address_used, "share_with_zip": round(float(has_zip.mean()), 4) if len(geo) else None,
+                         "rule_shares": {str(k): round(float(v), 4) for k, v in geo["rule"].value_counts(normalize=True, dropna=False).items()},
+                         "zip_not_in_sdi": round(float((has_zip & geo["sdi_score"].isna()).sum() / n_zip), 4) if n_zip else None,
+                         "zip_not_in_ruca": round(float((has_zip & geo["ruca_code"].isna()).sum() / n_zip), 4) if n_zip else None}
             geo = geo.drop_duplicates("stay_id").set_index("stay_id").reindex(cohort["row_id"])
             q = geo["sdi_quintile"].to_numpy()
             add("sdoh", pd.DataFrame({"sdi_quintile": q, "ruca_category": geo["ruca_category"].to_numpy(),
@@ -655,6 +665,7 @@ def extract_benchmark_features(
     out.attrs["key_columns"] = keys
     out.attrs["imputation_values"] = imputation
     out.attrs["address_table"] = address_used
+    out.attrs["geography"] = geography
     return out
 
 

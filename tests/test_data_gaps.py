@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "python"))
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from omop_etl.data_gaps import DataGapError, assess, feature_coverage  # noqa: E402
+from omop_etl.data_gaps import DataGapError, DataGapWarning, assess, feature_coverage  # noqa: E402
 from omop_etl.geography import find_address_tables, resolve_address_table  # noqa: E402
 
 COLS = "person_id BIGINT, location_id BIGINT, zip5 VARCHAR, address_start DATE, address_end DATE, preferred VARCHAR"
@@ -84,23 +84,31 @@ def _frame(n=100):
 GROUPS = {"labs": ["lab_albumin", "lab_ldl"], "medications": ["med_insulins"], "sdoh": ["sdi_quintile", "sdoh_missing"]}
 
 
-def test_a_healthy_site_only_warns_about_an_empty_column():
-    f = feature_coverage(_frame(), site="Site A", groups=GROUPS, skipped=["lab_ferritin"])
-    assert {x["check"] for x in f} == {"column_missing", "feature_skipped"} and all(x["severity"] == "warning" for x in f)
-    assert assess(f) == f
+def test_one_lab_missing_everywhere_at_a_site_fails_and_is_accepted_by_name():
+    d = _frame().assign(extra_note=np.nan, med_statins=0)
+    f = feature_coverage(d, site="Site A", groups=GROUPS, skipped=["lab_ferritin"])
+    by = {(x["check"], x.get("column")): x["severity"] for x in f}
+    assert by == {("feature_skipped", "lab_ferritin"): "error", ("column_missing", "lab_ldl"): "error",
+                  ("column_missing", "extra_note"): "warning"}            # outside every feature group: a warning only
+    assert all(x["check"] != "column_all_zero" for x in f)                # 100 stays: too few to call an all-zero class suspicious
+    with pytest.raises(DataGapError, match="--allow-data-gaps lab_ferritin lab_ldl"):
+        assess(f)
+    assert all(x["allowed"] for x in assess(f, ["lab_ferritin", "lab_ldl"]) if x["severity"] == "error")
+    big = pd.concat([d] * 3, ignore_index=True)
+    assert any(x["check"] == "column_all_zero" and x["column"] == "med_statins" for x in feature_coverage(big, site="Site A", groups=GROUPS))
 
 
 def test_all_missing_sdoh_all_zero_meds_and_missing_labs_are_errors():
     d = _frame().assign(sdoh_missing=1, med_insulins=0, lab_albumin=np.nan)
     d.loc[:2, "sdoh_missing"] = 0                                # 97% missing is still "close to all"
     f = feature_coverage(d, site="Site B", groups=GROUPS)
-    errors = {x.get("group"): x for x in f if x["severity"] == "error"}
+    errors = {x.get("group"): x for x in f if x["severity"] == "error" and x.get("group")}
     assert set(errors) == {"sdoh", "medications", "labs"} and errors["sdoh"]["check"] == "sdoh"
     assert "97.0%" in errors["sdoh"]["message"] and "Site B" not in errors["sdoh"]["message"]
     with pytest.raises(DataGapError, match="--allow-data-gaps labs medications sdoh"):
         assess(f)
     assert all(x["allowed"] for x in assess(f, ["sdoh", "group_missing"]) if x["severity"] == "error")
-    with pytest.raises(ValueError, match="unknown check"):
+    with pytest.raises(ValueError, match="unknown name"):
         assess(f, ["sdho"])
 
 
@@ -184,3 +192,84 @@ def test_script_stops_with_the_candidates_when_no_address_table_is_found(tmp_pat
     assert reproduce_study.main(args + ["--allow-data-gaps", "address_table"]) == 0
     out = capsys.readouterr()
     assert "address table used: Site A: person.location_id" in out.out and "DATA GAPS ACCEPTED" in out.err
+
+
+# -- window, observation periods, partial geography, one-pass check ---------------------------------------------------------
+
+def test_window_not_covered_and_build_date_pileup_are_gap_warnings():
+    import warnings
+
+    from omop_etl.study_run import _check_coverage_of_window
+
+    c = duckdb.connect()
+    c.execute("CREATE TABLE visit_occurrence AS SELECT 9201 AS visit_concept_id, DATE '2018-06-01' + i::INT AS visit_start_date FROM range(400) t(i)")
+    c.execute("CREATE TABLE observation_period AS SELECT DATE '2019-01-01' - (i % 60)::INT AS observation_period_end_date FROM range(120) t(i) "
+              "UNION ALL SELECT DATE '2019-07-05' FROM range(200)")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _check_coverage_of_window(c, "2017-01-01", "2022-09-30", {"visit_type": [9201, 262]})
+    gaps = [(x.message.check, str(x.message)) for x in w if isinstance(x.message, DataGapWarning)]
+    assert sorted(c for c, _ in gaps) == ["observation_period", "window", "window"]
+    assert any("end 1183 days before" in m for _, m in gaps) and any("begin 516 days after" in m for _, m in gaps)
+    assert not any("2019" in m or "2018" in m for _, m in gaps)                                                    # days and shares, no dates
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        _check_coverage_of_window(c, "2018-06-01", "2019-06-30", {})
+    assert not [x for x in w if isinstance(x.message, DataGapWarning) and x.message.check == "window"]
+
+
+def test_partial_geography_loss_is_caught_below_the_group_threshold():
+    from omop_etl.data_gaps import geography_findings
+
+    ok = {"zip_not_in_sdi": 0.02, "zip_not_in_ruca": 0.01, "rule_shares": {"in_effect": 0.9, "earliest_after": 0.05}}
+    assert geography_findings(ok, site="Site A") == []
+    bad = {"zip_not_in_sdi": 0.4, "zip_not_in_ruca": 0.01, "rule_shares": {"earliest_after": 0.7}}
+    f = geography_findings(bad, site="Site A")
+    assert [(x["check"], x["severity"]) for x in f] == [("sdoh_partial", "error"), ("address_rule", "warning")]
+
+
+def test_benchmark_features_report_how_addresses_were_matched():
+    from test_sdoh_address_table import CUTS, KW, RUCA, SDI
+
+    from omop_etl.benchmark_features import extract_benchmark_features
+
+    c = duckdb.connect()
+    c.execute("CREATE TABLE person (person_id BIGINT, location_id BIGINT); CREATE TABLE location (location_id BIGINT, zip VARCHAR)")
+    c.execute(f"CREATE TABLE study_address_history ({COLS})")
+    c.execute("INSERT INTO study_address_history VALUES (1, 1, '19101', DATE '2019-01-01', NULL, 'N'), (2, 2, '55555', DATE '2019-01-01', NULL, 'N')")
+    c.execute("CREATE TABLE cohort_t AS SELECT * FROM (VALUES (1, DATE '2020-01-10', DATE '2020-01-15', 101, 0), "
+              "(2, DATE '2020-01-10', DATE '2020-01-15', 102, 0)) t(subject_id, cohort_start_date, cohort_end_date, visit_occurrence_id, outcome_flag)")
+    df = extract_benchmark_features(c, "cohort_t", include_sdoh=True, ruca_crosswalk=RUCA, sdi_table=SDI, sdi_cut_points=CUTS, **KW)
+    g = df.attrs["geography"]
+    assert g["address_table"] == "study_address_history" and g["share_with_zip"] == 1.0
+    assert g["zip_not_in_sdi"] == 0.5 and g["rule_shares"] == {"in_effect": 1.0}
+
+
+def test_check_data_reports_every_site_in_one_pass(tmp_path, monkeypatch, capsys):
+    import reproduce_study
+
+    from omop_etl.study_run import run_study
+
+    db, sites = _gapped_study(tmp_path, monkeypatch, sdoh_missing_at=1)
+    kw = dict(sites=sites, n_bootstraps=3, loso=False, figures=False, profile=None, document=False)
+    r = run_study(db, tmp_path / "ok", check_only=True, allow_data_gaps=["sdoh"], **kw)
+    assert r["checked_only"] and set(r["share_missing_by_group"]) == {"Site A", "Site B", "Site C"}
+    assert not (tmp_path / "ok" / "Study_Manuscript_Tables.xlsx").exists() and (tmp_path / "ok" / "Study_data_gaps.json").exists()
+    args = ["--db-dir", str(db), "--out", str(tmp_path / "o"), "--sites", *sites, "--no-document", "--profile", "none", "--check-data"]
+    assert reproduce_study.main(args) == 3
+    assert "[Site B] sdoh" in capsys.readouterr().err
+    assert reproduce_study.main(args + ["--allow-data-gaps", "sdoh"]) == 0
+    assert "data check passed" in capsys.readouterr().out
+
+
+def test_a_gap_warning_can_name_its_column_and_be_accepted_by_it():
+    import warnings
+
+    from omop_etl.study_run import _caught_findings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        warnings.warn(DataGapWarning("medication classes: Medication class 'statins' resolved to no descendant concepts", "feature_skipped",
+                                     "med_statins"))
+    f = _caught_findings(w, "Site A", {})
+    assert f[0]["column"] == "med_statins" and assess(f, ["med_statins"])[0]["allowed"]

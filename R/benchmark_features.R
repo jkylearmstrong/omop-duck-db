@@ -292,7 +292,8 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
 #' @param sdoh_fallback `"indicator"` (default): when `ruca_crosswalk`, `sdi_table` or `sdi_cut_points` is missing, `include_sdoh = TRUE`
 #'   gives `sdi_quintile` / `ruca_category` = NA plus `sdoh_missing = 1` and a warning; `"raise"` keeps the error. No national cut points are bundled.
 #' @param address_table dated address history for `include_sdoh` (columns `person_id`, `zip5`, `address_start`, `address_end`,
-#'   `preferred`): `"auto"` (default) uses `person_address_history` when present, else `person.location_id`; or a table name (for
+#'   `preferred`): `"auto"` (default) uses the one non-empty dated address table ([resolve_address_table()]), else `person.location_id`
+#'   when it holds ZIPs, and stops otherwise; or a table name (for
 #'   example a study's own `ederri_address_history`); `NULL` for `person.location_id`.
 #' @param address_undated rank of an address with no start date (`undated` of `derive_geography_features()`).
 #' @param address_tie_break how `derive_geography_features()` resolves addresses that tie on every rule key (`tie_break`).
@@ -484,9 +485,9 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
       stays <- data.frame(person_id = cohort$subject_id, stay_id = cohort$row_id, admit_date = cohort$cohort_start_date)
       geo <- derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays = stays, address_table = address_table,
                                         tie_break = address_tie_break, undated = address_undated)
-      if (all(is.na(geo$zip5))) warning("include_sdoh: no ZIP code was found for any stay, so sdi_quintile and ruca_category are all missing. ",
-                                        "The default address_table = 'auto' reads person_address_history, else person.location_id; pass ",
-                                        "address_table = the name of your dated address table.", call. = FALSE)
+      if (all(is.na(geo$zip5))) warning("include_sdoh: no ZIP code was found for any stay (address source: ", attr(geo, "address_table"),
+                                        "), so sdi_quintile and ruca_category are all missing. Pass address_table = the name of your ",
+                                        "dated address table.", call. = FALSE)
       geo <- geo[!duplicated(geo$stay_id), , drop = FALSE]
       idx <- match(cohort$row_id, geo$stay_id)
       add("sdoh", data.frame(sdi_quintile = geo$sdi_quintile[idx], ruca_category = geo$ruca_category[idx],

@@ -308,6 +308,7 @@ reference:
   desc: Area-level covariates derived from the address in effect at admission, with fixed training-cohort SDI cut points.
   contents:
   - derive_geography_features
+  - find_address_tables
   - write_geography_measurements
   - write_custom_covariates
   - write_custom_features

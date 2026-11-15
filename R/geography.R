@@ -117,6 +117,72 @@ read_sdi_table <- function(source) {
                   params = list(name))$n[[1]] > 0
 }
 
+.geo_address_columns <- c("person_id", "zip5", "address_start", "address_end", "preferred")
+
+#' Find and choose the dated address table
+#'
+#' `find_address_tables()` lists the tables and views in the current schema whose name contains `address`, with the
+#' required columns they lack (`person_id, zip5, address_start, address_end, preferred`) and their row count.
+#' `resolve_address_table()` chooses the table [derive_geography_features()] uses, and stops instead of guessing:
+#' `"auto"` takes the one non-empty table with those columns (so a study's own `<study>_address_history` is found as well as
+#' `person_address_history`), stops naming them when there are several, and falls back to `person.location_id` (returns
+#' `NULL`) only when some person has a ZIP there; otherwise it stops and lists what it looked at, because every stay would
+#' get no SDI / RUCA. A name given explicitly must exist and have the columns. `NULL` always means `person.location_id`.
+#' @param con A DBI connection.
+#' @param address_table `"auto"`, a table name, or `NULL`.
+#' @return `find_address_tables()`: data frame `table, missing_columns, rows`. `resolve_address_table()`: a table name or `NULL`.
+#' @export
+find_address_tables <- function(con) {
+  names <- DBI::dbGetQuery(con, "SELECT DISTINCT table_name FROM information_schema.tables WHERE table_catalog = current_database()
+                                  AND table_schema = current_schema() AND lower(table_name) LIKE '%address%' ORDER BY 1")$table_name
+  names <- names[grepl("^[A-Za-z0-9_]+$", names)]
+  rows <- lapply(names, function(t) {
+    cols <- tolower(DBI::dbGetQuery(con, sprintf('DESCRIBE "%s"', t))$column_name)
+    miss <- setdiff(.geo_address_columns, cols)
+    n <- if (length(miss)) NA_integer_ else as.integer(DBI::dbGetQuery(con, sprintf('SELECT count(*) AS n FROM "%s"', t))$n[[1]])
+    data.frame(table = t, missing_columns = paste(miss, collapse = ", "), rows = n, stringsAsFactors = FALSE)
+  })
+  if (!length(rows)) return(data.frame(table = character(), missing_columns = character(), rows = integer(), stringsAsFactors = FALSE))
+  do.call(rbind, rows)
+}
+
+.geo_describe_candidates <- function(c) {
+  if (!nrow(c)) return("no table or view with 'address' in its name")
+  paste(ifelse(nzchar(c$missing_columns), sprintf("%s (lacks %s)", c$table, c$missing_columns),
+               sprintf("%s (%s)", c$table, ifelse(is.na(c$rows) | c$rows == 0, "empty", "usable"))), collapse = "; ")
+}
+
+#' @rdname find_address_tables
+#' @export
+resolve_address_table <- function(con, address_table = "auto") {
+  if (is.null(address_table)) return(NULL)
+  if (!identical(address_table, "auto")) {
+    if (!grepl("^[A-Za-z0-9_]+$", address_table)) stop("invalid address table name ", shQuote(address_table), ".", call. = FALSE)
+    if (!.geo_has_table(con, address_table)) {
+      stop("address table '", address_table, "' does not exist in this database. Tables with 'address' in their name: ",
+           .geo_describe_candidates(find_address_tables(con)), ".", call. = FALSE)
+    }
+    cols <- tolower(DBI::dbGetQuery(con, sprintf("DESCRIBE %s", address_table))$column_name)
+    miss <- setdiff(.geo_address_columns, cols)
+    if (length(miss)) stop("address table '", address_table, "' lacks column(s) ", paste(miss, collapse = ", "), ".", call. = FALSE)
+    return(address_table)
+  }
+  cands <- find_address_tables(con)
+  usable <- cands$table[!nzchar(cands$missing_columns) & !is.na(cands$rows) & cands$rows > 0]
+  if (length(usable) == 1) return(usable)
+  if (length(usable) > 1) {
+    stop("address_table = 'auto' found more than one dated address table (", paste(usable, collapse = ", "),
+         "); pass address_table = the one the study uses.", call. = FALSE)
+  }
+  has_zip <- .geo_has_table(con, "person") && .geo_has_table(con, "location") && tryCatch(
+    nrow(DBI::dbGetQuery(con, "SELECT 1 FROM person p JOIN location l ON l.location_id = p.location_id
+                               WHERE regexp_matches(CAST(l.zip AS VARCHAR), '\\d{5}') LIMIT 1")) > 0, error = function(e) FALSE)
+  if (has_zip) return(NULL)
+  stop("address_table = 'auto' found no dated address table and person.location_id holds no ZIP, so every stay would have no ",
+       "SDI / RUCA. Looked at: ", .geo_describe_candidates(cands), ". Pass address_table = the table that holds person_id, zip5, ",
+       "address_start, address_end, preferred, or address_table = NULL to accept no geography.", call. = FALSE)
+}
+
 .geo_tie_breaks <- c("deterministic", "highest_zip", "ambiguous_missing", "arbitrary", "first_listed")
 .geo_undated <- c("last", "first")
 
@@ -173,8 +239,8 @@ read_sdi_table <- function(source) {
 #' @param sdi_cut_points Fixed SDI quintile cut points from the training cohort; required unless `fit_cut_points`.
 #' @param stays Optional data frame with `person_id`, `admit_date` and optionally a unique `stay_id`; defaults to every
 #'   inpatient visit (concepts 9201, 262) with `stay_id = visit_occurrence_id`.
-#' @param address_table `"auto"` (use `person_address_history` when present and non-empty, else `person.location_id`),
-#'   a table name, or `NULL` for the person's location.
+#' @param address_table `"auto"` (the one non-empty dated address table, see [resolve_address_table()]; else
+#'   `person.location_id` when it holds ZIPs; stops otherwise), a table name, or `NULL` for the person's location.
 #' @param fit_cut_points Logical; fit cut points from these stays (training reference only).
 #' @param undated Rank of an address with no start date among those in effect: `"last"` (default; a dated address wins) or
 #'   `"first"` (an undated address wins, as in the study's pandas pipeline and the delivered 2026-11-11 geography).
@@ -206,12 +272,7 @@ derive_geography_features <- function(con, ruca_crosswalk, sdi_table, sdi_cut_po
     stays <- stays[, c("person_id", "stay_id", "admit_date")]
   }
   stays$admit_date <- as.Date(stays$admit_date)
-  tbl <- address_table
-  if (identical(tbl, "auto")) {
-    tbl <- if (.geo_has_table(con, "person_address_history") &&
-               DBI::dbGetQuery(con, "SELECT count(*) AS n FROM person_address_history")$n[[1]] > 0) "person_address_history" else NULL
-  }
-  if (!is.null(tbl) && !grepl("^[A-Za-z0-9_]+$", tbl)) stop("invalid address table name ", shQuote(tbl), ".", call. = FALSE)
+  tbl <- resolve_address_table(con, address_table)
 
   picked <- .geo_index_addresses(con, stays, tbl, tie_break, undated)
   g <- merge(merge(picked, ruca, by = "zip5", all.x = TRUE, sort = FALSE), sdi, by = "zip5", all.x = TRUE, sort = FALSE)
@@ -223,6 +284,7 @@ derive_geography_features <- function(con, ruca_crosswalk, sdi_table, sdi_cut_po
   g <- g[, c("person_id", "stay_id", "zip5", "rule", "ruca_code", "ruca_category", "sdi_score", "sdi_quintile", "admit_date")]
   rownames(g) <- NULL
   attr(g, "sdi_cut_points") <- cuts
+  attr(g, "address_table") <- if (is.null(tbl)) "person.location_id" else tbl
   g
 }
 

@@ -152,12 +152,11 @@ stays_from_cohort <- function(con, cohort_table = "cohort", cohort_id = NULL) {
   cache <- NULL
   ctx$zip5 <- function() {
     if (is.null(cache)) {
-      tbl <- address_table
-      if (identical(tbl, "auto")) {
-        tbl <- if (.geo_has_table(con, "person_address_history") &&
-                   DBI::dbGetQuery(con, "SELECT count(*) AS n FROM person_address_history")$n[[1]] > 0) "person_address_history" else NULL
-      }
-      if (!is.null(tbl) && !grepl("^[A-Za-z0-9_]+$", tbl)) stop("invalid address table name ", shQuote(tbl), ".", call. = FALSE)
+      tbl <- tryCatch(resolve_address_table(con, address_table), error = function(e) {
+        if (!identical(address_table, "auto")) stop(e)
+        warning("study features: ", conditionMessage(e), " ZIP-based features are missing.", call. = FALSE)
+        NULL
+      })
       cache <<- .geo_index_addresses(con, stays[, .sf_key, drop = FALSE], tbl)
     }
     cache

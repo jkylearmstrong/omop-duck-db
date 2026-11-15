@@ -56,8 +56,8 @@ derive_geography_features(
 \item{stays}{Optional data frame with \code{person_id}, \code{admit_date} and optionally a unique \code{stay_id}; defaults to every
 inpatient visit (concepts 9201, 262) with \code{stay_id = visit_occurrence_id}.}
 
-\item{address_table}{\code{"auto"} (use \code{person_address_history} when present and non-empty, else \code{person.location_id}),
-a table name, or \code{NULL} for the person's location.}
+\item{address_table}{\code{"auto"} (the one non-empty dated address table, see \code{\link[=resolve_address_table]{resolve_address_table()}}; else
+\code{person.location_id} when it holds ZIPs; stops otherwise), a table name, or \code{NULL} for the person's location.}
 
 \item{fit_cut_points}{Logical; fit cut points from these stays (training reference only).}
 

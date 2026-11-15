@@ -36,6 +36,8 @@ def main(argv=None) -> int:
     p.add_argument("--allow-data-gaps", nargs="+", default=[], metavar="CHECK",
                    help="accept these data gaps instead of failing (a check such as sdoh, address_table, vocabulary, pinned, empty_site, "
                         "group_missing, or a feature group such as labs; 'all' accepts every one). Accepted gaps are still written to <prefix>_run.json")
+    p.add_argument("--check-data", action="store_true",
+                   help="build every site, report every data gap of every site in one pass, and stop before modelling (exit 0 when clean, 3 otherwise)")
     p.add_argument("--data-gap-threshold", type=float, default=0.95,
                    help="a feature group missing for at least this share of a site's stays is a data gap (default 0.95)")
     p.add_argument("--bootstraps", type=int, default=100)
@@ -96,7 +98,7 @@ def main(argv=None) -> int:
                                          if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset,
                       private_dir=a.private_dir, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
                       document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check,
-                      document_cache_dir=a.quarto_cache_dir, allow_data_gaps=a.allow_data_gaps, data_gap_threshold=a.data_gap_threshold,
+                      document_cache_dir=a.quarto_cache_dir, allow_data_gaps=a.allow_data_gaps, data_gap_threshold=a.data_gap_threshold, check_only=a.check_data,
                       run_args={k: v for k, v in vars(a).items() if k != "names"})
     except RunPrivacyError as e:
         print(f"PRIVACY CHECK FAILED: {e}", file=sys.stderr)
@@ -104,6 +106,12 @@ def main(argv=None) -> int:
     except DataGapError as e:
         print(f"DATA GAP CHECK FAILED (nothing was modelled): {e}", file=sys.stderr)
         return 3
+    if r.get("checked_only"):
+        print("data check passed: no data gap" + (" beyond those accepted" if any(f.get("allowed") for f in r["data_checks"]) else ""))
+        print("address table used: " + (", ".join(f"{k}: {v}" for k, v in sorted(r["address_table"].items())) or "none (SDI / RUCA off)"))
+        if r["data_checks"]:
+            print(format_findings(r["data_checks"]), file=sys.stderr)
+        return 0
     print(f"N = {len(r['data']):,}; workbook: {r['workbook']}; seconds: {r['timings']}")
     doc = r["document"]
     if doc.get("requested"):

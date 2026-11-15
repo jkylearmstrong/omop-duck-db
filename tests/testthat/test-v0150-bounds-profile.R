@@ -209,6 +209,23 @@ test_that("SDI / RUCA use the study's address table, break ties deterministicall
   stays <- data.frame(person_id = 2, stay_id = 102, admit_date = as.Date("2020-01-12"))
   for (i in 1:3) expect_equal(derive_geography_features(con, sd_ruca, sd_sdi, c(20, 40, 60, 80), stays = stays,
                                                         address_table = "ederri_address_history")$zip5, "17001")
-  expect_warning(w <- do.call(extract_benchmark_features, c(list(con, "cohort_t"), kw)), "address_table")
+  # 'auto' finds the study's table by its columns (it used to look only for person_address_history and return no ZIP at all)
+  auto <- suppressWarnings(do.call(extract_benchmark_features, c(list(con, "cohort_t"), kw)))
+  expect_equal(auto$sdoh_missing, c(0L, 0L, 1L))
+  expect_equal(resolve_address_table(con), "ederri_address_history")
+  # person.location chosen explicitly with no ZIP there: still the loud no-ZIP warning
+  expect_warning(w <- do.call(extract_benchmark_features, c(list(con, "cohort_t"), list(address_table = NULL), kw)), "no ZIP")
   expect_true(all(w$sdoh_missing == 1))
+})
+
+test_that("resolve_address_table stops instead of guessing", {
+  con <- sd_db(); on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
+  DBI::dbExecute(con, "CREATE TABLE person_address_history AS SELECT * FROM ederri_address_history")
+  expect_error(resolve_address_table(con), "more than one.*ederri_address_history, person_address_history")
+  DBI::dbExecute(con, "DROP TABLE person_address_history")
+  DBI::dbExecute(con, "ALTER TABLE ederri_address_history DROP COLUMN preferred")
+  expect_error(resolve_address_table(con), "no dated address table.*ederri_address_history \\(lacks preferred\\)")
+  expect_error(resolve_address_table(con, "nope_address"), "does not exist")
+  expect_null(resolve_address_table(con, NULL))
+  expect_equal(find_address_tables(con)$table, "ederri_address_history")
 })

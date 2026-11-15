@@ -20,10 +20,9 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence
 
-import numpy as np
 import pandas as pd
 
-__all__ = ["DataGapWarning", "DataGapError", "GAP_CHECKS", "feature_coverage", "group_missing_shares", "assess", "format_findings", "sanitize"]
+__all__ = ["DataGapWarning", "DataGapError", "GAP_CHECKS", "feature_coverage", "geography_findings", "group_missing_shares", "FEATURE_PREFIXES", "assess", "format_findings", "sanitize"]
 
 #: Every check that can fail a study run, with what it means. ``--allow-data-gaps`` takes these names (or a feature
 #: group's name, or ``all``).
@@ -37,14 +36,26 @@ GAP_CHECKS: dict[str, str] = {
     "group_missing": "a whole feature group is missing (or all zero) for (nearly) every stay at a site",
     "group_skipped": "a whole feature group could not be computed at a site (a table or concept is absent)",
     "stale_features": "--reuse-features found features saved with other settings (window, address table, inputs, preset ...)",
+    "feature_skipped": "a lab, vital or medication class has no concept in this database, so its column is absent or all zero",
+    "column_missing": "a feature column has no value for any stay at a site",
+    "window": "a site's data do not cover the study window (it starts late or ends early), so stays or outcomes are quietly lost",
+    "observation_period": "observation periods pile up on one end date (events filled with the build date), so follow-up is unreliable",
+    "sdoh_partial": "many stays have a ZIP that is not in the SDI or RUCA table (ZIP vs ZCTA format, an old crosswalk)",
 }
+
+#: Column-name prefixes of the benchmark features; ``--allow-data-gaps lab_ldl`` accepts that column (and ``lab_ldl_last`` ...).
+FEATURE_PREFIXES = ("lab_", "vital_", "med_", "ederri_med_", "elix_", "ederri_elix_", "disp_", "acs_")
+_GROUP_NAMES = {"labs", "vitals", "medications", "medications_ederri", "elixhauser", "elixhauser_ederri", "utilization", "demographics",
+                "disposition", "protocol_history", "study_features", "sdoh"}
+
 
 class DataGapWarning(UserWarning):
     """A gap that degrades results without stopping the code. ``check`` names it (a key of :data:`GAP_CHECKS`)."""
 
-    def __init__(self, message: str, check: str = "group_missing") -> None:
+    def __init__(self, message: str, check: str = "group_missing", column: str | None = None) -> None:
         super().__init__(message)
         self.check = check
+        self.column = column
 
 
 class DataGapError(RuntimeError):
@@ -85,8 +96,9 @@ def feature_coverage(frame: pd.DataFrame, *, site: str, groups: Mapping[str, Seq
     ``groups`` maps a feature group to its columns (``attrs["feature_groups"]`` of
     :func:`omop_etl.benchmark_features.extract_benchmark_features`). A group is a gap (severity ``error``) when at least
     ``threshold`` of the stays have none of its columns, or when every value in it is zero (a join that matched nothing),
-    and when it was skipped altogether. A single lab or vital that was skipped, or a column with no value at all, is a
-    ``warning``. Without ``groups`` only the column-level warnings are produced.
+    and when it was skipped altogether. A single lab, vital or medication class that was skipped (no concept), or a feature
+    column with no value for any stay, is also an ``error`` (accepted by its name, e.g. ``lab_ldl``). A medication column
+    that is 0 for every stay, and an empty column outside the feature groups, are ``warning``s.
     """
     if not 0 < threshold <= 1:
         raise ValueError("threshold must be in (0, 1].")
@@ -99,7 +111,7 @@ def feature_coverage(frame: pd.DataFrame, *, site: str, groups: Mapping[str, Seq
             out.append({"site": site, "check": "group_skipped", "group": s, "severity": "error",
                         "message": f"feature group {s!r} could not be computed and is absent"})
         else:
-            out.append({"site": site, "check": "feature_skipped", "group": s, "severity": "warning",
+            out.append({"site": site, "check": "feature_skipped", "column": s, "severity": "error",
                         "message": f"{s} has no concept in this database and is absent"})
     for g, cols in (groups or {}).items():
         share, all_zero = _missing_share(frame, g, cols)
@@ -112,11 +124,39 @@ def feature_coverage(frame: pd.DataFrame, *, site: str, groups: Mapping[str, Seq
                         "message": f"every value of feature group {g!r} is 0 (a lookup that matched nothing?)"})
     keys = {"person_id", "subject_id", "visit_occurrence_id", "stay_id", "row_id", "site", "site_source", "site_anon"}
     groups = dict(groups or {})
+    in_group = {c for cols in groups.values() for c in cols}
     reported = {c for f in out if f["severity"] == "error" and f.get("group") in groups for c in groups[f["group"]]}
     for c in frame.columns:
-        if c not in keys and c not in reported and frame[c].isna().all():
-            out.append({"site": site, "check": "column_missing", "column": c, "severity": "warning",
+        if c in keys or c in reported:
+            continue
+        if frame[c].isna().all():
+            # a feature column with no value at all (a lab never coded at this site): an error, accepted by its name
+            hard = c in in_group
+            out.append({"site": site, "check": "column_missing", "column": c, "severity": "error" if hard else "warning",
                         "message": f"column {c!r} has no value for any stay"})
+        elif c.startswith(("med_", "ederri_med_")) and len(frame) >= 200 and pd.to_numeric(frame[c], errors="coerce").fillna(0).eq(0).all():
+            out.append({"site": site, "check": "column_all_zero", "column": c, "severity": "warning",
+                        "message": f"no stay has {c} (a medication class that matched no drug?)"})
+    return out
+
+
+def geography_findings(stats: Mapping[str, Any] | None, *, site: str, max_unmatched: float = 0.10,
+                       max_earliest_after: float = 0.5) -> list[dict[str, Any]]:
+    """Partial SDI / RUCA loss that the group threshold misses: ZIPs found but absent from the SDI or RUCA table for at least
+    ``max_unmatched`` of the stays with a ZIP (``error``, check ``sdoh_partial``), and the address chosen by the "earliest
+    address after admission" fallback for at least ``max_earliest_after`` of stays (``warning``: dates in the address table look wrong)."""
+    if not stats:
+        return []
+    out = []
+    for key, table in (("zip_not_in_sdi", "SDI"), ("zip_not_in_ruca", "RUCA")):
+        v = stats.get(key)
+        if v is not None and v >= max_unmatched:
+            out.append({"site": site, "check": "sdoh_partial", "severity": "error", "share": v,
+                        "message": f"{v:.1%} of the stays with a ZIP have one that is not in the {table} table (ZIP vs ZCTA, ZIP+4, an old file?)"})
+    ea = (stats.get("rule_shares") or {}).get("earliest_after", 0.0)
+    if ea >= max_earliest_after:
+        out.append({"site": site, "check": "address_rule", "severity": "warning", "share": ea,
+                    "message": f"{ea:.1%} of stays use the earliest address that starts after admission (address start dates look wrong)"})
     return out
 
 
@@ -126,37 +166,34 @@ def group_missing_shares(frame: pd.DataFrame, groups: Mapping[str, Sequence[str]
 
 
 def _allowed(f: Mapping[str, Any], allow: set[str]) -> bool:
-    return bool({"all", f.get("check"), f.get("group")} & allow)
+    if {"all", f.get("check"), f.get("group")} & allow:
+        return True
+    col = f.get("column")
+    return bool(col) and any(col == a or col.startswith(a + "_") for a in allow)
 
 
 def assess(findings: Sequence[dict[str, Any]], allow: Iterable[str] = ()) -> list[dict[str, Any]]:
     """Marks each finding ``allowed`` (its check or group is in ``allow``) and raises :class:`DataGapError` for the errors that
     are not. Returns the findings (marked) when nothing fails."""
     allow_set = {str(a) for a in allow}
-    unknown = allow_set - set(GAP_CHECKS) - {"all"} - {f.get("group") for f in findings if f.get("group")} \
-        - {"labs", "vitals", "medications", "medications_ederri", "elixhauser", "utilization", "demographics", "disposition", "protocol_history", "study_features"}
+    unknown = {a for a in allow_set - set(GAP_CHECKS) - {"all"} - _GROUP_NAMES - {f.get("group") for f in findings}
+               if not a.startswith(FEATURE_PREFIXES)}
     if unknown:
-        raise ValueError(f"--allow-data-gaps: unknown check(s) {sorted(unknown)}; known: {sorted(GAP_CHECKS)} or a feature group name, or 'all'.")
+        raise ValueError(f"--allow-data-gaps: unknown name(s) {sorted(unknown)}; give a check ({', '.join(sorted(GAP_CHECKS))}), a feature "
+                         f"group, a feature column (starting {', '.join(FEATURE_PREFIXES)}) or 'all'.")
     for f in findings:
         if f.get("severity") == "error":
             f["allowed"] = _allowed(f, allow_set)
     failing = [f for f in findings if f.get("severity") == "error" and not f.get("allowed")]
     if failing:
-        names = sorted({f.get("group") or f["check"] for f in failing})
+        names = sorted({f.get("column") or f.get("group") or f["check"] for f in failing})
         raise DataGapError("data gap check failed:\n" + format_findings(failing) +
                            f"\nFix the input, or rerun with --allow-data-gaps {' '.join(names)} (run_study(allow_data_gaps=[...])) "
-                           "to accept the gap; it is then recorded in the run record.", findings)
+                           "to accept the gap; it is then recorded in the run record. Add --reuse-features to keep the sites already built, and "
+                           "--check-data to see every site's gaps in one pass.", findings)
     return list(findings)
 
 
 def format_findings(findings: Sequence[Mapping[str, Any]]) -> str:
     """One line per finding, for the console."""
     return "\n".join(f"  [{f.get('site', '-')}] {f['check']}: {f['message']}" + (" (allowed)" if f.get("allowed") else "") for f in findings)
-
-
-def numpy_safe(o: Any) -> Any:  # pragma: no cover - json default hook
-    if isinstance(o, (np.integer,)):
-        return int(o)
-    if isinstance(o, (np.floating,)):
-        return float(o)
-    return str(o)

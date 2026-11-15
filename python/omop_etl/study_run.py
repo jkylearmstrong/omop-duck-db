@@ -211,6 +211,7 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
             con.execute(f"ATTACH '{vocab.as_posix()}' AS central_vocab (READ_ONLY);")
             con.execute("CREATE OR REPLACE TEMP VIEW concept_ancestor AS SELECT * FROM central_vocab.main.concept_ancestor")
         meta: dict[str, Any] = {"address_table": None}
+        _check_coverage_of_window(con, start, end, params)
         if ruca is not None and sdi is not None:
             # before the (slow) cohort build, so a missing address table fails in seconds, not after the whole site
             from omop_etl.geography import PERSON_LOCATION, resolve_address_table
@@ -257,6 +258,7 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         meta["skipped"] = list(feats.attrs.get("skipped") or [])
         if feats.attrs.get("address_table"):
             meta["address_table"] = feats.attrs["address_table"]
+        meta["geography"] = feats.attrs.get("geography")
     finally:
         con.close()
     df = cohort.merge(feats, on="visit_occurrence_id", suffixes=("", "_f"))
@@ -268,6 +270,43 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
     df["index_los_days"] = (df["discharge_date"] - df["admit_date"]).dt.days
     df["person_id"] = df["subject_id"]
     return df, att, meta
+
+
+def _check_coverage_of_window(con: Any, start: str, end: str, params: Mapping[str, Any], slack_days: int = 90) -> None:
+    """Gap warnings when a site's stays do not cover the study window, or its observation periods pile up on the build date. Reports
+    day counts and shares, never dates (a site's data end could identify it)."""
+    import warnings
+
+    import duckdb
+
+    from omop_etl.cohort import check_observation_period_ends
+    from omop_etl.data_gaps import DataGapWarning
+
+    types = [int(x) for x in (params.get("visit_type") or (9201, 262))] if not isinstance(params.get("visit_type"), int) else [int(params["visit_type"])]
+    try:
+        lo, hi = con.execute(f"SELECT min(CAST(visit_start_date AS DATE)), max(CAST(visit_start_date AS DATE)) FROM visit_occurrence "
+                             f"WHERE visit_concept_id IN ({', '.join(map(str, types))})").fetchone()
+    except duckdb.Error:
+        return
+    s, e = pd.Timestamp(start), pd.Timestamp(end)
+    if hi is None:
+        warnings.warn(DataGapWarning("the site has no inpatient stay at all", "window"), stacklevel=2)
+        return
+    short_end, late_start = (e - pd.Timestamp(hi)).days, (pd.Timestamp(lo) - s).days
+    if short_end > slack_days:
+        warnings.warn(DataGapWarning(f"the site's inpatient stays end {short_end} days before the study window ends, so its later "
+                                     "admissions and their readmissions are missing", "window"), stacklevel=2)
+    if late_start > slack_days:
+        warnings.warn(DataGapWarning(f"the site's inpatient stays begin {late_start} days after the study window starts", "window"), stacklevel=2)
+    try:
+        op = check_observation_period_ends(con, warn=False)
+    except Exception:  # pragma: no cover - the check itself never raises; a broken table is reported by the cohort build
+        return
+    if op.get("flagged"):
+        warnings.warn(DataGapWarning(
+            f"{op['periods'] / max(op['total'], 1):.1%} of observation periods end on the last end date, about "
+            f"{op['periods'] / max(op['typical_daily'], 1.0):.0f} times a typical day: source events were probably filled with the build "
+            "date, so follow-up there is unreliable (omop_etl.build_omop_cdm.cap_observation_period)", "observation_period"), stacklevel=2)
 
 
 def _file_fingerprint(path: Any) -> dict[str, Any] | None:
@@ -297,7 +336,8 @@ def _caught_findings(caught: Sequence[Any], label: str, scrub: Mapping[str, str]
             key = (w.message.check, msg)
             if key not in seen:
                 seen.add(key)
-                out.append({"site": label, "check": w.message.check, "severity": "error", "message": msg})
+                out.append({"site": label, "check": w.message.check, "severity": "error", "message": msg,
+                            **({"column": w.message.column} if getattr(w.message, "column", None) else {})})
         elif issubclass(w.category, UserWarning):
             if ("warning", msg) not in seen:
                 seen.add(("warning", msg))
@@ -309,9 +349,10 @@ def _caught_findings(caught: Sequence[Any], label: str, scrub: Mapping[str, str]
 
 def _with_coverage(raised: list[dict[str, Any]], frame: pd.DataFrame, meta: Mapping[str, Any], label: str, threshold: float) -> list[dict[str, Any]]:
     """``raised`` plus the feature-coverage findings; a group already reported by the code that saw the gap is not reported twice."""
-    from omop_etl.data_gaps import feature_coverage
+    from omop_etl.data_gaps import feature_coverage, geography_findings
 
     cover = feature_coverage(frame, site=label, groups=meta.get("feature_groups"), skipped=meta.get("skipped") or (), threshold=threshold)
+    cover += geography_findings(meta.get("geography"), site=label)
     have = {f["check"] for f in raised}
     return raised + [f for f in cover if not (f["check"] in have and f["check"] in ("sdoh", "group_skipped", "empty_site", "address_table"))
                      and not (f["check"] == "sdoh" and "address_table" in have)]
@@ -344,7 +385,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
               privacy_check: bool = True, document_cache_dir: str | Path | None = None, allow_data_gaps: Sequence[str] = (),
-              data_gap_threshold: float = 0.95, run_args: Mapping[str, Any] | None = None) -> dict[str, Any]:
+              data_gap_threshold: float = 0.95, run_args: Mapping[str, Any] | None = None, check_only: bool = False) -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
@@ -379,7 +420,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     could not be computed, no reachable vocabulary, pinned stays not found, a site with no stays. Any of these raises
     :class:`omop_etl.data_gaps.DataGapError` (after writing ``<prefix>_data_gaps.json``) unless its check or group is named in
     ``allow_data_gaps`` (``"all"`` allows every one). Every finding, allowed or a plain warning, goes into ``<prefix>_run.json``
-    with the address table used per site. ``run_args`` (the command line) and the ``sites`` order are written only to
+    with the address table used per site. ``check_only=True`` builds every site, collects every finding (no fail-fast), writes
+    ``<prefix>_data_gaps.json`` and stops before any modelling: it raises ``DataGapError`` listing every gap of every site, or returns
+    ``{"data_checks": [...], ...}`` when there is none. ``run_args`` (the command line) and the ``sites`` order are written only to
     ``<prefix>_run_private.json`` in ``private_dir``: together with real names they would reveal which label is which site."""
     from omop_etl.manuscript_tables import compare_workbooks, manuscript_workbook
     from omop_etl.study_report import build_study_tables
@@ -419,6 +462,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     findings: list[dict[str, Any]] = []
     address_used: dict[str, Any] = {}
     coverage: dict[str, dict[str, float]] = {}
+    geography: dict[str, Any] = {}
     home = str(Path.home())
     scrub: dict[str, str] = {str(db.resolve()): "<db_dir>", str(db): "<db_dir>", **({home: "~"} if len(home) > 1 else {})}
     for s_ in sites:
@@ -434,14 +478,24 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                       "pinned": None if pinned is None else pd.util.hash_pandas_object(pinned, index=False).sum().item(),
                                       "feature_kwargs": feature_kwargs or {}}, default=str, sort_keys=True))
 
+    def _write_gaps() -> None:
+        (out / f"{prefix}_data_gaps.json").write_text(json.dumps({"threshold": data_gap_threshold, "allowed": allow, "findings": findings,
+                                                                "share_missing_by_group": coverage, "geography": geography},
+                                                               indent=1, default=str), encoding="utf-8")
+
     def _gate(new: list[dict[str, Any]]) -> None:
         findings.extend(new)
         try:
             assess(new, allow)
         except DataGapError:
-            (out / f"{prefix}_data_gaps.json").write_text(json.dumps({"threshold": data_gap_threshold, "allowed": allow, "findings": findings},
-                                                                    indent=1, default=str), encoding="utf-8")
-            raise
+            if not check_only:  # check_only: keep going, every site's gaps are reported together at the end
+                _write_gaps()
+                raise
+
+    if compare_to is not None and preset == "package":
+        findings.append({"site": "-", "check": "preset", "severity": "warning",
+                         "message": "--compare-to with the default preset 'package': a workbook delivered under another preset (such as "
+                                    "delivered_2026_11_11) differs in its decisions too, so not every difference is a data difference"})
 
     if pinned is not None and "site_source" in pinned:
         stray = sorted(set(pinned["site_source"].dropna().astype(str)) - set(map(str, sites)))
@@ -475,6 +529,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                               "message": f"reused features were built with different settings ({', '.join(diff)}); rerun without --reuse-features"})
             address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
             coverage[labels[site]] = group_missing_shares(df, meta.get("feature_groups"))
+            if meta.get("geography"):
+                geography[labels[site]] = {k: v for k, v in meta["geography"].items() if k != "address_table"}
             _gate(_with_coverage(saved, df, meta, labels[site], data_gap_threshold))
             frames.append(df)
             atts.append(pd.read_csv(a))
@@ -493,10 +549,17 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         m.write_text(json.dumps({**meta, "settings": settings, "raised": [{k: v for k, v in x.items() if k != "site"} for x in raised]}, indent=1, default=str),
                      encoding="utf-8")
         coverage[labels[site]] = group_missing_shares(df, meta.get("feature_groups"))
+        if meta.get("geography"):
+            geography[labels[site]] = {k: v for k, v in meta["geography"].items() if k != "address_table"}
         _gate(_with_coverage(raised, df, meta, labels[site], data_gap_threshold))
         frames.append(df)
         atts.append(att)
         timings[f"site_{labels.get(site, site)}"] = round(time.time() - t_site, 1)  # keyed by the anonymous letter: the run record is shareable and must not name sites
+    if check_only:
+        _write_gaps()
+        assess(findings, allow)  # raises with every site's gaps at once
+        return {"data_checks": findings, "address_table": address_used, "share_missing_by_group": coverage, "geography": geography,
+                "private_dir": priv, "checked_only": True}
     pooled = _canonical_order(frames)
     attrition = pd.concat(atts, ignore_index=True)
     if not dec["consort_final_steps"]:
@@ -578,6 +641,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                                                                      "pinned_stays": _file_fingerprint(pinned_stays), "compare_to": _file_fingerprint(compare_to)}.items() if v},
                                                        "data_checks": {"threshold": data_gap_threshold, "allowed": allow, "findings": findings,
                                                                        "share_missing_by_group": dict(sorted(coverage.items())),
+                                                                       "geography": dict(sorted(geography.items())),
                                                                        "n_errors_allowed": sum(1 for x in findings if x.get("severity") == "error"),
                                                                        "n_warnings": sum(1 for x in findings if x.get("severity") == "warning")},
                                                        "document": doc_record, "privacy_check": privacy, "environment": run_environment()}, indent=1, default=str), encoding="utf-8")
