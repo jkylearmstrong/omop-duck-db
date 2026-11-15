@@ -414,3 +414,14 @@ class _KeepGrid:
     def setattr(self, obj, name, value):
         if name != "default_model_grid":
             self.mp.setattr(obj, name, value)
+
+
+def test_run_environment_without_xgboost_or_threadpoolctl(monkeypatch):
+    """The platform details never fail a run: without XGBoost or threadpoolctl those two keys are None."""
+    from omop_etl.study_run import run_environment
+
+    monkeypatch.setitem(sys.modules, "xgboost", None)
+    monkeypatch.setitem(sys.modules, "threadpoolctl", None)
+    env = run_environment()
+    assert env["xgboost_build"] is None and env["thread_pools"] is None
+    assert env["platform"] and env["container"] in ("yes", "no")
