@@ -273,3 +273,20 @@ def test_a_gap_warning_can_name_its_column_and_be_accepted_by_it():
                                      "med_statins"))
     f = _caught_findings(w, "Site A", {})
     assert f[0]["column"] == "med_statins" and assess(f, ["med_statins"])[0]["allowed"]
+
+
+def test_library_warnings_lose_their_counts_and_dates_in_the_shareable_record():
+    import warnings
+
+    from omop_etl.data_gaps import mask_counts
+    from omop_etl.study_run import _caught_findings
+
+    assert mask_counts("33 of 61,204 periods end on 2024-01-01; LOINC 2160-0, E11.9, 12.5%, lab_ldl") == \
+        "<n> of <n> periods end on <date>; LOINC 2160-0, E11.9, 12.5%, lab_ldl"
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        warnings.warn("33 of 61204 observation periods end on 2024-01-01", UserWarning)
+        warnings.warn(DataGapWarning("the site's inpatient stays end 120 days before the study window ends", "window"))
+    f = _caught_findings(w, "Site A", {})
+    assert f[0]["message"] == "<n> of <n> observation periods end on <date>"
+    assert "120 days" in f[1]["message"]                       # gap messages are written to be shareable and keep their numbers

@@ -18,11 +18,12 @@ Findings are keyed by the anonymous site label and carry shares (percentages), n
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["DataGapWarning", "DataGapError", "GAP_CHECKS", "feature_coverage", "geography_findings", "group_missing_shares", "FEATURE_PREFIXES", "assess", "format_findings", "sanitize"]
+__all__ = ["DataGapWarning", "DataGapError", "GAP_CHECKS", "feature_coverage", "geography_findings", "group_missing_shares", "FEATURE_PREFIXES", "assess", "format_findings", "mask_counts", "sanitize"]
 
 #: Every check that can fail a study run, with what it means. ``--allow-data-gaps`` takes these names (or a feature
 #: group's name, or ``all``).
@@ -72,6 +73,18 @@ def sanitize(text: str, replacements: Mapping[str, str]) -> str:
     for k in sorted((k for k in replacements if k), key=len, reverse=True):
         out = out.replace(k, replacements[k])
     return out
+
+
+_COUNT = re.compile(r"(?<![\w.\-/'])\d{1,3}(?:,\d{3})+(?![\w.\-/%])|(?<![\w.\-/'])\d{2,}(?![\w.\-/%])")
+
+
+_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?\b")
+
+
+def mask_counts(text: str) -> str:
+    """Replaces dates with ``<date>`` (a site's last data date can identify it) and whole numbers of two digits or more (``61,204``, ``33``) with ``<n>``. Percentages, decimals and codes joined to letters,
+    dots or hyphens (``E11.9``, ``2160-0``, ``lab_ldl``) are kept. For messages that were not written for a shareable record."""
+    return _COUNT.sub("<n>", _DATE.sub("<date>", str(text)))
 
 
 def _missing_share(frame: pd.DataFrame, group: str, cols: Sequence[str]) -> tuple[float, bool]:

@@ -334,7 +334,7 @@ def _check_coverage_of_window(con: Any, start: str, end: str, params: Mapping[st
         return
     if op.get("flagged"):
         warnings.warn(DataGapWarning(
-            f"{op['periods'] / max(op['total'], 1):.1%} of observation periods end on the last end date, about "
+            f"{op['periods'] / max(op['total'], 1):.3%} of observation periods end on the last end date, about "
             f"{op['periods'] / max(op['typical_daily'], 1.0):.0f} times a typical day: source events were probably filled with the build "
             "date, so follow-up there is unreliable (omop_etl.build_omop_cdm.cap_observation_period)", "observation_period"), stacklevel=2)
 
@@ -356,12 +356,16 @@ def _caught_findings(caught: Sequence[Any], label: str, scrub: Mapping[str, str]
     """The gap warnings raised while one site was built (errors) and the other warnings the library printed (warnings)."""
     import warnings
 
-    from omop_etl.data_gaps import DataGapWarning, sanitize
+    from omop_etl.data_gaps import DataGapWarning, mask_counts, sanitize
 
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for w in caught:
         msg = sanitize(str(w.message), scrub)
+        if not isinstance(w.message, DataGapWarning):
+            # library warnings were not written for a shareable record and can carry row counts ("33 of 61,204 periods"):
+            # the run record keeps their wording, not their numbers
+            msg = mask_counts(msg)
         if isinstance(w.message, DataGapWarning):
             key = (w.message.check, msg)
             if key not in seen:
