@@ -77,14 +77,14 @@ def relabel_outputs(run_dir: str | Path, out_dir: str | Path, *, old_labels: Map
                     new_labels: Mapping[str, str] | str | Path, label_seed: int | None = None, labels_out: str | Path | None = None,
                     prefix: str | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
                     document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
-                    privacy_check: bool = True) -> dict[str, Any]:
+                    privacy_check: bool = True, document_cache_dir: str | Path | None = None) -> dict[str, Any]:
     """Copies the shareable outputs of ``run_dir`` to ``out_dir`` with every site label changed from ``old_labels`` to ``new_labels``.
 
     ``old_labels``: the ``site -> label`` mapping the run used (the file ``labels_out`` / ``--labels-out`` saved, or a dict).
     ``new_labels``: a mapping or mapping file, or ``"random"`` (a new random letter per site, repeatable with ``label_seed``; save it with
     ``labels_out``). Both must cover the same sites, the run's labels (from ``<prefix>_run.json``) must be the old ones, and each side must
     give every site its own label. ``prefix`` defaults to the one of the single ``*_run.json`` in ``run_dir``. ``document`` rebuilds the
-    DOCX / PDF from the relabelled workbook. The privacy scan works as in :func:`omop_etl.run_study` and raises :class:`RunPrivacyError`.
+    DOCX / PDF from the relabelled workbook (``document_cache_dir``: as in :func:`omop_etl.run_study`). The privacy scan works as in :func:`omop_etl.run_study` and raises :class:`RunPrivacyError`.
 
     Returns ``{"translation": {old label: new label}, "files": [...], "unchanged": [...], "skipped": [...], "document": {...},
     "privacy_check": {...}}``."""
@@ -148,9 +148,9 @@ def relabel_outputs(run_dir: str | Path, out_dir: str | Path, *, old_labels: Map
         figs = [f for f in files if f.suffix.lower() == ".png" and f.name.startswith(prefix + "_")]
         window = record.get("window")
         d = render_manuscript_document(wb, stage, prefix=prefix, figures=figs, window=window, title=document_title, author=document_author,
-                                       formats=document_formats)
+                                       formats=document_formats, cache_dir=document_cache_dir)
         staged = [d["qmd"], *d["files"].values()]
-        doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"]})
+        doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"], "cache": d["cache"]})
     privacy: dict[str, Any] = {"checked": False}
     hits: list = []
     if privacy_check:

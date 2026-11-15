@@ -55,7 +55,7 @@ def _fake_quarto(tmp_path, monkeypatch, behaviour):
     monkeypatch.setattr(md, "find_renderer", lambda: {"quarto": "quarto", "pandoc": None, "typst": None})
     calls = []
 
-    def run(cmd, cwd, check, capture_output, timeout):
+    def run(cmd, cwd, check, capture_output, timeout, env=None):
         calls.append(cmd)
         fmt = "pdf" if "typst" in cmd else "docx"
         target = Path(cwd) / cmd[cmd.index("--output") + 1]
@@ -118,7 +118,7 @@ def test_pandoc_fallback_uses_typst_for_the_pdf(tmp_path, monkeypatch):
     monkeypatch.setattr(md, "find_renderer", lambda: {"quarto": None, "pandoc": "pandoc", "typst": "typst"})
     seen = []
 
-    def run(cmd, cwd, check, capture_output, timeout):
+    def run(cmd, cwd, check, capture_output, timeout, env=None):
         seen.append(cmd)
         target = Path(cwd) / cmd[cmd.index("-o") + 1]
         _docx(target) if target.suffix == ".docx" else target.write_bytes(b"%PDF")
@@ -128,6 +128,83 @@ def test_pandoc_fallback_uses_typst_for_the_pdf(tmp_path, monkeypatch):
     r = md.render_manuscript_document(wb, tmp_path / "doc")
     assert r["renderer"] == "pandoc" and set(r["files"]) == {"docx", "pdf"}
     assert seen[1][-2:] == ["--pdf-engine", "typst"]
+
+
+# Quarto 1.10's output when %LOCALAPPDATA%\quarto is read only: the cause comes first, then a Deno stack ending in core/cri/cri.ts.
+_QUARTO_DENIED = ("\x1b[31mERROR: PermissionDenied: Access is denied. (os error 5): mkdir 'C:\\Users\\{user}\\AppData\\Local\\quarto\\typst'\x1b[39m\n\n"
+                  "Stack trace:\n" + "".join(f"    at fn{i} (file:///C:/q/bin/quarto.js:{i}:1)\n" for i in range(30))
+                  + "    at async Object.run (file:///C:/q/src/core/cri/cri.ts:88:5)\n")
+
+
+def test_failure_note_keeps_the_start_of_the_error_and_hides_the_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("USERNAME", "jdoe42")
+    monkeypatch.setenv("OMOP_QUARTO_CACHE_DIR", str(tmp_path / "cache"))  # configured, so no automatic retry
+    wb = _workbook(tmp_path / "Study_Manuscript_Tables.xlsx")
+    err = _QUARTO_DENIED.format(user="jdoe42").encode()
+
+    def fail(fmt, target):
+        raise subprocess.CalledProcessError(1, "quarto", stderr=err)
+
+    _fake_quarto(tmp_path, monkeypatch, fail)
+    r = md.render_manuscript_document(wb, tmp_path / "doc", formats=["docx"])
+    note = r["note"]
+    assert note.startswith("docx: quarto failed (exit 1): ERROR: PermissionDenied: Access is denied. (os error 5)")
+    assert "cri.ts" in note and "more line(s)" in note and "\x1b" not in note
+    assert "jdoe42" not in note and "<user>" in note and "OMOP_QUARTO_CACHE_DIR" in note
+    assert len(note) < 1500 and r["cache"] == "configured"
+
+
+def test_stderr_summary_redacts_home_and_given_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home" / "pat"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home" / "pat"))
+    s = md.stderr_summary(f"ERROR: cannot open {tmp_path / 'home' / 'pat' / 'x.qmd'}\nin {tmp_path / 'out'}", redact=[tmp_path / "out"])
+    assert str(tmp_path) not in s and "~" in s and "<dir>" in s
+    assert md.stderr_summary(b"") == "no error output"
+    short = md.stderr_summary("\n".join(f"line {i}" for i in range(5)))
+    assert short == "line 0 / line 1 / line 2 / line 3 / line 4"
+
+
+def test_permission_error_is_retried_once_with_a_temporary_cache(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMOP_QUARTO_CACHE_DIR", raising=False)
+    monkeypatch.setattr(md, "find_renderer", lambda: {"quarto": "quarto", "pandoc": None, "typst": None})
+    envs = []
+
+    def run(cmd, cwd, check, capture_output, timeout, env=None):
+        envs.append(env)
+        if env is None:  # the user's own cache folder is read only
+            raise subprocess.CalledProcessError(1, cmd, stderr=_QUARTO_DENIED.format(user="x").encode())
+        assert Path(env["LOCALAPPDATA"]).is_dir() and Path(env["APPDATA"]).is_dir() and Path(env["XDG_CACHE_HOME"]).is_dir()
+        target = Path(cwd) / cmd[cmd.index("--output") + 1]
+        _docx(target) if target.suffix == ".docx" else target.write_bytes(b"%PDF")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(md.subprocess, "run", run)
+    wb = _workbook(tmp_path / "Study_Manuscript_Tables.xlsx")
+    r = md.render_manuscript_document(wb, tmp_path / "doc")
+    assert set(r["files"]) == {"docx", "pdf"} and r["note"] == "" and r["cache"].startswith("temporary")
+    assert envs[0] is None and envs[1] is not None and envs[2] is envs[1]  # one retry, then the writable cache is kept
+    assert str(tmp_path / "doc") in envs[1]["LOCALAPPDATA"] and not (tmp_path / "doc" / ".quarto_cache").exists()
+
+
+def test_configured_cache_dir_is_passed_to_quarto(tmp_path, monkeypatch):
+    monkeypatch.delenv("OMOP_QUARTO_CACHE_DIR", raising=False)
+    monkeypatch.setattr(md, "find_renderer", lambda: {"quarto": "quarto", "pandoc": None, "typst": None})
+    envs = []
+
+    def run(cmd, cwd, check, capture_output, timeout, env=None):
+        envs.append(env)
+        _docx(Path(cwd) / cmd[cmd.index("--output") + 1])
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(md.subprocess, "run", run)
+    wb = _workbook(tmp_path / "Study_Manuscript_Tables.xlsx")
+    r = md.render_manuscript_document(wb, tmp_path / "doc", formats=["docx"], cache_dir=tmp_path / "qcache")
+    assert r["cache"] == "configured" and envs[0]["LOCALAPPDATA"] == str((tmp_path / "qcache" / "local").resolve())
+    assert envs[0]["DENO_DIR"].startswith(str((tmp_path / "qcache").resolve())) and "PATH" in envs[0]
+    monkeypatch.setenv("OMOP_QUARTO_CACHE_DIR", str(tmp_path / "envcache"))
+    assert md.renderer_env()["APPDATA"] == str((tmp_path / "envcache" / "roaming").resolve())
+    monkeypatch.delenv("OMOP_QUARTO_CACHE_DIR")
+    assert md.renderer_env() is None
 
 
 def test_quarto_path_from_environment(monkeypatch):

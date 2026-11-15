@@ -269,7 +269,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package",
               private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
-              privacy_check: bool = True) -> dict[str, Any]:
+              privacy_check: bool = True, document_cache_dir: str | Path | None = None) -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
@@ -291,7 +291,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     ``private_dir`` (default ``<out_dir>_private`` next to ``out_dir``; keep it unshared). Every site must have its own label
     (:func:`validate_site_labels`; a site without one used to appear under its own name). ``document=True`` (default) also writes
     ``<prefix>_Manuscript.docx`` / ``.pdf`` / ``.qmd`` from the workbook (:func:`omop_etl.manuscript_document.render_manuscript_document`,
-    formats ``document_formats``; without Quarto the run record says what was not rendered). ``privacy_check=True`` (default) then scans
+    formats ``document_formats``; without Quarto the run record says what was not rendered; ``document_cache_dir``: a writable folder for
+    Quarto's cache in a sandbox, see :func:`omop_etl.manuscript_document.renderer_env`). ``privacy_check=True`` (default) then scans
     every file in ``out_dir`` (text, workbook, DOCX and PDF text and metadata, :mod:`omop_etl.run_privacy`) for ``site_names`` (a list or
     a names file, one per line) and the site keys; a hit raises :class:`RunPrivacyError` after the run record is written, and the
     manuscript files are not moved into ``out_dir``.
@@ -392,9 +393,10 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         shutil.rmtree(stage, ignore_errors=True)
         figs = [Path(x) for x in res["files"] if str(x).lower().endswith(".png")]
         d = render_manuscript_document(wb["path"], stage, prefix=prefix, figures=figs, window=(start, end), title=document_title,
-                                       author=document_author, formats=document_formats, min_cell=min_cell)
+                                       author=document_author, formats=document_formats, min_cell=min_cell, cache_dir=document_cache_dir)
         staged = [d["qmd"], *d["files"].values()]
-        doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"]})
+        doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
+                           "cache": d["cache"]})
         timings["document"] = round(time.time() - t_doc, 1)
     privacy: dict[str, Any] = {"checked": False}
     hits: list = []
