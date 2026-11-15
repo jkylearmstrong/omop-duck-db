@@ -30,6 +30,7 @@ def main(argv=None) -> int:
     p.add_argument("--prefix", help="run prefix (default: from the single *_run.json in --run-dir)")
     p.add_argument("--no-document", action="store_true", help="do not rebuild the DOCX / PDF")
     p.add_argument("--document-formats", nargs="+", default=["docx", "pdf"], choices=["docx", "pdf"])
+    p.add_argument("--quarto-cache-dir", help="writable folder for Quarto's cache (default: OMOP_QUARTO_CACHE_DIR)")
     p.add_argument("--doc-title"); p.add_argument("--doc-author", default="")
     p.add_argument("--names-file", help="text file, one real site name per line: the new folder is scanned for them")
     p.add_argument("--names", nargs="*", default=[])
@@ -45,7 +46,8 @@ def main(argv=None) -> int:
     try:
         r = relabel_outputs(a.run_dir, a.out, old_labels=a.old_labels, new_labels=a.new_labels, label_seed=a.label_seed, labels_out=a.labels_out,
                             prefix=a.prefix, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
-                            document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check)
+                            document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check,
+                            document_cache_dir=a.quarto_cache_dir)
     except RunPrivacyError as e:
         print(f"PRIVACY CHECK FAILED: {e}", file=sys.stderr)
         return 1

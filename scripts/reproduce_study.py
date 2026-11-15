@@ -49,6 +49,8 @@ def main(argv=None) -> int:
     p.add_argument("--private-dir", help="folder for the per-site intermediates that carry site names (default <out>_private; never share it)")
     p.add_argument("--no-document", action="store_true", help="skip <prefix>_Manuscript.docx / .pdf (the workbook is always written)")
     p.add_argument("--document-formats", nargs="+", default=["docx", "pdf"], choices=["docx", "pdf"])
+    p.add_argument("--quarto-cache-dir", help="writable folder for Quarto's cache, for sandboxes where the user's cache folder is read only "
+                   "(default: OMOP_QUARTO_CACHE_DIR, else Quarto's own; a permission error is retried once with a temporary cache)")
     p.add_argument("--doc-title", help="manuscript title (default '<prefix> manuscript')")
     p.add_argument("--doc-author", default="", help="author shown in the manuscript and its file properties (default none)")
     p.add_argument("--names-file", help="text file, one real site name per line (kept outside the repository): the outputs are scanned for them")
@@ -82,7 +84,8 @@ def main(argv=None) -> int:
                       sheet_site_labels=({"Table S1": dict(zip(labels.values(), a.s1_s3_labels)), "Table S3": dict(zip(labels.values(), a.s1_s3_labels))}
                                          if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset,
                       private_dir=a.private_dir, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
-                      document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check)
+                      document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check,
+                      document_cache_dir=a.quarto_cache_dir)
     except RunPrivacyError as e:
         print(f"PRIVACY CHECK FAILED: {e}", file=sys.stderr)
         return 1

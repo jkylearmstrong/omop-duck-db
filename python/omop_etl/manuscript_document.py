@@ -10,6 +10,12 @@ Privacy: the document carries no author unless one is given, the Word file's cre
 (empty by default) so the account that rendered it is not recorded, figure alt text is the figure caption, and tables follow the same
 aggregate-only and small-cell rules as :func:`omop_etl.render_results_report`. :func:`omop_etl.run_study` scans the finished files for real
 site names before it moves them into the output folder.
+
+Sandboxed runs: Quarto keeps a cache under ``%LOCALAPPDATA%\\quarto`` (Windows) or ``$XDG_CACHE_HOME`` / ``$XDG_DATA_HOME`` (Linux). Where
+that folder is not writable Quarto stops with ``PermissionDenied``. ``cache_dir`` (or the ``OMOP_QUARTO_CACHE_DIR`` environment variable)
+points Quarto, Deno and Typst at a writable folder instead; without one, a render that fails on a permission error is retried once with a
+temporary cache inside ``out_dir`` (removed afterwards). A failed render's note carries the start of Quarto's error output (where the
+actual error is) and its last lines, with the home folder and account name replaced.
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ from typing import Any, Sequence
 
 import pandas as pd
 
-__all__ = ["render_manuscript_document", "find_renderer"]
+__all__ = ["render_manuscript_document", "find_renderer", "renderer_env", "stderr_summary"]
 
 _MD_SPECIAL = re.compile(r"([\\`*_{}\[\]<>#@$|~^])")
 
@@ -48,6 +54,61 @@ def find_renderer() -> dict[str, str | None]:
     return {"quarto": os.environ.get("QUARTO_PATH") or shutil.which("quarto"),
             "pandoc": os.environ.get("PANDOC_PATH") or shutil.which("pandoc"),
             "typst": shutil.which("typst")}
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_PERMISSION = re.compile(r"PermissionDenied|permission denied|access is denied|os error (5|13)\b|EACCES|EPERM", re.I)
+
+
+def renderer_env(cache_dir: str | Path | None = None, base: dict[str, str] | None = None) -> dict[str, str] | None:
+    """Environment for Quarto / Pandoc with their cache and data folders under ``cache_dir`` (created if missing).
+
+    Sets ``LOCALAPPDATA`` and ``APPDATA`` (Windows), ``XDG_CACHE_HOME`` and ``XDG_DATA_HOME`` (Linux) and ``DENO_DIR`` to subfolders of
+    ``cache_dir``. ``cache_dir=None`` uses ``OMOP_QUARTO_CACHE_DIR`` when set, otherwise returns ``None`` (inherit the environment).
+    macOS keeps Quarto's cache under the home folder, which these variables do not move."""
+    cache_dir = cache_dir or os.environ.get("OMOP_QUARTO_CACHE_DIR")
+    if not cache_dir:
+        return None
+    root = Path(cache_dir).expanduser().resolve()
+    env = dict(os.environ if base is None else base)
+    for var, sub in (("LOCALAPPDATA", "local"), ("APPDATA", "roaming"), ("XDG_CACHE_HOME", "cache"), ("XDG_DATA_HOME", "data"),
+                     ("DENO_DIR", "deno")):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+        env[var] = str(root / sub)
+    return env
+
+
+def _redact(text: str, extra: Sequence[str | Path] = ()) -> str:
+    """Replaces the home folder, the account name and ``extra`` paths with placeholders (a note is written to the shareable run record)."""
+    paths = [(str(p), "<dir>") for p in extra if p and len(str(p)) > 3]
+    paths += [(os.environ[v], f"%{v}%") for v in ("LOCALAPPDATA", "APPDATA", "XDG_CACHE_HOME", "XDG_DATA_HOME") if len(os.environ.get(v, "")) > 3]
+    home = os.path.expanduser("~")
+    if home and home not in ("~", "/"):
+        paths.append((home, "~"))
+    for old, new in sorted(paths, key=lambda x: -len(x[0])):  # longest first; either slash matches, as tools print both on Windows
+        pat = r"[\\/]+".join(re.escape(part) for part in re.split(r"[\\/]+", old))
+        text = re.sub(pat, lambda _: new, text, flags=re.I)
+    for var in ("USERNAME", "USER", "LOGNAME"):
+        u = os.environ.get(var)
+        if u and len(u) > 2:
+            text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(u)}(?![A-Za-z0-9])", "<user>", text, flags=re.I)
+    return text
+
+
+def stderr_summary(stderr: bytes | str | None, *, head: int = 6, tail: int = 2, max_chars: int = 1200,
+                   redact: Sequence[str | Path] = ()) -> str:
+    """The first ``head`` and last ``tail`` non-empty lines of a tool's error output, joined with ``" / "``.
+
+    Quarto prints the error first and a Deno stack trace after it, so the tail alone shows only the stack (``core/cri/cri.ts``) and hides
+    the cause. Colour codes are removed, and the home folder, the account name and ``redact`` paths are replaced (:func:`_redact`)."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    lines = [ln.strip() for ln in _ANSI.sub("", stderr or "").splitlines() if ln.strip()]
+    if not lines:
+        return "no error output"
+    keep = lines if len(lines) <= head + tail else [*lines[:head], f"... ({len(lines) - head - tail} more line(s)) ...", *lines[-tail:]]
+    out = _redact(" / ".join(keep), redact)
+    return out if len(out) <= max_chars else out[: max_chars - 3] + "..."
 
 
 def _caption(png: Path, prefix: str) -> str:
@@ -80,12 +141,15 @@ def _xml(s: str) -> str:
 def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, prefix: str = "Study", figures: Sequence[str | Path] | None = None,
                                window: Sequence[str] | None = None, title: str | None = None, author: str = "",
                                formats: Sequence[str] = ("docx", "pdf"), min_cell: int | None = 11, max_rows: int = 500,
-                               timeout: int = 600) -> dict[str, Any]:
+                               timeout: int = 600, cache_dir: str | Path | None = None) -> dict[str, Any]:
     """Writes ``<prefix>_Manuscript.qmd`` and renders ``.docx`` / ``.pdf`` (``formats``) under ``out_dir``.
 
     ``figures``: image files to include (default: ``<prefix>_*.png`` next to the workbook). ``title`` defaults to ``"<prefix> manuscript"``;
     ``author`` (default empty) is the only name the document carries. Returns ``{"qmd": Path, "files": {fmt: Path}, "renderer": str | None,
-    "missing": [fmt, ...], "note": str}``: a format that could not be rendered is listed in ``missing`` with the reason in ``note``."""
+    "missing": [fmt, ...], "note": str}``: a format that could not be rendered is listed in ``missing`` with the reason in ``note`` (the start
+    and end of the renderer's error output, :func:`stderr_summary`). ``cache_dir`` (default ``OMOP_QUARTO_CACHE_DIR``): a writable folder
+    for Quarto's cache, for sandboxes where the user's cache folder is read only (:func:`renderer_env`); without it a render that fails on
+    a permission error is retried once with a temporary cache under ``out_dir``. ``"cache"`` in the result says which was used."""
     from omop_etl.manuscript_report import _check_aggregate, _sentences, _suppress_small, manuscript_facts, read_workbook_tables
 
     bad = set(formats) - {"docx", "pdf"}
@@ -128,26 +192,42 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
     files: dict[str, Path] = {}
     notes: list[str] = []
     renderer = None
+    env = renderer_env(cache_dir)
+    cache_used = "configured" if env is not None else "default"
+    tmp_cache = out / ".quarto_cache"
+    hide = [out.resolve(), *([Path(cache_dir).expanduser().resolve()] if cache_dir else []),
+            *([Path(os.environ["OMOP_QUARTO_CACHE_DIR"]).expanduser().resolve()] if os.environ.get("OMOP_QUARTO_CACHE_DIR") else [])]
+
+    def _run(cmd: list[str]) -> None:
+        nonlocal env, cache_used
+        try:
+            subprocess.run(cmd, cwd=out, check=True, capture_output=True, timeout=timeout, env=env)
+        except subprocess.CalledProcessError as e:
+            if cache_used != "default" or not _PERMISSION.search((e.stderr or b"").decode("utf-8", errors="ignore")):
+                raise
+            env, cache_used = renderer_env(tmp_cache), "temporary (default cache not writable)"  # sandbox: retry once with a writable cache
+            subprocess.run(cmd, cwd=out, check=True, capture_output=True, timeout=timeout, env=env)
+
     for fmt in formats:
         target = out / f"{prefix}_Manuscript.{fmt}"
         target.unlink(missing_ok=True)
         try:
             if tools["quarto"]:
                 renderer = "quarto"
-                subprocess.run([tools["quarto"], "render", qmd.name, "--to", "typst" if fmt == "pdf" else "docx", "--output", target.name],
-                               cwd=out, check=True, capture_output=True, timeout=timeout)
+                _run([tools["quarto"], "render", qmd.name, "--to", "typst" if fmt == "pdf" else "docx", "--output", target.name])
             elif tools["pandoc"] and (fmt == "docx" or tools["typst"]):
                 renderer = "pandoc"
                 cmd = [tools["pandoc"], qmd.name, "-f", "markdown", "-o", target.name, "--resource-path", "."]
                 if fmt == "pdf":
                     cmd += ["--pdf-engine", tools["typst"]]
-                subprocess.run(cmd, cwd=out, check=True, capture_output=True, timeout=timeout)
+                _run(cmd)
             else:
                 notes.append(f"{fmt}: no renderer found (install Quarto, https://quarto.org); the .qmd was written")
                 continue
         except subprocess.CalledProcessError as e:  # report, do not fail the study: the workbook is already written
-            err = (e.stderr or b"").decode("utf-8", errors="ignore").strip().splitlines()[-3:]
-            notes.append(f"{fmt}: {renderer} failed: {' / '.join(err)}")
+            hint = (" (the cache folder is not writable: pass a writable folder as cache_dir / --quarto-cache-dir or set OMOP_QUARTO_CACHE_DIR)"
+                    if _PERMISSION.search((e.stderr or b"").decode("utf-8", errors="ignore")) else "")
+            notes.append(f"{fmt}: {renderer} failed (exit {e.returncode}): {stderr_summary(e.stderr, redact=hide)}{hint}")
             continue
         except subprocess.TimeoutExpired:
             notes.append(f"{fmt}: {renderer} timed out after {timeout} s")
@@ -158,10 +238,11 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
             files[fmt] = target
         else:
             notes.append(f"{fmt}: {renderer} ran but wrote no file")
+    shutil.rmtree(tmp_cache, ignore_errors=True)
     for side in (out / f"{prefix}_Manuscript_files", out / f"{prefix}_Manuscript.typ"):  # Quarto's intermediates
         if side.is_dir():
             shutil.rmtree(side, ignore_errors=True)
         elif side.exists():
             side.unlink()
     return {"qmd": qmd, "files": files, "figures": imgs, "copied": copied, "renderer": renderer, "missing": [f for f in formats if f not in files],
-            "note": "; ".join(notes)}
+            "note": "; ".join(notes), "cache": cache_used}
