@@ -1,4 +1,9 @@
-"""Stores each site's DuckDB database in an embedded PostgreSQL (no install, no admin rights) and proves the round trip is lossless.
+"""Checks that each site's DuckDB database survives a trip through an embedded PostgreSQL (no install, no admin rights) unchanged.
+
+**Quick by default.** This is a functional test of the package's copy code (types, NULLs, text encoding, dates), not a test of data
+volume, so by default each table is cut to a repeatable sample of at most ``--sample-rows`` rows (10,000) before the round trip; a
+site takes minutes, not hours. ``--full`` copies every row (hours on large sites, and the DuckDB -> PostgreSQL -> DuckDB copies need
+disk and memory on the order of the data); ``--backup`` always copies every row, because a backup of a sample is no backup.
 
 For every site, in one local PostgreSQL server kept in ``--pg-dir``:
 
@@ -48,6 +53,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from omop_etl.embedded_postgres import (  # noqa: E402
     EmbeddedPostgres,
+    sample_site,
     backup_raw_files,
     backup_site,
     drop_backup,
@@ -119,6 +125,9 @@ def main(argv=None) -> int:
     ap.add_argument("--raw-pattern", default="*.csv", help="file pattern in each raw folder (default *.csv)")
     ap.add_argument("--delta-dir", help="also compare Delta Lake versions 0 (original) and 1 (round trip) here")
     ap.add_argument("--delta-tables", nargs="*", help="tables for the Delta check (default every table with rows; each is read into memory)")
+    ap.add_argument("--sample-rows", type=int, default=10_000,
+                    help="round-trip at most this many rows per table, a repeatable sample (default 10000; quick functional check)")
+    ap.add_argument("--full", action="store_true", help="round-trip every row of every table (slow on large sites: hours)")
     ap.add_argument("--tables", default="all", help="'all' (default), 'cdm', or a comma-separated list")
     ap.add_argument("--backend", default="auto", choices=["auto", "pg0", "pgembed"])
     ap.add_argument("--method", default="copy", choices=["copy", "insert"])
@@ -133,11 +142,14 @@ def main(argv=None) -> int:
         ap.error("--raw-dirs needs one folder per site, in the order of --sites")
     if a.backup and a.drop_after:
         ap.error("--backup and --drop-after cannot be used together")
+    if a.sample_rows < 1:
+        ap.error("--sample-rows must be at least 1")
+    full = a.full or a.backup
     tables = a.tables if a.tables in ("all", "cdm") else [t.strip() for t in a.tables.split(",") if t.strip()]
     labels = _labels(a.sites, a.labels_file)
     out_dir = Path(a.out_db_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    clash = [s for s in a.sites if (out_dir / f"omop_{s}.duckdb").exists()]
+    clash = [s for s in a.sites if (out_dir / f"omop_{s}.duckdb").exists()]  # sample_input/ is rebuilt each run
     if clash:
         ap.error(f"--out-db-dir already holds {len(clash)} of the output files; use an empty folder")
 
@@ -153,6 +165,14 @@ def main(argv=None) -> int:
             src = Path(a.db_dir) / f"omop_{site}.duckdb"
             back = out_dir / f"omop_{site}.duckdb"
             lines += ["", f"## {label} (schema `{schema}`)", ""]
+            if not full:
+                print(f"[{label}] sampling at most {a.sample_rows} rows per table ...", flush=True)
+                if not src.exists():
+                    raise SystemExit(f"[{label}] DuckDB file not found in --db-dir")
+                sample = out_dir / "sample_input" / f"omop_{site}.duckdb"
+                sample.unlink(missing_ok=True)
+                sample_site(src, sample, rows=a.sample_rows, tables=tables)
+                src = sample
             print(f"[{label}] DuckDB -> PostgreSQL ...", flush=True)
             t0 = time.time()
             try:
@@ -179,7 +199,7 @@ def main(argv=None) -> int:
                 cmp = cmp[cmp["table"].isin([x["table"] for x in rep.attrs["load"]])]
             bad = cmp[~cmp["match"]]
             failed |= len(bad) > 0
-            lines.append(f"- PostgreSQL -> DuckDB, compared row for row with the original: "
+            lines.append(f"- PostgreSQL -> DuckDB, compared row for row with the {'original' if full else 'sample'}: "
                          + ("**PASS**, " + f"{len(cmp)} tables identical" if bad.empty else
                             "**FAIL**: " + ", ".join(f"`{t}` ({n or 'rows differ'})" for t, n in bad[["table", "note"]].itertuples(index=False)))
                          + f" ({time.time() - t0:.0f} s)")
@@ -216,6 +236,8 @@ def main(argv=None) -> int:
             f"- PostgreSQL: {server} (embedded, backend `{pg.backend}`, load method `{a.method}`)",
             f"- DuckDB: {duckdb.__version__}; Python {platform.python_version()} on {platform.system()} {platform.machine()}",
             f"- Sites: {len(a.sites)}; tables: `{a.tables}`; value-level comparison: {'no' if a.no_content else 'yes'}",
+            "- Rows: " + ("every row (full copy)" if full else f"a repeatable sample of at most {a.sample_rows} per table (quick check; "
+                                                                  "--full for every row)"),
             "- PostgreSQL copy: " + ("deleted after the checks" if a.drop_after else
                                      "kept as a managed backup (see scripts/postgres_backup.py)" if a.backup else
                                      "kept (not registered as a backup; scripts/postgres_backup.py register adopts it)"),

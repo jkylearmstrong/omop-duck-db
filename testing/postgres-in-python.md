@@ -73,6 +73,13 @@ compare_duckdb("derived/omop_duckdb/omop_site1.duckdb", "private/from_postgres/o
 Booleans are stored as `smallint` (as on Oracle), and come back as `BOOLEAN` in the CDM tables; doubles keep NaN and ±Infinity; empty
 strings stay empty strings (unlike Oracle, which stores them as NULL), and non-Latin text is kept (the database is UTF-8).
 
+## On the site machine: quick by default
+
+The round trip is a functional test of the copy code (types, NULLs, text encoding, dates), not a test of data volume. By default
+`postgres_roundtrip_check.py` cuts every table to a repeatable sample of at most 10,000 rows (`--sample-rows`) first, so a site takes
+minutes. `--full` copies every row (hours on large sites, with disk and memory on the order of the data); `--backup` always copies every
+row. Leave out `--raw-dirs` and `--delta-dir` unless you need those checks: the raw-file check loads whole files.
+
 ## On the site machine: all sites, raw files and Delta Lake in one run
 
 ```bash
@@ -81,7 +88,7 @@ python scripts/postgres_roundtrip_check.py --db-dir derived/omop_duckdb --sites 
     --raw-dirs ../raw/site1 ../raw/site2 ../raw/site3 --delta-dir ../private/delta --out pg_roundtrip_record.md
 ```
 
-For each site this stores the database in schema `site_<letter>`, reads it back into `--out-db-dir` under the same file name and compares
+For each site (sampled, unless `--full`) this stores the database in schema `site_<letter>`, reads it back into `--out-db-dir` under the same file name and compares
 it row for row, loads that site's raw text files into `raw_site_<letter>` and compares them with DuckDB, and writes every table as Delta
 Lake version 0 (original) and version 1 (after the round trip) and checks that the two versions have no delta. `--delta-tables` limits the
 Delta check (each table is read into memory). Any number of sites works; labels come from the private JSON written by

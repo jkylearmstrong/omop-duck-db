@@ -100,6 +100,37 @@ def test_repr_never_shows_a_password(tmp_path):
     assert "password" not in repr(EmbeddedPostgres(tmp_path))
 
 
+def test_sample_site_keeps_types_caps_rows_and_is_repeatable(tmp_path):
+    from omop_etl.embedded_postgres import sample_site
+
+    src = tmp_path / "src.duckdb"
+    con = duckdb.connect(str(src))
+    con.execute(EDGE_SQL)
+    con.execute("CREATE TABLE tiny AS SELECT 1::INTEGER AS k")
+    con.execute("CREATE VIEW v AS SELECT * FROM tiny")
+    con.close()
+    rep = {r["table"]: r for r in sample_site(src, tmp_path / "s1.duckdb", rows=25)}
+    assert set(rep) == {"study_extra", "tiny"}                          # base tables only
+    assert rep["study_extra"] == {"table": "study_extra", "rows": 25, "sampled": True}
+    assert rep["tiny"] == {"table": "tiny", "rows": 1, "sampled": False}
+    sample_site(src, tmp_path / "s2.duckdb", rows=25)
+    c = duckdb.connect()
+    c.execute(f"ATTACH '{src.as_posix()}' AS o (READ_ONLY)")
+    c.execute(f"ATTACH '{(tmp_path / 's1.duckdb').as_posix()}' AS a (READ_ONLY)")
+    c.execute(f"ATTACH '{(tmp_path / 's2.duckdb').as_posix()}' AS b (READ_ONLY)")
+    assert c.execute("DESCRIBE a.study_extra").fetchall() == c.execute("DESCRIBE o.study_extra").fetchall()
+    assert c.execute("SELECT count(*) FROM a.study_extra").fetchone()[0] == 25
+    assert c.execute("SELECT count(*) FROM (SELECT * FROM a.study_extra EXCEPT ALL SELECT * FROM b.study_extra)").fetchone()[0] == 0
+    assert c.execute("SELECT count(*) FROM (SELECT * FROM a.study_extra EXCEPT ALL SELECT * FROM o.study_extra)").fetchone()[0] == 0
+    c.close()
+    with pytest.raises(FileExistsError):
+        sample_site(src, tmp_path / "s1.duckdb")
+    with pytest.raises(LookupError):
+        sample_site(src, tmp_path / "s3.duckdb", tables=["nope"])
+    with pytest.raises(ValueError):
+        sample_site(src, tmp_path / "s4.duckdb", rows=0)
+
+
 # ---------------------------------------------------------------------------------------------------------------------- fixtures
 def _site_db(path: Path, persons: set[int] | None = None) -> Path:
     from test_define_study_cohort import load_fixture_cdm
@@ -254,6 +285,35 @@ def test_script_checks_any_number_of_sites_with_raw_files_and_delta(tmp_path, ca
     with pytest.raises(SystemExit):
         script.main(["--db-dir", str(db), "--sites", *sites, "--pg-dir", str(tmp_path / "pg"), "--out-db-dir", str(tmp_path / "back")])
     EmbeddedPostgres(tmp_path / "pg", backend=BACKENDS[0]).drop()
+
+
+@needs_pg
+def test_script_is_a_quick_sample_by_default_and_full_on_request(tmp_path):
+    import postgres_roundtrip_check as script
+
+    db = tmp_path / "db"
+    db.mkdir()
+    _site_db(db / "omop_one.duckdb")
+    common = ["--db-dir", str(db), "--sites", "one", "--tables", "person,study_extra", "--pg-dir", str(tmp_path / "pg"),
+              "--backend", BACKENDS[0], "--drop-after"]
+    try:
+        quick = tmp_path / "quick.md"
+        assert script.main([*common, "--sample-rows", "7", "--out-db-dir", str(tmp_path / "q"), "--out", str(quick)]) == 0
+        text = quick.read_text(encoding="utf-8")
+        assert "sample of at most 7 per table" in text and "compared row for row with the sample" in text
+        con = duckdb.connect(str(tmp_path / "q" / "omop_one.duckdb"), read_only=True)
+        assert con.execute("SELECT count(*) FROM study_extra").fetchone()[0] == 7
+        con.close()
+        assert compare_duckdb(tmp_path / "q" / "sample_input" / "omop_one.duckdb", tmp_path / "q" / "omop_one.duckdb")["match"].all()
+        full = tmp_path / "full.md"
+        assert script.main([*common, "--full", "--out-db-dir", str(tmp_path / "f"), "--out", str(full)]) == 0
+        assert "every row (full copy)" in full.read_text(encoding="utf-8")
+        assert compare_duckdb(db / "omop_one.duckdb", tmp_path / "f" / "omop_one.duckdb",
+                              tables=["person", "study_extra"])["match"].all()
+        with pytest.raises(SystemExit):
+            script.main([*common, "--sample-rows", "0", "--out-db-dir", str(tmp_path / "z")])
+    finally:
+        EmbeddedPostgres(tmp_path / "pg", backend=BACKENDS[0]).drop()
 
 
 # ---------------------------------------------------------------------------------------------------------------------- backups
