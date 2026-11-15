@@ -69,6 +69,7 @@ import omop_etl
 from omop_etl import extract_sard_visit_tensors, extract_benchmark_features
 from omop_etl.deep_dataset import extract_multimodal_deep_dataset
 from omop_etl.extract import from_sql
+from omop_etl.oracle_roundtrip import mirror_oracle, verify_postgres_copy
 from omop_etl.study_report import build_study_tables, explain_models
 from omop_etl import run_study, to_sql, verify_transfer, make_mlp_fit_predict, deep_study_tables, device_report
 print("omop_etl", omop_etl.__version__, "| torch", torch.__version__, "| duckdb", duckdb.__version__,
