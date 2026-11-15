@@ -271,3 +271,61 @@ def test_script_with_postgres_backup_and_read_back(edge_table, tmp_path):
     assert text.count("Result: **PASS**") == 4 and "FAIL" not in text
     assert edge_table not in text and "1501" not in text and "omop_ci_pw" not in text and "localhost" not in text
     assert (tmp_path / "m" / "site_c.duckdb").exists() and (tmp_path / "m" / "site_c_from_postgres.duckdb").exists()
+
+
+def test_num_parses_oracle_text_exactly():
+    assert rt._num("12345678901234567890123456789") == 12345678901234567890123456789
+    assert rt._num("-.5") == decimal.Decimal("-0.5")
+    assert rt._num("1.5E+000") == 1 or rt._num("1.5E+000") == decimal.Decimal("1.5")
+    assert rt._num("Nan") != rt._num("Nan")
+    assert rt._num("Inf") == float("inf") and rt._num("-Inf") == float("-inf")
+    assert rt._num(decimal.Decimal("3.0")) == 3 and rt._num(True) == 1 and rt._num(None) is None
+
+
+@live
+def test_describe_all_tables_map_errors_and_charset_conversion(edge_table):
+    from omop_etl.oracle_roundtrip import _driver_connection
+
+    e, r, c = _driver_connection(URL)
+    cur = c.cursor()
+    try:
+        plan = rt.describe_oracle(cur, "all", table_map={"edge_copy": edge_table}, probe=False)
+        t = next(p for p in plan if p.source == edge_table)
+        assert t.name == "edge_copy"
+        assert {x.name: x.duck_type for x in t.columns}["u"] == "DECIMAL(38,0)"   # not probed: assumed whole numbers
+        with pytest.raises(LookupError):
+            rt.describe_oracle(cur, ["no_such_table_xyz"])
+        with pytest.raises(ValueError, match="same DuckDB table name"):
+            rt.describe_oracle(cur, [f"a={edge_table}", f"A={edge_table}"])
+        with pytest.raises(ValueError, match="letters, digits"):
+            rt.describe_oracle(cur, [f"bad-name={edge_table}"])
+        # the CONVERT(..., 'AL32UTF8') path used on a non-Unicode database gives the same fingerprint here (AL32UTF8 database)
+        t = rt.describe_oracle(cur, [f"edge={edge_table}"])[0]
+        assert rt.fingerprint_oracle(cur, t, unicode_db=False) == rt.fingerprint_oracle(cur, t, unicode_db=True)
+        assert rt.fingerprint_oracle(cur, t) == rt.fingerprint_oracle(cur, t, unicode_db=True)
+    finally:
+        r.close()
+        e.dispose()
+    with pytest.raises(ValueError, match="reads Oracle"):
+        rt._driver_connection("sqlite://")
+
+
+@live
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="PostgreSQL refuses to run as root")
+def test_postgres_copy_matches_oracle_in_process(edge_table, tmp_path):
+    pytest.importorskip("pg0")
+    from omop_etl.embedded_postgres import EmbeddedPostgres, store_site
+
+    out = tmp_path / "p.duckdb"
+    rt.mirror_oracle(URL, out, tables=[f"edge={edge_table}"])
+    with EmbeddedPostgres(tmp_path / "pg") as pg:
+        store_site(pg, out, "oracle_site_a")
+        assert rt.verify_postgres_copy(pg, "oracle_site_a", out)["match"].all()
+        conn = pg.connect()
+        try:
+            conn.cursor().execute('UPDATE oracle_site_a.edge SET s = \'x\' WHERE id = 3')
+            conn.commit()
+            rep = rt.verify_postgres_copy(conn, "oracle_site_a", out)
+        finally:
+            conn.close()
+        assert set(rep.loc[~rep["match"], "column"]) == {"s"}
