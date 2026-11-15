@@ -58,6 +58,7 @@ __all__ = [
     "store_site",
     "load_site",
     "compare_duckdb",
+    "sample_site",
     "load_text_files",
     "BACKUP_SCHEMA",
     "backup_site",
@@ -500,6 +501,43 @@ def load_site(pg, schema: str, out, *, tables: Sequence[str] | str = "all", chun
             finally:
                 con.close()
     return report
+
+
+def sample_site(src, dest, *, rows: int = 10_000, tables: Sequence[str] | str = "all", seed: int = 42) -> list[dict[str, Any]]:
+    """Writes a small copy of a site's DuckDB file for a quick functional round trip.
+
+    Each base table keeps its column types and at most ``rows`` rows: the whole table when it is that small, otherwise a repeatable
+    reservoir sample (``seed``). Every column type, NULL handling and text encoding still goes through PostgreSQL, but the copy takes
+    seconds instead of hours, because the round trip tests the package's code, not the size of the data. ``tables``: ``"all"`` or
+    ``"cdm"`` (every base table; :func:`store_site` filters) or a list. ``dest`` must not exist. Returns ``table`` / ``rows`` /
+    ``sampled`` per table; keep it private (it has row counts).
+    """
+    if rows < 1:
+        raise ValueError("rows must be at least 1.")
+    dest = Path(dest)
+    if dest.exists():
+        raise FileExistsError(f"Sample file already exists: {dest}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(dest))
+    out = []
+    try:
+        con.execute(f"ATTACH '{Path(src).as_posix()}' AS src (READ_ONLY)")
+        have = [r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_catalog = 'src' AND table_schema = 'main' "
+            "AND table_type = 'BASE TABLE' ORDER BY 1").fetchall()]
+        names = have if tables in ("all", "cdm") else list(tables)
+        missing = [t for t in names if t not in have]
+        if missing:
+            raise LookupError(f"Not in the DuckDB file: {missing}")
+        for t in names:
+            n = con.execute(f'SELECT count(*) FROM src."{t}"').fetchone()[0]
+            sampled = n > rows
+            pick = f" USING SAMPLE reservoir({int(rows)} ROWS) REPEATABLE ({int(seed)})" if sampled else ""
+            con.execute(f'CREATE TABLE main."{t}" AS SELECT * FROM src."{t}"{pick}')
+            out.append({"table": t, "rows": min(n, rows), "sampled": sampled})
+    finally:
+        con.close()
+    return out
 
 
 def compare_duckdb(a, b, *, tables: Sequence[str] | None = None, ignore_empty_extra: bool = True) -> pd.DataFrame:

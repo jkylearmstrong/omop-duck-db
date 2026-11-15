@@ -1,3 +1,7 @@
+# omopduckdb (development version)
+
+- **PostgreSQL round trip is quick by default (Python).** `scripts/postgres_roundtrip_check.py` now cuts each table to a repeatable sample of at most 10,000 rows (`--sample-rows`) before the round trip, so a site takes minutes instead of hours; it tests the copy code, not data volume. `--full` restores the every-row run; `--backup` always copies every row. New `omop_etl.embedded_postgres.sample_site()`.
+
 # omopduckdb 0.27.0
 
 Feature release: live Oracle -> DuckDB -> PostgreSQL copies proved value by value against Oracle (first run on a site's live Oracle 19c: every table passed), the embedded PostgreSQL copy kept as a verified backup with restore helpers, and an arm64 CI job (Oracle, deep models, Delta Lake, embedded PostgreSQL) as on a DGX Spark. 0.26.0 was never tagged or published, so this release also carries everything listed under 0.26.0 below. Version bump 0.26.0 to 0.27.0.
