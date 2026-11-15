@@ -11,9 +11,22 @@ permissions: read-all
 jobs:
   python-test-coverage:
     runs-on: ubuntu-latest
+    # Oracle Free, so the live Oracle tests (tests/test_oracle_roundtrip.py, the Oracle half of tests/test_live_databases.py) count
+    # towards coverage; without OMOP_TEST_ORACLE_URL they skip.
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          ORACLE_PASSWORD: omop_ci_pw
+          APP_USER: omop
+          APP_USER_PASSWORD: omop_ci_pw
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 30
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       RENV_CONFIG_AUTOLOADER_ENABLED: false
+      OMOP_TEST_ORACLE_URL: oracle+oracledb://omop:omop_ci_pw@localhost:1521/?service_name=FREEPDB1  # secret-scan:allow (throwaway CI container credentials)
 
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +46,7 @@ jobs:
       - name: Install Python package (+ dev extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,postgres-embedded]"   # postgres-embedded: the embedded PostgreSQL tests run here too
+          pip install -e ".[dev,postgres-embedded,oracle]"   # postgres-embedded / oracle: the embedded PostgreSQL and live Oracle tests run here too
           pip install torch --index-url https://download.pytorch.org/whl/cpu  # CPU build: exercises omop_etl.deep_models for coverage
 
       - name: Run pytest with coverage
