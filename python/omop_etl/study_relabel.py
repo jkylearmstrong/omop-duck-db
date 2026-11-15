@@ -25,7 +25,7 @@ __all__ = ["label_translation", "relabel_text", "relabel_outputs"]
 
 _TEXT = {".csv", ".tsv", ".json", ".md", ".txt", ".html", ".htm"}
 _IMAGES = {".png", ".jpg", ".jpeg", ".svg", ".gif", ".tif", ".tiff"}
-_REBUILT = {".docx", ".pdf", ".qmd"}
+_REBUILT = {".docx", ".pdf", ".qmd", ".bib"}
 
 
 def label_translation(old: Mapping[str, str], new: Mapping[str, str], sites: Sequence[str] | None = None) -> dict[str, str]:
@@ -148,9 +148,11 @@ def relabel_outputs(run_dir: str | Path, out_dir: str | Path, *, old_labels: Map
         figs = [f for f in files if f.suffix.lower() == ".png" and f.name.startswith(prefix + "_")]
         window = record.get("window")
         d = render_manuscript_document(wb, stage, prefix=prefix, figures=figs, window=window, title=document_title, author=document_author,
-                                       formats=document_formats, cache_dir=document_cache_dir)
-        staged = [d["qmd"], *d["files"].values()]
-        doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"], "cache": d["cache"]})
+                                       formats=document_formats, cache_dir=document_cache_dir,
+                                       software_versions=record.get("environment"))  # cite the versions that produced the run
+        staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
+        doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"], "cache": d["cache"],
+                           "cites_omop_duck_db": d.get("software")})
     privacy: dict[str, Any] = {"checked": False}
     hits: list = []
     if privacy_check:

@@ -19,7 +19,7 @@ from typing import Iterable, Sequence
 
 __all__ = ["TEXT_SUFFIXES", "ZIP_SUFFIXES", "read_names_file", "scan", "scan_files", "docx_text", "pdf_text", "png_text"]
 
-TEXT_SUFFIXES = {".csv", ".tsv", ".json", ".md", ".txt", ".html", ".htm", ".log", ".yaml", ".yml", ".sql", ".py", ".r", ".qmd", ".rmd", ".xml", ".typ"}
+TEXT_SUFFIXES = {".csv", ".bib", ".tsv", ".json", ".md", ".txt", ".html", ".htm", ".log", ".yaml", ".yml", ".sql", ".py", ".r", ".qmd", ".rmd", ".xml", ".typ"}
 ZIP_SUFFIXES = {".xlsx", ".xlsm", ".docx", ".pptx", ".zip"}
 
 

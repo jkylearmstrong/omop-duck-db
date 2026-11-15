@@ -443,3 +443,57 @@ def test_run_environment_reports_builds_without_paths(monkeypatch):
     assert env["xgboost_build"] == "GCC_VERSION=10.3.1, USE_OPENMP=True"
     assert env["thread_pools"] == "openblas 0.3.30 (8 threads)"
     assert "someone" not in json.dumps(env)
+
+def test_manuscript_cites_omop_duck_db_with_its_installed_version_through_grateful_py(tmp_path, monkeypatch):
+    pytest.importorskip("grateful_py")
+    import omop_etl
+    from omop_etl.package_citations import omop_duck_db_version, software_citations
+
+    assert omop_duck_db_version() == omop_etl.__version__  # read from the installed package (or the checkout), never typed into the text
+    wb = _workbook(tmp_path / "Study_Manuscript_Tables.xlsx")
+    _fake_quarto(tmp_path, monkeypatch, lambda fmt, target: _docx(target) if fmt == "docx" else target.write_bytes(b"%PDF"))
+    r = md.render_manuscript_document(wb, tmp_path / "doc", figures=[])
+    v = omop_duck_db_version()
+    qmd = r["qmd"].read_text(encoding="utf-8")
+    assert r["software"] == v and r["bib"] == tmp_path / "doc" / "Study_Manuscript.bib" and r["bib"].exists()
+    assert "bibliography: Study_Manuscript.bib" in qmd.split("---")[1]  # in the YAML header
+    assert "## Software" in qmd and f"omop-duck-db version {v} [@omopduckdb]" in qmd and "[@python]" in qmd and "grateful_py version" in qmd
+    assert qmd.index("## Software") < qmd.index("## Tables") and qmd.rstrip().endswith("::: {#refs}\n:::")
+    bib = r["bib"].read_text(encoding="utf-8")
+    assert "@software{omopduckdb," in bib and f"version = {{{v}}}" in bib and "@software{gratefulpy," in bib and "@" not in bib.replace("@software{", "")
+    assert not rp.scan_files([r["bib"]], ["Some Health System"])[1]  # the privacy scan reads the .bib as text
+
+    # versions recorded with the run win over the installed ones (a relabelled document cites what made the numbers)
+    s = software_citations(tmp_path / "x.bib", versions={"omop-duck-db": "0.0.1", "python": "3.13.17", "scikit-learn": None, "platform": "Linux"})
+    assert "omop-duck-db version 0.0.1 [@omopduckdb]" in s["paragraph"] and "Python version 3.13.17 [@python]" in s["paragraph"]
+
+    r = md.render_manuscript_document(wb, tmp_path / "plain", figures=[], cite_software=False)
+    assert r["bib"] is None and "## Software" not in r["qmd"].read_text(encoding="utf-8") and not (tmp_path / "plain" / "Study_Manuscript.bib").exists()
+
+
+def test_manuscript_without_grateful_py_says_so_and_pandoc_gets_citeproc(tmp_path, monkeypatch):
+    import omop_etl.package_citations as sc
+
+    wb = _workbook(tmp_path / "Study_Manuscript_Tables.xlsx")
+
+    def no_grateful(*a, **k):
+        raise ImportError("No module named 'grateful_py'")
+
+    monkeypatch.setattr(sc, "software_citations", no_grateful)
+    _fake_quarto(tmp_path, monkeypatch, lambda fmt, target: _docx(target) if fmt == "docx" else target.write_bytes(b"%PDF"))
+    r = md.render_manuscript_document(wb, tmp_path / "doc", figures=[])
+    assert r["bib"] is None and set(r["files"]) == {"docx", "pdf"} and "grateful_py is not installed" in r["note"]
+    monkeypatch.undo()
+
+    pytest.importorskip("grateful_py")
+    monkeypatch.setattr(md, "find_renderer", lambda: {"quarto": None, "pandoc": "pandoc", "typst": None})
+    seen = []
+
+    def run(cmd, cwd, check, capture_output, timeout, env=None):
+        seen.append(cmd)
+        _docx(Path(cwd) / cmd[cmd.index("-o") + 1])
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(md.subprocess, "run", run)
+    r = md.render_manuscript_document(wb, tmp_path / "doc2", figures=[], formats=["docx"])
+    assert "--citeproc" in seen[0] and r["bib"].exists()

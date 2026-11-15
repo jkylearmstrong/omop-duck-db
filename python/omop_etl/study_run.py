@@ -423,10 +423,11 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         shutil.rmtree(stage, ignore_errors=True)
         figs = [Path(x) for x in res["files"] if str(x).lower().endswith(".png")]
         d = render_manuscript_document(wb["path"], stage, prefix=prefix, figures=figs, window=(start, end), title=document_title,
-                                       author=document_author, formats=document_formats, min_cell=min_cell, cache_dir=document_cache_dir)
-        staged = [d["qmd"], *d["files"].values()]
+                                       author=document_author, formats=document_formats, min_cell=min_cell, cache_dir=document_cache_dir,
+                                       software_versions=run_environment())
+        staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
-                           "cache": d["cache"]})
+                           "cache": d["cache"], "cites_omop_duck_db": d.get("software")})
         timings["document"] = round(time.time() - t_doc, 1)
     privacy: dict[str, Any] = {"checked": False}
     hits: list = []
