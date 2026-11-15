@@ -11,6 +11,7 @@ on:
       - "python/omop_etl/extract.py"
       - "python/omop_etl/lakehouse.py"
       - "scripts/postgres_roundtrip_check.py"
+      - "scripts/postgres_backup.py"
       - "tests/test_embedded_postgres.py"
       - "pyproject.toml"
       - ".github/workflows/embedded-postgres.yml"
@@ -20,6 +21,7 @@ on:
       - "python/omop_etl/embedded_postgres.py"
       - "python/omop_etl/load_sql.py"
       - "scripts/postgres_roundtrip_check.py"
+      - "scripts/postgres_backup.py"
       - "tests/test_embedded_postgres.py"
   workflow_dispatch:
 

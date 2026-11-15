@@ -100,6 +100,60 @@ python scripts/check_run_privacy.py --dir run_pg --names-file ../private/site_na
 
 A lossless round trip gives 0 differing cells.
 
+## Keeping the PostgreSQL copy as a backup
+
+The round trip stores a **full copy**: with `--tables all` (the default) every table of each site's DuckDB file (CDM, vocabulary and
+study tables) goes into its own schema, and the data folder is kept after the run (only the server stops). Views, indexes and tables in
+DuckDB schemas other than `main` are not tables in that copy; a backup records the views and recreates them on restore.
+
+To keep it as a backup you can rely on, use `scripts/postgres_backup.py` (or the functions below):
+
+```bash
+# copy, or refresh, every site (and its raw text files); unchanged sites are skipped
+python scripts/postgres_backup.py backup --pg-dir ../private/postgres --db-dir derived/omop_duckdb --sites site1 site2 site3 \
+    --labels-file ../private/labels.json --raw-dirs ../raw/site1 ../raw/site2 ../raw/site3 --if-changed
+# adopt copies an earlier round trip already made (checked against the DuckDB files first, nothing copied again)
+python scripts/postgres_backup.py register --pg-dir ../private/postgres --db-dir derived/omop_duckdb --sites site1 site2 site3 \
+    --labels-file ../private/labels.json
+python scripts/postgres_backup.py status --pg-dir ../private/postgres     # labels, tables, views, when made and last verified
+python scripts/postgres_backup.py verify --pg-dir ../private/postgres     # PostgreSQL alone, against the recorded fingerprints
+python scripts/postgres_backup.py verify --pg-dir ../private/postgres --db-dir derived/omop_duckdb --sites site1 site2 site3 \
+    --labels-file ../private/labels.json --raw-dirs ../raw/site1 ../raw/site2 ../raw/site3   # and value by value against the sources
+python scripts/postgres_backup.py restore --pg-dir ../private/postgres --sites site1 site2 site3 \
+    --labels-file ../private/labels.json --out-db-dir ../private/restored  # new DuckDB files, checked against the backup
+```
+
+Or add `--backup` to `postgres_roundtrip_check.py` so its copies become managed backups in the same run (`--drop-after` does the
+opposite and deletes them, for a check-only run).
+
+How it stays trustworthy:
+
+- **Refresh is safe.** Each site is copied into `<schema>__new`, checked value by value against the DuckDB file, and only then swapped
+  in, in one transaction. If the copy or the check fails, the previous backup is unchanged.
+- **Verify needs only PostgreSQL.** At backup time PostgreSQL records each table's row count and an order-independent fingerprint of
+  every row (md5 of the row's text, summed), in schema `omop_backup`. `verify` recomputes them, so a changed value, a lost or added row,
+  or a missing or extra table is caught even when the original DuckDB file is gone.
+- **Restore is checked.** `restore` rebuilds each DuckDB file with the CDM v5.4 types, recreates the recorded views, and compares every
+  table with the backup (row count against the record, every value against PostgreSQL). It never overwrites a file.
+- **Anonymous.** The manifest holds schemas (`site_a`, `raw_site_a`), the anonymous labels, fingerprints and the DuckDB view
+  definitions; the printed output has no row counts. The data folder itself holds patient-level data: keep it with the site's
+  private files.
+
+From Python:
+
+```python
+from omop_etl.embedded_postgres import (EmbeddedPostgres, backup_site, backup_raw_files, backup_status, verify_backup,
+                                        restore_site, site_schema)
+
+with EmbeddedPostgres("private/postgres") as pg:
+    schema = site_schema("Site A")
+    backup_site(pg, "derived/omop_duckdb/omop_site1.duckdb", schema, label="Site A", if_changed=True)
+    backup_raw_files(pg, "raw/site1", "raw_" + schema, label="Site A", if_changed=True)
+    print(backup_status(pg))
+    assert verify_backup(pg)["match"].all()
+    restore_site(pg, schema, "private/restored/omop_site1.duckdb")
+```
+
 ## What has been tested, and what has not
 
 - CI (`embedded-postgres` job): Linux x64, Linux arm64, Windows x64 and macOS arm64 with `pg0-embedded`, and Linux x64 with `pgembed`
@@ -108,5 +162,10 @@ A lossless round trip gives 0 differing cells.
   identical; `define_study_cohort` gives the same cohort from both copies; a changed value is caught; data and password survive a restart;
   raw files (comma and pipe delimited, quotes, embedded newlines, a byte-order mark) agree between both readers; the script runs three
   sites with raw files and Delta Lake versions.
+- Backups, same CI job: a backup holds every table and view and restores to a file identical row for row; `verify` catches a changed
+  value, a deleted row and an added table; a refresh after a source change replaces the copy and an unchanged source is skipped; a
+  refresh that fails leaves the previous backup intact; `register` adopts a round-trip copy and refuses a changed one; raw-file backups
+  verify against the files and restore to CSV; `postgres_backup.py` runs four sites under relabelled anonymous names with no site key in
+  its output.
 - Not yet run on real site data. Run the script above on the site machine and add the record to `testing/tested-environments.md`.
 - Not tested: tables over a few million rows, a `--pg-dir` on a network drive, and running more than one server from the same folder.

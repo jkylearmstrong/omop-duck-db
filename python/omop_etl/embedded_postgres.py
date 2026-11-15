@@ -26,6 +26,10 @@ Typical use::
 :func:`load_text_files` loads raw delimited source files (PCORnet extracts) straight into PostgreSQL with its own ``COPY`` reader and
 checks every value against DuckDB reading the same files, so two independent readers agree on the raw data.
 
+:func:`backup_site` / :func:`backup_raw_files` keep a site's copy as a backup (staged and swapped in only after it passes its check, so a
+refresh never damages the previous copy), :func:`verify_backup` re-checks it against fingerprints recorded at backup time, and
+:func:`restore_site` / :func:`restore_raw_files` rebuild the files from it. ``scripts/postgres_backup.py`` does this for every site.
+
 Schema names are what you pass; use anonymous ones (``site_a``, see :func:`site_schema`) if the database or its reports will be shared.
 """
 
@@ -55,6 +59,15 @@ __all__ = [
     "load_site",
     "compare_duckdb",
     "load_text_files",
+    "BACKUP_SCHEMA",
+    "backup_site",
+    "backup_raw_files",
+    "register_backup",
+    "backup_status",
+    "verify_backup",
+    "restore_site",
+    "restore_raw_files",
+    "drop_backup",
 ]
 
 _IDENT = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
@@ -626,3 +639,500 @@ def load_text_files(pg, folder, schema: str, *, pattern: str = "*.csv", verify: 
         raise RoundTripError("PostgreSQL COPY and DuckDB read_csv disagree on: " + ", ".join(f"{a}:{b}" for a, b in bad.itertuples(index=False)),
                              report)
     return report
+
+
+# ====================================================================================================================== backups
+# A PostgreSQL copy kept on purpose: each site's DuckDB file (and, if wanted, its raw text files) in one schema, with a manifest in
+# schema ``omop_backup`` that records what was copied and a fingerprint of every table, so the copy can be checked later without the
+# original, refreshed safely (the old copy stays until the new one has passed its check) and restored into a new DuckDB file.
+
+BACKUP_SCHEMA = "omop_backup"
+_STAGE, _OLD = "__new", "__old"
+
+
+def _connect(pg):
+    import psycopg2
+
+    return psycopg2.connect(_pg(pg)[1])
+
+
+def _ensure_manifest(cur) -> None:
+    cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{BACKUP_SCHEMA}"')
+    cur.execute(f'''CREATE TABLE IF NOT EXISTS "{BACKUP_SCHEMA}".backups (
+        schema_name text PRIMARY KEY, kind text NOT NULL, label text, source_signature text, views jsonb NOT NULL DEFAULT '[]',
+        created_at timestamptz NOT NULL, verified_at timestamptz, package_version text, note text, selection text NOT NULL DEFAULT 'all')''')
+    cur.execute(f'''CREATE TABLE IF NOT EXISTS "{BACKUP_SCHEMA}".backup_tables (
+        schema_name text NOT NULL, table_name text NOT NULL, n_rows bigint NOT NULL, fingerprint text NOT NULL,
+        PRIMARY KEY (schema_name, table_name))''')
+
+
+def _backup_name(schema: str) -> str:
+    _check_ident(schema)
+    if schema == BACKUP_SCHEMA or schema.endswith((_STAGE, _OLD)):
+        raise ValueError(f"{schema!r} is reserved for the backup manifest or a backup in progress.")
+    if len(schema) > 63 - len(_STAGE):
+        raise ValueError(f"Backup schema names can have at most {63 - len(_STAGE)} characters.")
+    return schema
+
+
+def _schema_tables(cur, schema: str) -> list[str]:
+    cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = %s AND table_type = 'BASE TABLE' ORDER BY 1",
+                (schema,))
+    return [r[0] for r in cur.fetchall()]
+
+
+def _fingerprints(cur, schema: str, tables: Sequence[str] | None = None) -> dict[str, tuple[int, str]]:
+    """Per table (rows, fingerprint): the sum of the first 64 bits of md5 of each row's text, so order does not matter, duplicates
+    count and any changed value changes it. Computed by PostgreSQL, so it checks the stored copy without the original."""
+    out = {}
+    for t in tables if tables is not None else _schema_tables(cur, schema):
+        cur.execute(f"SELECT count(*), coalesce(sum(('x' || substr(md5(r::text), 1, 16))::bit(64)::bigint::numeric), 0)::text "
+                    f'FROM "{schema}"."{t}" AS r')
+        n, fp = cur.fetchone()
+        out[t] = (int(n), fp)
+    return out
+
+
+def _package_version() -> str:
+    try:
+        from omop_etl import __version__
+
+        return __version__
+    except Exception:  # pragma: no cover
+        return ""
+
+
+def _duckdb_signature(path: Path, con: duckdb.DuckDBPyConnection) -> str:
+    st = path.stat()
+    counts = {t: con.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in _base_tables(con)}
+    blob = json.dumps({"size": st.st_size, "mtime_ns": st.st_mtime_ns, "tables": counts}, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _files_signature(files: Sequence[Path]) -> str:
+    blob = json.dumps([[f.name, f.stat().st_size, f.stat().st_mtime_ns] for f in files])
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _duckdb_views(con: duckdb.DuckDBPyConnection) -> list[dict[str, str]]:
+    return [{"name": n, "sql": s} for n, s in con.execute(
+        "SELECT view_name, sql FROM duckdb_views() WHERE NOT internal AND schema_name = 'main' "
+        "AND database_name = current_database() ORDER BY 1").fetchall()]
+
+
+def _other_schemas(con: duckdb.DuckDBPyConnection) -> list[str]:
+    return [r[0] for r in con.execute(
+        "SELECT DISTINCT table_schema FROM information_schema.tables WHERE table_catalog = current_database() "
+        "AND table_schema NOT IN ('main', 'information_schema', 'pg_catalog') ORDER BY 1").fetchall()]
+
+
+def _manifest_row(cur, schema: str):
+    cur.execute(f'SELECT kind, label, source_signature, views, created_at, verified_at FROM "{BACKUP_SCHEMA}".backups '
+                "WHERE schema_name = %s", (schema,))
+    return cur.fetchone()
+
+
+def _stored_signature(pg, schema: str) -> str | None:
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"{BACKUP_SCHEMA}.backups",))
+            if cur.fetchone()[0] is None:
+                return None
+            row = _manifest_row(cur, schema)
+            return None if row is None else row[2]
+    finally:
+        conn.close()
+
+
+def _drop_stage(pg, schema: str) -> None:
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP SCHEMA IF EXISTS "{schema}{_STAGE}" CASCADE')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _swap_in(pg, schema: str, *, kind: str, label: str | None, signature: str, views: list[dict[str, str]], note: str = "",
+             selection: str = "all") -> dict:
+    """Makes the verified staging schema the backup, in one transaction: the old copy is replaced only if everything succeeds."""
+    stage = schema + _STAGE
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            _ensure_manifest(cur)
+            fps = _fingerprints(cur, stage)
+            cur.execute("SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", (schema,))
+            existed = cur.fetchone() is not None
+            cur.execute(f'DROP SCHEMA IF EXISTS "{schema}{_OLD}" CASCADE')
+            if existed:
+                cur.execute(f'ALTER SCHEMA "{schema}" RENAME TO "{schema}{_OLD}"')
+            cur.execute(f'ALTER SCHEMA "{stage}" RENAME TO "{schema}"')
+            if existed:
+                cur.execute(f'DROP SCHEMA "{schema}{_OLD}" CASCADE')
+            cur.execute(f'DELETE FROM "{BACKUP_SCHEMA}".backup_tables WHERE schema_name = %s', (schema,))
+            cur.execute(f'DELETE FROM "{BACKUP_SCHEMA}".backups WHERE schema_name = %s', (schema,))
+            cur.execute(f'INSERT INTO "{BACKUP_SCHEMA}".backups VALUES (%s, %s, %s, %s, %s, now(), now(), %s, %s, %s)',
+                        (schema, kind, label, signature, json.dumps(views), _package_version(), note or None, selection))
+            for t, (n, fp) in fps.items():
+                cur.execute(f'INSERT INTO "{BACKUP_SCHEMA}".backup_tables VALUES (%s, %s, %s, %s)', (schema, t, n, fp))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"schema": schema, "status": "refreshed" if existed else "created", "tables": len(fps)}
+
+
+def backup_site(pg, duckdb_path, schema: str, *, label: str | None = None, tables: Sequence[str] | str = "all", if_changed: bool = False,
+                content: bool = True, method: str = "copy") -> pd.DataFrame:
+    """Keeps a site's DuckDB file in PostgreSQL as a backup, or refreshes that backup.
+
+    The tables are copied into a staging schema with :func:`store_site` and checked value by value. Only if the check passes does the
+    staging schema replace ``schema`` (one transaction), and the manifest in schema ``omop_backup`` records the label, the DuckDB views
+    (so :func:`restore_site` can recreate them), a signature of the source file and a fingerprint of every table. If anything fails,
+    the previous backup is left as it was and :class:`RoundTripError` (or the original error) is raised.
+
+    Args:
+        pg: :class:`EmbeddedPostgres` (started) or a SQLAlchemy URL of any PostgreSQL server.
+        duckdb_path: The site's DuckDB file (opened read-only).
+        schema: Backup schema, e.g. ``site_schema("Site A")``.
+        label: Anonymous site label to record (e.g. ``"Site A"``); never a real site name.
+        tables: As in :func:`store_site`; ``"all"`` (default) keeps every table, so the backup is a full copy.
+        if_changed: Skip the copy when the source file (size, modification time, tables and their row counts) is unchanged since the
+            last backup; the result's ``status`` is then ``"unchanged"``.
+
+    Returns the per-column check of :func:`store_site` (empty when unchanged), with ``attrs["backup"]`` = ``{"schema", "status",
+    "tables", "skipped_schemas"}``. ``skipped_schemas`` lists DuckDB schemas other than ``main``, whose tables are not copied.
+    """
+    schema = _backup_name(schema)
+    path = Path(duckdb_path)
+    con, close = _duck(path)
+    try:
+        signature = _duckdb_signature(path, con)
+        views = _duckdb_views(con)
+        skipped = _other_schemas(con)
+        if if_changed and _stored_signature(pg, schema) == signature:
+            rep = pd.DataFrame()
+            rep.attrs["load"] = []
+            rep.attrs["backup"] = {"schema": schema, "status": "unchanged", "tables": None, "skipped_schemas": skipped}
+            return rep
+        _drop_stage(pg, schema)
+        try:
+            rep = store_site(pg, con, schema + _STAGE, tables=tables, content=content, method=method)
+            info = _swap_in(pg, schema, kind="duckdb", label=label, signature=signature, views=views,
+                            note=("not copied: DuckDB schemas " + ", ".join(skipped)) if skipped else "",
+                            selection=tables if isinstance(tables, str) else "list")
+        except BaseException:
+            _drop_stage(pg, schema)
+            raise
+    finally:
+        if close:
+            con.close()
+    rep.attrs["backup"] = {**info, "skipped_schemas": skipped}
+    return rep
+
+
+def backup_raw_files(pg, folder, schema: str, *, label: str | None = None, pattern: str = "*.csv", if_changed: bool = False) -> pd.DataFrame:
+    """Keeps a site's raw text files in PostgreSQL as a backup (one text table per file), or refreshes it.
+
+    Loads with :func:`load_text_files` into a staging schema (PostgreSQL ``COPY``, checked value by value against DuckDB's
+    ``read_csv``), then swaps it in and records it in the manifest, as :func:`backup_site` does. ``if_changed`` skips the load when the
+    files' names, sizes and modification times are unchanged. Use a schema such as ``"raw_" + site_schema(label)``.
+    """
+    schema = _backup_name(schema)
+    files = sorted(p for p in Path(folder).glob(pattern) if p.is_file())
+    if not files:
+        raise FileNotFoundError(f"No files matching {pattern!r} in {folder}")
+    signature = _files_signature(files)
+    if if_changed and _stored_signature(pg, schema) == signature:
+        rep = pd.DataFrame()
+        rep.attrs["files"] = {}
+        rep.attrs["backup"] = {"schema": schema, "status": "unchanged", "tables": None}
+        return rep
+    _drop_stage(pg, schema)
+    try:
+        rep = load_text_files(pg, folder, schema + _STAGE, pattern=pattern)
+        info = _swap_in(pg, schema, kind="raw", label=label, signature=signature, views=[])
+    except BaseException:
+        _drop_stage(pg, schema)
+        raise
+    rep.attrs["backup"] = info
+    return rep
+
+
+def register_backup(pg, schema: str, duckdb_path, *, label: str | None = None, content: bool = True) -> pd.DataFrame:
+    """Adopts a schema already stored with :func:`store_site` (for example by ``postgres_roundtrip_check.py``) as a backup, without
+    copying again: checks it value by value against ``duckdb_path`` and, if it matches, records it in the manifest.
+
+    Raises :class:`RoundTripError` if the schema differs from the DuckDB file (nothing is recorded then).
+    """
+    from omop_etl.load_sql import verify_transfer
+
+    schema = _backup_name(schema)
+    url, _ = _pg(pg)
+    path = Path(duckdb_path)
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            stored = _schema_tables(cur, schema)
+    finally:
+        conn.close()
+    if not stored:
+        raise LookupError(f"Schema {schema!r} has no tables.")
+    con, close = _duck(path)
+    try:
+        have = set(_base_tables(con))
+        extra = [t for t in stored if t not in have]
+        if extra:
+            raise RoundTripError(f"{len(extra)} table(s) in {schema!r} are not in the DuckDB file: {extra}")
+        rep = verify_transfer(con, stored, url, schema=schema, content=content)
+        if not bool(rep["match"].all()):
+            bad = rep.loc[~rep["match"], ["table", "column"]].drop_duplicates()
+            raise RoundTripError(f"{schema!r} differs from the DuckDB file in {len(bad)} column(s).", rep)
+        signature, views, skipped = _duckdb_signature(path, con), _duckdb_views(con), _other_schemas(con)
+        missing = sorted(have - set(stored))
+    finally:
+        if close:
+            con.close()
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            _ensure_manifest(cur)
+            fps = _fingerprints(cur, schema)
+            note = "; ".join(x for x in ((f"not copied: {len(missing)} table(s) of the DuckDB file" if missing else ""),
+                                          ("not copied: DuckDB schemas " + ", ".join(skipped)) if skipped else "") if x)
+            cur.execute(f'DELETE FROM "{BACKUP_SCHEMA}".backup_tables WHERE schema_name = %s', (schema,))
+            cur.execute(f'DELETE FROM "{BACKUP_SCHEMA}".backups WHERE schema_name = %s', (schema,))
+            cur.execute(f'INSERT INTO "{BACKUP_SCHEMA}".backups VALUES (%s, %s, %s, %s, %s, now(), now(), %s, %s, %s)',
+                        (schema, "duckdb", label, signature, json.dumps(views), _package_version(), note or None,
+                         "partial" if missing else "all"))
+            for t, (n, fp) in fps.items():
+                cur.execute(f'INSERT INTO "{BACKUP_SCHEMA}".backup_tables VALUES (%s, %s, %s, %s)', (schema, t, n, fp))
+        conn.commit()
+    finally:
+        conn.close()
+    rep.attrs["backup"] = {"schema": schema, "status": "registered", "tables": len(fps), "missing_tables": missing}
+    return rep
+
+
+def backup_status(pg) -> pd.DataFrame:
+    """One row per backup: ``schema``, ``kind`` (``duckdb`` / ``raw``), ``label``, ``tables``, ``views``, ``created_at``,
+    ``verified_at``, ``package_version``, ``note``. No row counts, so it can be shown on screen."""
+    cols = ["schema", "kind", "label", "tables", "views", "created_at", "verified_at", "package_version", "note"]
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"{BACKUP_SCHEMA}.backups",))
+            if cur.fetchone()[0] is None:
+                return pd.DataFrame(columns=cols)
+            cur.execute(f'''SELECT b.schema_name, b.kind, b.label, (SELECT count(*) FROM "{BACKUP_SCHEMA}".backup_tables t
+                            WHERE t.schema_name = b.schema_name), jsonb_array_length(b.views), b.created_at, b.verified_at,
+                            b.package_version, b.note FROM "{BACKUP_SCHEMA}".backups b ORDER BY 1''')
+            return pd.DataFrame(cur.fetchall(), columns=cols)
+    finally:
+        conn.close()
+
+
+def verify_backup(pg, schema: str | None = None, *, against=None, content: bool = True) -> pd.DataFrame:
+    """Checks backups (one ``schema``, or all when None) against the fingerprints recorded when they were made: every recorded table
+    must still be there with the same rows, and no table may have been added. Needs only PostgreSQL.
+
+    ``against``: also compare the backup value by value with a DuckDB file (duckdb backups) or a raw-file folder (raw backups, read
+    with DuckDB's ``read_csv``), so it is checked against the current source too; this needs a single ``schema``. For a full backup
+    (``tables="all"``) a table in the DuckDB file that is not in the backup is reported too.
+
+    Returns one row per schema and table: ``schema``, ``table``, ``match``, ``note``; ``verified_at`` is updated for schemas that pass.
+    Row counts are not in the result.
+    """
+    if against is not None and schema is None:
+        raise ValueError("'against' needs a single schema.")
+    out = []
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"{BACKUP_SCHEMA}.backups",))
+            if cur.fetchone()[0] is None:
+                raise LookupError("No backups recorded in this database.")
+            cur.execute(f'SELECT schema_name, kind, selection FROM "{BACKUP_SCHEMA}".backups' + (" WHERE schema_name = %s" if schema else "")
+                        + " ORDER BY 1", (schema,) if schema else None)
+            todo = cur.fetchall()
+            if schema and not todo:
+                raise LookupError(f"No backup recorded for schema {schema!r}.")
+            for s, kind, selection in todo:
+                cur.execute(f'SELECT table_name, n_rows, fingerprint FROM "{BACKUP_SCHEMA}".backup_tables WHERE schema_name = %s', (s,))
+                want = {t: (n, fp) for t, n, fp in cur.fetchall()}
+                now = _schema_tables(cur, s)
+                got = _fingerprints(cur, s, [t for t in now if t in want])
+                for t in sorted(set(want) | set(now)):
+                    if t not in now:
+                        out.append({"schema": s, "table": t, "match": False, "note": "table missing"})
+                    elif t not in want:
+                        out.append({"schema": s, "table": t, "match": False, "note": "table not in the backup record"})
+                    elif got[t][0] != want[t][0]:
+                        out.append({"schema": s, "table": t, "match": False, "note": "row count changed"})
+                    elif got[t][1] != want[t][1]:
+                        out.append({"schema": s, "table": t, "match": False, "note": "values changed"})
+                    else:
+                        out.append({"schema": s, "table": t, "match": True, "note": ""})
+                if against is not None:
+                    out += _verify_against(pg, s, kind, against, list(want), content, full=selection == "all")
+        result = pd.DataFrame(out, columns=["schema", "table", "match", "note"])
+        with conn.cursor() as cur:
+            for s, *_ in todo:
+                if bool(result.loc[result["schema"] == s, "match"].all()):
+                    cur.execute(f'UPDATE "{BACKUP_SCHEMA}".backups SET verified_at = now() WHERE schema_name = %s', (s,))
+        conn.commit()
+    finally:
+        conn.close()
+    return result
+
+
+def _verify_against(pg, schema: str, kind: str, source, tables: list[str], content: bool, full: bool) -> list[dict]:
+    from omop_etl.load_sql import verify_transfer
+
+    url, _ = _pg(pg)
+    if kind == "duckdb":
+        con, close = _duck(source)
+        try:
+            have = set(_base_tables(con))
+            rows = [{"schema": schema, "table": t, "match": False, "note": "not in the DuckDB file"} for t in tables if t not in have]
+            rows += [{"schema": schema, "table": t, "match": False, "note": "in the DuckDB file but not in the backup"}
+                     for t in sorted(have - set(tables)) if full]
+            names = [t for t in tables if t in have]
+            rep = verify_transfer(con, names, url, schema=schema, content=content) if names else pd.DataFrame(columns=["table", "match"])
+        finally:
+            if close:
+                con.close()
+    else:
+        files = {site_schema(p.stem): p for p in Path(source).iterdir() if p.is_file()}
+        rows = [{"schema": schema, "table": t, "match": False, "note": "no source file"} for t in tables if t not in files]
+        duck = duckdb.connect()
+        try:
+            spec = {}
+            for t in tables:
+                if t in files:
+                    f = files[t]
+                    fmt = _sniff(duck, f)
+                    names = ", ".join(f"'{c}'" for c in _header(f, fmt["delim"], fmt["quote"]))
+                    spec[t] = (f"SELECT * FROM read_csv('{f.as_posix()}', header = true, all_varchar = true, delim = '{fmt['delim']}', "
+                               f"quote = '{fmt['quote']}', escape = '{fmt['escape']}', names = [{names}])")
+            rep = verify_transfer(duck, spec, url, schema=schema, content=True) if spec else pd.DataFrame(columns=["table", "match"])
+        finally:
+            duck.close()
+    for t, ok in rep.groupby("table")["match"].all().items():
+        rows.append({"schema": schema, "table": t, "match": bool(ok), "note": "" if ok else "differs from the source"})
+    return rows
+
+
+def restore_site(pg, schema: str, out, *, verify: bool = True) -> pd.DataFrame:
+    """Restores a DuckDB backup into a new DuckDB file ``out`` (which must not exist): every recorded table, then the recorded views.
+
+    With ``verify`` the restored file is checked against the backup: each table's row count against the manifest, and every value
+    against PostgreSQL (:func:`omop_etl.load_sql.verify_transfer` with ``content=True``). On a mismatch the file is kept for inspection
+    and :class:`RoundTripError` is raised. Returns one row per table: ``table``, ``match``, ``note``.
+    """
+    from omop_etl.load_sql import verify_transfer
+
+    schema = _backup_name(schema)
+    url, _ = _pg(pg)
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"{BACKUP_SCHEMA}.backups",))
+            row = _manifest_row(cur, schema) if cur.fetchone()[0] is not None else None
+            if row is None:
+                raise LookupError(f"No backup recorded for schema {schema!r}.")
+            if row[0] != "duckdb":
+                raise ValueError(f"{schema!r} is a raw-file backup; use restore_raw_files.")
+            views = row[3] if isinstance(row[3], list) else json.loads(row[3])
+            cur.execute(f'SELECT table_name, n_rows FROM "{BACKUP_SCHEMA}".backup_tables WHERE schema_name = %s ORDER BY 1', (schema,))
+            want = dict(cur.fetchall())
+    finally:
+        conn.close()
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    load_site(pg, schema, out, tables=list(want))
+    con = duckdb.connect(str(out))
+    try:
+        pending, failed_views = list(views), []
+        while pending:                                    # views may use each other; create them in an order that works
+            left = []
+            for v in pending:
+                try:
+                    con.execute(v["sql"])
+                except duckdb.Error:
+                    left.append(v)
+            if len(left) == len(pending):
+                failed_views = [v["name"] for v in left]
+                break
+            pending = left
+        res = []
+        rep = verify_transfer(con, list(want), url, schema=schema, content=True) if verify else pd.DataFrame(columns=["table", "match"])
+        ok_by_table = rep.groupby("table")["match"].all().to_dict()
+        for t, n in want.items():
+            got = con.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0]
+            if got != n:
+                res.append({"table": t, "match": False, "note": "row count differs from the backup record"})
+            elif verify and not ok_by_table.get(t, False):
+                res.append({"table": t, "match": False, "note": "values differ from the backup"})
+            else:
+                res.append({"table": t, "match": True, "note": ""})
+        for name in failed_views:
+            res.append({"table": name, "match": False, "note": "view could not be recreated"})
+    finally:
+        con.close()
+    result = pd.DataFrame(res, columns=["table", "match", "note"])
+    if not bool(result["match"].all()):
+        raise RoundTripError(f"Restored file differs from the backup in {int((~result['match']).sum())} table(s) or view(s).", result)
+    return result
+
+
+def restore_raw_files(pg, schema: str, out_dir) -> pd.DataFrame:
+    """Writes each table of a raw-file backup to ``<out_dir>/<table>.csv`` (comma-delimited, header row, UTF-8; NULL as an empty
+    field). Files that already exist are not overwritten. Returns one row per table: ``table``, ``file``, ``match`` (row count equals
+    the backup record)."""
+    schema = _backup_name(schema)
+    out_dir = Path(out_dir)
+    conn = _connect(pg)
+    res = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"{BACKUP_SCHEMA}.backups",))
+            row = _manifest_row(cur, schema) if cur.fetchone()[0] is not None else None
+            if row is None:
+                raise LookupError(f"No backup recorded for schema {schema!r}.")
+            cur.execute(f'SELECT table_name, n_rows FROM "{BACKUP_SCHEMA}".backup_tables WHERE schema_name = %s ORDER BY 1', (schema,))
+            want = dict(cur.fetchall())
+            clash = [t for t in want if (out_dir / f"{t}.csv").exists()]
+            if clash:
+                raise FileExistsError(f"{len(clash)} file(s) already exist in {out_dir}; choose an empty folder.")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for t, n in want.items():
+                f = out_dir / f"{t}.csv"
+                with open(f, "w", encoding="utf-8", newline="") as fh:
+                    cur.copy_expert(f'COPY "{schema}"."{t}" TO STDOUT WITH (FORMAT csv, HEADER true)', fh)
+                    got = cur.rowcount
+                res.append({"table": t, "file": f.name, "match": got == n})
+    finally:
+        conn.close()
+    return pd.DataFrame(res, columns=["table", "file", "match"])
+
+
+def drop_backup(pg, schema: str) -> None:
+    """Deletes a backup: its schema and its manifest entries."""
+    schema = _backup_name(schema)
+    conn = _connect(pg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            cur.execute("SELECT to_regclass(%s)", (f"{BACKUP_SCHEMA}.backups",))
+            if cur.fetchone()[0] is not None:
+                cur.execute(f'DELETE FROM "{BACKUP_SCHEMA}".backup_tables WHERE schema_name = %s', (schema,))
+                cur.execute(f'DELETE FROM "{BACKUP_SCHEMA}".backups WHERE schema_name = %s', (schema,))
+        conn.commit()
+    finally:
+        conn.close()

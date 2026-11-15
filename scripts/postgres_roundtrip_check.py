@@ -26,6 +26,12 @@ Example (PowerShell or bash; run as an ordinary user, PostgreSQL refuses to run 
         --labels-file ../private/labels.json --pg-dir ../private/postgres --out-db-dir ../private/from_postgres \
         --raw-dirs ../raw/site1 ../raw/site2 ../raw/site3 --delta-dir ../private/delta --out pg_roundtrip_record.md
 
+**Keeping the copy as a backup.** The PostgreSQL copy in ``--pg-dir`` is a full copy of every table (with ``--tables all``) and is
+kept after the run; only the server is stopped. Add ``--backup`` to make it a managed backup: each site is copied into a staging schema
+and swaps in only after its check passes (so a failed run never damages the previous copy), and the manifest records a fingerprint of
+every table so ``scripts/postgres_backup.py verify`` can check it later and ``restore`` can rebuild the DuckDB files. ``--drop-after``
+instead deletes the site schemas when the checks are done, for a check-only run.
+
 ``--labels-file`` is the private site -> label JSON from ``reproduce_study.py --labels-out``; without it the sites are labelled Site A, B, ...
 in the order given. Keep ``--pg-dir``, ``--out-db-dir`` and ``--delta-dir`` with the site's private files: they hold patient-level data.
 """
@@ -42,6 +48,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from omop_etl.embedded_postgres import (  # noqa: E402
     EmbeddedPostgres,
+    backup_raw_files,
+    backup_site,
+    drop_backup,
     RoundTripError,
     compare_duckdb,
     load_site,
@@ -115,10 +124,15 @@ def main(argv=None) -> int:
     ap.add_argument("--method", default="copy", choices=["copy", "insert"])
     ap.add_argument("--no-content", action="store_true", help="skip the value-level comparison in PostgreSQL (faster)")
     ap.add_argument("--keep-running", action="store_true", help="leave the server running afterwards (connect with the printed command)")
+    ap.add_argument("--backup", action="store_true",
+                    help="keep each site's PostgreSQL copy as a managed backup (staged, swapped in after its check, fingerprinted)")
+    ap.add_argument("--drop-after", action="store_true", help="delete the site schemas from PostgreSQL when the checks are done")
     ap.add_argument("--out", help="write the Markdown record here")
     a = ap.parse_args(argv)
     if a.raw_dirs and len(a.raw_dirs) != len(a.sites):
         ap.error("--raw-dirs needs one folder per site, in the order of --sites")
+    if a.backup and a.drop_after:
+        ap.error("--backup and --drop-after cannot be used together")
     tables = a.tables if a.tables in ("all", "cdm") else [t.strip() for t in a.tables.split(",") if t.strip()]
     labels = _labels(a.sites, a.labels_file)
     out_dir = Path(a.out_db_dir)
@@ -142,14 +156,20 @@ def main(argv=None) -> int:
             print(f"[{label}] DuckDB -> PostgreSQL ...", flush=True)
             t0 = time.time()
             try:
-                rep = store_site(pg, src, schema, tables=tables, content=not a.no_content, method=a.method)
+                if a.backup:
+                    rep = backup_site(pg, src, schema, label=label, tables=tables, content=not a.no_content, method=a.method)
+                else:
+                    rep = store_site(pg, src, schema, tables=tables, content=not a.no_content, method=a.method)
                 n_tab = len(rep.attrs["load"])
                 lines.append(f"- DuckDB -> PostgreSQL: **PASS**, {n_tab} tables, {len(rep)} column checks, all equal ({time.time() - t0:.0f} s)")
             except RoundTripError as exc:
                 failed = True
                 bad = [] if exc.report is None else \
                     list(exc.report.loc[~exc.report["match"], ["table", "column"]].drop_duplicates().itertuples(index=False))
-                lines.append(f"- DuckDB -> PostgreSQL: **FAIL** in {len(bad)} column check(s): " + ", ".join(f"`{t}.{c}`" for t, c in bad))
+                lines.append(f"- DuckDB -> PostgreSQL: **FAIL** in {len(bad)} column check(s): " + ", ".join(f"`{t}.{c}`" for t, c in bad)
+                             + ("; the previous backup of this site, if any, is unchanged" if a.backup else ""))
+                if a.drop_after:
+                    drop_backup(pg, schema)
                 continue
             print(f"[{label}] PostgreSQL -> DuckDB ...", flush=True)
             t0 = time.time()
@@ -166,7 +186,10 @@ def main(argv=None) -> int:
             if a.raw_dirs:
                 print(f"[{label}] raw text files ...", flush=True)
                 try:
-                    r = load_text_files(pg, a.raw_dirs[i], "raw_" + schema, pattern=a.raw_pattern)
+                    if a.backup:
+                        r = backup_raw_files(pg, a.raw_dirs[i], "raw_" + schema, label=label, pattern=a.raw_pattern)
+                    else:
+                        r = load_text_files(pg, a.raw_dirs[i], "raw_" + schema, pattern=a.raw_pattern)
                     lines.append(f"- Raw text files: **PASS**, {len(r.attrs['files'])} files; PostgreSQL COPY and DuckDB read_csv agree on every value")
                 except (RoundTripError, FileNotFoundError, ValueError) as exc:
                     failed = True
@@ -179,6 +202,10 @@ def main(argv=None) -> int:
                 failed |= bool(bad_d)
                 lines.append(f"- Delta Lake, version 0 (original) vs version 1 (round trip): "
                              + (f"**PASS**, no delta in {len(res)} tables" if not bad_d else f"**FAIL**: {', '.join(bad_d)}"))
+            if a.drop_after:
+                drop_backup(pg, schema)
+                if a.raw_dirs:
+                    drop_backup(pg, "raw_" + schema)
         if a.keep_running:
             print(f"Server left running. Connect with psql or any client using the URL from EmbeddedPostgres({a.pg_dir!r}).dsn")
 
@@ -189,6 +216,9 @@ def main(argv=None) -> int:
             f"- PostgreSQL: {server} (embedded, backend `{pg.backend}`, load method `{a.method}`)",
             f"- DuckDB: {duckdb.__version__}; Python {platform.python_version()} on {platform.system()} {platform.machine()}",
             f"- Sites: {len(a.sites)}; tables: `{a.tables}`; value-level comparison: {'no' if a.no_content else 'yes'}",
+            "- PostgreSQL copy: " + ("deleted after the checks" if a.drop_after else
+                                     "kept as a managed backup (see scripts/postgres_backup.py)" if a.backup else
+                                     "kept (not registered as a backup; scripts/postgres_backup.py register adopts it)"),
             f"- Result: **{'FAIL' if failed else 'PASS'}** ({time.time() - t_all:.0f} s)"]
     text = "\n".join(head + lines) + "\n"
     print(text)
