@@ -1,4 +1,6 @@
-# omopduckdb (development version)
+# omopduckdb 0.28.0
+
+Minor release: the PostgreSQL round trip is now a quick functional check by default (first run on real site data: all 5 sites passed in under 10 minutes).
 
 - **PostgreSQL round trip is quick by default (Python).** `scripts/postgres_roundtrip_check.py` now cuts each table to a repeatable sample of at most 10,000 rows (`--sample-rows`) before the round trip, so a site takes minutes instead of hours; it tests the copy code, not data volume. `--full` restores the every-row run; `--backup` always copies every row. New `omop_etl.embedded_postgres.sample_site()`.
 
