@@ -497,3 +497,28 @@ def test_manuscript_without_grateful_py_says_so_and_pandoc_gets_citeproc(tmp_pat
     monkeypatch.setattr(md.subprocess, "run", run)
     r = md.render_manuscript_document(wb, tmp_path / "doc2", figures=[], formats=["docx"])
     assert "--citeproc" in seen[0] and r["bib"].exists()
+
+
+def test_source_checkout_without_installed_metadata_still_cites_omop_duck_db(tmp_path, monkeypatch):
+    """Run from a git checkout (omop_etl importable, omop-duck-db not pip-installed): the version falls back to omop_etl.__version__."""
+    gp = pytest.importorskip("grateful_py")
+    import importlib.metadata as im
+
+    import omop_etl
+    import omop_etl.package_citations as pc
+
+    real_version, real_get = im.version, gp.get_pkgs_info
+
+    def version(name):
+        if name == "omop-duck-db":
+            raise im.PackageNotFoundError(name)
+        return real_version(name)
+
+    found = [c for c in real_get(pkgs=["omop_duck_db", "pandas"], omit="none", skip_missing=True, include_interpreter=True)
+             if c.name.lower().replace("_", "-") != "omop-duck-db"]  # what grateful_py resolves when omop-duck-db is not installed
+    monkeypatch.setattr(pc.metadata, "version", version)
+    monkeypatch.setattr(gp, "get_pkgs_info", lambda **k: list(found))
+    assert pc.omop_duck_db_version() == omop_etl.__version__
+    s = pc.software_citations(tmp_path / "x.bib", packages=("pandas",))
+    assert f"omop-duck-db version {omop_etl.__version__} [@omopduckdb]" in s["paragraph"] and s["omop_duck_db_version"] == omop_etl.__version__
+    assert "@software{omopduckdb," in (tmp_path / "x.bib").read_text(encoding="utf-8")
