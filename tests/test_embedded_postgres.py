@@ -254,3 +254,229 @@ def test_script_checks_any_number_of_sites_with_raw_files_and_delta(tmp_path, ca
     with pytest.raises(SystemExit):
         script.main(["--db-dir", str(db), "--sites", *sites, "--pg-dir", str(tmp_path / "pg"), "--out-db-dir", str(tmp_path / "back")])
     EmbeddedPostgres(tmp_path / "pg", backend=BACKENDS[0]).drop()
+
+
+# ---------------------------------------------------------------------------------------------------------------------- backups
+from omop_etl.embedded_postgres import (  # noqa: E402
+    backup_raw_files,
+    backup_site,
+    backup_status,
+    drop_backup,
+    register_backup,
+    restore_raw_files,
+    restore_site,
+    verify_backup,
+)
+
+
+def test_backup_schema_names_are_checked_before_anything_runs():
+    for bad in ("omop_backup", "site_a__new", "site_a__old", "x" * 60, "Site A"):
+        with pytest.raises(ValueError):
+            backup_site("postgresql+psycopg2://x@localhost/x", "missing.duckdb", bad)
+
+
+@needs_pg
+def test_backup_is_a_full_copy_that_verifies_and_restores_identically(pg, tmp_path):
+    src = _site_db(tmp_path / "omop_bk.duckdb")
+    con = duckdb.connect(str(src))
+    con.execute("CREATE VIEW adults AS SELECT person_id FROM person WHERE year_of_birth < 2000")
+    con.execute("CREATE VIEW adult_count AS SELECT count(*) AS n FROM adults")       # a view on a view
+    con.close()
+    rep = backup_site(pg, src, "bk_a", label="Site A")
+    assert rep.attrs["backup"]["status"] == "created" and bool(rep["match"].all())
+    src_tables = set(duckdb.connect(str(src), read_only=True).execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE'").df()["table_name"])
+    st = backup_status(pg).set_index("schema")
+    assert st.loc["bk_a", "kind"] == "duckdb" and st.loc["bk_a", "label"] == "Site A"
+    assert st.loc["bk_a", "tables"] == len(src_tables) and st.loc["bk_a", "views"] == 2            # every table: a full copy
+    assert "bk_a__new" not in set(pg.query("SELECT schema_name FROM information_schema.schemata")["schema_name"])
+    v = verify_backup(pg, "bk_a")
+    assert bool(v["match"].all()) and set(v["table"]) == src_tables
+    v = verify_backup(pg, "bk_a", against=src)
+    assert bool(v["match"].all())
+    out = tmp_path / "restored" / "omop_bk.duckdb"
+    res = restore_site(pg, "bk_a", out)
+    assert bool(res["match"].all())
+    cmp = compare_duckdb(src, out)
+    assert bool(cmp["match"].all()), cmp[~cmp["match"]]
+    r = duckdb.connect(str(out), read_only=True)
+    assert r.execute("SELECT n FROM adult_count").fetchone() == duckdb.connect(str(src), read_only=True).execute(
+        "SELECT n FROM adult_count").fetchone()
+    r.close()
+    with pytest.raises(FileExistsError):
+        restore_site(pg, "bk_a", out)
+
+
+@needs_pg
+def test_verify_catches_a_changed_dropped_or_added_table(pg, tmp_path):
+    src = _site_db(tmp_path / "omop_bv.duckdb")
+    backup_site(pg, src, "bk_v", tables=["person", "study_extra", "measurement"])
+    pg.query("UPDATE bk_v.study_extra SET txt = 'changed' WHERE id = 3")
+    pg.query("DELETE FROM bk_v.measurement WHERE measurement_id IN (SELECT min(measurement_id) FROM bk_v.measurement)")
+    pg.query("CREATE TABLE bk_v.stray AS SELECT 1 AS x")
+    v = verify_backup(pg, "bk_v").set_index("table")
+    assert bool(v.loc["person", "match"])
+    assert v.loc["study_extra", "note"] == "values changed"
+    assert v.loc["measurement", "note"] == "row count changed"
+    assert v.loc["stray", "note"] == "table not in the backup record"
+    before = backup_status(pg).set_index("schema").loc["bk_v", "verified_at"]
+    verify_backup(pg, "bk_v")
+    assert backup_status(pg).set_index("schema").loc["bk_v", "verified_at"] == before            # not marked verified
+    with pytest.raises(RoundTripError):
+        restore_site(pg, "bk_v", tmp_path / "bad.duckdb")
+
+
+@needs_pg
+def test_refresh_replaces_the_copy_and_skips_when_unchanged(pg, tmp_path):
+    src = _site_db(tmp_path / "omop_br.duckdb")
+    assert backup_site(pg, src, "bk_r", tables="cdm").attrs["backup"]["status"] == "created"
+    assert backup_site(pg, src, "bk_r", tables="cdm", if_changed=True).attrs["backup"]["status"] == "unchanged"
+    con = duckdb.connect(str(src))
+    con.execute("DELETE FROM person WHERE person_id IN (SELECT max(person_id) FROM person)")
+    con.close()
+    assert backup_site(pg, src, "bk_r", tables="cdm", if_changed=True).attrs["backup"]["status"] == "refreshed"
+    assert bool(verify_backup(pg, "bk_r", against=src)["match"].all())
+    n_src = duckdb.connect(str(src), read_only=True).execute("SELECT count(*) FROM person").fetchone()[0]
+    assert int(pg.query("SELECT count(*) FROM bk_r.person").iloc[0, 0]) == n_src
+
+
+@needs_pg
+def test_a_failed_refresh_keeps_the_previous_backup(pg, tmp_path, monkeypatch):
+    import omop_etl.embedded_postgres as ep
+
+    src = _site_db(tmp_path / "omop_bf.duckdb")
+    backup_site(pg, src, "bk_f", tables=["person", "study_extra"])
+    real = ep.store_site
+
+    def broken(pg_, con, schema, **kw):
+        real(pg_, con, schema, **kw)
+        raise RoundTripError("simulated mismatch")
+
+    monkeypatch.setattr(ep, "store_site", broken)
+    with pytest.raises(RoundTripError):
+        backup_site(pg, src, "bk_f", tables=["person", "study_extra"])
+    schemas = set(pg.query("SELECT schema_name FROM information_schema.schemata")["schema_name"])
+    assert "bk_f" in schemas and "bk_f__new" not in schemas
+    assert bool(verify_backup(pg, "bk_f", against=src)["match"].all())
+
+
+@needs_pg
+def test_register_adopts_a_round_trip_copy_and_refuses_a_different_one(pg, tmp_path):
+    src = _site_db(tmp_path / "omop_bg.duckdb")
+    store_site(pg, src, "bk_g", tables=["person", "study_extra"])
+    rep = register_backup(pg, "bk_g", src, label="Site G")
+    assert rep.attrs["backup"]["status"] == "registered" and "measurement" in rep.attrs["backup"]["missing_tables"]
+    assert bool(verify_backup(pg, "bk_g")["match"].all())
+    store_site(pg, src, "bk_h", tables=["person", "study_extra"])
+    pg.query("UPDATE bk_h.study_extra SET txt = 'changed' WHERE id = 3")
+    with pytest.raises(RoundTripError):
+        register_backup(pg, "bk_h", src)
+    assert "bk_h" not in set(backup_status(pg)["schema"])
+    drop_backup(pg, "bk_g")
+    assert "bk_g" not in set(backup_status(pg)["schema"])
+    assert "bk_g" not in list_site_schemas(pg)
+
+
+@needs_pg
+def test_raw_files_backup_verifies_against_the_files_and_restores(pg, tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for f in (ROOT / "tests" / "fixtures" / "pcornet_sample").glob("*.csv"):
+        (raw / f.name).write_bytes(f.read_bytes())
+    (raw / "note.csv").write_bytes('ID|TXT\n1|"a | b"\n2|"two\nlines"\n3|日本語\n4|\n'.encode("utf-8"))
+    rep = backup_raw_files(pg, raw, "raw_bk_a", label="Site A")
+    assert rep.attrs["backup"]["status"] == "created" and bool(rep["match"].all())
+    assert backup_raw_files(pg, raw, "raw_bk_a", if_changed=True).attrs["backup"]["status"] == "unchanged"
+    assert backup_status(pg).set_index("schema").loc["raw_bk_a", "kind"] == "raw"
+    assert bool(verify_backup(pg, "raw_bk_a", against=raw)["match"].all())
+    (raw / "note.csv").write_bytes('ID|TXT\n1|"a | b"\n2|changed\n3|日本語\n4|\n'.encode("utf-8"))
+    v = verify_backup(pg, "raw_bk_a", against=raw)
+    bad = v[~v["match"]]
+    assert bad[["table", "note"]].values.tolist() == [["note", "differs from the source"]]       # the stored copy itself is intact
+    out = tmp_path / "raw_back"
+    res = restore_raw_files(pg, "raw_bk_a", out)
+    assert bool(res["match"].all()) and (out / "note.csv").exists()
+    back = duckdb.connect().execute(f"SELECT * FROM read_csv('{(out / 'note.csv').as_posix()}', all_varchar = true) ORDER BY id").df()
+    assert back["txt"].tolist()[:3] == ["a | b", "two\nlines", "日本語"]
+    with pytest.raises(ValueError):
+        restore_site(pg, "raw_bk_a", tmp_path / "x.duckdb")
+
+
+@needs_pg
+def test_backup_script_any_number_of_sites_anonymous(tmp_path, capsys):
+    import postgres_backup as script
+    import postgres_roundtrip_check as rt
+
+    db = tmp_path / "db"
+    db.mkdir()
+    sites = ["northfield", "southport", "eastvale", "westbrook"]        # made-up keys; output must not name them
+    persons = duckdb.connect().execute(f"SELECT person_id FROM read_csv('{(ROOT / 'tests/fixtures/study_cohort_cdm/person.csv').as_posix()}')").df()
+    ids = persons.person_id.tolist()
+    raws = []
+    for k, s in enumerate(sites):
+        _site_db(db / f"omop_{s}.duckdb", set(ids[k::4]))
+        r = tmp_path / f"raw_{s}"
+        r.mkdir()
+        (r / "demographic.csv").write_bytes((ROOT / "tests/fixtures/pcornet_sample/demographic.csv").read_bytes())
+        raws.append(str(r))
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps({"northfield": "Site D", "southport": "Site A", "eastvale": "Site C", "westbrook": "Site B"}))
+    common = ["--pg-dir", str(tmp_path / "pg"), "--backend", BACKENDS[0]]
+    site_args = ["--sites", *sites, "--labels-file", str(labels)]
+    try:
+        # the round trip with --backup leaves managed backups
+        rec = tmp_path / "record.md"
+        assert rt.main(["--db-dir", str(db), *site_args, *common, "--out-db-dir", str(tmp_path / "back"), "--raw-dirs", *raws,
+                        "--backup", "--out", str(rec)]) == 0
+        assert "kept as a managed backup" in rec.read_text(encoding="utf-8")
+        capsys.readouterr()
+        assert script.main(["backup", "--db-dir", str(db), *site_args, "--raw-dirs", *raws, "--if-changed", *common]) == 0
+        assert capsys.readouterr().out.count(": unchanged") == 8
+        assert script.main(["status", *common]) == 0
+        status = capsys.readouterr().out
+        assert all(f"site_{c}" in status and f"raw_site_{c}" in status for c in "abcd")
+        assert script.main(["verify", *common]) == 0
+        assert script.main(["verify", "--db-dir", str(db), "--raw-dirs", *raws, *site_args, *common]) == 0
+        assert script.main(["restore", *site_args, "--out-db-dir", str(tmp_path / "restored"), *common]) == 0
+        for s in sites:
+            assert bool(compare_duckdb(db / f"omop_{s}.duckdb", tmp_path / "restored" / f"omop_{s}.duckdb")["match"].all())
+        with pytest.raises(SystemExit):                                     # never overwrites restored files
+            script.main(["restore", *site_args, "--out-db-dir", str(tmp_path / "restored"), *common])
+        # a changed site is refreshed, the others are skipped; verify against the files then passes again
+        con = duckdb.connect(str(db / f"omop_{sites[0]}.duckdb"))
+        con.execute("DELETE FROM study_extra WHERE id = 7")
+        con.close()
+        assert script.main(["verify", "--db-dir", str(db), *site_args, *common]) == 1
+        capsys.readouterr()
+        assert script.main(["backup", "--db-dir", str(db), *site_args, "--if-changed", *common]) == 0
+        out = capsys.readouterr().out
+        assert "[Site D] site_d: refreshed" in out and out.count(": unchanged") == 3
+        assert script.main(["verify", "--db-dir", str(db), *site_args, *common]) == 0
+        assert script.main(["drop", "--sites", sites[1], "--labels-file", str(labels), *common]) == 0
+        capsys.readouterr()
+        script.main(["status", *common])
+        status = capsys.readouterr().out
+        assert "site_a" not in status and "site_b" in status
+        printed = status + out + rec.read_text(encoding="utf-8")
+        assert not any(s in printed.lower() for s in sites)
+    finally:
+        EmbeddedPostgres(tmp_path / "pg", backend=BACKENDS[0]).drop()
+
+
+@needs_pg
+def test_roundtrip_drop_after_leaves_nothing_in_postgres(tmp_path):
+    import postgres_roundtrip_check as rt
+
+    db = tmp_path / "db"
+    db.mkdir()
+    _site_db(db / "omop_one.duckdb")
+    common = ["--pg-dir", str(tmp_path / "pg"), "--backend", BACKENDS[0]]
+    try:
+        assert rt.main(["--db-dir", str(db), "--sites", "one", "--tables", "person,study_extra", "--out-db-dir", str(tmp_path / "b"),
+                        "--drop-after", *common]) == 0
+        with EmbeddedPostgres(tmp_path / "pg", backend=BACKENDS[0]) as s:
+            assert list_site_schemas(s) == []
+        with pytest.raises(SystemExit):
+            rt.main(["--db-dir", str(db), "--sites", "one", "--out-db-dir", str(tmp_path / "c"), "--backup", "--drop-after", *common])
+    finally:
+        EmbeddedPostgres(tmp_path / "pg", backend=BACKENDS[0]).drop()
