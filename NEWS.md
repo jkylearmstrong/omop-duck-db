@@ -1,4 +1,6 @@
-# omopduckdb (development version)
+# omopduckdb 0.28.1
+
+Patch release: Quarto failures in the run record show the cause, and runs where the usual Quarto cache folder is read only (sandboxed Windows) can still render the DOCX / PDF. No change to cohort, features or model numbers. Version bump 0.28.0 to 0.28.1.
 
 - **Quarto failures say what went wrong, and sandboxed runs can render the DOCX / PDF (Python).** When Quarto fails, `<prefix>_run.json` `document.note` now gives the start of Quarto's error output (where the cause is, for example `PermissionDenied ... (os error 5)`) as well as its last lines, with colour codes removed and the home folder, cache folders and account name replaced; before, only the last three lines were kept, which for Quarto are its stack trace (`core/cri/cri.ts`). New `cache_dir` in `render_manuscript_document()` (`document_cache_dir` in `run_study()` and `relabel_outputs()`, `--quarto-cache-dir` in `scripts/reproduce_study.py` and `scripts/relabel_study.py`, or the `OMOP_QUARTO_CACHE_DIR` environment variable) points Quarto's cache (`LOCALAPPDATA`, `APPDATA`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `DENO_DIR`) at a writable folder. Without one, a render that fails on a permission error is retried once with a temporary cache inside the private build folder, which is removed afterwards; `document.cache` in the run record says which cache was used. New helpers `renderer_env()` and `stderr_summary()`.
 
