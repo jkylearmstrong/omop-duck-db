@@ -23,6 +23,8 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from omop_etl.data_gaps import DataGapWarning
+
 __all__ = ["extract_benchmark_features", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS",
            "DEFAULT_BOUNDS", "DEFAULT_RESCALE", "EDERRI_MEDICATION_SPECS"]
 
@@ -118,7 +120,7 @@ def _ensure_vocabulary(con, vocabulary_db) -> None:
         attach_central_vocabulary(con, path)
         warnings.warn(f"concept_ancestor was not reachable; attached the central vocabulary {path!r}.", UserWarning, stacklevel=3)
     except Exception as exc:   # an already attached catalog, a locked file: carry on and let the extractors report it
-        warnings.warn(f"Could not attach the central vocabulary {path!r}: {exc}", UserWarning, stacklevel=3)
+        warnings.warn(DataGapWarning(f"Could not attach the central vocabulary {path!r}: {exc}", "vocabulary"), stacklevel=3)
 
 
 def _cohort_frame(con, cohort_table: str, cohort_id: int | None) -> pd.DataFrame:
@@ -446,6 +448,7 @@ def extract_benchmark_features(
     keys = list(out.columns)
     groups: dict[str, list[str]] = {}
     skipped: list[str] = []
+    address_used: str | None = None
 
     blocks: list[pd.DataFrame] = []     # joined once at the end: 100+ single-column inserts fragment a DataFrame
 
@@ -510,17 +513,20 @@ def extract_benchmark_features(
                     window_kw = dict(window=None, offset_anchor="visit_end_date", lookahead_days=0)
                 else:
                     window_kw = dict(window=window)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
+                with warnings.catch_warnings(record=True) as med_warnings:
+                    warnings.simplefilter("always", UserWarning)
                     med = extract_medication_classes(con, view, specs, strategy="standard", person_col="subject_id",
                                                      index_date_col="cohort_start_date", end_date_col="cohort_end_date",
                                                      lookback_days=lookback_days, **window_kw)
+                # a class that resolves to no concept is an all-zero column: keep the reason (it used to be silenced)
+                for w in sorted({str(w.message) for w in med_warnings if issubclass(w.category, UserWarning)}):
+                    warnings.warn(f"medication classes: {w}", UserWarning, stacklevel=2)
                 add("medications" if not prefix else "medications_ederri", _align(cohort, med, prefix=prefix + "med_", only=list(specs)))
         if include_protocol_history:
             try:
                 add("protocol_history", extract_protocol_history_features(con, cohort, lookback_days=lookback_days))
             except duckdb.CatalogException as exc:     # a CDM without visit_occurrence / condition_occurrence / observation
-                warnings.warn(f"protocol history columns skipped: {str(exc).splitlines()[0]}", UserWarning, stacklevel=2)
+                warnings.warn(DataGapWarning(f"protocol history columns skipped: {str(exc).splitlines()[0]}", "group_skipped"), stacklevel=2)
                 skipped.append("protocol_history")
     finally:
         con.unregister(view)
@@ -565,8 +571,9 @@ def extract_benchmark_features(
                     src = pd.Series(con.execute("SELECT upper(v.discharged_to_source_value) FROM (SELECT unnest(?) AS vid, generate_subscripts(?, 1) AS ord) k "
                                                 "LEFT JOIN visit_occurrence v ON v.visit_occurrence_id = k.vid ORDER BY k.ord",
                                                 [cohort["visit_occurrence_id"].tolist()] * 2).df().iloc[:, 0].to_numpy(), dtype=object)
-                except duckdb.Error:
-                    pass  # no source value column: concept ids only
+                except duckdb.Error as exc:  # no source value column: concept ids only
+                    warnings.warn(f"disposition: discharged_to_source_value could not be read ({str(exc).splitlines()[0]}); the "
+                                  "eDERRI disposition uses concept ids only.", UserWarning, stacklevel=2)
             d = disp.reset_index(drop=True)
 
             def _level(c, sv):
@@ -594,8 +601,8 @@ def extract_benchmark_features(
         if ruca_crosswalk is None or sdi_table is None or sdi_cut_points is None:
             if sdoh_fallback == "raise":
                 raise ValueError("include_sdoh=True needs ruca_crosswalk, sdi_table and the frozen sdi_cut_points.")
-            warnings.warn("include_sdoh=True but ruca_crosswalk, sdi_table or sdi_cut_points is missing: sdi_quintile and "
-                          "ruca_category are NaN and sdoh_missing = 1 for every row.", UserWarning, stacklevel=2)
+            warnings.warn(DataGapWarning("include_sdoh=True but ruca_crosswalk, sdi_table or sdi_cut_points is missing: sdi_quintile and "
+                                         "ruca_category are NaN and sdoh_missing = 1 for every row.", "sdoh"), stacklevel=2)
             add("sdoh", pd.DataFrame({"sdi_quintile": np.full(n, np.nan), "ruca_category": np.full(n, np.nan, dtype=object),
                                       "sdoh_missing": np.ones(n, dtype="int8")}))
         else:
@@ -604,9 +611,11 @@ def extract_benchmark_features(
             geo = derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays=stays, address_table=address_table,
                                          tie_break=address_tie_break, undated=address_undated)
             if geo["zip5"].isna().all():
-                warnings.warn("include_sdoh: no ZIP code was found for any stay, so sdi_quintile and ruca_category are all missing. "
-                              "The default address_table='auto' reads person_address_history, else person.location_id; pass "
-                              "address_table= the name of your dated address table.", UserWarning, stacklevel=2)
+                warnings.warn(DataGapWarning(
+                    f"include_sdoh: no ZIP code was found for any stay (address source: {geo.attrs.get('address_table')}), so "
+                    "sdi_quintile and ruca_category are all missing. Pass address_table= the name of your dated address table.", "sdoh"),
+                    stacklevel=2)
+            address_used = geo.attrs.get("address_table")
             geo = geo.drop_duplicates("stay_id").set_index("stay_id").reindex(cohort["row_id"])
             q = geo["sdi_quintile"].to_numpy()
             add("sdoh", pd.DataFrame({"sdi_quintile": q, "ruca_category": geo["ruca_category"].to_numpy(),
@@ -645,6 +654,7 @@ def extract_benchmark_features(
     out.attrs["skipped"] = skipped
     out.attrs["key_columns"] = keys
     out.attrs["imputation_values"] = imputation
+    out.attrs["address_table"] = address_used
     return out
 
 

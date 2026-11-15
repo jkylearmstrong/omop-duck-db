@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
 
 from omop_etl.benchmark_features import extract_benchmark_features  # noqa: E402
+from omop_etl.data_gaps import DataGapWarning  # noqa: E402
 from omop_etl.geography import derive_geography_features  # noqa: E402
 
 RUCA = pd.DataFrame({"zipcode": ["19101", "19102", "17001", "99999"], "ruca_code": [1, 2, 4.2, 10]})
@@ -63,13 +64,24 @@ def test_ties_are_broken_by_lowest_zip_every_time(con):
     assert picked == {"17001"}
 
 
-def test_no_zip_found_anywhere_warns_with_the_fix(con):
-    with pytest.warns(UserWarning, match="address_table"):
-        df = _sdoh(con)                                               # 'auto': no person_address_history, empty person.location
-    assert (df["sdoh_missing"] == 1).all()
+def test_auto_finds_a_study_address_table_by_its_columns(con):
+    # the study keeps its history in <study>_address_history, not person_address_history: 'auto' used to miss it and
+    # return no ZIP for any stay (100% sdoh_missing) while the run still passed
     with warnings.catch_warnings():
-        warnings.simplefilter("error")                                # with the study's table there is nothing to warn about
-        _sdoh(con, address_table="ederri_address_history")
+        warnings.simplefilter("error")
+        df = _sdoh(con)
+    assert df["sdoh_missing"].tolist() == [0, 0, 1]
+    assert df.attrs["address_table"] == "ederri_address_history"
+
+
+def test_no_address_anywhere_fails_loudly_naming_what_was_looked_at(con):
+    con.execute("ALTER TABLE ederri_address_history RENAME TO old_address_backup")
+    con.execute("ALTER TABLE old_address_backup DROP COLUMN preferred")
+    with pytest.raises(ValueError, match=r"no dated address table.*old_address_backup \(lacks preferred\)"):
+        _sdoh(con)
+    with pytest.warns(DataGapWarning, match="no ZIP code was found"):     # person.location chosen explicitly: still a gap warning
+        df = _sdoh(con, address_table=None)
+    assert (df["sdoh_missing"] == 1).all()
 
 
 def test_tie_break_options(con):

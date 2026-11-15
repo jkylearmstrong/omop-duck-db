@@ -678,11 +678,12 @@ def _create_metformin_only_table(con, spec: "_StudySpec") -> None:
 
     ca = resolve_concept_ancestor_ref(con, spec.schema)
     if ca is None:
-        warnings.warn("exclude_metformin_only_prediabetes_pcos: no usable concept_ancestor was found on this connection "
-                      "(including attached vocabulary catalogs), so descendant concepts are not resolved and the concept "
-                      "sets are limited to the listed ids and source-value patterns; the cohort will differ from one "
-                      "built with the vocabulary. Attach or load the vocabulary (e.g. omop_connect()).",
-                      UserWarning, stacklevel=3)
+        from omop_etl.data_gaps import DataGapWarning
+        warnings.warn(DataGapWarning("exclude_metformin_only_prediabetes_pcos: no usable concept_ancestor was found on this connection "
+                                     "(including attached vocabulary catalogs), so descendant concepts are not resolved and the concept "
+                                     "sets are limited to the listed ids and source-value patterns; the cohort will differ from one "
+                                     "built with the vocabulary. Attach or load the vocabulary (e.g. omop_connect()).", "vocabulary"),
+                      stacklevel=3)
     con.execute(f"CREATE OR REPLACE TEMP TABLE {_STUDY_METFORMIN_TABLE} AS SELECT person_id FROM "
                 f"({metformin_only_sql(spec.metformin_only_pcos, spec.schema, ca)})")
 
@@ -704,11 +705,12 @@ def _warn_unmapped_transfer_discharge(con, spec: "_StudySpec") -> None:
     except duckdb.Error:
         return
     if unmapped is not None:
-        warnings.warn(
+        from omop_etl.data_gaps import DataGapWarning
+        warnings.warn(DataGapWarning(
             f"transfer_discharge_concept_ids={list(spec.transfer_ids)} matches no stay, but visits with "
             "discharged_to_source_value = 'IP' have discharged_to_concept_id 0 (the database predates the ETL mapping "
-            "to 8717), so the transfer exclusion removes nothing. Run remap_discharge_status(con) to recode them.",
-            UserWarning, stacklevel=3)
+            "to 8717), so the transfer exclusion removes nothing. Run remap_discharge_status(con) to recode them.", "transfer"),
+            stacklevel=3)
 
 
 def check_observation_period_ends(con: duckdb.DuckDBPyConnection, warn: bool = True, min_ratio: float = 10.0,

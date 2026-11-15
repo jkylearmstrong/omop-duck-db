@@ -188,7 +188,13 @@ def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on:
 def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mapping[str, Any], profile: str | None, pinned: pd.DataFrame | None,
                 ruca: Any, sdi: Any, cuts: Sequence[float] | None, address_table: str | None, transfer_source_values: Sequence[str],
                 feature_kwargs: Mapping[str, Any], work: Path, attrition_mode: str = "windowed"):
+    """One site's pooled-ready frame, its attrition and ``meta`` (feature groups, skipped features, the address source used,
+    pinned-list coverage). Data gaps it can see are raised as :class:`omop_etl.data_gaps.DataGapWarning` for run_study to judge."""
+    import warnings
+
     import duckdb
+
+    from omop_etl.data_gaps import DataGapWarning
 
     from omop_etl.benchmark_features import extract_benchmark_features
     from omop_etl.cohort import define_study_cohort
@@ -204,6 +210,16 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         if vocab.exists():
             con.execute(f"ATTACH '{vocab.as_posix()}' AS central_vocab (READ_ONLY);")
             con.execute("CREATE OR REPLACE TEMP VIEW concept_ancestor AS SELECT * FROM central_vocab.main.concept_ancestor")
+        meta: dict[str, Any] = {"address_table": None}
+        if ruca is not None and sdi is not None:
+            # before the (slow) cohort build, so a missing address table fails in seconds, not after the whole site
+            from omop_etl.geography import PERSON_LOCATION, resolve_address_table
+            try:
+                address_table = resolve_address_table(con, address_table)
+            except ValueError as exc:
+                warnings.warn(DataGapWarning(str(exc), "address_table"), stacklevel=2)
+                address_table = None
+            meta["address_table"] = address_table or PERSON_LOCATION
         rule = {"sample_stay_rule": "all"} if pinned is not None else {"sample_stay_rule": "random"}
         cohort = define_study_cohort(con, materialise=False, min_admit_date=start, max_admit_date=end, **rule, **dict(params))
         att = pd.DataFrame(cohort.attrs.get("attrition"))
@@ -222,6 +238,13 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         if pinned is not None:
             from_site = pinned[pinned["site_source"] == site] if "site_source" in pinned else pinned
             cohort = pin_stays(cohort, from_site, strict=False)
+            listed = int(from_site["visit_occurrence_id"].nunique()) if "visit_occurrence_id" in from_site else 0
+            meta["pinned_found_share"] = round(len(cohort) / listed, 4) if listed else None
+            if not listed:
+                warnings.warn(DataGapWarning("the pinned stay list has no stay for this site", "pinned"), stacklevel=2)
+            elif len(cohort) < listed:
+                warnings.warn(DataGapWarning(f"{1 - len(cohort) / listed:.2%} of the pinned stays for this site are not in the cohort "
+                                             "(different cohort definition, window or data cut); they were dropped", "pinned"), stacklevel=2)
             att = pd.concat([att, pd.DataFrame([{"step_name": "Stay selected for the patient (pinned list)", "subjects_retained": len(cohort), "site": site}])], ignore_index=True)
         path = work / f"cohort_{site}.parquet"
         cohort.to_parquet(path)
@@ -230,6 +253,10 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         if ruca is not None and sdi is not None:
             kw.update(include_sdoh=True, ruca_crosswalk=str(ruca), sdi_table=str(sdi), sdi_cut_points=list(cuts or ()), address_table=address_table)
         feats = extract_benchmark_features(con, "cohort_t", vocabulary_db=None, profile=profile, **kw)
+        meta["feature_groups"] = {k: list(v) for k, v in (feats.attrs.get("feature_groups") or {}).items()} or None
+        meta["skipped"] = list(feats.attrs.get("skipped") or [])
+        if feats.attrs.get("address_table"):
+            meta["address_table"] = feats.attrs["address_table"]
     finally:
         con.close()
     df = cohort.merge(feats, on="visit_occurrence_id", suffixes=("", "_f"))
@@ -240,7 +267,54 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
     df["discharge_date"] = pd.to_datetime(df["cohort_end_date"])
     df["index_los_days"] = (df["discharge_date"] - df["admit_date"]).dt.days
     df["person_id"] = df["subject_id"]
-    return df, att
+    return df, att, meta
+
+
+def _file_fingerprint(path: Any) -> dict[str, Any] | None:
+    """File name (no folder: paths can name a user) and SHA-256 of an input file, for the run record."""
+    if path is None or not isinstance(path, (str, Path)) or not Path(path).is_file():
+        return None
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return {"file": Path(path).name, "sha256": h.hexdigest()}
+
+
+def _caught_findings(caught: Sequence[Any], label: str, scrub: Mapping[str, str]) -> list[dict[str, Any]]:
+    """The gap warnings raised while one site was built (errors) and the other warnings the library printed (warnings)."""
+    import warnings
+
+    from omop_etl.data_gaps import DataGapWarning, sanitize
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for w in caught:
+        msg = sanitize(str(w.message), scrub)
+        if isinstance(w.message, DataGapWarning):
+            key = (w.message.check, msg)
+            if key not in seen:
+                seen.add(key)
+                out.append({"site": label, "check": w.message.check, "severity": "error", "message": msg})
+        elif issubclass(w.category, UserWarning):
+            if ("warning", msg) not in seen:
+                seen.add(("warning", msg))
+                out.append({"site": label, "check": "warning", "severity": "warning", "message": msg})
+        else:  # deprecations and the like: show them as before
+            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+    return out
+
+
+def _with_coverage(raised: list[dict[str, Any]], frame: pd.DataFrame, meta: Mapping[str, Any], label: str, threshold: float) -> list[dict[str, Any]]:
+    """``raised`` plus the feature-coverage findings; a group already reported by the code that saw the gap is not reported twice."""
+    from omop_etl.data_gaps import feature_coverage
+
+    cover = feature_coverage(frame, site=label, groups=meta.get("feature_groups"), skipped=meta.get("skipped") or (), threshold=threshold)
+    have = {f["check"] for f in raised}
+    return raised + [f for f in cover if not (f["check"] in have and f["check"] in ("sdoh", "group_skipped", "empty_site", "address_table"))
+                     and not (f["check"] == "sdoh" and "address_table" in have)]
 
 
 def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -269,7 +343,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package",
               private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
-              privacy_check: bool = True, document_cache_dir: str | Path | None = None) -> dict[str, Any]:
+              privacy_check: bool = True, document_cache_dir: str | Path | None = None, allow_data_gaps: Sequence[str] = (),
+              data_gap_threshold: float = 0.95, run_args: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
@@ -298,7 +373,14 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     manuscript files are not moved into ``out_dir``.
     ``address_tie_break``: see :func:`omop_etl.geography.derive_geography_features`. ``preset`` names a set of the decisions above
     (:data:`STUDY_PRESETS`: ``"package"`` or ``"delivered_2026_11_11"``); any of ``attrition_mode``, ``table5``, ``sdi_missing_term``,
-    ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps``, ``age_method`` given (not None) overrides the preset. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage)."""
+    ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps``, ``age_method`` given (not None) overrides the preset. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage).
+    **Data gaps fail the run.** Each site is checked as soon as it is built (:mod:`omop_etl.data_gaps`): no usable address table,
+    a feature group missing (or all zero) for at least ``data_gap_threshold`` of the stays (SDI / RUCA included), a group that
+    could not be computed, no reachable vocabulary, pinned stays not found, a site with no stays. Any of these raises
+    :class:`omop_etl.data_gaps.DataGapError` (after writing ``<prefix>_data_gaps.json``) unless its check or group is named in
+    ``allow_data_gaps`` (``"all"`` allows every one). Every finding, allowed or a plain warning, goes into ``<prefix>_run.json``
+    with the address table used per site. ``run_args`` (the command line) and the ``sites`` order are written only to
+    ``<prefix>_run_private.json`` in ``private_dir``: together with real names they would reveal which label is which site."""
     from omop_etl.manuscript_tables import compare_workbooks, manuscript_workbook
     from omop_etl.study_report import build_study_tables
 
@@ -313,6 +395,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         c_params["age_method"] = dec["age_method"]
     dec["age_method"] = c_params["age_method"]  # the run record shows the rule that was actually used
     db, out = Path(db_dir), Path(out_dir)
+    site_labels_arg = site_labels
     out.mkdir(parents=True, exist_ok=True)
     if isinstance(site_labels, (str, Path)) and str(site_labels) not in ("random", "ordered"):
         site_labels = load_site_labels(site_labels)  # a JSON file written by save_site_labels
@@ -327,6 +410,43 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         save_site_labels(labels, labels_out)
     pinned = None if pinned_stays is None else (pd.read_csv(pinned_stays) if isinstance(pinned_stays, (str, Path)) else pinned_stays)
     import time
+    import warnings
+
+    from omop_etl.data_gaps import DataGapError, assess, sanitize
+
+    allow = [str(x) for x in (allow_data_gaps or ())]
+    assess([], allow)  # unknown names are refused before any site is built
+    findings: list[dict[str, Any]] = []
+    address_used: dict[str, Any] = {}
+    home = str(Path.home())
+    scrub: dict[str, str] = {str(db.resolve()): "<db_dir>", str(db): "<db_dir>", **({home: "~"} if len(home) > 1 else {})}
+    for s_ in sites:
+        scrub.update({str((db / f"omop_{s_}.duckdb").resolve()): f"<db_dir>/omop_<{labels[s_]}>.duckdb", f"omop_{s_}": f"omop_<{labels[s_]}>",
+                      **({s_: labels[s_]} if len(s_) >= 3 else {})})
+
+    # what the saved features of a site depend on: reuse_features refuses features built with other settings
+    settings = json.loads(json.dumps({"window": [start, end], "profile": profile, "cohort_params": c_params, "attrition_mode": attrition_mode,
+                                      "address_table": address_table, "address_tie_break": address_tie_break, "address_undated": undated,
+                                      "ruca": (_file_fingerprint(ruca_crosswalk) or {}).get("sha256", None if ruca_crosswalk is None else "in memory"),
+                                      "sdi": (_file_fingerprint(sdi_table) or {}).get("sha256", None if sdi_table is None else "in memory"),
+                                      "sdi_cut_points": list(sdi_cut_points or ()), "transfer_source_values": list(transfer_source_values),
+                                      "pinned": None if pinned is None else pd.util.hash_pandas_object(pinned, index=False).sum().item(),
+                                      "feature_kwargs": feature_kwargs or {}}, default=str, sort_keys=True))
+
+    def _gate(new: list[dict[str, Any]]) -> None:
+        findings.extend(new)
+        try:
+            assess(new, allow)
+        except DataGapError:
+            (out / f"{prefix}_data_gaps.json").write_text(json.dumps({"threshold": data_gap_threshold, "allowed": allow, "findings": findings},
+                                                                    indent=1, default=str), encoding="utf-8")
+            raise
+
+    if pinned is not None and "site_source" in pinned:
+        stray = sorted(set(pinned["site_source"].dropna().astype(str)) - set(map(str, sites)))
+        if stray:
+            _gate([{"site": "-", "check": "pinned", "severity": "error",
+                    "message": f"the pinned stay list names {len(stray)} site(s) that are not in --sites; their stays are not used"}])
 
     t_start = time.time()
     timings: dict[str, float] = {}
@@ -340,17 +460,37 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             shutil.move(str(out / a.name), a)
             if (out / f"cohort_{site}.parquet").exists():
                 shutil.move(str(out / f"cohort_{site}.parquet"), priv / f"cohort_{site}.parquet")
+        m = priv / f"features_{site}.meta.json"
         if reuse_features and f.exists() and a.exists():
-            frames.append(pd.read_parquet(f).assign(site_anon=labels[site]))  # the current labels, even if the saved run used others
+            df = pd.read_parquet(f).assign(site_anon=labels[site])  # the current labels, even if the saved run used others
+            meta = json.loads(m.read_text(encoding="utf-8")) if m.exists() else {"address_table": "unknown (reused features from before 0.29.0)"}
+            saved = [dict(x, site=labels[site]) for x in meta.get("raised", [])]
+            if "settings" not in meta:
+                saved.append({"site": labels[site], "check": "stale_features", "severity": "warning",
+                              "message": "reused features were saved before 0.29.0: the settings they were built with are unknown"})
+            elif meta["settings"] != settings:
+                diff = sorted(k for k in set(settings) | set(meta["settings"]) if settings.get(k) != meta["settings"].get(k))
+                saved.append({"site": labels[site], "check": "stale_features", "severity": "error",
+                              "message": f"reused features were built with different settings ({', '.join(diff)}); rerun without --reuse-features"})
+            address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
+            _gate(_with_coverage(saved, df, meta, labels[site], data_gap_threshold))
+            frames.append(df)
             atts.append(pd.read_csv(a))
             continue
-        df, att = _site_frame(db, site, start=start, end=end, params=c_params, profile=profile, pinned=pinned,
-                              ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
-                              transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=priv,
-                              attrition_mode=attrition_mode)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            df, att, meta = _site_frame(db, site, start=start, end=end, params=c_params, profile=profile, pinned=pinned,
+                                        ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
+                                        transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=priv,
+                                        attrition_mode=attrition_mode)
         df["site_anon"] = labels.get(site, site)
+        raised = _caught_findings(caught, labels[site], scrub)
+        address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
         df.to_parquet(f)
         att.to_csv(a, index=False)
+        m.write_text(json.dumps({**meta, "settings": settings, "raised": [{k: v for k, v in x.items() if k != "site"} for x in raised]}, indent=1, default=str),
+                     encoding="utf-8")
+        _gate(_with_coverage(raised, df, meta, labels[site], data_gap_threshold))
         frames.append(df)
         atts.append(att)
         timings[f"site_{labels.get(site, site)}"] = round(time.time() - t_site, 1)  # keyed by the anonymous letter: the run record is shareable and must not name sites
@@ -424,12 +564,26 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                            "note": "; ".join(x for x in [doc_record.get("note"), "withheld: the privacy check found a site name; nothing was written to the output folder"] if x)})
     shutil.rmtree(stage, ignore_errors=True)
     timings["total"] = round(time.time() - t_start, 1)
+    label_mode = ("explicit" if isinstance(site_labels_arg, Mapping) else "file" if isinstance(site_labels_arg, (str, Path)) and
+                  str(site_labels_arg) not in ("random", "ordered") else str(site_labels_arg or "ordered"))
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
                                                        "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
-                                                       "document": doc_record, "privacy_check": privacy, "environment": run_environment()}, indent=1), encoding="utf-8")
+                                                       "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},
+                                                       "sdoh": {"on": ruca_crosswalk is not None and sdi_table is not None, "sdi_cut_points": list(sdi_cut_points or ())},
+                                                       "transfer_source_values": list(transfer_source_values), "site_labels": label_mode,
+                                                       "inputs": {k: v for k, v in {"ruca_crosswalk": _file_fingerprint(ruca_crosswalk), "sdi_table": _file_fingerprint(sdi_table),
+                                                                                     "pinned_stays": _file_fingerprint(pinned_stays), "compare_to": _file_fingerprint(compare_to)}.items() if v},
+                                                       "data_checks": {"threshold": data_gap_threshold, "allowed": allow, "findings": findings,
+                                                                       "n_errors_allowed": sum(1 for x in findings if x.get("severity") == "error"),
+                                                                       "n_warnings": sum(1 for x in findings if x.get("severity") == "warning")},
+                                                       "document": doc_record, "privacy_check": privacy, "environment": run_environment()}, indent=1, default=str), encoding="utf-8")
+    # what only the operating site may see: the --sites order and the command line (with real names they reveal the labels)
+    (priv / f"{prefix}_run_private.json").write_text(json.dumps({"sites": list(sites), "label_seed": label_seed, "address_table_by_site":
+                                                                {s_: address_used.get(labels[s_]) for s_ in sites}, "run_args": dict(run_args or {})},
+                                                               indent=1, default=str), encoding="utf-8")
     if hits:
         where = "; ".join(sorted({f"{h[0]} ({h[2]})" for h in hits})[:20])
         raise RunPrivacyError(f"{len(hits)} privacy finding(s) in the study outputs, reported by file only: {where}. "
                               "The manuscript DOCX/PDF were not written to the output folder. Do not share the folder until this is fixed.")
     return {"data": pooled, "tables": res["tables"], "workbook": wb["path"], "files": files, "comparison": comparison, "summary": res["summary"], "timings": timings,
-            "document": doc_record, "privacy_check": privacy, "private_dir": priv}
+            "document": doc_record, "privacy_check": privacy, "private_dir": priv, "data_checks": findings, "address_table": address_used}

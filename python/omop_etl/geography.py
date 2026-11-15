@@ -39,7 +39,7 @@ __all__ = [
     "RUCA_MISSING", "SDI_MISSING", "SDI_LABELS", "SDI_PROBS",
     "ruca_category", "fit_sdi_cut_points", "assign_sdi_quintile", "validate_sdi_cut_points",
     "read_ruca_crosswalk", "read_sdi_table", "derive_geography_features", "write_geography_measurements",
-    "GEOGRAPHY_CONCEPT_IDS",
+    "GEOGRAPHY_CONCEPT_IDS", "find_address_tables", "resolve_address_table",
 ]
 
 RUCA_MISSING = "RUCA: Missing / Unknown"
@@ -104,12 +104,24 @@ def _zip5(s: pd.Series) -> pd.Series:
     return s.astype("string").str.extract(r"(\d{5})", expand=False)
 
 
+def _numeric(values: pd.Series, what: str) -> pd.Series:
+    """``pd.to_numeric(errors="coerce")`` that says so when it turns given values into NaN (a decimal comma, "N/A" ...)."""
+    out = pd.to_numeric(values, errors="coerce")
+    given = values.notna() & values.astype("string").str.strip().ne("")
+    lost = float((given & out.isna()).sum() / max(int(given.sum()), 1))
+    if lost > 0.01:
+        import warnings
+
+        warnings.warn(f"{what}: {lost:.1%} of the values given are not numbers and are read as missing.", UserWarning, stacklevel=3)
+    return out
+
+
 def read_ruca_crosswalk(source: Any) -> pd.DataFrame:
     """USDA ZIP -> RUCA crosswalk (CSV path or DataFrame) as ``zip5, ruca_code``; first row wins on duplicate ZIPs."""
     df = _read_table(source, {"zip5": ("zipcode", "zip", "zip5", "zip_code"),
                               "ruca_code": ("ruca_code", "ruca", "ruca1", "primary_ruca")}, "RUCA crosswalk")
     df["zip5"] = _zip5(df["zip5"].astype("string").str.strip().str.zfill(5))
-    df["ruca_code"] = pd.to_numeric(df["ruca_code"], errors="coerce")
+    df["ruca_code"] = _numeric(df["ruca_code"], "RUCA crosswalk ruca_code")
     return df.dropna(subset=["zip5"]).drop_duplicates("zip5").reset_index(drop=True)
 
 
@@ -118,13 +130,94 @@ def read_sdi_table(source: Any) -> pd.DataFrame:
     df = _read_table(source, {"zip5": ("zcta5_fips", "zcta5", "zcta", "zip", "zip5"),
                               "sdi_score": ("sdi_score", "sdi")}, "SDI table")
     df["zip5"] = _zip5(df["zip5"].astype("string").str.strip().str.zfill(5))
-    df["sdi_score"] = pd.to_numeric(df["sdi_score"], errors="coerce")
+    df["sdi_score"] = _numeric(df["sdi_score"], "SDI table sdi_score")
     return df.dropna(subset=["zip5"]).drop_duplicates("zip5").reset_index(drop=True)
 
 
 def _has_table(con, name: str) -> bool:
     return bool(con.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() "
                             "AND table_name = ?", [name]).fetchone()[0])
+
+
+_ADDRESS_COLUMNS = ("person_id", "zip5", "address_start", "address_end", "preferred")
+PERSON_LOCATION = "person.location_id"
+
+
+def find_address_tables(con) -> list[dict[str, Any]]:
+    """Tables and views in the current schema whose name contains ``address``: ``table``, ``missing_columns`` (of
+    ``person_id, zip5, address_start, address_end, preferred``) and ``rows`` (None when columns are missing)."""
+    names = [r[0] for r in con.execute(
+        "SELECT DISTINCT table_name FROM information_schema.tables WHERE table_catalog = current_database() "
+        "AND table_schema = current_schema() AND lower(table_name) LIKE '%address%' ORDER BY 1").fetchall()]
+    out = []
+    for t in names:
+        if not t.replace("_", "").isalnum():
+            continue
+        cols = {r[0].lower() for r in con.execute(f'DESCRIBE "{t}"').fetchall()}
+        missing = [c for c in _ADDRESS_COLUMNS if c not in cols]
+        rows = None if missing else int(con.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0])
+        out.append({"table": t, "missing_columns": missing, "rows": rows})
+    return out
+
+
+def _describe_candidates(cands: Sequence[dict[str, Any]]) -> str:
+    if not cands:
+        return "no table or view with 'address' in its name"
+    parts = []
+    for c in cands:
+        if c["missing_columns"]:
+            parts.append(f"{c['table']} (lacks {', '.join(c['missing_columns'])})")
+        else:
+            parts.append(f"{c['table']} ({'empty' if not c['rows'] else 'usable'})")
+    return "; ".join(parts)
+
+
+def _location_has_zip(con) -> bool:
+    if not (_has_table(con, "person") and _has_table(con, "location")):
+        return False
+    try:
+        return con.execute("SELECT 1 FROM person p JOIN location l ON l.location_id = p.location_id "
+                           "WHERE regexp_matches(CAST(l.zip AS VARCHAR), '\\d{5}') LIMIT 1").fetchone() is not None
+    except duckdb.Error:
+        return False
+
+
+def resolve_address_table(con, address_table: str | None = "auto") -> str | None:
+    """The dated address table to use, or None for ``person.location_id``. Raises ``ValueError`` instead of guessing.
+
+    ``"auto"`` looks at every table or view whose name contains ``address`` and has the columns ``person_id, zip5,
+    address_start, address_end, preferred`` (``person_address_history`` from :func:`omop_etl.build_omop_cdm.load_location`,
+    or a study's own table such as ``<study>_address_history``). Exactly one non-empty table: it is used. More than one: an
+    error naming them (pass ``address_table=``). None: ``person.location_id`` when some person has a ZIP there, else an error
+    naming what was looked at, because every stay would get no ZIP and SDI / RUCA would be silently missing. A name given
+    explicitly must exist and have those columns. ``None`` always means ``person.location_id``.
+    """
+    if address_table is None:
+        return None
+    if address_table != "auto":
+        if not str(address_table).replace("_", "").isalnum():
+            raise ValueError(f"invalid address table name {address_table!r}.")
+        if not _has_table(con, address_table):
+            raise ValueError(f"address table {address_table!r} does not exist in this database. Tables with 'address' in "
+                             f"their name: {_describe_candidates(find_address_tables(con))}.")
+        cols = {r[0].lower() for r in con.execute(f"DESCRIBE {address_table}").fetchall()}
+        missing = [c for c in _ADDRESS_COLUMNS if c not in cols]
+        if missing:
+            raise ValueError(f"address table {address_table!r} lacks column(s) {missing}; it needs {list(_ADDRESS_COLUMNS)}.")
+        return address_table
+    cands = find_address_tables(con)
+    usable = [c["table"] for c in cands if not c["missing_columns"] and c["rows"]]
+    if len(usable) == 1:
+        return usable[0]
+    if len(usable) > 1:
+        raise ValueError(f"address_table='auto' found more than one dated address table ({', '.join(usable)}); pass "
+                         "address_table= (--address-table) the one the study uses.")
+    if _location_has_zip(con):
+        return None
+    raise ValueError("address_table='auto' found no dated address table and person.location_id holds no ZIP, so every stay "
+                     f"would have no SDI / RUCA. Looked at: {_describe_candidates(cands)}. Pass address_table= (--address-table) "
+                     "the table that holds person_id, zip5, address_start, address_end, preferred, or address_table=None "
+                     "(--address-table person_location) to accept no geography.")
 
 
 UNDATED = ("last", "first")
@@ -206,8 +299,10 @@ def derive_geography_features(
 
     ``stays`` is a DataFrame with ``person_id`` and ``admit_date`` (plus an optional unique ``stay_id``, else its row
     index is used); the default is every inpatient/ED-inpatient visit (concepts 9201, 262) in ``visit_occurrence``,
-    with ``stay_id = visit_occurrence_id``. ``address_table='auto'`` uses ``person_address_history`` when present and
-    non-empty, else ``person.location_id``; pass a table name to force one, or ``None`` for the person's location.
+    with ``stay_id = visit_occurrence_id``. ``address_table='auto'`` uses the one non-empty dated address table it finds
+    (:func:`resolve_address_table`: ``person_address_history`` or a study's own ``*address*`` table with the same columns), else
+    ``person.location_id`` when it holds ZIPs, and raises otherwise; pass a table name to force one, or ``None`` for the person's
+    location. ``result.attrs["address_table"]`` names the source used.
     ``undated`` ranks an address with no start date among those in effect at admission: ``"last"`` (default; a dated address wins,
     the nearest start first) or ``"first"`` (an undated address wins, which is what the study's pandas pipeline does through an
     operator-precedence quirk and what the delivered 2026-11-11 geography reflects).
@@ -241,12 +336,7 @@ def derive_geography_features(
         stays_df["admit_date"] = pd.to_datetime(stays_df["admit_date"])
     con.register("_geo_stays", stays_df)
     try:
-        table = address_table
-        if table == "auto":
-            table = _ADDRESS_TABLE if (_has_table(con, _ADDRESS_TABLE)
-                                       and con.execute(f"SELECT count(*) FROM {_ADDRESS_TABLE}").fetchone()[0]) else None
-        if table is not None and not table.replace("_", "").isalnum():
-            raise ValueError(f"invalid address table name {table!r}.")
+        table = resolve_address_table(con, address_table)
         picked = _index_addresses(con, "SELECT person_id, stay_id, CAST(admit_date AS DATE) AS admit_date FROM _geo_stays", table, tie_break, undated)
     finally:
         con.unregister("_geo_stays")
@@ -259,6 +349,7 @@ def derive_geography_features(
     g["sdi_quintile"] = assign_sdi_quintile(g["sdi_score"], cuts).to_numpy()
     g = g[["person_id", "stay_id", "zip5", "rule", "ruca_code", "ruca_category", "sdi_score", "sdi_quintile", "admit_date"]]
     g.attrs["sdi_cut_points"] = cuts
+    g.attrs["address_table"] = table or PERSON_LOCATION
     return g
 
 

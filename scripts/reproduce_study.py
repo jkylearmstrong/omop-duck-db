@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+from omop_etl.data_gaps import DataGapError, format_findings  # noqa: E402
 from omop_etl.study_run import STUDY_DECISIONS, STUDY_PRESETS, RunPrivacyError, run_study  # noqa: E402
 
 
@@ -27,7 +28,16 @@ def main(argv=None) -> int:
     p.add_argument("--end", default="2022-09-30")
     p.add_argument("--profile", default="ederri", choices=["ederri", "both", "none"])
     p.add_argument("--pinned-stays", help="CSV with site_source and visit_occurrence_id of the stays to use")
-    p.add_argument("--ruca"); p.add_argument("--sdi"); p.add_argument("--address-table", default="auto")
+    p.add_argument("--ruca"); p.add_argument("--sdi")
+    p.add_argument("--address-table", default="auto",
+                   help="dated address table for SDI / RUCA. 'auto' (default) uses the one non-empty table whose name contains 'address' and "
+                        "that has person_id, zip5, address_start, address_end, preferred, and stops with the candidates if there are none or several; "
+                        "'person_location' uses person.location_id")
+    p.add_argument("--allow-data-gaps", nargs="+", default=[], metavar="CHECK",
+                   help="accept these data gaps instead of failing (a check such as sdoh, address_table, vocabulary, pinned, empty_site, "
+                        "group_missing, or a feature group such as labs; 'all' accepts every one). Accepted gaps are still written to <prefix>_run.json")
+    p.add_argument("--data-gap-threshold", type=float, default=0.95,
+                   help="a feature group missing for at least this share of a site's stays is a data gap (default 0.95)")
     p.add_argument("--bootstraps", type=int, default=100)
     p.add_argument("--no-loso", action="store_true"); p.add_argument("--no-figures", action="store_true")
     p.add_argument("--reuse-features", action="store_true")
@@ -77,7 +87,8 @@ def main(argv=None) -> int:
         names += read_names_file(a.names_file)
     try:
         r = run_study(a.db_dir, a.out, sites=a.sites, site_labels=labels, label_seed=a.label_seed, labels_out=a.labels_out, start=a.start, end=a.end, profile=None if a.profile == "none" else a.profile,
-                      pinned_stays=a.pinned_stays, ruca_crosswalk=a.ruca, sdi_table=a.sdi, address_table=a.address_table, n_bootstraps=a.bootstraps,
+                      pinned_stays=a.pinned_stays, ruca_crosswalk=a.ruca, sdi_table=a.sdi,
+                      address_table=None if a.address_table == "person_location" else a.address_table, n_bootstraps=a.bootstraps,
                       loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix,
                       attrition_mode=a.attrition, table5=a.table5, sdi_missing_term=a.sdi_missing_term, address_tie_break=a.tie_break, address_undated=a.address_undated,
                       table6_increments=a.table6_increments, consort_final_steps=a.consort_final_steps, age_method=a.age_method,
@@ -85,10 +96,14 @@ def main(argv=None) -> int:
                                          if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset,
                       private_dir=a.private_dir, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
                       document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check,
-                      document_cache_dir=a.quarto_cache_dir)
+                      document_cache_dir=a.quarto_cache_dir, allow_data_gaps=a.allow_data_gaps, data_gap_threshold=a.data_gap_threshold,
+                      run_args={k: v for k, v in vars(a).items() if k != "names"})
     except RunPrivacyError as e:
         print(f"PRIVACY CHECK FAILED: {e}", file=sys.stderr)
         return 1
+    except DataGapError as e:
+        print(f"DATA GAP CHECK FAILED (nothing was modelled): {e}", file=sys.stderr)
+        return 3
     print(f"N = {len(r['data']):,}; workbook: {r['workbook']}; seconds: {r['timings']}")
     doc = r["document"]
     if doc.get("requested"):
@@ -96,6 +111,13 @@ def main(argv=None) -> int:
     pc = r["privacy_check"]
     print(f"privacy check: {pc['hits']} hit(s) for {pc['n_names']} name(s)" if pc.get("checked") else "privacy check: no names to scan for (give --names-file)")
     print(f"per-site intermediates (private, do not share): {r['private_dir']}")
+    print("address table used: " + (", ".join(f"{k}: {v}" for k, v in sorted(r["address_table"].items())) or "none (SDI / RUCA off)"))
+    gaps = [f for f in r["data_checks"] if f.get("severity") == "error"]
+    warns = [f for f in r["data_checks"] if f.get("severity") == "warning"]
+    if gaps:
+        print(f"DATA GAPS ACCEPTED with --allow-data-gaps ({len(gaps)}):\n" + format_findings(gaps), file=sys.stderr)
+    if warns:
+        print(f"data warnings ({len(warns)}), also in the run record:\n" + format_findings(warns), file=sys.stderr)
     if r["comparison"] is not None:
         print(r["comparison"][0].to_string(index=False))
     return 0
