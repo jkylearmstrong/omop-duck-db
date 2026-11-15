@@ -879,3 +879,7 @@ __all__ += ["deep_oof_predictions", "deep_study_tables", "device_report", "make_
 from omop_etl.load_sql import to_sql, verify_transfer  # noqa: E402
 
 __all__ += ["to_sql", "verify_transfer"]
+
+from omop_etl.oracle_roundtrip import mirror_oracle, verify_duckdb_copy, verify_postgres_copy  # noqa: E402
+
+__all__ += ["mirror_oracle", "verify_duckdb_copy", "verify_postgres_copy"]
