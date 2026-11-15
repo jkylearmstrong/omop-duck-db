@@ -10,7 +10,9 @@ snapshot while the site keeps loading data. For each table:
 2. **DuckDB -> PostgreSQL** (``--pg-dir``, needs ``omop-duck-db[postgres-embedded]`` and an ordinary, non-admin user). The copy is stored in
    schema ``oracle_<site>`` of an embedded PostgreSQL kept in that folder (``store_site``, itself checked against DuckDB), then PostgreSQL
    computes the fingerprint and it is compared with **Oracle's**. ``--read-back`` also copies that schema back into a new DuckDB file and
-   compares it with Oracle's fingerprint, so Oracle -> DuckDB -> PostgreSQL -> DuckDB is proved end to end.
+   compares it with Oracle's fingerprint, so Oracle -> DuckDB -> PostgreSQL -> DuckDB is proved end to end. ``--skip-duckdb-pg-check``
+   skips ``store_site``'s own DuckDB-vs-PostgreSQL check, which reads each column separately and took most of the PostgreSQL time on a
+   real site; the Oracle-vs-PostgreSQL fingerprint, one scan per table, already covers it.
 3. **DuckDB -> Oracle** (``--write-back``, WRITES to Oracle; off by default; use a scratch schema). Each table is loaded into a new
    ``OMOP_RT_<NAME>`` table with ``to_sql``, fingerprinted by Oracle, compared, and dropped.
 
@@ -80,6 +82,9 @@ def main(argv=None) -> int:
     ap.add_argument("--chunksize", type=int, default=100_000)
     ap.add_argument("--pg-dir", help="also store the copy in an embedded PostgreSQL kept here and compare it with Oracle")
     ap.add_argument("--pg-backend", default="auto", choices=["auto", "pg0", "pgembed"])
+    ap.add_argument("--skip-duckdb-pg-check", action="store_true",
+                    help="with --pg-dir: skip store_site's own DuckDB-vs-PostgreSQL check (slow: one scan per column); "
+                         "the Oracle-vs-PostgreSQL fingerprint still runs")
     ap.add_argument("--read-back", action="store_true", help="with --pg-dir: copy PostgreSQL back into <site>_from_postgres.duckdb and compare with Oracle")
     ap.add_argument("--write-back", action="store_true", help="WRITES to Oracle: load the copy into OMOP_RT_<NAME> tables, compare, drop them")
     ap.add_argument("--write-back-schema", help="scratch schema for --write-back (default: the account's own)")
@@ -119,8 +124,9 @@ def main(argv=None) -> int:
         with EmbeddedPostgres(a.pg_dir, backend=a.pg_backend) as pg:
             server = pg.query("SHOW server_version").iloc[0, 0]
             try:
-                store_site(pg, mirror, schema, tables=names)
-                stored = "store_site check against DuckDB passed"
+                store_site(pg, mirror, schema, tables=names, verify=not a.skip_duckdb_pg_check)
+                stored = ("store_site check against DuckDB skipped (--skip-duckdb-pg-check)" if a.skip_duckdb_pg_check
+                          else "store_site check against DuckDB passed")
             except RoundTripError as exc:
                 stored = f"store_site check against DuckDB FAILED in {len(exc.report.loc[~exc.report['match']]) if exc.report is not None else '?'} statistics"
                 all_ok = False

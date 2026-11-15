@@ -265,10 +265,11 @@ def test_script_with_postgres_backup_and_read_back(edge_table, tmp_path):
     rec = tmp_path / "record.md"
     r = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "oracle_roundtrip_check.py"), "--tables", f"edge={edge_table}",
                         "--label", "Site C", "--out-dir", str(tmp_path / "m"), "--pg-dir", str(tmp_path / "pg"), "--read-back",
-                        "--row-level", "--out", str(rec)], capture_output=True, text=True, env=env, timeout=600)
+                        "--row-level", "--skip-duckdb-pg-check", "--out", str(rec)], capture_output=True, text=True, env=env, timeout=600)
     text = rec.read_text(encoding="utf-8")
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
     assert text.count("Result: **PASS**") == 4 and "FAIL" not in text
+    assert "skipped (--skip-duckdb-pg-check)" in text
     assert edge_table not in text and "1501" not in text and "omop_ci_pw" not in text and "localhost" not in text
     assert (tmp_path / "m" / "site_c.duckdb").exists() and (tmp_path / "m" / "site_c_from_postgres.duckdb").exists()
 
