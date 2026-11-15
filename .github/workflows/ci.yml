@@ -139,5 +139,8 @@ jobs:
           cache-from: type=gha,scope=docker-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
 
+      - name: Python in the image is exactly the pinned version
+        run: bash scripts/check_image_python.sh omopduckdb:ci Dockerfile
+
       - name: Smoke test inside the image (${{ matrix.arch }})
         run: docker run --rm omopduckdb:ci python scripts/container_smoke_test.py

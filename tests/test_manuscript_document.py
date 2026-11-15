@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -380,6 +381,8 @@ def test_two_runs_on_the_same_data_are_identical_and_record_their_environment(tm
         pd.testing.assert_frame_equal(a[k], b[k], obj=k)
     env = json.loads((tmp_path / "o0" / "Study_run.json").read_text(encoding="utf-8"))["environment"]
     assert env["python"] and env["scikit-learn"] and "xgboost" in env
+    assert env["platform"] and env["cpu_count"] and env["container"] in ("yes", "no") and "xgboost_build" in env and "thread_pools" in env
+    assert not any(os.sep + "home" in str(v) or ":\\" in str(v) for v in env.values())  # no file paths in the shareable record
 
 
 def test_model_tables_do_not_depend_on_sites_order_or_labels(tmp_path, monkeypatch):
@@ -411,3 +414,32 @@ class _KeepGrid:
     def setattr(self, obj, name, value):
         if name != "default_model_grid":
             self.mp.setattr(obj, name, value)
+
+
+def test_run_environment_without_xgboost_or_threadpoolctl(monkeypatch):
+    """The platform details never fail a run: without XGBoost or threadpoolctl those two keys are None."""
+    from omop_etl.study_run import run_environment
+
+    monkeypatch.setitem(sys.modules, "xgboost", None)
+    monkeypatch.setitem(sys.modules, "threadpoolctl", None)
+    env = run_environment()
+    assert env["xgboost_build"] is None and env["thread_pools"] is None
+    assert env["platform"] and env["container"] in ("yes", "no")
+
+
+def test_run_environment_reports_builds_without_paths(monkeypatch):
+    """The XGBoost build and the thread pools are summarised without file paths (a fake build stands in for any installed one)."""
+    import types
+
+    from omop_etl.study_run import run_environment
+
+    xgb = types.ModuleType("xgboost")
+    xgb.build_info = lambda: {"GCC_VERSION": [10, 3, 1], "USE_OPENMP": True, "USE_CUDA": False}
+    tp = types.ModuleType("threadpoolctl")
+    tp.threadpool_info = lambda: [{"internal_api": "openblas", "version": "0.3.30", "num_threads": 8, "filepath": "/home/someone/lib.so"}]
+    monkeypatch.setitem(sys.modules, "xgboost", xgb)
+    monkeypatch.setitem(sys.modules, "threadpoolctl", tp)
+    env = run_environment()
+    assert env["xgboost_build"] == "GCC_VERSION=10.3.1, USE_OPENMP=True"
+    assert env["thread_pools"] == "openblas 0.3.30 (8 threads)"
+    assert "someone" not in json.dumps(env)
