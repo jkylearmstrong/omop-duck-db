@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -380,6 +381,8 @@ def test_two_runs_on_the_same_data_are_identical_and_record_their_environment(tm
         pd.testing.assert_frame_equal(a[k], b[k], obj=k)
     env = json.loads((tmp_path / "o0" / "Study_run.json").read_text(encoding="utf-8"))["environment"]
     assert env["python"] and env["scikit-learn"] and "xgboost" in env
+    assert env["platform"] and env["cpu_count"] and env["container"] in ("yes", "no") and "xgboost_build" in env and "thread_pools" in env
+    assert not any(os.sep + "home" in str(v) or ":\\" in str(v) for v in env.values())  # no file paths in the shareable record
 
 
 def test_model_tables_do_not_depend_on_sites_order_or_labels(tmp_path, monkeypatch):

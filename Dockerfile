@@ -11,8 +11,12 @@
 # `/latest` alias instead. Worth fixing upstream in the PR: pinning to
 # Sys.Date() is only safe if that's guaranteed to be <= the real current date.
 
+# Exact Python for the image (must match the study's reference workstation; CI fails if the built image reports another version).
+ARG PYTHON_VERSION=3.13.17
+
 # Stage 1: builder
 FROM rocker/r-ver:4.4.2 AS builder
+ARG PYTHON_VERSION
 
 # The repo's .Rprofile activates renv on load; renv's own project library is
 # irrelevant here (this image installs straight into /rlib instead), and
@@ -37,13 +41,21 @@ COPY . /build
 RUN R_LIBS=/rlib R CMD INSTALL --no-multiarch --with-keep.source --install-tests /build --library=/rlib
 RUN cd /build/tests && R_LIBS=/rlib Rscript testthat.R
 
-RUN python3 -m venv /pyvenv \
+# Python is pinned to an exact version, the same as the study's reference workstation, instead of taking whatever `python3` the
+# base image's Ubuntu ships (noble: 3.12). uv installs a standalone CPython build into /opt/python, which the runtime stage copies
+# at the same path. CI checks that the built image reports exactly this version.
+COPY --from=ghcr.io/astral-sh/uv:0.13.8 /uv /usr/local/bin/uv
+RUN UV_PYTHON_INSTALL_DIR=/opt/python uv python install "${PYTHON_VERSION}" \
+    && "$(UV_PYTHON_INSTALL_DIR=/opt/python uv python find --managed-python "${PYTHON_VERSION}")" -m venv /pyvenv \
+    && test "$(/pyvenv/bin/python -c 'import platform; print(platform.python_version())')" = "${PYTHON_VERSION}"
+RUN /pyvenv/bin/python -m pip --version \
     && /pyvenv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.0" \
     && /pyvenv/bin/pip install --no-cache-dir "/build[dev,bundle,deep,postgres-embedded]" \
     && R_LIBS=/rlib PATH="/pyvenv/bin:$PATH" /pyvenv/bin/python -m pytest /build/tests -v
 
 # Stage 2: final runtime
 FROM rocker/r-ver:4.4.2
+ARG PYTHON_VERSION
 
 LABEL org.opencontainers.image.title="omopduckdb"
 
@@ -52,7 +64,7 @@ RUN id -u ruser >/dev/null 2>&1 || useradd -m -u 1000 ruser
 
 # Install runtime system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git python3 python3-venv libicu-dev ca-certificates curl \
+        git libicu-dev ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Quarto CLI renders the study manuscript (run_study -> <prefix>_Manuscript.docx / .pdf). It bundles Pandoc and Typst, so the PDF
@@ -72,10 +84,12 @@ WORKDIR /workspace
 
 # Copy R packages and the built Python venv from builder
 COPY --from=builder /rlib /rlib
+COPY --from=builder /opt/python /opt/python
 COPY --from=builder /pyvenv /pyvenv
 ENV RENV_CONFIG_AUTOLOADER_ENABLED=FALSE
 ENV R_LIBS=/rlib
 ENV PATH="/pyvenv/bin:$PATH"
+RUN test "$(python -c 'import platform; print(platform.python_version())')" = "${PYTHON_VERSION}" && python3 --version
 
 # Copy project source
 COPY --chown=ruser:ruser . .

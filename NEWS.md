@@ -1,3 +1,8 @@
+# omopduckdb (development version)
+
+- **The Docker image runs an exact, pinned Python (3.13.17), checked in CI.** Until now the image used whatever `python3` its Ubuntu base (noble) ships, which is 3.12, while the study's reference workstation runs 3.13; nothing pinned it. The Dockerfile now has `ARG PYTHON_VERSION=3.13.17` and installs that CPython build with uv (into `/opt/python`); the build stops if the venv reports another version, and the new `scripts/check_image_python.sh` fails the CI and release image jobs unless `python` and `python3` in the built image are exactly the pinned version. The system `python3` is no longer installed in the runtime image. `Dockerfile.dgx` keeps the Python of NVIDIA's PyTorch container, because its CUDA build of torch is compiled for that Python.
+- **The run record names the platform (Python).** `run_environment()` (the `environment` block of `<prefix>_run.json`) now also records the operating system (`platform`), `machine`, `cpu_count`, whether it ran in a container, the XGBoost build (compiler, OpenMP) and the BLAS / OpenMP thread pools with their thread counts (no file paths, host or user names). Same-version libraries on Windows and on Linux can still differ in the last digits of a model's predictions, which moves threshold metrics such as sensitivity at 0.5 for a held-out site; the record now shows when two runs came from different platforms.
+
 # omopduckdb 0.28.1
 
 Patch release: Quarto failures in the run record show the cause, and runs where the usual Quarto cache folder is read only (sandboxed Windows) can still render the DOCX / PDF. No change to cohort, features or model numbers. Version bump 0.28.0 to 0.28.1.
