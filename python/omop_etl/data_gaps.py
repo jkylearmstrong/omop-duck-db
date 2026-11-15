@@ -23,7 +23,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-__all__ = ["DataGapWarning", "DataGapError", "GAP_CHECKS", "feature_coverage", "assess", "format_findings", "sanitize"]
+__all__ = ["DataGapWarning", "DataGapError", "GAP_CHECKS", "feature_coverage", "group_missing_shares", "assess", "format_findings", "sanitize"]
 
 #: Every check that can fail a study run, with what it means. ``--allow-data-gaps`` takes these names (or a feature
 #: group's name, or ``all``).
@@ -118,6 +118,11 @@ def feature_coverage(frame: pd.DataFrame, *, site: str, groups: Mapping[str, Seq
             out.append({"site": site, "check": "column_missing", "column": c, "severity": "warning",
                         "message": f"column {c!r} has no value for any stay"})
     return out
+
+
+def group_missing_shares(frame: pd.DataFrame, groups: Mapping[str, Sequence[str]] | None) -> dict[str, float]:
+    """Share of stays with the whole group missing, per feature group (SDI / RUCA: ``sdoh_missing``), for the run record."""
+    return {g: round(_missing_share(frame, g, cols)[0], 4) for g, cols in (groups or {}).items()} if len(frame) else {}
 
 
 def _allowed(f: Mapping[str, Any], allow: set[str]) -> bool:

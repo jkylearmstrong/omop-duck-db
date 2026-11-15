@@ -412,12 +412,13 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     import time
     import warnings
 
-    from omop_etl.data_gaps import DataGapError, assess, sanitize
+    from omop_etl.data_gaps import DataGapError, assess, group_missing_shares, sanitize
 
     allow = [str(x) for x in (allow_data_gaps or ())]
     assess([], allow)  # unknown names are refused before any site is built
     findings: list[dict[str, Any]] = []
     address_used: dict[str, Any] = {}
+    coverage: dict[str, dict[str, float]] = {}
     home = str(Path.home())
     scrub: dict[str, str] = {str(db.resolve()): "<db_dir>", str(db): "<db_dir>", **({home: "~"} if len(home) > 1 else {})}
     for s_ in sites:
@@ -473,6 +474,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                 saved.append({"site": labels[site], "check": "stale_features", "severity": "error",
                               "message": f"reused features were built with different settings ({', '.join(diff)}); rerun without --reuse-features"})
             address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
+            coverage[labels[site]] = group_missing_shares(df, meta.get("feature_groups"))
             _gate(_with_coverage(saved, df, meta, labels[site], data_gap_threshold))
             frames.append(df)
             atts.append(pd.read_csv(a))
@@ -490,6 +492,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         att.to_csv(a, index=False)
         m.write_text(json.dumps({**meta, "settings": settings, "raised": [{k: v for k, v in x.items() if k != "site"} for x in raised]}, indent=1, default=str),
                      encoding="utf-8")
+        coverage[labels[site]] = group_missing_shares(df, meta.get("feature_groups"))
         _gate(_with_coverage(raised, df, meta, labels[site], data_gap_threshold))
         frames.append(df)
         atts.append(att)
@@ -574,6 +577,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                                        "inputs": {k: v for k, v in {"ruca_crosswalk": _file_fingerprint(ruca_crosswalk), "sdi_table": _file_fingerprint(sdi_table),
                                                                                      "pinned_stays": _file_fingerprint(pinned_stays), "compare_to": _file_fingerprint(compare_to)}.items() if v},
                                                        "data_checks": {"threshold": data_gap_threshold, "allowed": allow, "findings": findings,
+                                                                       "share_missing_by_group": dict(sorted(coverage.items())),
                                                                        "n_errors_allowed": sum(1 for x in findings if x.get("severity") == "error"),
                                                                        "n_warnings": sum(1 for x in findings if x.get("severity") == "warning")},
                                                        "document": doc_record, "privacy_check": privacy, "environment": run_environment()}, indent=1, default=str), encoding="utf-8")

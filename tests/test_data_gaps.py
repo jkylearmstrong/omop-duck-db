@@ -150,6 +150,8 @@ def test_run_with_all_missing_sdoh_at_one_site_fails_unless_allowed(tmp_path, mo
     assert rec["address_table"] == {"requested": "auto", "used": {"Site A": "study_address_history", "Site B": "study_address_history",
                                                                    "Site C": "study_address_history"}}
     assert rec["data_checks"]["allowed"] == ["sdoh"] and rec["site_labels"] == "ordered"
+    shares = rec["data_checks"]["share_missing_by_group"]
+    assert shares["Site B"]["sdoh"] == 1.0 and 0 < shares["Site A"]["sdoh"] < 0.5 and shares["Site A"]["vitals"] == 0.0
     # the --sites order and the command line stay with the operating site
     private = json.loads((r["private_dir"] / "Study_run_private.json").read_text())
     assert private["sites"] == list(sites) and private["run_args"] == {"sites": list(sites)}
