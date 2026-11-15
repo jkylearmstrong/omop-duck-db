@@ -113,8 +113,9 @@ def validate_site_labels(sites: Sequence[str], labels: Mapping[str, str]) -> dic
 
 
 def run_environment() -> dict[str, str | None]:
-    """Versions of Python and the libraries that move the model numbers, for ``<prefix>_run.json``: two runs on the same data that differ
-    in a model-performance cell usually differ here (a newer scikit-learn or XGBoost), not in the package's seeds."""
+    """Versions of Python and the libraries that move the model numbers, plus the platform (operating system, CPU count, the XGBoost build
+    and the BLAS / OpenMP thread pools), for ``<prefix>_run.json``: two runs on the same data that differ in a model-performance cell
+    usually differ here (a newer scikit-learn or XGBoost, or Windows versus Linux), not in the package's seeds."""
     import platform
     from importlib import metadata
 
@@ -124,6 +125,35 @@ def run_environment() -> dict[str, str | None]:
             out[pkg] = metadata.version(pkg)
         except metadata.PackageNotFoundError:
             out[pkg] = None
+    out.update(_platform_details())
+    return out
+
+
+def _platform_details() -> dict[str, str | None]:
+    """Operating system, CPU and the native builds under the model libraries. The same library versions can still give slightly
+    different model numbers on Windows and Linux (another compiler and BLAS build), so the run record says which platform made it.
+    No host name, user name or file path is recorded."""
+    import os
+    import platform
+
+    out: dict[str, str | None] = {"platform": platform.platform(terse=True), "machine": platform.machine() or None,
+                                  "cpu_count": str(os.cpu_count()) if os.cpu_count() else None,
+                                  "container": "yes" if (os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")) else "no"}
+    try:
+        import xgboost
+
+        info = xgboost.build_info()
+        keep = {k: v for k, v in info.items() if any(t in k.upper() for t in ("GCC", "CLANG", "MSVC", "COMPILER", "OPENMP"))}
+        out["xgboost_build"] = ", ".join(f"{k}={'.'.join(map(str, v)) if isinstance(v, (list, tuple)) else v}" for k, v in sorted(keep.items())) or None
+    except Exception:  # noqa: BLE001 - not installed, or an older build without build_info()
+        out["xgboost_build"] = None
+    try:
+        from threadpoolctl import threadpool_info
+
+        pools = [f"{p.get('internal_api')} {p.get('version')} ({p.get('num_threads')} threads)" for p in threadpool_info()]
+        out["thread_pools"] = "; ".join(sorted(set(pools))) or None  # BLAS / OpenMP libraries and thread counts; file paths left out
+    except Exception:  # noqa: BLE001
+        out["thread_pools"] = None
     return out
 
 
