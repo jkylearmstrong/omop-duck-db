@@ -208,3 +208,23 @@ def test_builder_script_reports_and_writes(tmp_path, monkeypatch, capsys):
     written = json.loads((fake / "inst/extdata/concept_sets/labs/bilirubin_total.json").read_text())
     assert [it["concept"]["CONCEPT_CODE"] for it in written["expression"]["items"]] == ["1975-2", "34543-9"]
     assert json.loads((fake / "inst/extdata/concept_sets/manifest.json").read_text())["version"] == "test.1"
+
+
+def test_coverage_script_prints_shares_only(tmp_path, monkeypatch, capsys):
+    import importlib.util
+
+    db = tmp_path / "site.duckdb"
+    con = vocab(duckdb.connect(str(db)))
+    cohort = measurements(con, {1: ["1975-2"], 2: ["34543-9"], 3: ["14631-6"]})
+    con.close()
+    cohort.rename(columns={"subject_id": "person_id"}).to_parquet(tmp_path / "cohort.parquet")
+    spec = importlib.util.spec_from_file_location("ccsc", REPO_ROOT / "scripts" / "check_concept_set_coverage.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(cs, "load_concept_sets", lambda d: {"bilirubin_total": cs.concept_set_from_codes(["1975-2"])})
+    assert mod.main(["--db", str(db), "--cohort", str(tmp_path / "cohort.parquet")]) == 0
+    out = capsys.readouterr().out
+    assert "34543-9" in out and "33.3%" in out
+    assert mod.main(["--db", str(db), "--cohort", str(tmp_path / "cohort.parquet"), "--expand"]) == 0
+    out = capsys.readouterr().out
+    assert "34543-9" not in out and "14631-6" in out and "33.3%" in out   # share of all the analyte's rows
