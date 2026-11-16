@@ -4,6 +4,7 @@ Synthetic data only. Site keys here are made-up place names, so the privacy scan
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import sys
@@ -114,6 +115,11 @@ def test_any_number_of_sites_gives_an_anonymous_shareable_folder(tmp_path, monke
     run = json.loads((out / "Study_run.json").read_text(encoding="utf-8"))
     assert run["n_sites"] == k and run["document"]["requested"]
     assert (out / "Study_Manuscript.qmd").exists()
+    if importlib.util.find_spec("grateful_py"):  # software citations: omop-duck-db with the version that ran, references from the .bib
+        from omop_etl.package_citations import omop_duck_db_version
+
+        assert (out / "Study_Manuscript.bib").exists() and run["document"]["cites_omop_duck_db"] == omop_duck_db_version()
+        assert "Study_Manuscript.bib" in run["document"]["files"]
     if CAN_DOCX:
         doc = _all_text(out / "Study_Manuscript.docx")
         assert set(re.findall(r"(?<![-A-Za-z])Site [A-Z]{1,2}\b", doc)) == set(labels.values())
@@ -186,6 +192,7 @@ def test_relabel_changes_the_letters_and_nothing_else(tmp_path, monkeypatch):
     trans = {old[s]: new[s] for s in keys}
     v2 = tmp_path / "v2"
     files = (["Study_Manuscript_Tables.xlsx", "Study_LOSO_By_Site.csv", "Study_summary.json", "Study_Manuscript.qmd"]
+             + (["Study_Manuscript.bib"] if importlib.util.find_spec("grateful_py") else [])
              + (["Study_Manuscript.docx"] if CAN_DOCX else []) + (["Study_Manuscript.pdf"] if CAN_PDF else []))
     for name in files:  # the DOCX / PDF / qmd are rebuilt from the relabelled workbook: same text once the letters are mapped
         before, after = _all_text(out / name), _all_text(v2 / name)
