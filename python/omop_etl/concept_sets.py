@@ -41,10 +41,10 @@ __all__ = ["CONCEPT_SET_VERSION", "CONCEPT_SET_DOMAINS", "concept_set_dir", "lis
 #: Domains with bundled sets: ``labs`` and ``vitals`` (LOINC), ``medications_ederri`` and ``medications`` (ATC / RxNorm).
 CONCEPT_SET_DOMAINS = ("labs", "vitals", "medications_ederri", "medications")
 
-#: A LOINC system (specimen) part name that counts as blood, serum or plasma; cord blood, fetal blood, donor units and
-#: dried blood spots do not.
+#: A LOINC system (specimen) part name that counts as blood, serum or plasma; cord blood, fetal blood, donor units,
+#: dried blood spots, red blood cells and mixed urine-and-serum specimens do not.
 LOINC_BLOOD_SYSTEM = re.compile(r"serum|plasma|blood|\bbld|\bser\b|\bplas\b", re.I)
-_NOT_BLOOD = re.compile(r"cord|fetus|fetal|donor|spot|product|unit|newborn|\^", re.I)
+_NOT_BLOOD = re.compile(r"cord|fetus|fetal|donor|spot|product|unit|newborn|red blood cell|erythrocyte|\brbc\b|urine|\^", re.I)
 
 _PARTS = {"component": "Has component", "property": "Has property", "scale": "Has scale type", "time": "Has time aspect",
           "system": "Has system"}
@@ -179,11 +179,15 @@ def resolve_concept_sets(con, sets: Mapping[str, Mapping[str, Any]], *, concept_
     con.register("_cs_items", items)
     try:
         # an item with a vocabulary and code is looked up by them (ids can differ between vocabulary builds); its
-        # CONCEPT_ID is used only when the code is not in this vocabulary or the item has no code
-        lookup = ("LEFT JOIN concept c ON c.vocabulary_id = i.vocab AND c.concept_code = i.code"
-                  if has_concept else "LEFT JOIN (SELECT NULL::BIGINT AS concept_id) c ON FALSE")
+        # CONCEPT_ID is used when the code is not found but that id is in this vocabulary, and as it is when there is no
+        # concept table at all
+        lookup = ("LEFT JOIN concept c ON c.vocabulary_id = i.vocab AND c.concept_code = i.code "
+                  "LEFT JOIN concept k ON k.concept_id = i.cid"
+                  if has_concept else "LEFT JOIN (SELECT NULL::BIGINT AS concept_id) c ON FALSE "
+                                      "LEFT JOIN (SELECT i.cid AS concept_id FROM _cs_items i) k ON FALSE")
+        idk = "k.concept_id" if has_concept else "i.cid"
         con.execute(f"""CREATE OR REPLACE TEMP TABLE _cs_base AS
-                        SELECT i.name, COALESCE(c.concept_id, i.cid) AS concept_id, i.code, i.descendants, i.mapped, i.excluded
+                        SELECT DISTINCT i.name, COALESCE(c.concept_id, {idk}) AS concept_id, i.code, i.descendants, i.mapped, i.excluded
                         FROM _cs_items i {lookup}""")
         missing = [tuple(r) for r in con.execute("SELECT DISTINCT name, code FROM _cs_base WHERE concept_id IS NULL ORDER BY 1, 2").fetchall()]
         need_ca = bool(con.execute("SELECT count(*) FROM _cs_base WHERE descendants AND concept_id IS NOT NULL").fetchone()[0])

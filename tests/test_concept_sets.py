@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -246,7 +247,11 @@ def test_codes_are_looked_up_before_stored_ids():
             "includeDescendants": False, "includeMapped": False, "isExcluded": False}
     assert cs.resolve_concept_set(con, {"items": [item]}) == [3024128]         # this vocabulary's id for 1975-2
     gone = {**item, "concept": {**item["concept"], "CONCEPT_CODE": "0000-0"}}
-    assert cs.resolve_concept_set(con, {"items": [gone]}, warn=False) == [999]  # no such code here: the stored id
+    assert cs.resolve_concept_set(con, {"items": [gone]}, warn=False) == []     # neither the code nor the id is here
+    known = {**item, "concept": {**item["concept"], "CONCEPT_ID": 3006140, "CONCEPT_CODE": "0000-0"}}
+    assert cs.resolve_concept_set(con, {"items": [known]}, warn=False) == [3006140]   # the stored id is in this vocabulary
+    bare = duckdb.connect()                                                     # no concept table: ids are used as they are
+    assert cs.resolve_concept_set(bare, {"items": [item]}, warn=False) == [999]
 
 
 def test_whole_blood_sets_do_not_take_serum_or_plasma_codes():
@@ -281,3 +286,11 @@ def test_expansion_modes():
     assert cs.load_concept_set("labs/hemoglobin")["expand_from"] == ["718-7"]
     assert "1558-6" in bf.BENCHMARK_LAB_LOINCS["glucose"]
     assert set(bf.BENCHMARK_LAB_LOINCS) <= set(bf.DEFAULT_BOUNDS)
+
+
+def test_bundled_lab_sets_hold_no_red_cell_urine_or_cord_codes():
+    assert not cs._blood("Red Blood Cells") and not cs._blood("Urine and Serum or Plasma") and not cs._blood("Cord blood")
+    for name in cs.concept_set_manifest()["domains"]["labs"]:
+        for it in cs.load_concept_set(f"labs/{name}")["expression"]["items"]:
+            label = it["concept"].get("CONCEPT_NAME") or ""
+            assert not re.search(r"red blood cell|urine|cord blood", label, re.I), (name, label)

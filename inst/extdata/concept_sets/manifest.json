@@ -1,5 +1,5 @@
 {
-  "version": "2026.11.3",
+  "version": "2026.11.4",
   "about": "OHDSI concept sets behind the feature columns. Each domain lists its sets in column order. Bump version whenever a file changes. A lab set may carry \"expansion\": blood (default), seed_systems or none (see omop_etl.concept_sets.EXPANSION_MODES).",
   "domains": {
     "labs": [

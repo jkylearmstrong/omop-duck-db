@@ -27,18 +27,6 @@
       },
       {
         "concept": {
-          "CONCEPT_ID": 3001838,
-          "CONCEPT_CODE": "12907-2",
-          "VOCABULARY_ID": "LOINC",
-          "CONCEPT_NAME": "Sodium [Moles/volume] in Red Blood Cells",
-          "STANDARD_CONCEPT": "S"
-        },
-        "includeDescendants": false,
-        "includeMapped": false,
-        "isExcluded": false
-      },
-      {
-        "concept": {
           "CONCEPT_ID": 3043706,
           "CONCEPT_CODE": "32717-1",
           "VOCABULARY_ID": "LOINC",

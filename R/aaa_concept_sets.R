@@ -150,9 +150,12 @@ resolve_concept_sets <- function(con, sets, warn = TRUE) {
     for (t in c("_cs_base", "_cs_exp")) DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", t))
   }, add = TRUE)
   # an item with a vocabulary and code is looked up by them; its CONCEPT_ID is used only when the code is not found
-  lookup <- if (has_concept) "LEFT JOIN concept c ON c.vocabulary_id = i.vocab AND c.concept_code = i.code"
+  # (a stored id counts when this vocabulary has it, or as it is when there is no concept table)
+  lookup <- if (has_concept) paste("LEFT JOIN concept c ON c.vocabulary_id = i.vocab AND c.concept_code = i.code",
+                                   "LEFT JOIN concept k ON k.concept_id = CAST(i.cid AS BIGINT)")
             else "LEFT JOIN (SELECT CAST(NULL AS BIGINT) AS concept_id) c ON FALSE"
-  DBI::dbExecute(con, paste("CREATE OR REPLACE TEMP TABLE _cs_base AS SELECT i.name, COALESCE(c.concept_id, CAST(i.cid AS BIGINT)) AS concept_id,",
+  idk <- if (has_concept) "k.concept_id" else "CAST(i.cid AS BIGINT)"
+  DBI::dbExecute(con, paste("CREATE OR REPLACE TEMP TABLE _cs_base AS SELECT DISTINCT i.name, COALESCE(c.concept_id,", idk, ") AS concept_id,",
                             "i.code, i.descendants, i.mapped, i.excluded FROM _cs_items i", lookup))
   missing <- DBI::dbGetQuery(con, "SELECT DISTINCT name, code FROM _cs_base WHERE concept_id IS NULL ORDER BY 1, 2")
   need_ca <- DBI::dbGetQuery(con, "SELECT count(*) AS n FROM _cs_base WHERE descendants AND concept_id IS NOT NULL")$n > 0
@@ -185,7 +188,7 @@ resolve_concept_sets <- function(con, sets, warn = TRUE) {
 
 .cs_blood <- function(x) {
   !is.na(x) & grepl("serum|plasma|blood|\\bbld|\\bser\\b|\\bplas\\b", x, ignore.case = TRUE, perl = TRUE) &
-    !grepl("cord|fetus|fetal|donor|spot|product|unit|newborn|\\^", x, ignore.case = TRUE)
+    !grepl("cord|fetus|fetal|donor|spot|product|unit|newborn|red blood cell|erythrocyte|\\brbc\\b|urine|\\^", x, ignore.case = TRUE, perl = TRUE)
 }
 
 .cs_parts <- function(con) {

@@ -27,18 +27,6 @@
       },
       {
         "concept": {
-          "CONCEPT_ID": 3005435,
-          "CONCEPT_CODE": "16412-9",
-          "VOCABULARY_ID": "LOINC",
-          "CONCEPT_NAME": "Aspartate aminotransferase [Enzymatic activity/volume] in Red Blood Cells",
-          "STANDARD_CONCEPT": "S"
-        },
-        "includeDescendants": false,
-        "includeMapped": false,
-        "isExcluded": false
-      },
-      {
-        "concept": {
           "CONCEPT_ID": 36305398,
           "CONCEPT_CODE": "88112-8",
           "VOCABULARY_ID": "LOINC",
