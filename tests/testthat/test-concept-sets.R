@@ -65,7 +65,8 @@ test_that("loinc_coverage names the codes a set misses, and the benchmark warns"
   DBI::dbExecute(con, "INSERT INTO measurement VALUES (1, 1, 3024128, DATE '2024-01-02', NULL, 1), (2, 2, 3006140, DATE '2024-01-02', NULL, 1),
                        (3, 2, 3006140, DATE '2024-01-02', NULL, 1), (4, 3, 3013721, DATE '2024-01-02', NULL, 1), (5, 4, 3024128, DATE '2024-01-02', NULL, 1)")
   cohort <- data.frame(subject_id = 1:4, cohort_start_date = as.Date("2024-01-01"), cohort_end_date = as.Date("2024-01-05"))
-  sets <- list(bilirubin_total = load_concept_set("labs/bilirubin_total")$expression)
+  # a one-code set (the bundled file is already expanded and holds 42719-5)
+  sets <- list(bilirubin_total = concept_set_from_codes("1975-2"))
   miss <- loinc_coverage(con, sets, cohort = cohort)
   expect_identical(miss$concept_code, c("42719-5", "14631-6"))
   expect_equal(round(miss$share, 2), c(0.4, 0.2))
