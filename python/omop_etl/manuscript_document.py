@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
@@ -141,7 +141,8 @@ def _xml(s: str) -> str:
 def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, prefix: str = "Study", figures: Sequence[str | Path] | None = None,
                                window: Sequence[str] | None = None, title: str | None = None, author: str = "",
                                formats: Sequence[str] = ("docx", "pdf"), min_cell: int | None = 11, max_rows: int = 500,
-                               timeout: int = 600, cache_dir: str | Path | None = None) -> dict[str, Any]:
+                               timeout: int = 600, cache_dir: str | Path | None = None, cite_software: bool = True,
+                               software_versions: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Writes ``<prefix>_Manuscript.qmd`` and renders ``.docx`` / ``.pdf`` (``formats``) under ``out_dir``.
 
     ``figures``: image files to include (default: ``<prefix>_*.png`` next to the workbook). ``title`` defaults to ``"<prefix> manuscript"``;
@@ -149,7 +150,13 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
     "missing": [fmt, ...], "note": str}``: a format that could not be rendered is listed in ``missing`` with the reason in ``note`` (the start
     and end of the renderer's error output, :func:`stderr_summary`). ``cache_dir`` (default ``OMOP_QUARTO_CACHE_DIR``): a writable folder
     for Quarto's cache, for sandboxes where the user's cache folder is read only (:func:`renderer_env`); without it a render that fails on
-    a permission error is retried once with a temporary cache under ``out_dir``. ``"cache"`` in the result says which was used."""
+    a permission error is retried once with a temporary cache under ``out_dir``. ``"cache"`` in the result says which was used.
+
+    ``cite_software`` (default True): add a *Software* section that cites omop-duck-db with its installed version, Python and the study's
+    libraries through grateful_py (:func:`omop_etl.package_citations.software_citations`), write ``<prefix>_Manuscript.bib`` and end the
+    document with a *References* list. ``software_versions`` (e.g. the ``environment`` block of ``<prefix>_run.json``) overrides the
+    installed versions. The result's ``"bib"`` is the ``.bib`` path (None without citations) and ``"software"`` the cited omop-duck-db
+    version; without grateful_py the section is left out and ``note`` says so."""
     from omop_etl.manuscript_report import _check_aggregate, _sentences, _suppress_small, manuscript_facts, read_workbook_tables
 
     bad = set(formats) - {"docx", "pdf"}
@@ -170,7 +177,19 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
         yaml.append(f'author: "{author.replace(chr(34), "")}"')
     yaml += ["format:", "  docx: default", "  typst:", "    papersize: us-letter", "    margin:", "      x: 1.5cm", "      y: 2cm", "    fontsize: 8pt",
              "lang: en", "---", ""]
+    software: dict[str, Any] | None = None
+    if cite_software:
+        from omop_etl.package_citations import software_citations
+
+        try:
+            software = software_citations(out / f"{prefix}_Manuscript.bib", versions=software_versions)
+        except ImportError:
+            software = None
+        if software:
+            yaml.insert(-2, f"bibliography: {software['bib'].name}")
     md = list(yaml)
+    if software:
+        md += ["## Software", "", software["paragraph"], ""]
     sent = _sentences(facts)
     if sent:
         md += ["## Results", "", *[_esc(s) for s in sent], ""]
@@ -186,11 +205,13 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
                 copied.append(out / p.name)
             cap = _esc(_caption(p, prefix))
             md += [f'![{cap}]({p.name}){{fig-alt="{cap.replace(chr(34), "")}" width="100%"}}', ""]
+    if software:
+        md += ["## References", "", "::: {#refs}", ":::", ""]
     qmd = out / f"{prefix}_Manuscript.qmd"
     qmd.write_text("\n".join(md), encoding="utf-8")
     tools = find_renderer()
     files: dict[str, Path] = {}
-    notes: list[str] = []
+    notes: list[str] = ["software citations left out: grateful_py is not installed (pip install grateful_py)"] if cite_software and not software else []
     renderer = None
     env = renderer_env(cache_dir)
     cache_used = "configured" if env is not None else "default"
@@ -217,7 +238,7 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
                 _run([tools["quarto"], "render", qmd.name, "--to", "typst" if fmt == "pdf" else "docx", "--output", target.name])
             elif tools["pandoc"] and (fmt == "docx" or tools["typst"]):
                 renderer = "pandoc"
-                cmd = [tools["pandoc"], qmd.name, "-f", "markdown", "-o", target.name, "--resource-path", "."]
+                cmd = [tools["pandoc"], qmd.name, "-f", "markdown", "-o", target.name, "--resource-path", ".", *(["--citeproc"] if software else [])]
                 if fmt == "pdf":
                     cmd += ["--pdf-engine", tools["typst"]]
                 _run(cmd)
@@ -244,5 +265,6 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
             shutil.rmtree(side, ignore_errors=True)
         elif side.exists():
             side.unlink()
-    return {"qmd": qmd, "files": files, "figures": imgs, "copied": copied, "renderer": renderer, "missing": [f for f in formats if f not in files],
+    return {"qmd": qmd, "bib": software["bib"] if software else None, "software": software["omop_duck_db_version"] if software else None,
+            "files": files, "figures": imgs, "copied": copied, "renderer": renderer, "missing": [f for f in formats if f not in files],
             "note": "; ".join(notes), "cache": cache_used}

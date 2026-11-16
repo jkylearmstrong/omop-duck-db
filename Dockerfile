@@ -90,6 +90,8 @@ ENV RENV_CONFIG_AUTOLOADER_ENABLED=FALSE
 ENV R_LIBS=/rlib
 ENV PATH="/pyvenv/bin:$PATH"
 RUN test "$(python -c 'import platform; print(platform.python_version())')" = "${PYTHON_VERSION}" && python3 --version
+# The manuscript cites omop-duck-db with the installed package's version through grateful_py: both must resolve in the image.
+RUN python -c "import grateful_py, omop_etl; from omop_etl.package_citations import omop_duck_db_version as v; assert v() == omop_etl.__version__, (v(), omop_etl.__version__); print('grateful_py', grateful_py.__version__, '| omop-duck-db', v())"
 
 # Copy project source
 COPY --chown=ruser:ruser . .
