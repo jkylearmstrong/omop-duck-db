@@ -5,45 +5,28 @@
 #' Mean Differences (SMD), and p-values, alongside Table 1b completeness audits.
 
 #' Default Consolidated Acute Lab LOINC Mappings
+#'
+#' Read from the bundled OHDSI concept sets (`inst/extdata/concept_sets/labs`; see [concept_sets]), the same files the
+#' benchmark features use.
 #' @export
-DEFAULT_LAB_LOINCS <- list(
-  albumin = c("1751-7", "2862-1"),
-  alt = c("1742-6", "1743-4", "1744-2"),
-  anion_gap = c("1863-0", "33037-3", "41276-7"),
-  ast = c("1920-8", "30239-8"),
-  bicarbonate = c("1963-8", "2028-9", "2026-3"),
-  bun = c("3094-0", "6299-2"),
-  creatinine = c("2160-0", "38483-4"),
-  egfr = c("33914-3", "48642-3", "48643-1", "62238-1", "69405-9", "77147-7", "88293-6", "88294-4"),
-  glucose = c("2345-7", "2339-0", "41653-7"),
-  hba1c = c("4548-4", "17856-6", "17855-8", "59261-8"),
-  hematocrit = c("20570-8", "4544-3", "4545-0"),
-  hemoglobin = c("718-7", "59260-0"),
-  ldl = c("13457-7", "2089-1", "18262-6"),
-  wbc = c("26464-8", "6690-2"),
-  sodium = c("2951-2", "2947-0")
-)
+DEFAULT_LAB_LOINCS <- lapply(stats::setNames(c("albumin", "alt", "anion_gap", "ast", "bicarbonate", "bun", "creatinine", "egfr", "glucose",
+                                               "hba1c", "hematocrit", "hemoglobin", "ldl", "wbc", "sodium"),
+                                             c("albumin", "alt", "anion_gap", "ast", "bicarbonate", "bun", "creatinine", "egfr", "glucose",
+                                               "hba1c", "hematocrit", "hemoglobin", "ldl", "wbc", "sodium")),
+                             function(n) concept_set_codes(load_concept_set(paste0("labs/", n))$expression))
 
 #' Default Vital Sign LOINC Mappings
+#'
+#' Read from `inst/extdata/concept_sets/vitals`.
 #' @export
-DEFAULT_VITAL_LOINCS <- list(
-  bmi = "39156-5",
-  systolic_bp = "8480-6",
-  diastolic_bp = "8462-4"
-)
+DEFAULT_VITAL_LOINCS <- lapply(stats::setNames(c("bmi", "systolic_bp", "diastolic_bp"), c("bmi", "systolic_bp", "diastolic_bp")),
+                               function(n) concept_set_codes(load_concept_set(paste0("vitals/", n))$expression))
 
 #' Default Core Chronic Medication Classes (ATC / RxNorm Ancestors)
+#'
+#' Read from `inst/extdata/concept_sets/medications`; each concept includes its descendants.
 #' @export
-DEFAULT_MEDICATION_CONCEPTS <- list(
-  insulins = 21600713L,
-  metformin = c(1503297L, 21600745L),
-  sulfonylureas = c(1502855L, 1502809L, 21600749L),
-  statins = c(1539403L, 1545958L, 1551860L, 21601855L),
-  antihypertensives = c(21600381L, 21601664L, 21601744L, 21601782L),
-  raas_inhibitors = 21601782L,
-  beta_blockers = c(21601664L, 1314002L, 21601668L),
-  systemic_corticosteroids = c(21602722L, 1506270L)
-)
+DEFAULT_MEDICATION_CONCEPTS <- lapply(load_concept_sets("medications"), function(e) as.integer(concept_set_ids(e)))
 
 #' @keywords internal
 #' @noRd

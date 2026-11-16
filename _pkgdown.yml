@@ -63,6 +63,7 @@ reference:
   - build_schema
   - load_vocabulary
   - attach_central_vocabulary
+  - concept_sets
   - attach_database
   - omop_connect
   - omop_connect_lakehouse

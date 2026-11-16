@@ -7,6 +7,8 @@
 \title{LOINC codes per lab and per vital sign for the benchmark feature table}
 \format{
 Named lists of character vectors (LOINC codes).
+
+An object of class \code{list} of length 7.
 }
 \usage{
 BENCHMARK_LAB_LOINCS
@@ -14,6 +16,7 @@ BENCHMARK_LAB_LOINCS
 BENCHMARK_VITAL_LOINCS
 }
 \description{
+Read from the bundled OHDSI concept sets (\code{inst/extdata/concept_sets/labs}, \code{vitals}; see \link{concept_sets}).
 \code{BENCHMARK_LAB_LOINCS} is a superset of \code{CORE_14_LAB_PANEL}: sites code the same test under several LOINC codes (ALT is
 often 1743-4, HbA1c 17856-6, glucose 41653-7) and a code that is not listed silently drops the lab. It also lists
 \code{hematocrit}, \code{alkaline_phosphatase}, \code{ldl} and a measured \code{anion_gap}. \code{BENCHMARK_VITAL_LOINCS} adds heart rate,
