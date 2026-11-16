@@ -49,11 +49,12 @@ def main(argv: list[str] | None = None) -> int:
                                                            if o.startswith(d + "/")]
         for n in names:
             data = cs.load_concept_set(f"{d}/{n}")
-            new = cs.expand_loinc_concept_set(con, data["expression"])
+            new = cs.expand_loinc_concept_set(con, data["expression"], mode=data.get("expansion", "blood"),
+                                              expand_from=data.get("expand_from"))
             sets_now[n] = new
             before, after = cs.concept_set_codes(data["expression"]), cs.concept_set_codes(new)
             added = [it["concept"] for it in new["items"] if it["concept"].get("CONCEPT_CODE") not in before]
-            print(f"{d}/{n}: {len(before)} -> {len(after)} codes")
+            print(f"{d}/{n}: {len(before)} -> {len(after)} codes" + (f" (expansion: {data['expansion']})" if data.get("expansion") else ""))
             for c in added:
                 print(f"    + {c['CONCEPT_CODE']}  {c.get('CONCEPT_NAME', '')}")
             if new != data["expression"]:

@@ -11,7 +11,7 @@ cs_vocab <- function(parts = TRUE) {
     (904, 'Point in time (spot)', 'LOINC', 'LP904', 'LOINC Time', NULL, NULL), (910, 'Serum or Plasma', 'LOINC', 'LP910', 'LOINC System', NULL, NULL),
     (911, 'Blood', 'LOINC', 'LP911', 'LOINC System', NULL, NULL), (912, 'Urine', 'LOINC', 'LP912', 'LOINC System', NULL, NULL),
     (3024128, 'Bilirubin.total [Mass/volume] in Serum or Plasma', 'LOINC', '1975-2', 'Lab Test', 'S', NULL),
-    (3006140, 'Bilirubin.total [Mass/volume] in Blood', 'LOINC', '34543-9', 'Lab Test', 'S', NULL),
+    (3006140, 'Bilirubin.total [Mass/volume] in Blood', 'LOINC', '42719-5', 'Lab Test', 'S', NULL),
     (3013721, 'Bilirubin.total [Moles/volume] in Serum or Plasma', 'LOINC', '14631-6', 'Lab Test', 'S', NULL),
     (3002000, 'Bilirubin.total [Mass/volume] in Urine', 'LOINC', '5770-3', 'Lab Test', 'S', NULL),
     (21600712, 'A10', 'ATC', 'A10', 'ATC 2nd', 'C', NULL), (1503297, 'metformin', 'RxNorm', '6809', 'Ingredient', 'S', NULL),
@@ -67,10 +67,10 @@ test_that("loinc_coverage names the codes a set misses, and the benchmark warns"
   cohort <- data.frame(subject_id = 1:4, cohort_start_date = as.Date("2024-01-01"), cohort_end_date = as.Date("2024-01-05"))
   sets <- list(bilirubin_total = load_concept_set("labs/bilirubin_total")$expression)
   miss <- loinc_coverage(con, sets, cohort = cohort)
-  expect_identical(miss$concept_code, c("34543-9", "14631-6"))
+  expect_identical(miss$concept_code, c("42719-5", "14631-6"))
   expect_equal(round(miss$share, 2), c(0.4, 0.2))
   expect_identical(miss$same_property, c(TRUE, FALSE))
-  expect_warning(omopduckdb:::.cs_check_lab_coverage(con, sets, cohort, 0), "concept_set_coverage.*lab_bilirubin_total.*34543-9 40.0%")
+  expect_warning(omopduckdb:::.cs_check_lab_coverage(con, sets, cohort, 0), "concept_set_coverage.*lab_bilirubin_total.*42719-5 40.0%")
   con2 <- cs_vocab(parts = FALSE)
   on.exit(DBI::dbDisconnect(con2, shutdown = TRUE), add = TRUE)
   expect_null(loinc_coverage(con2, sets))

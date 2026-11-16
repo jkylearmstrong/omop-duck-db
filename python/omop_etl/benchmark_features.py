@@ -24,7 +24,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from omop_etl.concept_sets import ancestor_specs, codes_by_name, concept_set_from_codes, load_concept_sets, loinc_coverage, resolve_concept_sets
+from omop_etl.concept_sets import ancestor_specs, codes_by_name, concept_set_from_codes, load_concept_set, load_concept_sets, loinc_coverage, resolve_concept_sets
 from omop_etl.data_gaps import DataGapWarning
 
 __all__ = ["extract_benchmark_features", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS", "BENCHMARK_LAB_CONCEPT_SETS", "BENCHMARK_VITAL_CONCEPT_SETS",
@@ -37,6 +37,8 @@ __all__ = ["extract_benchmark_features", "extract_protocol_history_features", "D
 #: database is skipped and reported in ``attrs["skipped"]``.
 BENCHMARK_LAB_CONCEPT_SETS: dict[str, dict[str, Any]] = load_concept_sets("labs")
 BENCHMARK_LAB_LOINCS: dict[str, list[str]] = codes_by_name("labs")
+#: Each lab set's expansion mode (``concept_sets.EXPANSION_MODES``); only ``blood`` sets fail on a missed same-unit code.
+BENCHMARK_LAB_EXPANSION: dict[str, str] = {n: load_concept_set(f"labs/{n}").get("expansion", "blood") for n in BENCHMARK_LAB_LOINCS}
 
 #: LOINC codes per vital sign (feature ``vital_<name>``), from ``concept_sets/vitals``.
 BENCHMARK_VITAL_CONCEPT_SETS: dict[str, dict[str, Any]] = load_concept_sets("vitals")
@@ -52,6 +54,7 @@ DEFAULT_BOUNDS: dict[str, tuple[float, float]] = {
     "chloride": (60, 150), "bicarbonate": (5, 60), "calcium": (4, 16), "hematocrit": (10, 75), "hemoglobin": (1, 25),
     "wbc": (0.1, 200), "platelets": (5, 2000), "albumin": (0.5, 7), "bilirubin_total": (0.1, 40),
     "alkaline_phosphatase": (5, 2500), "ast": (1, 5000), "alt": (1, 5000), "hba1c": (3, 25), "ldl": (10, 500), "anion_gap": (1, 45),
+    "troponin_i": (0, 1000), "lactate": (0.1, 30), "pco2": (5, 200), "po2": (10, 700),
 }
 
 #: ``{feature name: (above, up_to, divisor)}``: a value in ``(above, up_to]`` is divided by ``divisor`` before the bounds are
@@ -169,13 +172,21 @@ def _check_lab_coverage(con, sets: Mapping[str, Mapping[str, Any]], cohort: pd.D
         warnings.warn("lab concept-set coverage not checked: the vocabulary has no LOINC part links (Has component ...), so "
                       "lab codes outside the bundled concept sets cannot be found", stacklevel=3)
         return
-    for name, g in miss.groupby("name", sort=False):
-        desc = "; ".join(f"{r.concept_code} {r.share:.1%}" + ("" if r.same_property else " (other unit type)") + ("" if r.blood else " (not blood)")
-                         for r in g.itertuples())
-        warnings.warn(DataGapWarning(f"lab_{name}: in-stay rows for this analyte use LOINC codes outside its concept set ({desc}); "
-                                     "add them to concept_sets/labs/" + name + ".json (with a unit conversion for another unit type) "
-                                     "or accept with --allow-data-gaps lab_" + name, "concept_set_coverage", f"lab_{name}"), stacklevel=3)
+    def fmt(g: pd.DataFrame) -> str:
+        return "; ".join(f"{r.concept_code} {r.share:.1%}" for r in g.itertuples())
 
+    # an error only for a code the set should hold: same component, property and scale, blood / serum / plasma.
+    # A code of another property (molar units, a partial pressure such as pCO2 next to total CO2) or another specimen
+    # is reported as a plain warning: it needs a unit conversion or is a different test, never a silent loss.
+    blood_sets = {n for n in sets if BENCHMARK_LAB_EXPANSION.get(n, "blood") == "blood"}
+    hard = miss["same_property"] & miss["blood"] & miss["name"].isin(blood_sets)
+    for name, g in miss[hard].groupby("name", sort=False):
+        warnings.warn(DataGapWarning(f"lab_{name}: in-stay rows for this analyte use LOINC codes outside its concept set ({fmt(g)}); "
+                                     f"add them to concept_sets/labs/{name}.json or accept with --allow-data-gaps lab_{name}",
+                                     "concept_set_coverage", f"lab_{name}"), stacklevel=3)
+    for name, g in miss[~hard].groupby("name", sort=False):
+        warnings.warn(f"lab_{name}: in-stay rows use codes of the same analyte in another unit type or specimen, not counted "
+                      f"({fmt(g)}); the set leaves them out on purpose or they need a unit conversion", stacklevel=3)
 
 def _bounds_frame(cmap: pd.DataFrame, bounds: Mapping[str, Sequence[float | None]] | None,
                   rescale: Mapping[str, Sequence[float]] | None) -> pd.DataFrame:

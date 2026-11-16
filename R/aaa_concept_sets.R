@@ -149,9 +149,10 @@ resolve_concept_sets <- function(con, sets, warn = TRUE) {
     duckdb::duckdb_unregister(con, "_cs_items")
     for (t in c("_cs_base", "_cs_exp")) DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", t))
   }, add = TRUE)
-  lookup <- if (has_concept) "LEFT JOIN concept c ON i.cid IS NULL AND c.vocabulary_id = i.vocab AND c.concept_code = i.code"
+  # an item with a vocabulary and code is looked up by them; its CONCEPT_ID is used only when the code is not found
+  lookup <- if (has_concept) "LEFT JOIN concept c ON c.vocabulary_id = i.vocab AND c.concept_code = i.code"
             else "LEFT JOIN (SELECT CAST(NULL AS BIGINT) AS concept_id) c ON FALSE"
-  DBI::dbExecute(con, paste("CREATE OR REPLACE TEMP TABLE _cs_base AS SELECT i.name, COALESCE(CAST(i.cid AS BIGINT), c.concept_id) AS concept_id,",
+  DBI::dbExecute(con, paste("CREATE OR REPLACE TEMP TABLE _cs_base AS SELECT i.name, COALESCE(c.concept_id, CAST(i.cid AS BIGINT)) AS concept_id,",
                             "i.code, i.descendants, i.mapped, i.excluded FROM _cs_items i", lookup))
   missing <- DBI::dbGetQuery(con, "SELECT DISTINCT name, code FROM _cs_base WHERE concept_id IS NULL ORDER BY 1, 2")
   need_ca <- DBI::dbGetQuery(con, "SELECT count(*) AS n FROM _cs_base WHERE descendants AND concept_id IS NOT NULL")$n > 0
@@ -183,7 +184,7 @@ resolve_concept_sets <- function(con, sets, warn = TRUE) {
 }
 
 .cs_blood <- function(x) {
-  !is.na(x) & grepl("^(serum|plasma|blood|bld|ser|plas)\\b", trimws(x), ignore.case = TRUE, perl = TRUE) &
+  !is.na(x) & grepl("serum|plasma|blood|\\bbld|\\bser\\b|\\bplas\\b", x, ignore.case = TRUE, perl = TRUE) &
     !grepl("cord|fetus|fetal|donor|spot|product|unit|newborn|\\^", x, ignore.case = TRUE)
 }
 
@@ -251,12 +252,23 @@ loinc_coverage <- function(con, sets, cohort = NULL, pre_days = 0, min_share = 0
             "outside the bundled concept sets cannot be found", call. = FALSE)
     return(invisible(NULL))
   }
-  for (n in unique(miss$name)) {
-    g <- miss[miss$name == n, , drop = FALSE]
-    desc <- paste0(g$concept_code, " ", sprintf("%.1f%%", 100 * g$share), ifelse(g$same_property, "", " (other unit type)"),
-                   ifelse(g$blood, "", " (not blood)"), collapse = "; ")
+  modes <- vapply(names(sets), function(n) {
+    f <- file.path(.cs_dir(), "labs", paste0(n, ".json"))
+    m <- if (file.exists(f)) jsonlite::fromJSON(f, simplifyVector = FALSE)$expansion else NULL
+    if (is.null(m)) "blood" else m
+  }, character(1))
+  # an error only for a code the set should hold (same property, blood / serum / plasma, a set that expands to blood);
+  # another unit type or specimen is a plain warning
+  hard <- miss$same_property & miss$blood & miss$name %in% names(modes)[modes == "blood"]
+  fmt <- function(g) paste0(g$concept_code, " ", sprintf("%.1f%%", 100 * g$share), collapse = "; ")
+  for (n in unique(miss$name[hard])) {
     warning(sprintf(paste0("[concept_set_coverage] lab_%s: in-stay rows for this analyte use LOINC codes outside its concept set (%s); ",
-                           "add them to concept_sets/labs/%s.json (with a unit conversion for another unit type)"), n, desc, n), call. = FALSE)
+                           "add them to concept_sets/labs/%s.json"), n, fmt(miss[hard & miss$name == n, , drop = FALSE]), n), call. = FALSE)
+  }
+  for (n in unique(miss$name[!hard])) {
+    warning(sprintf(paste0("lab_%s: in-stay rows use codes of the same analyte in another unit type or specimen, not counted (%s); ",
+                           "the set leaves them out on purpose or they need a unit conversion"), n,
+                    fmt(miss[!hard & miss$name == n, , drop = FALSE])), call. = FALSE)
   }
   invisible(miss)
 }

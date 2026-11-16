@@ -44,7 +44,7 @@ DEFAULT_BOUNDS <- list(
   sodium = c(100, 180), potassium = c(1.5, 10), chloride = c(60, 150), bicarbonate = c(5, 60), calcium = c(4, 16),
   hematocrit = c(10, 75), hemoglobin = c(1, 25), wbc = c(0.1, 200), platelets = c(5, 2000), albumin = c(0.5, 7),
   bilirubin_total = c(0.1, 40), alkaline_phosphatase = c(5, 2500), ast = c(1, 5000), alt = c(1, 5000), hba1c = c(3, 25),
-  ldl = c(10, 500), anion_gap = c(1, 45))
+  ldl = c(10, 500), anion_gap = c(1, 45), troponin_i = c(0, 1000), lactate = c(0.1, 30), pco2 = c(5, 200), po2 = c(10, 700))
 
 #' @rdname DEFAULT_BOUNDS
 #' @export

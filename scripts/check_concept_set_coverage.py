@@ -37,7 +37,9 @@ def main(argv: list[str] | None = None) -> int:
         sets = {k: v for k, v in sets.items() if k in a.labs}
     if a.expand:
         vcon = duckdb.connect(a.vocab_db or a.db, read_only=True)
-        sets = {k: cs.expand_loinc_concept_set(vcon, v) for k, v in sets.items()}
+        meta = {k: cs.load_concept_set(f"labs/{k}") for k in sets}
+        sets = {k: cs.expand_loinc_concept_set(vcon, v, mode=meta[k].get("expansion", "blood"), expand_from=meta[k].get("expand_from"))
+                for k, v in sets.items()}
         vcon.close()
     con = duckdb.connect(a.db, read_only=True)
     cohort = None

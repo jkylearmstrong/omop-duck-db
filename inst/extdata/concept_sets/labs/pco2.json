@@ -1,0 +1,18 @@
+{
+  "name": "pco2",
+  "domain": "labs",
+  "expansion": "seed_systems",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "2019-8",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

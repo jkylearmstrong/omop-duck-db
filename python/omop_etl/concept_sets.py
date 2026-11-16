@@ -35,7 +35,7 @@ import pandas as pd
 
 __all__ = ["CONCEPT_SET_VERSION", "CONCEPT_SET_DOMAINS", "concept_set_dir", "list_concept_sets", "load_concept_set",
            "load_concept_sets", "concept_set_manifest", "concept_set_codes", "concept_set_ids", "codes_by_name", "ancestor_specs", "concept_set_from_codes", "concept_set_from_ids", "resolve_concept_set",
-           "resolve_concept_sets", "concept_set_fingerprint", "expand_loinc_concept_set", "loinc_coverage", "write_concept_set", "LOINC_BLOOD_SYSTEM"]
+           "resolve_concept_sets", "concept_set_fingerprint", "expand_loinc_concept_set", "EXPANSION_MODES", "loinc_coverage", "write_concept_set", "LOINC_BLOOD_SYSTEM"]
 
 
 #: Domains with bundled sets: ``labs`` and ``vitals`` (LOINC), ``medications_ederri`` and ``medications`` (ATC / RxNorm).
@@ -43,7 +43,7 @@ CONCEPT_SET_DOMAINS = ("labs", "vitals", "medications_ederri", "medications")
 
 #: A LOINC system (specimen) part name that counts as blood, serum or plasma; cord blood, fetal blood, donor units and
 #: dried blood spots do not.
-LOINC_BLOOD_SYSTEM = re.compile(r"^(serum|plasma|blood|bld|ser|plas)\b", re.I)
+LOINC_BLOOD_SYSTEM = re.compile(r"serum|plasma|blood|\bbld|\bser\b|\bplas\b", re.I)
 _NOT_BLOOD = re.compile(r"cord|fetus|fetal|donor|spot|product|unit|newborn|\^", re.I)
 
 _PARTS = {"component": "Has component", "property": "Has property", "scale": "Has scale type", "time": "Has time aspect",
@@ -178,10 +178,12 @@ def resolve_concept_sets(con, sets: Mapping[str, Mapping[str, Any]], *, concept_
         concept_ancestor = _resolve_concept_ancestor(con)[0] if has_concept or _has(con, "concept_ancestor") else None
     con.register("_cs_items", items)
     try:
-        lookup = ("LEFT JOIN concept c ON i.cid IS NULL AND c.vocabulary_id = i.vocab AND c.concept_code = i.code"
+        # an item with a vocabulary and code is looked up by them (ids can differ between vocabulary builds); its
+        # CONCEPT_ID is used only when the code is not in this vocabulary or the item has no code
+        lookup = ("LEFT JOIN concept c ON c.vocabulary_id = i.vocab AND c.concept_code = i.code"
                   if has_concept else "LEFT JOIN (SELECT NULL::BIGINT AS concept_id) c ON FALSE")
         con.execute(f"""CREATE OR REPLACE TEMP TABLE _cs_base AS
-                        SELECT i.name, COALESCE(i.cid, c.concept_id) AS concept_id, i.code, i.descendants, i.mapped, i.excluded
+                        SELECT i.name, COALESCE(c.concept_id, i.cid) AS concept_id, i.code, i.descendants, i.mapped, i.excluded
                         FROM _cs_items i {lookup}""")
         missing = [tuple(r) for r in con.execute("SELECT DISTINCT name, code FROM _cs_base WHERE concept_id IS NULL ORDER BY 1, 2").fetchall()]
         need_ca = bool(con.execute("SELECT count(*) FROM _cs_base WHERE descendants AND concept_id IS NOT NULL").fetchone()[0])
@@ -244,27 +246,52 @@ def _loinc_parts_sql() -> str:
 
 
 def _blood(system_name: str | None) -> bool:
-    return bool(system_name) and bool(LOINC_BLOOD_SYSTEM.search(system_name.strip())) and not _NOT_BLOOD.search(system_name)
+    return bool(system_name) and bool(LOINC_BLOOD_SYSTEM.search(system_name)) and not _NOT_BLOOD.search(system_name)
 
 
-def expand_loinc_concept_set(con, expression: Mapping[str, Any], *, blood_only: bool = True) -> dict[str, Any]:
+def _whole_blood(system_name: str | None) -> bool:
+    """A blood system with no serum or plasma in it (Blood, Arterial blood, Capillary blood ...)."""
+    return _blood(system_name) and not re.search(r"serum|plasma|\bser\b|\bplas\b", system_name or "", re.I)
+
+
+#: How a lab set may grow (the set file's ``"expansion"``): ``blood`` (default) adds codes in any blood, serum or plasma
+#: specimen; ``seed_systems`` only in the specimens the set already lists (blood gases: arterial pO2 must not take venous
+#: pO2); ``none`` adds nothing (troponin I, where conventional and high-sensitivity assays share a property but not a unit).
+EXPANSION_MODES = ("blood", "seed_systems", "none")
+
+
+def expand_loinc_concept_set(con, expression: Mapping[str, Any], *, blood_only: bool = True,
+                             mode: str = "blood", expand_from: Sequence[str] | None = None) -> dict[str, Any]:
     """``expression`` plus every LOINC test that shares a listed LOINC code's component, property, scale and time aspect.
 
-    With ``blood_only`` (default) an added test's system must be blood, serum or plasma (:data:`LOINC_BLOOD_SYSTEM`).
+    With ``blood_only`` (default) an added test's system must be blood, serum or plasma (:data:`LOINC_BLOOD_SYSTEM`);
+    when every listed code is a whole-blood test, serum and plasma codes are not added. ``mode`` is one of
+    :data:`EXPANSION_MODES` (``none`` returns the expression unchanged, ``seed_systems`` keeps the listed specimens).
+    ``expand_from`` (a set file's ``"expand_from"``): grow only from these listed codes, e.g. hemoglobin from 718-7 (g/dL)
+    and not from its molar code 59260-0, so no further molar codes join a feature read in g/dL.
     Added items carry ``CONCEPT_ID``, ``CONCEPT_CODE``, ``VOCABULARY_ID`` and ``CONCEPT_NAME``, so the result can be saved
     with :func:`write_concept_set` and read in ATLAS. Raises ``ValueError`` when the vocabulary has no LOINC part links."""
     if not _parts_available(con):
         raise ValueError("this vocabulary has no LOINC part relationships (Has component / Has property / Has scale type / "
                          "Has system); download LOINC from Athena with its parts to expand lab concept sets")
+    if mode not in EXPANSION_MODES:
+        raise ValueError(f"expansion mode must be one of {EXPANSION_MODES}, got {mode!r}")
     codes = concept_set_codes(expression)
+    if mode == "none":
+        return {**expression, "items": [dict(it) for it in expression["items"]]}
     parts = con.execute(_loinc_parts_sql()).df()
-    seeds = parts[parts["concept_code"].isin(codes)]
+    seeds = parts[parts["concept_code"].isin(list(expand_from) if expand_from else codes)]
     key = ["component", "property", "scale", "time"]
     keys = seeds[key].dropna().drop_duplicates()
     cand = parts.merge(keys, on=key)
-    if blood_only:
+    if mode == "seed_systems":
+        cand = cand[cand["system"].isin(set(seeds["system"].dropna()))]
+    elif blood_only:
         seed_systems = set(seeds["system"].dropna())
         cand = cand[cand["system"].isin(seed_systems) | cand["system_name"].map(_blood)]
+        if len(seeds) and seeds["system_name"].map(_whole_blood).all():
+            # cell counts and other whole-blood tests: a serum or plasma code measures something else (platelets in plasma)
+            cand = cand[cand["system"].isin(seed_systems) | cand["system_name"].map(_whole_blood)]
     have = set(codes)
     items = [dict(it) for it in expression["items"]]
     for r in cand.sort_values("concept_code").itertuples():

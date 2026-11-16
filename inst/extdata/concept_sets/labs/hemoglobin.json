@@ -1,6 +1,9 @@
 {
   "name": "hemoglobin",
   "domain": "labs",
+  "expand_from": [
+    "718-7"
+  ],
   "expression": {
     "items": [
       {
