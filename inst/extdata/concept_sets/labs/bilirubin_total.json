@@ -6,7 +6,45 @@
       {
         "concept": {
           "CONCEPT_CODE": "1975-2",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3024128,
+          "CONCEPT_NAME": "Bilirubin.total [Mass/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3028833,
+          "CONCEPT_CODE": "42719-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bilirubin.total [Mass/volume] in Blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 40762888,
+          "CONCEPT_CODE": "59827-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bilirubin.total [Mass/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 40762889,
+          "CONCEPT_CODE": "59828-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bilirubin.total [Mass/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

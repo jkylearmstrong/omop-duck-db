@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "2345-7",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3004501,
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Serum or Plasma"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "2339-0",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3000483,
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Blood"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -24,7 +28,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "41653-7",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3034962,
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Capillary blood by Glucometer"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -33,7 +39,129 @@
       {
         "concept": {
           "CONCEPT_CODE": "1558-6",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3037110,
+          "CONCEPT_NAME": "Fasting glucose [Mass/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1092005,
+          "CONCEPT_CODE": "104597-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Venous blood by Glucometer",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1091312,
+          "CONCEPT_CODE": "104598-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Arterial blood by Glucometer",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1092148,
+          "CONCEPT_CODE": "104655-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3036671,
+          "CONCEPT_CODE": "1556-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Fasting glucose [Mass/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3037187,
+          "CONCEPT_CODE": "1557-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Fasting glucose [Mass/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3004077,
+          "CONCEPT_CODE": "32016-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3035250,
+          "CONCEPT_CODE": "41604-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Fasting glucose [Mass/volume] in Capillary blood by Glucometer",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3031266,
+          "CONCEPT_CODE": "41651-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3033408,
+          "CONCEPT_CODE": "41652-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 44816672,
+          "CONCEPT_CODE": "74774-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glucose [Mass/volume] in Serum, Plasma or Blood",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

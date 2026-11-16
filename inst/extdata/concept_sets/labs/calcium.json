@@ -6,7 +6,21 @@
       {
         "concept": {
           "CONCEPT_CODE": "17861-6",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3006906,
+          "CONCEPT_NAME": "Calcium [Mass/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3032503,
+          "CONCEPT_CODE": "49765-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Calcium [Mass/volume] in Blood",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

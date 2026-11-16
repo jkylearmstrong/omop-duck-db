@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "1920-8",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3013721,
+          "CONCEPT_NAME": "Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,33 @@
       {
         "concept": {
           "CONCEPT_CODE": "30239-8",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3037081,
+          "CONCEPT_NAME": "Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma by With P-5'-P"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3005435,
+          "CONCEPT_CODE": "16412-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Aspartate aminotransferase [Enzymatic activity/volume] in Red Blood Cells",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 36305398,
+          "CONCEPT_CODE": "88112-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma by No addition of P-5'-P",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

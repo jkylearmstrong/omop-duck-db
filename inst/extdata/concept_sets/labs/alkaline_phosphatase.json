@@ -6,7 +6,33 @@
       {
         "concept": {
           "CONCEPT_CODE": "6768-6",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3035995,
+          "CONCEPT_NAME": "Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3001110,
+          "CONCEPT_CODE": "1783-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Alkaline phosphatase [Enzymatic activity/volume] in Blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46235077,
+          "CONCEPT_CODE": "77141-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Alkaline phosphatase [Enzymatic activity/volume] in Serum, Plasma or Blood",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

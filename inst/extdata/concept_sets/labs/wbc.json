@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "6690-2",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3000905,
+          "CONCEPT_NAME": "Leukocytes [#/volume] in Blood by Automated count"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,33 @@
       {
         "concept": {
           "CONCEPT_CODE": "26464-8",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3010813,
+          "CONCEPT_NAME": "Leukocytes [#/volume] in Blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3032393,
+          "CONCEPT_CODE": "49498-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Leukocytes [#/volume] in Blood by Estimate",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3003282,
+          "CONCEPT_CODE": "804-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Leukocytes [#/volume] in Blood by Manual count",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "33037-3",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3045716,
+          "CONCEPT_NAME": "Anion gap in Serum or Plasma by calculation"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "41276-7",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3039000,
+          "CONCEPT_NAME": "Anion gap in Blood by calculation"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -24,7 +28,105 @@
       {
         "concept": {
           "CONCEPT_CODE": "1863-0",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3037278,
+          "CONCEPT_NAME": "Anion gap in Serum or Plasma by Calculated.4Ions"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3021391,
+          "CONCEPT_CODE": "10466-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Serum or Plasma by Calculated.3Ions",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 43533603,
+          "CONCEPT_CODE": "73578-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Venous blood by Calculated.4Ions",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 43533604,
+          "CONCEPT_CODE": "73579-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Mixed venous blood by Calculated.4Ions",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 43533605,
+          "CONCEPT_CODE": "73580-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Capillary blood by Calculated.4Ions",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 43533606,
+          "CONCEPT_CODE": "73581-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Arterial blood by Calculated.4Ions",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 43533607,
+          "CONCEPT_CODE": "73582-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Blood by Calculated.4Ions",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46236046,
+          "CONCEPT_CODE": "77341-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Serum, Plasma or Blood by Calculated.4Ions",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 36032372,
+          "CONCEPT_CODE": "95718-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Anion gap in Blood by Calculated.3Ions",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

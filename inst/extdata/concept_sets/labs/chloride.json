@@ -6,7 +6,93 @@
       {
         "concept": {
           "CONCEPT_CODE": "2075-0",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3014576,
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1761323,
+          "CONCEPT_CODE": "100745-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3018572,
+          "CONCEPT_CODE": "2069-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3018086,
+          "CONCEPT_CODE": "2073-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Red Blood Cells",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3035285,
+          "CONCEPT_CODE": "41649-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3031248,
+          "CONCEPT_CODE": "41650-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3039964,
+          "CONCEPT_CODE": "51590-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46235783,
+          "CONCEPT_CODE": "77138-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Chloride [Moles/volume] in Serum, Plasma or Blood",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

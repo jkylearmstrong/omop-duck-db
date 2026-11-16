@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "13457-7",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3028288,
+          "CONCEPT_NAME": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "2089-1",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3028437,
+          "CONCEPT_NAME": "Cholesterol in LDL [Mass/volume] in Serum or Plasma"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -24,7 +28,57 @@
       {
         "concept": {
           "CONCEPT_CODE": "18262-6",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3009966,
+          "CONCEPT_NAME": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by Direct assay"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3035899,
+          "CONCEPT_CODE": "18261-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Cholesterol in LDL [Mass/volume] in Serum or Plasma ultracentrifugate",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3053341,
+          "CONCEPT_CODE": "49132-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by Electrophoresis",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 40758569,
+          "CONCEPT_CODE": "55440-2",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Cholesterol.in LDL (real) [Mass/volume] in Serum or Plasma by VAP",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 36031404,
+          "CONCEPT_CODE": "96259-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by Calculated by Martin-Hopkins",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

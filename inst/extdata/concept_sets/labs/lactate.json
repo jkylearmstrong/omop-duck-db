@@ -7,7 +7,93 @@
       {
         "concept": {
           "CONCEPT_CODE": "2524-7",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3014111,
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3028271,
+          "CONCEPT_CODE": "19239-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3005949,
+          "CONCEPT_CODE": "19240-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3018405,
+          "CONCEPT_CODE": "2518-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3008037,
+          "CONCEPT_CODE": "2519-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3020410,
+          "CONCEPT_CODE": "32132-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Arterial plasma",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3005491,
+          "CONCEPT_CODE": "32133-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Plasma venous",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3047181,
+          "CONCEPT_CODE": "32693-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Lactate [Moles/volume] in Blood",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

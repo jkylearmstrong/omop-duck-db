@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "777-3",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3024929,
+          "CONCEPT_NAME": "Platelets [#/volume] in Blood by Automated count"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,57 @@
       {
         "concept": {
           "CONCEPT_CODE": "26515-7",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3007461,
+          "CONCEPT_NAME": "Platelets [#/volume] in Blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3031586,
+          "CONCEPT_CODE": "49497-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Platelets [#/volume] in Blood by Estimate",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 44787107,
+          "CONCEPT_CODE": "74464-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Platelets [#/volume] in Capillary blood by Manual count",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3010834,
+          "CONCEPT_CODE": "778-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Platelets [#/volume] in Blood by Manual count",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1616298,
+          "CONCEPT_CODE": "97995-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Platelets [#/volume] in Blood by Automated count.optical",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "2823-3",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3023103,
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Serum or Plasma"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,81 @@
       {
         "concept": {
           "CONCEPT_CODE": "6298-4",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3005456,
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3013823,
+          "CONCEPT_CODE": "2824-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Red Blood Cells",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3043409,
+          "CONCEPT_CODE": "32713-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3041354,
+          "CONCEPT_CODE": "39789-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3040893,
+          "CONCEPT_CODE": "39790-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3031219,
+          "CONCEPT_CODE": "41656-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46235078,
+          "CONCEPT_CODE": "77142-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Potassium [Moles/volume] in Serum, Plasma or Blood",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

@@ -6,7 +6,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "4548-4",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3004410,
+          "CONCEPT_NAME": "Hemoglobin A1c/Hemoglobin.total in Blood"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -15,7 +17,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "17856-6",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3005673,
+          "CONCEPT_NAME": "Hemoglobin A1c/Hemoglobin.total in Blood by HPLC"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -24,7 +28,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "17855-8",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3007263,
+          "CONCEPT_NAME": "Hemoglobin A1c/Hemoglobin.total in Blood by calculation"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -33,7 +39,33 @@
       {
         "concept": {
           "CONCEPT_CODE": "59261-8",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 40762352,
+          "CONCEPT_NAME": "Hemoglobin A1c/Hemoglobin.total standardized per IFCC-RMP for CDT in Blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3003309,
+          "CONCEPT_CODE": "4549-2",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin A1c/Hemoglobin.total in Blood by Electrophoresis",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 40765129,
+          "CONCEPT_CODE": "62388-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin A1c/Hemoglobin.total in Blood by JDS/JSCC protocol",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,

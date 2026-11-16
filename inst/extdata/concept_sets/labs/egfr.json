@@ -15,7 +15,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "48642-3",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3049187,
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among non black population"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -24,7 +26,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "48643-1",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3053283,
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among black population"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -33,7 +37,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "62238-1",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 40764999,
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -42,7 +48,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "69405-9",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 40771922,
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by based on 1.73 sq M"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -51,7 +59,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "77147-7",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 46236952,
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -60,7 +70,9 @@
       {
         "concept": {
           "CONCEPT_CODE": "88293-6",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 36306178,
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M among black population"
         },
         "includeDescendants": false,
         "includeMapped": false,
@@ -69,7 +81,117 @@
       {
         "concept": {
           "CONCEPT_CODE": "88294-4",
-          "VOCABULARY_ID": "LOINC"
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 36303797,
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M among non black population"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3965919,
+          "CONCEPT_CODE": "102097-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine, Cystatin C and Urea-based formula (CKiD)/1.73 sq M",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3029829,
+          "CONCEPT_CODE": "50044-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among female population",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3029859,
+          "CONCEPT_CODE": "50210-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Cystatin C-based formula/1.73 sq M",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3030104,
+          "CONCEPT_CODE": "50384-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (Schwartz)/1.73 sq M",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 42869913,
+          "CONCEPT_CODE": "70969-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (MDRD)/1.73 sq M among male population",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46236975,
+          "CONCEPT_CODE": "78006-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Isotopic Glomerular filtration rate/1.73 sq M [Volume Rate/Area] in Urine and Serum or Plasma",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 36660257,
+          "CONCEPT_CODE": "94677-2",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine and Cystatin C-based formula (CKD-EPI)/1.73 sq M",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1619025,
+          "CONCEPT_CODE": "98979-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI 2021)/1.73 sq M",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1619026,
+          "CONCEPT_CODE": "98980-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine and Cystatin C-based formula (CKD-EPI 2021)/1.73 sq M",
+          "STANDARD_CONCEPT": "S"
         },
         "includeDescendants": false,
         "includeMapped": false,
