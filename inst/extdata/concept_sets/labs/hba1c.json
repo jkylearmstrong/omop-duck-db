@@ -1,0 +1,44 @@
+{
+  "name": "hba1c",
+  "domain": "labs",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "4548-4",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "17856-6",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "17855-8",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "59261-8",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

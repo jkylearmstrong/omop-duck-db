@@ -24,30 +24,23 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from omop_etl.concept_sets import ancestor_specs, codes_by_name, concept_set_from_codes, load_concept_sets, loinc_coverage, resolve_concept_sets
 from omop_etl.data_gaps import DataGapWarning
 
-__all__ = ["extract_benchmark_features", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS",
+__all__ = ["extract_benchmark_features", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS", "BENCHMARK_LAB_CONCEPT_SETS", "BENCHMARK_VITAL_CONCEPT_SETS",
            "DEFAULT_BOUNDS", "DEFAULT_RESCALE", "EDERRI_MEDICATION_SPECS"]
 
-#: LOINC codes per lab (feature ``lab_<name>``). A superset of ``features.CORE_14_LAB_PANEL``: sites code the same test under
-#: several LOINC codes (ALT is often 1743-4, "with P-5'-P"; HbA1c 17856-6; glucose 41653-7), and a code that is not listed
-#: silently drops the lab, so the defaults list the common alternatives. ``hematocrit``, ``alkaline_phosphatase``, ``ldl`` and the
-#: measured ``anion_gap`` are included; a name with no concept in the database is skipped and reported in ``attrs["skipped"]``.
-BENCHMARK_LAB_LOINCS: dict[str, list[str]] = {
-    "bun": ["3094-0", "6299-2"], "creatinine": ["2160-0", "38483-4"], "sodium": ["2951-2", "2947-0"],
-    "potassium": ["2823-3", "6298-4"], "chloride": ["2075-0"], "bicarbonate": ["1963-8", "2028-9", "2026-3"],
-    "glucose": ["2345-7", "2339-0", "41653-7"], "calcium": ["17861-6"], "albumin": ["1751-7", "2862-1"],
-    "bilirubin_total": ["1975-2"], "ast": ["1920-8", "30239-8"], "alt": ["1742-6", "1743-4", "1744-2"],
-    "wbc": ["6690-2", "26464-8"], "hemoglobin": ["718-7", "59260-0"], "platelets": ["777-3", "26515-7"],
-    "hba1c": ["4548-4", "17856-6", "17855-8", "59261-8"], "hematocrit": ["20570-8", "4544-3", "4545-0"],
-    "alkaline_phosphatase": ["6768-6"], "ldl": ["13457-7", "2089-1", "18262-6"], "anion_gap": ["33037-3", "41276-7", "1863-0"],
-}
+#: Lab concept sets (feature ``lab_<name>``), read from the bundled OHDSI concept-set files ``concept_sets/labs/<name>.json``
+#: (see :mod:`omop_etl.concept_sets`); ``BENCHMARK_LAB_LOINCS`` is the same as ``{name: [LOINC code, ...]}``. A superset of
+#: ``features.CORE_14_LAB_PANEL``: sites code one test under several LOINC codes (blood vs serum/plasma, method variants), and
+#: a code outside the set drops the lab, which the ``concept_set_coverage`` check reports. A name with no concept in the
+#: database is skipped and reported in ``attrs["skipped"]``.
+BENCHMARK_LAB_CONCEPT_SETS: dict[str, dict[str, Any]] = load_concept_sets("labs")
+BENCHMARK_LAB_LOINCS: dict[str, list[str]] = codes_by_name("labs")
 
-#: LOINC codes per vital sign (feature ``vital_<name>``).
-BENCHMARK_VITAL_LOINCS: dict[str, list[str]] = {
-    "bmi": ["39156-5"], "systolic_bp": ["8480-6"], "diastolic_bp": ["8462-4"], "heart_rate": ["8867-4"],
-    "respiratory_rate": ["9279-1"], "body_temperature": ["8310-5"], "oxygen_saturation": ["2708-6", "59408-5"],
-}
+#: LOINC codes per vital sign (feature ``vital_<name>``), from ``concept_sets/vitals``.
+BENCHMARK_VITAL_CONCEPT_SETS: dict[str, dict[str, Any]] = load_concept_sets("vitals")
+BENCHMARK_VITAL_LOINCS: dict[str, list[str]] = codes_by_name("vitals")
 
 #: Physiologic plausibility bounds ``{feature name: (min, max)}`` in conventional US units (mg/dL, g/dL, 10^3/uL, degrees Celsius).
 #: A single measurement outside its bounds is dropped before the per-stay mean / latest value is taken, so one artifact such as a
@@ -68,12 +61,7 @@ DEFAULT_RESCALE: dict[str, tuple[float, float, float]] = {"wbc": (200.0, 200000.
 #: Medication classes of the eDERRI protocol: the ATC class concepts, flag ``med_<name>``. Differs from the generic defaults
 #: (``antihypertensives`` is ATC C02 only, ``lipid_modifying`` is all of C10, ``biguanides`` is A10BA); use it with
 #: ``profile="ederri"`` or ``medication_specs=EDERRI_MEDICATION_SPECS`` and ``medication_window="pre_discharge"``.
-EDERRI_MEDICATION_SPECS: dict[str, dict[str, list[int]]] = {
-    "biguanides": {"ancestor_concept_ids": [21600745]}, "insulins": {"ancestor_concept_ids": [21600713]},
-    "sulfonylureas": {"ancestor_concept_ids": [21600749]}, "raas": {"ancestor_concept_ids": [21601782]},
-    "antihypertensives": {"ancestor_concept_ids": [21600381]}, "beta_blockers": {"ancestor_concept_ids": [21601664]},
-    "systemic_corticosteroids": {"ancestor_concept_ids": [21602722]}, "lipid_modifying": {"ancestor_concept_ids": [21601853]},
-}
+EDERRI_MEDICATION_SPECS: dict[str, dict[str, list[int]]] = ancestor_specs("medications_ederri")  # concept_sets/medications_ederri
 
 #: discharge disposition concept -> benchmark category. 8536 Home, 581476 Home Health, 8863 SNF, 32216 AMA (as written by
 #: the PCORnet ETL). Everything else is "other"; a missing disposition is its own indicator.
@@ -150,23 +138,43 @@ def _cohort_frame(con, cohort_table: str, cohort_id: int | None) -> pd.DataFrame
     return df
 
 
-def _concept_map(con, loincs: Mapping[str, Sequence[str]], overrides: Mapping[str, Sequence[int]] | None) -> pd.DataFrame:
-    """name -> concept_id rows: explicit ids first, plus LOINC codes resolved through ``concept``."""
+def _concept_map(con, loincs: Mapping[str, Sequence[str]] | None, overrides: Mapping[str, Sequence[int]] | None,
+                 sets: Mapping[str, Mapping[str, Any]] | None = None) -> pd.DataFrame:
+    """name -> concept_id rows: explicit ids first; every other name is resolved as a concept set (``sets``, or LOINC codes
+    from ``loincs`` turned into one) through the vocabulary (:func:`omop_etl.concept_sets.resolve_concept_sets`)."""
     rows: list[tuple[str, int]] = []
     for name, ids in (overrides or {}).items():
         rows += [(name, int(i)) for i in ids]
-    has_concept = bool(con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'concept'").fetchone()[0])
-    if has_concept:
-        codes = [(n, c) for n, cs in loincs.items() if n not in (overrides or {}) for c in cs]
-        if codes:
-            con.register("_bf_codes", pd.DataFrame(codes, columns=["name", "code"]))
-            try:
-                got = con.execute("SELECT DISTINCT k.name, c.concept_id FROM _bf_codes k JOIN concept c "
-                                  "ON c.concept_code = k.code AND c.vocabulary_id = 'LOINC'").fetchall()
-            finally:
-                con.unregister("_bf_codes")
-            rows += [(n, int(i)) for n, i in got]
+    exprs = dict(sets) if sets is not None else {n: concept_set_from_codes(cs) for n, cs in (loincs or {}).items() if cs}
+    exprs = {n: e for n, e in exprs.items() if n not in (overrides or {})}
+    if exprs and bool(con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'concept'").fetchone()[0]):
+        got = resolve_concept_sets(con, exprs, warn=False)
+        rows += [(n, int(i)) for n, i in got.itertuples(index=False)]
     return pd.DataFrame(rows, columns=["name", "concept_id"]).drop_duplicates()
+
+
+def _check_lab_coverage(con, sets: Mapping[str, Mapping[str, Any]], cohort: pd.DataFrame, pre_days: int,
+                        min_share: float = 0.01) -> None:
+    """Fails loudly (``concept_set_coverage``) when a lab's in-stay rows sit under LOINC codes its concept set does not hold.
+
+    Uses the LOINC part links of the vocabulary; without them it says the check could not run (a plain warning)."""
+    if not sets:
+        return
+    try:
+        miss = loinc_coverage(con, sets, cohort=cohort, pre_days=pre_days, min_share=min_share)
+    except duckdb.Error as exc:  # an unusual vocabulary layout must not stop feature extraction
+        warnings.warn(f"lab concept-set coverage not checked: {str(exc).splitlines()[0]}", stacklevel=3)
+        return
+    if miss is None:
+        warnings.warn("lab concept-set coverage not checked: the vocabulary has no LOINC part links (Has component ...), so "
+                      "lab codes outside the bundled concept sets cannot be found", stacklevel=3)
+        return
+    for name, g in miss.groupby("name", sort=False):
+        desc = "; ".join(f"{r.concept_code} {r.share:.1%}" + ("" if r.same_property else " (other unit type)") + ("" if r.blood else " (not blood)")
+                         for r in g.itertuples())
+        warnings.warn(DataGapWarning(f"lab_{name}: in-stay rows for this analyte use LOINC codes outside its concept set ({desc}); "
+                                     "add them to concept_sets/labs/" + name + ".json (with a unit conversion for another unit type) "
+                                     "or accept with --allow-data-gaps lab_" + name, "concept_set_coverage", f"lab_{name}"), stacklevel=3)
 
 
 def _bounds_frame(cmap: pd.DataFrame, bounds: Mapping[str, Sequence[float | None]] | None,
@@ -536,14 +544,17 @@ def extract_benchmark_features(
         con.unregister(view)
 
     if include_vitals:
-        vmap = _concept_map(con, vital_loincs or BENCHMARK_VITAL_LOINCS, vital_concept_ids)
+        vmap = _concept_map(con, vital_loincs, vital_concept_ids, None if vital_loincs else BENCHMARK_VITAL_CONCEPT_SETS)
         stats = _measurement_stats(con, cohort, vmap, lab_lookback_days, bounds, rescale)
         names = list(vital_loincs or BENCHMARK_VITAL_LOINCS)
         skipped += [f"vital_{x}" for x in names if x not in set(vmap["name"])]
         add("vitals", _wide(stats, "vital_", [x for x in names if x in set(vmap["name"])], n, with_last=False).drop(columns=["row_id"]))
     if include_labs:
         loincs = dict(lab_loincs or BENCHMARK_LAB_LOINCS)
-        lmap = _concept_map(con, loincs, lab_concept_ids)
+        lab_sets = None if lab_loincs else BENCHMARK_LAB_CONCEPT_SETS
+        lmap = _concept_map(con, loincs, lab_concept_ids, lab_sets)
+        _check_lab_coverage(con, lab_sets or {n: concept_set_from_codes(c) for n, c in loincs.items() if c and n not in (lab_concept_ids or {})},
+                            cohort, lab_lookback_days)
         stats = _measurement_stats(con, cohort, lmap, lab_lookback_days, bounds, rescale)
         present = [x for x in loincs if x in set(lmap["name"])]
         skipped += [f"lab_{x}" for x in loincs if x not in present]

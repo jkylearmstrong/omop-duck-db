@@ -1,0 +1,17 @@
+{
+  "name": "body_temperature",
+  "domain": "vitals",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "8310-5",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "respiratory_rate",
+  "domain": "vitals",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "9279-1",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

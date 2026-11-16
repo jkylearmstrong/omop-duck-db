@@ -1,0 +1,17 @@
+{
+  "name": "bilirubin_total",
+  "domain": "labs",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "1975-2",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

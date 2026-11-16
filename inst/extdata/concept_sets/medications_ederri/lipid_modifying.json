@@ -1,0 +1,16 @@
+{
+  "name": "lipid_modifying",
+  "domain": "medications_ederri",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 21601853
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

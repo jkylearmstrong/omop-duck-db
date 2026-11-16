@@ -1,0 +1,17 @@
+{
+  "name": "alkaline_phosphatase",
+  "domain": "labs",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "6768-6",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "sulfonylureas",
+  "domain": "medications_ederri",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 21600749
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

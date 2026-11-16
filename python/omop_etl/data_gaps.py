@@ -41,6 +41,7 @@ GAP_CHECKS: dict[str, str] = {
     "column_missing": "a feature column has no value for any stay at a site",
     "window": "a site's data do not cover the study window (it starts late or ends early), so stays or outcomes are quietly lost",
     "observation_period": "observation periods pile up on one end date (events filled with the build date), so follow-up is unreliable",
+    "concept_set_coverage": "a lab's rows at a site use LOINC codes its concept set does not hold (blood vs serum/plasma, molar units)",
     "sdoh_partial": "many stays have a ZIP that is not in the SDI or RUCA table (ZIP vs ZCTA format, an old crosswalk)",
 }
 

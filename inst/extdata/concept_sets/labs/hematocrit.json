@@ -1,0 +1,35 @@
+{
+  "name": "hematocrit",
+  "domain": "labs",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "20570-8",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "4544-3",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "4545-0",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

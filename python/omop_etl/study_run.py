@@ -504,7 +504,10 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                       **({s_: labels[s_]} if len(s_) >= 3 else {})})
 
     # what the saved features of a site depend on: reuse_features refuses features built with other settings
-    settings = json.loads(json.dumps({"window": [start, end], "profile": profile, "cohort_params": c_params, "attrition_mode": attrition_mode,
+    from omop_etl.concept_sets import concept_set_fingerprint
+
+    concept_sets = concept_set_fingerprint()
+    settings = json.loads(json.dumps({"window": [start, end], "profile": profile, "concept_sets": concept_sets["sha256"], "cohort_params": c_params, "attrition_mode": attrition_mode,
                                       "address_table": address_table, "address_tie_break": address_tie_break, "address_undated": undated,
                                       "ruca": (_file_fingerprint(ruca_crosswalk) or {}).get("sha256", None if ruca_crosswalk is None else "in memory"),
                                       "sdi": (_file_fingerprint(sdi_table) or {}).get("sha256", None if sdi_table is None else "in memory"),
@@ -671,6 +674,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},
                                                        "sdoh": {"on": ruca_crosswalk is not None and sdi_table is not None, "sdi_cut_points": list(sdi_cut_points or ())},
                                                        "transfer_source_values": list(transfer_source_values), "site_labels": label_mode,
+                                                       "concept_sets": concept_sets,
                                                        "inputs": {k: v for k, v in {"ruca_crosswalk": _file_fingerprint(ruca_crosswalk), "sdi_table": _file_fingerprint(sdi_table),
                                                                                      "pinned_stays": _file_fingerprint(pinned_stays), "compare_to": _file_fingerprint(compare_to)}.items() if v},
                                                        "data_checks": {"threshold": data_gap_threshold, "allowed": allow, "findings": findings,

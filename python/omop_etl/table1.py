@@ -15,44 +15,25 @@ from typing import Any, Mapping, Sequence
 import duckdb
 import pandas as pd
 
-# Default 14 consolidated acute lab LOINC mappings
+from omop_etl.concept_sets import concept_set_codes, concept_set_ids, load_concept_set, load_concept_sets
+
+# Lab, vital and medication definitions come from the bundled OHDSI concept sets (inst/extdata/concept_sets, see
+# omop_etl.concept_sets), the same files the benchmark features use, so Table 1 and the models count the same codes.
+_TABLE1_LABS = ("albumin", "alt", "anion_gap", "ast", "bicarbonate", "bun", "creatinine", "egfr", "glucose", "hba1c",
+                "hematocrit", "hemoglobin", "ldl", "wbc", "sodium")
 DEFAULT_LAB_LOINCS: dict[str, list[str]] = {
-    "albumin": ["1751-7", "2862-1"],
-    "alt": ["1742-6", "1743-4", "1744-2"],
-    "anion_gap": ["1863-0", "33037-3", "41276-7"],
-    "ast": ["1920-8", "30239-8"],
-    "bicarbonate": ["1963-8", "2028-9", "2026-3"],
-    "bun": ["3094-0", "6299-2"],
-    "creatinine": ["2160-0", "38483-4"],
-    "egfr": ["33914-3", "48642-3", "48643-1", "62238-1", "69405-9", "77147-7", "88293-6", "88294-4"],
-    "glucose": ["2345-7", "2339-0", "41653-7"],
-    "hba1c": ["4548-4", "17856-6", "17855-8", "59261-8"],
-    "hematocrit": ["20570-8", "4544-3", "4545-0"],
-    "hemoglobin": ["718-7", "59260-0"],
-    "ldl": ["13457-7", "2089-1", "18262-6"],
-    "wbc": ["26464-8", "6690-2"],
-    "sodium": ["2951-2", "2947-0"],
-}
+    n: concept_set_codes(load_concept_set(f"labs/{n}")["expression"]) for n in _TABLE1_LABS}
 
 # Default vital sign LOINC mappings
 DEFAULT_VITAL_LOINCS: dict[str, list[str]] = {
-    "bmi": ["39156-5"],
-    "systolic_bp": ["8480-6"],
-    "diastolic_bp": ["8462-4"],
-}
+    n: concept_set_codes(load_concept_set(f"vitals/{n}")["expression"]) for n in ("bmi", "systolic_bp", "diastolic_bp")}
 
-# Default 8 core chronic medication concept classes (ATC / RxNorm ancestor concepts)
+# Default 8 core chronic medication classes (ATC class concepts and RxNorm ingredients, each with its descendants):
+# insulins A10A; metformin + A10BA; sulfonylureas (tolbutamide, tolazamide, A10BB); statins (simva/atorva/prava, C10AA);
+# antihypertensives C02, C07, C08, C09; raas_inhibitors C09; beta_blockers (C07, atenolol, oxprenolol);
+# systemic_corticosteroids (H02, methylprednisolone).
 DEFAULT_MEDICATION_CONCEPTS: dict[str, list[int]] = {
-    # ATC class concepts (21xxxxxx) and RxNorm ingredients, verified against the OMOP vocabulary.
-    "insulins": [21600713],                          # A10A insulins and analogues
-    "metformin": [1503297, 21600745],                # metformin; A10BA biguanides
-    "sulfonylureas": [1502855, 1502809, 21600749],   # tolbutamide, tolazamide; A10BB
-    "statins": [1539403, 1545958, 1551860, 21601855],  # simva/atorva/prava; C10AA
-    "antihypertensives": [21600381, 21601664, 21601744, 21601782],  # C02, C07, C08, C09
-    "raas_inhibitors": [21601782],                   # C09
-    "beta_blockers": [21601664, 1314002, 21601668],  # C07; atenolol; oxprenolol
-    "systemic_corticosteroids": [21602722, 1506270],  # H02; methylprednisolone
-}
+    n: concept_set_ids(e) for n, e in load_concept_sets("medications").items()}
 
 
 def _calc_smd_continuous(s1: pd.Series, s0: pd.Series) -> float | None:

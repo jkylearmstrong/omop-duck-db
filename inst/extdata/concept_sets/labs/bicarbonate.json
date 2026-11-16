@@ -1,0 +1,35 @@
+{
+  "name": "bicarbonate",
+  "domain": "labs",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "1963-8",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "2028-9",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "2026-3",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

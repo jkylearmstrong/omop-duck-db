@@ -1,0 +1,32 @@
+{
+  "name": "sulfonylureas",
+  "domain": "medications",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 1502855
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1502809
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 21600749
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

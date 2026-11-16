@@ -1,0 +1,16 @@
+{
+  "name": "systemic_corticosteroids",
+  "domain": "medications_ederri",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 21602722
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

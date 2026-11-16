@@ -1,0 +1,40 @@
+{
+  "name": "antihypertensives",
+  "domain": "medications",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 21600381
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 21601664
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 21601744
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 21601782
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}
