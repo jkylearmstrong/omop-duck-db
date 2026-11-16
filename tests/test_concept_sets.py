@@ -113,11 +113,12 @@ def test_resolver_without_concept_ancestor_says_so():
 
 def test_expansion_joins_blood_and_serum_but_not_other_units_or_specimens():
     con = vocab(duckdb.connect())
-    out = cs.expand_loinc_concept_set(con, cs.load_concept_set("labs/bilirubin_total")["expression"])
+    out = cs.expand_loinc_concept_set(con, cs.concept_set_from_codes(["1975-2"]))
     codes = cs.concept_set_codes(out)
     assert codes == ["1975-2", "34543-9"]          # blood joins serum/plasma; molar, urine and cord blood do not
     first = out["items"][0]["concept"]
     assert first["CONCEPT_ID"] == 3024128 and first["CONCEPT_NAME"].startswith("Bilirubin.total")
+    assert "1975-2" in bf.BENCHMARK_LAB_LOINCS["bilirubin_total"]
     assert cs.expand_loinc_concept_set(con, out) == out   # idempotent
     with pytest.raises(ValueError, match="no LOINC part relationships"):
         cs.expand_loinc_concept_set(vocab(duckdb.connect(), parts=False), out)
@@ -140,7 +141,7 @@ def measurements(con, codes_per_person):
 def test_coverage_names_the_missed_codes_with_their_share():
     con = vocab(duckdb.connect())
     cohort = measurements(con, {1: ["1975-2"], 2: ["34543-9", "34543-9"], 3: ["14631-6"], 4: ["1975-2"]})
-    sets = {"bilirubin_total": cs.load_concept_set("labs/bilirubin_total")["expression"]}
+    sets = {"bilirubin_total": cs.concept_set_from_codes(["1975-2"])}
     miss = cs.loinc_coverage(con, sets, cohort=cohort)
     got = {r.concept_code: (round(r.share, 2), r.same_property, r.blood) for r in miss.itertuples()}
     assert got == {"34543-9": (0.4, True, True), "14631-6": (0.2, False, True)}
@@ -150,7 +151,7 @@ def test_coverage_names_the_missed_codes_with_their_share():
 def test_benchmark_labs_fail_loudly_on_a_missed_code_and_use_the_expanded_set():
     con = vocab(duckdb.connect())
     cohort = measurements(con, {1: ["1975-2"], 2: ["34543-9"]})
-    sets = {"bilirubin_total": cs.load_concept_set("labs/bilirubin_total")["expression"]}
+    sets = {"bilirubin_total": cs.concept_set_from_codes(["1975-2"])}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         bf._check_lab_coverage(con, sets, cohort, 0)
@@ -184,6 +185,9 @@ def test_builder_script_reports_and_writes(tmp_path, monkeypatch, capsys):
     con.close()
     legacy = tmp_path / "legacy.csv"
     legacy.write_text("LAB_LOINC,RAW_NAME\n34543-9,TBILI BLOOD\n14631-6,TBILI UMOL\n")
+    # the builder starts from the bundled files: pin bilirubin to its serum/plasma code for this test
+    monkeypatch.setattr(cs, "load_concept_set", lambda n, _orig=cs.load_concept_set: (
+        {**_orig(n), "expression": cs.concept_set_from_codes(["1975-2"])} if str(n) == "labs/bilirubin_total" else _orig(n)))
     spec = importlib.util.spec_from_file_location("build_concept_sets", REPO_ROOT / "scripts" / "build_concept_sets.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
