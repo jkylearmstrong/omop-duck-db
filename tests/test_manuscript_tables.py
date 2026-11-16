@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from omop_etl import manuscript_tables as mt  # noqa: E402
 from omop_etl import study_report as sr  # noqa: E402
+from omop_etl.data_gaps import DataGapError  # noqa: E402
 from omop_etl.study_run import pin_stays  # noqa: E402
 
 
@@ -186,9 +188,19 @@ def test_run_study_end_to_end(feats, tmp_path, monkeypatch):
     assert len(r["data"]) == len(feats) and set(r["data"].site_anon) == {"Site A", "Site B", "Site C"} and Path(r["workbook"]).exists()
     assert r["comparison"] is None and (out / "Study_run.json").exists()
     # pinned draw: only the listed stays survive; reuse_features re-reads the saved parquet; compare_to compares with the first workbook
-    pins = feats[feats.subject_id % 2 == 0][["visit_occurrence_id"]].assign(site_source=lambda d: "A")
+    even = feats[feats.subject_id % 2 == 0]
+    pins = even[["visit_occurrence_id"]].assign(site_source=even.site_anon.str[-1].to_numpy())
     r2 = run_study(db, tmp_path / "out2", pinned_stays=pins, **kw)
     assert 0 < len(r2["data"]) < len(feats)
+    # a pinned list with stays that are not in the cohort used to drop them silently; now it fails, or is accepted by name and recorded
+    wrong = pd.concat([pins, pd.DataFrame({"visit_occurrence_id": [10**9, 10**9 + 1], "site_source": "A"})], ignore_index=True)
+    with pytest.raises(DataGapError, match="pinned"):
+        run_study(db, tmp_path / "out2b", pinned_stays=wrong, **kw)
+    assert "pinned" in (tmp_path / "out2b" / "Study_data_gaps.json").read_text()
+    r2b = run_study(db, tmp_path / "out2c", pinned_stays=wrong, allow_data_gaps=["pinned"], **kw)
+    rec = json.loads((tmp_path / "out2c" / "Study_run.json").read_text())
+    assert {f["check"] for f in rec["data_checks"]["findings"] if f["severity"] == "error"} == {"pinned"}
+    assert all(f["allowed"] for f in rec["data_checks"]["findings"] if f["severity"] == "error") and len(r2b["data"]) > 0
     r3 = run_study(db, out, reuse_features=True, compare_to=r["workbook"], prefix="Again", **kw)
     assert len(r3["data"]) == len(r["data"]) and r3["comparison"][0]["cells"].sum() > 0
     assert (out / "Again_Comparison_Summary.csv").exists()

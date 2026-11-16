@@ -1,0 +1,17 @@
+{
+  "name": "bmi",
+  "domain": "vitals",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "39156-5",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

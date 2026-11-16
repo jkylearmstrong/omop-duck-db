@@ -1,0 +1,64 @@
+{
+  "version": "2026.11.4",
+  "about": "OHDSI concept sets behind the feature columns. Each domain lists its sets in column order. Bump version whenever a file changes. A lab set may carry \"expansion\": blood (default), seed_systems or none (see omop_etl.concept_sets.EXPANSION_MODES).",
+  "domains": {
+    "labs": [
+      "bun",
+      "creatinine",
+      "sodium",
+      "potassium",
+      "chloride",
+      "bicarbonate",
+      "glucose",
+      "calcium",
+      "albumin",
+      "bilirubin_total",
+      "ast",
+      "alt",
+      "wbc",
+      "hemoglobin",
+      "platelets",
+      "hba1c",
+      "hematocrit",
+      "alkaline_phosphatase",
+      "ldl",
+      "anion_gap",
+      "troponin_i",
+      "lactate",
+      "pco2",
+      "po2"
+    ],
+    "vitals": [
+      "bmi",
+      "systolic_bp",
+      "diastolic_bp",
+      "heart_rate",
+      "respiratory_rate",
+      "body_temperature",
+      "oxygen_saturation"
+    ],
+    "medications_ederri": [
+      "biguanides",
+      "insulins",
+      "sulfonylureas",
+      "raas",
+      "antihypertensives",
+      "beta_blockers",
+      "systemic_corticosteroids",
+      "lipid_modifying"
+    ],
+    "medications": [
+      "insulins",
+      "metformin",
+      "sulfonylureas",
+      "statins",
+      "antihypertensives",
+      "raas_inhibitors",
+      "beta_blockers",
+      "systemic_corticosteroids"
+    ]
+  },
+  "other": [
+    "labs/egfr"
+  ]
+}

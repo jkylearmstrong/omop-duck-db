@@ -1,0 +1,90 @@
+{
+  "name": "sodium",
+  "domain": "labs",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "2951-2",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3019550,
+          "CONCEPT_NAME": "Sodium [Moles/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "2947-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3000285,
+          "CONCEPT_NAME": "Sodium [Moles/volume] in Blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3043706,
+          "CONCEPT_CODE": "32717-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Sodium [Moles/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3041473,
+          "CONCEPT_CODE": "39791-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Sodium [Moles/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3038702,
+          "CONCEPT_CODE": "39792-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Sodium [Moles/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3031579,
+          "CONCEPT_CODE": "41657-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Sodium [Moles/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46235784,
+          "CONCEPT_CODE": "77139-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Sodium [Moles/volume] in Serum, Plasma or Blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

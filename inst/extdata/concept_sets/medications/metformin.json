@@ -1,0 +1,24 @@
+{
+  "name": "metformin",
+  "domain": "medications",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 1503297
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 21600745
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

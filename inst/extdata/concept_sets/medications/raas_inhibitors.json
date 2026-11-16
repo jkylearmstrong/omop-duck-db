@@ -1,0 +1,16 @@
+{
+  "name": "raas_inhibitors",
+  "domain": "medications",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 21601782
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

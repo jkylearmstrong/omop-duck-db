@@ -16,6 +16,7 @@ Leakage policy (all windows are fixed by the code, not by the caller):
 from __future__ import annotations
 
 import os
+import re
 import warnings
 from typing import Any, Mapping, Sequence
 
@@ -23,28 +24,25 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-__all__ = ["extract_benchmark_features", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS",
+from omop_etl.concept_sets import ancestor_specs, codes_by_name, concept_set_from_codes, load_concept_set, load_concept_sets, loinc_coverage, resolve_concept_sets
+from omop_etl.data_gaps import DataGapWarning
+
+__all__ = ["extract_benchmark_features", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS", "BENCHMARK_LAB_CONCEPT_SETS", "BENCHMARK_VITAL_CONCEPT_SETS",
            "DEFAULT_BOUNDS", "DEFAULT_RESCALE", "EDERRI_MEDICATION_SPECS"]
 
-#: LOINC codes per lab (feature ``lab_<name>``). A superset of ``features.CORE_14_LAB_PANEL``: sites code the same test under
-#: several LOINC codes (ALT is often 1743-4, "with P-5'-P"; HbA1c 17856-6; glucose 41653-7), and a code that is not listed
-#: silently drops the lab, so the defaults list the common alternatives. ``hematocrit``, ``alkaline_phosphatase``, ``ldl`` and the
-#: measured ``anion_gap`` are included; a name with no concept in the database is skipped and reported in ``attrs["skipped"]``.
-BENCHMARK_LAB_LOINCS: dict[str, list[str]] = {
-    "bun": ["3094-0", "6299-2"], "creatinine": ["2160-0", "38483-4"], "sodium": ["2951-2", "2947-0"],
-    "potassium": ["2823-3", "6298-4"], "chloride": ["2075-0"], "bicarbonate": ["1963-8", "2028-9", "2026-3"],
-    "glucose": ["2345-7", "2339-0", "41653-7"], "calcium": ["17861-6"], "albumin": ["1751-7", "2862-1"],
-    "bilirubin_total": ["1975-2"], "ast": ["1920-8", "30239-8"], "alt": ["1742-6", "1743-4", "1744-2"],
-    "wbc": ["6690-2", "26464-8"], "hemoglobin": ["718-7", "59260-0"], "platelets": ["777-3", "26515-7"],
-    "hba1c": ["4548-4", "17856-6", "17855-8", "59261-8"], "hematocrit": ["20570-8", "4544-3", "4545-0"],
-    "alkaline_phosphatase": ["6768-6"], "ldl": ["13457-7", "2089-1", "18262-6"], "anion_gap": ["33037-3", "41276-7", "1863-0"],
-}
+#: Lab concept sets (feature ``lab_<name>``), read from the bundled OHDSI concept-set files ``concept_sets/labs/<name>.json``
+#: (see :mod:`omop_etl.concept_sets`); ``BENCHMARK_LAB_LOINCS`` is the same as ``{name: [LOINC code, ...]}``. A superset of
+#: ``features.CORE_14_LAB_PANEL``: sites code one test under several LOINC codes (blood vs serum/plasma, method variants), and
+#: a code outside the set drops the lab, which the ``concept_set_coverage`` check reports. A name with no concept in the
+#: database is skipped and reported in ``attrs["skipped"]``.
+BENCHMARK_LAB_CONCEPT_SETS: dict[str, dict[str, Any]] = load_concept_sets("labs")
+BENCHMARK_LAB_LOINCS: dict[str, list[str]] = codes_by_name("labs")
+#: Each lab set's expansion mode (``concept_sets.EXPANSION_MODES``); only ``blood`` sets fail on a missed same-unit code.
+BENCHMARK_LAB_EXPANSION: dict[str, str] = {n: load_concept_set(f"labs/{n}").get("expansion", "blood") for n in BENCHMARK_LAB_LOINCS}
 
-#: LOINC codes per vital sign (feature ``vital_<name>``).
-BENCHMARK_VITAL_LOINCS: dict[str, list[str]] = {
-    "bmi": ["39156-5"], "systolic_bp": ["8480-6"], "diastolic_bp": ["8462-4"], "heart_rate": ["8867-4"],
-    "respiratory_rate": ["9279-1"], "body_temperature": ["8310-5"], "oxygen_saturation": ["2708-6", "59408-5"],
-}
+#: LOINC codes per vital sign (feature ``vital_<name>``), from ``concept_sets/vitals``.
+BENCHMARK_VITAL_CONCEPT_SETS: dict[str, dict[str, Any]] = load_concept_sets("vitals")
+BENCHMARK_VITAL_LOINCS: dict[str, list[str]] = codes_by_name("vitals")
 
 #: Physiologic plausibility bounds ``{feature name: (min, max)}`` in conventional US units (mg/dL, g/dL, 10^3/uL, degrees Celsius).
 #: A single measurement outside its bounds is dropped before the per-stay mean / latest value is taken, so one artifact such as a
@@ -56,6 +54,7 @@ DEFAULT_BOUNDS: dict[str, tuple[float, float]] = {
     "chloride": (60, 150), "bicarbonate": (5, 60), "calcium": (4, 16), "hematocrit": (10, 75), "hemoglobin": (1, 25),
     "wbc": (0.1, 200), "platelets": (5, 2000), "albumin": (0.5, 7), "bilirubin_total": (0.1, 40),
     "alkaline_phosphatase": (5, 2500), "ast": (1, 5000), "alt": (1, 5000), "hba1c": (3, 25), "ldl": (10, 500), "anion_gap": (1, 45),
+    "troponin_i": (0, 1000), "lactate": (0.1, 30), "pco2": (5, 200), "po2": (10, 700),
 }
 
 #: ``{feature name: (above, up_to, divisor)}``: a value in ``(above, up_to]`` is divided by ``divisor`` before the bounds are
@@ -65,12 +64,7 @@ DEFAULT_RESCALE: dict[str, tuple[float, float, float]] = {"wbc": (200.0, 200000.
 #: Medication classes of the eDERRI protocol: the ATC class concepts, flag ``med_<name>``. Differs from the generic defaults
 #: (``antihypertensives`` is ATC C02 only, ``lipid_modifying`` is all of C10, ``biguanides`` is A10BA); use it with
 #: ``profile="ederri"`` or ``medication_specs=EDERRI_MEDICATION_SPECS`` and ``medication_window="pre_discharge"``.
-EDERRI_MEDICATION_SPECS: dict[str, dict[str, list[int]]] = {
-    "biguanides": {"ancestor_concept_ids": [21600745]}, "insulins": {"ancestor_concept_ids": [21600713]},
-    "sulfonylureas": {"ancestor_concept_ids": [21600749]}, "raas": {"ancestor_concept_ids": [21601782]},
-    "antihypertensives": {"ancestor_concept_ids": [21600381]}, "beta_blockers": {"ancestor_concept_ids": [21601664]},
-    "systemic_corticosteroids": {"ancestor_concept_ids": [21602722]}, "lipid_modifying": {"ancestor_concept_ids": [21601853]},
-}
+EDERRI_MEDICATION_SPECS: dict[str, dict[str, list[int]]] = ancestor_specs("medications_ederri")  # concept_sets/medications_ederri
 
 #: discharge disposition concept -> benchmark category. 8536 Home, 581476 Home Health, 8863 SNF, 32216 AMA (as written by
 #: the PCORnet ETL). Everything else is "other"; a missing disposition is its own indicator.
@@ -118,7 +112,7 @@ def _ensure_vocabulary(con, vocabulary_db) -> None:
         attach_central_vocabulary(con, path)
         warnings.warn(f"concept_ancestor was not reachable; attached the central vocabulary {path!r}.", UserWarning, stacklevel=3)
     except Exception as exc:   # an already attached catalog, a locked file: carry on and let the extractors report it
-        warnings.warn(f"Could not attach the central vocabulary {path!r}: {exc}", UserWarning, stacklevel=3)
+        warnings.warn(DataGapWarning(f"Could not attach the central vocabulary {path!r}: {exc}", "vocabulary"), stacklevel=3)
 
 
 def _cohort_frame(con, cohort_table: str, cohort_id: int | None) -> pd.DataFrame:
@@ -147,24 +141,52 @@ def _cohort_frame(con, cohort_table: str, cohort_id: int | None) -> pd.DataFrame
     return df
 
 
-def _concept_map(con, loincs: Mapping[str, Sequence[str]], overrides: Mapping[str, Sequence[int]] | None) -> pd.DataFrame:
-    """name -> concept_id rows: explicit ids first, plus LOINC codes resolved through ``concept``."""
+def _concept_map(con, loincs: Mapping[str, Sequence[str]] | None, overrides: Mapping[str, Sequence[int]] | None,
+                 sets: Mapping[str, Mapping[str, Any]] | None = None) -> pd.DataFrame:
+    """name -> concept_id rows: explicit ids first; every other name is resolved as a concept set (``sets``, or LOINC codes
+    from ``loincs`` turned into one) through the vocabulary (:func:`omop_etl.concept_sets.resolve_concept_sets`)."""
     rows: list[tuple[str, int]] = []
     for name, ids in (overrides or {}).items():
         rows += [(name, int(i)) for i in ids]
-    has_concept = bool(con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'concept'").fetchone()[0])
-    if has_concept:
-        codes = [(n, c) for n, cs in loincs.items() if n not in (overrides or {}) for c in cs]
-        if codes:
-            con.register("_bf_codes", pd.DataFrame(codes, columns=["name", "code"]))
-            try:
-                got = con.execute("SELECT DISTINCT k.name, c.concept_id FROM _bf_codes k JOIN concept c "
-                                  "ON c.concept_code = k.code AND c.vocabulary_id = 'LOINC'").fetchall()
-            finally:
-                con.unregister("_bf_codes")
-            rows += [(n, int(i)) for n, i in got]
+    exprs = dict(sets) if sets is not None else {n: concept_set_from_codes(cs) for n, cs in (loincs or {}).items() if cs}
+    exprs = {n: e for n, e in exprs.items() if n not in (overrides or {})}
+    if exprs and bool(con.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'concept'").fetchone()[0]):
+        got = resolve_concept_sets(con, exprs, warn=False)
+        rows += [(n, int(i)) for n, i in got.itertuples(index=False)]
     return pd.DataFrame(rows, columns=["name", "concept_id"]).drop_duplicates()
 
+
+def _check_lab_coverage(con, sets: Mapping[str, Mapping[str, Any]], cohort: pd.DataFrame, pre_days: int,
+                        min_share: float = 0.01) -> None:
+    """Fails loudly (``concept_set_coverage``) when a lab's in-stay rows sit under LOINC codes its concept set does not hold.
+
+    Uses the LOINC part links of the vocabulary; without them it says the check could not run (a plain warning)."""
+    if not sets:
+        return
+    try:
+        miss = loinc_coverage(con, sets, cohort=cohort, pre_days=pre_days, min_share=min_share)
+    except duckdb.Error as exc:  # an unusual vocabulary layout must not stop feature extraction
+        warnings.warn(f"lab concept-set coverage not checked: {str(exc).splitlines()[0]}", stacklevel=3)
+        return
+    if miss is None:
+        warnings.warn("lab concept-set coverage not checked: the vocabulary has no LOINC part links (Has component ...), so "
+                      "lab codes outside the bundled concept sets cannot be found", stacklevel=3)
+        return
+    def fmt(g: pd.DataFrame) -> str:
+        return "; ".join(f"{r.concept_code} {r.share:.1%}" for r in g.itertuples())
+
+    # an error only for a code the set should hold: same component, property and scale, blood / serum / plasma.
+    # A code of another property (molar units, a partial pressure such as pCO2 next to total CO2) or another specimen
+    # is reported as a plain warning: it needs a unit conversion or is a different test, never a silent loss.
+    blood_sets = {n for n in sets if BENCHMARK_LAB_EXPANSION.get(n, "blood") == "blood"}
+    hard = miss["same_property"] & miss["blood"] & miss["name"].isin(blood_sets)
+    for name, g in miss[hard].groupby("name", sort=False):
+        warnings.warn(DataGapWarning(f"lab_{name}: in-stay rows for this analyte use LOINC codes outside its concept set ({fmt(g)}); "
+                                     f"add them to concept_sets/labs/{name}.json or accept with --allow-data-gaps lab_{name}",
+                                     "concept_set_coverage", f"lab_{name}"), stacklevel=3)
+    for name, g in miss[~hard].groupby("name", sort=False):
+        warnings.warn(f"lab_{name}: in-stay rows use codes of the same analyte in another unit type or specimen, not counted "
+                      f"({fmt(g)}); the set leaves them out on purpose or they need a unit conversion", stacklevel=3)
 
 def _bounds_frame(cmap: pd.DataFrame, bounds: Mapping[str, Sequence[float | None]] | None,
                   rescale: Mapping[str, Sequence[float]] | None) -> pd.DataFrame:
@@ -446,6 +468,8 @@ def extract_benchmark_features(
     keys = list(out.columns)
     groups: dict[str, list[str]] = {}
     skipped: list[str] = []
+    address_used: str | None = None
+    geography: dict[str, Any] | None = None
 
     blocks: list[pd.DataFrame] = []     # joined once at the end: 100+ single-column inserts fragment a DataFrame
 
@@ -510,30 +534,38 @@ def extract_benchmark_features(
                     window_kw = dict(window=None, offset_anchor="visit_end_date", lookahead_days=0)
                 else:
                     window_kw = dict(window=window)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
+                with warnings.catch_warnings(record=True) as med_warnings:
+                    warnings.simplefilter("always", UserWarning)
                     med = extract_medication_classes(con, view, specs, strategy="standard", person_col="subject_id",
                                                      index_date_col="cohort_start_date", end_date_col="cohort_end_date",
                                                      lookback_days=lookback_days, **window_kw)
+                # a class that resolves to no concept is an all-zero column: keep the reason (it used to be silenced)
+                for w in sorted({str(w.message) for w in med_warnings if issubclass(w.category, UserWarning)}):
+                    cls = re.search(r"Medication class '([^']+)'", w)
+                    warnings.warn(DataGapWarning(f"medication classes: {w}", "feature_skipped",
+                                                 f"{prefix}med_{cls.group(1)}" if cls else None), stacklevel=2)
                 add("medications" if not prefix else "medications_ederri", _align(cohort, med, prefix=prefix + "med_", only=list(specs)))
         if include_protocol_history:
             try:
                 add("protocol_history", extract_protocol_history_features(con, cohort, lookback_days=lookback_days))
             except duckdb.CatalogException as exc:     # a CDM without visit_occurrence / condition_occurrence / observation
-                warnings.warn(f"protocol history columns skipped: {str(exc).splitlines()[0]}", UserWarning, stacklevel=2)
+                warnings.warn(DataGapWarning(f"protocol history columns skipped: {str(exc).splitlines()[0]}", "group_skipped"), stacklevel=2)
                 skipped.append("protocol_history")
     finally:
         con.unregister(view)
 
     if include_vitals:
-        vmap = _concept_map(con, vital_loincs or BENCHMARK_VITAL_LOINCS, vital_concept_ids)
+        vmap = _concept_map(con, vital_loincs, vital_concept_ids, None if vital_loincs else BENCHMARK_VITAL_CONCEPT_SETS)
         stats = _measurement_stats(con, cohort, vmap, lab_lookback_days, bounds, rescale)
         names = list(vital_loincs or BENCHMARK_VITAL_LOINCS)
         skipped += [f"vital_{x}" for x in names if x not in set(vmap["name"])]
         add("vitals", _wide(stats, "vital_", [x for x in names if x in set(vmap["name"])], n, with_last=False).drop(columns=["row_id"]))
     if include_labs:
         loincs = dict(lab_loincs or BENCHMARK_LAB_LOINCS)
-        lmap = _concept_map(con, loincs, lab_concept_ids)
+        lab_sets = None if lab_loincs else BENCHMARK_LAB_CONCEPT_SETS
+        lmap = _concept_map(con, loincs, lab_concept_ids, lab_sets)
+        _check_lab_coverage(con, lab_sets or {n: concept_set_from_codes(c) for n, c in loincs.items() if c and n not in (lab_concept_ids or {})},
+                            cohort, lab_lookback_days)
         stats = _measurement_stats(con, cohort, lmap, lab_lookback_days, bounds, rescale)
         present = [x for x in loincs if x in set(lmap["name"])]
         skipped += [f"lab_{x}" for x in loincs if x not in present]
@@ -565,8 +597,9 @@ def extract_benchmark_features(
                     src = pd.Series(con.execute("SELECT upper(v.discharged_to_source_value) FROM (SELECT unnest(?) AS vid, generate_subscripts(?, 1) AS ord) k "
                                                 "LEFT JOIN visit_occurrence v ON v.visit_occurrence_id = k.vid ORDER BY k.ord",
                                                 [cohort["visit_occurrence_id"].tolist()] * 2).df().iloc[:, 0].to_numpy(), dtype=object)
-                except duckdb.Error:
-                    pass  # no source value column: concept ids only
+                except duckdb.Error as exc:  # no source value column: concept ids only
+                    warnings.warn(f"disposition: discharged_to_source_value could not be read ({str(exc).splitlines()[0]}); the "
+                                  "eDERRI disposition uses concept ids only.", UserWarning, stacklevel=2)
             d = disp.reset_index(drop=True)
 
             def _level(c, sv):
@@ -594,8 +627,8 @@ def extract_benchmark_features(
         if ruca_crosswalk is None or sdi_table is None or sdi_cut_points is None:
             if sdoh_fallback == "raise":
                 raise ValueError("include_sdoh=True needs ruca_crosswalk, sdi_table and the frozen sdi_cut_points.")
-            warnings.warn("include_sdoh=True but ruca_crosswalk, sdi_table or sdi_cut_points is missing: sdi_quintile and "
-                          "ruca_category are NaN and sdoh_missing = 1 for every row.", UserWarning, stacklevel=2)
+            warnings.warn(DataGapWarning("include_sdoh=True but ruca_crosswalk, sdi_table or sdi_cut_points is missing: sdi_quintile and "
+                                         "ruca_category are NaN and sdoh_missing = 1 for every row.", "sdoh"), stacklevel=2)
             add("sdoh", pd.DataFrame({"sdi_quintile": np.full(n, np.nan), "ruca_category": np.full(n, np.nan, dtype=object),
                                       "sdoh_missing": np.ones(n, dtype="int8")}))
         else:
@@ -604,9 +637,17 @@ def extract_benchmark_features(
             geo = derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays=stays, address_table=address_table,
                                          tie_break=address_tie_break, undated=address_undated)
             if geo["zip5"].isna().all():
-                warnings.warn("include_sdoh: no ZIP code was found for any stay, so sdi_quintile and ruca_category are all missing. "
-                              "The default address_table='auto' reads person_address_history, else person.location_id; pass "
-                              "address_table= the name of your dated address table.", UserWarning, stacklevel=2)
+                warnings.warn(DataGapWarning(
+                    f"include_sdoh: no ZIP code was found for any stay (address source: {geo.attrs.get('address_table')}), so "
+                    "sdi_quintile and ruca_category are all missing. Pass address_table= the name of your dated address table.", "sdoh"),
+                    stacklevel=2)
+            address_used = geo.attrs.get("address_table")
+            has_zip = geo["zip5"].notna()
+            n_zip = int(has_zip.sum())
+            geography = {"address_table": address_used, "share_with_zip": round(float(has_zip.mean()), 4) if len(geo) else None,
+                         "rule_shares": {str(k): round(float(v), 4) for k, v in geo["rule"].value_counts(normalize=True, dropna=False).items()},
+                         "zip_not_in_sdi": round(float((has_zip & geo["sdi_score"].isna()).sum() / n_zip), 4) if n_zip else None,
+                         "zip_not_in_ruca": round(float((has_zip & geo["ruca_code"].isna()).sum() / n_zip), 4) if n_zip else None}
             geo = geo.drop_duplicates("stay_id").set_index("stay_id").reindex(cohort["row_id"])
             q = geo["sdi_quintile"].to_numpy()
             add("sdoh", pd.DataFrame({"sdi_quintile": q, "ruca_category": geo["ruca_category"].to_numpy(),
@@ -645,6 +686,8 @@ def extract_benchmark_features(
     out.attrs["skipped"] = skipped
     out.attrs["key_columns"] = keys
     out.attrs["imputation_values"] = imputation
+    out.attrs["address_table"] = address_used
+    out.attrs["geography"] = geography
     return out
 
 

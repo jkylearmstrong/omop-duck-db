@@ -672,6 +672,8 @@ def test_code_tables_resolve_from_a_wheel_style_layout(tmp_path):
     site = tmp_path / "site"
     pkg = site / "omop_etl"
     shutil.copytree(REPO_ROOT / "python" / "omop_etl", pkg, ignore=shutil.ignore_patterns("__pycache__"))
+    # the concept sets are read at import (pyproject force-includes them too)
+    shutil.copytree(REPO_ROOT / "inst" / "extdata" / "concept_sets", pkg / "resources" / "extdata" / "concept_sets")
     probe = ("import os, omop_etl.comorbidity as c; "
              "p = c._resource_path('extdata', 'comorbidity', 'elixhauser_codes.csv'); print(p); "
              "print(len(c._load_code_table(c._ELIXHAUSER).domains), len(c._load_code_table(c._CHARLSON).domains))")

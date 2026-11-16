@@ -35,7 +35,7 @@ import pandas as pd
 
 from omop_etl.custom_covariates import DERIVED_VALUE_TYPE_CONCEPT_ID, register_custom_concepts, write_custom_covariates
 from omop_etl.geography import (
-    GEOGRAPHY_CONCEPT_IDS, SDI_LABELS, _ADDRESS_TABLE, _has_table, _index_addresses, assign_sdi_quintile, fit_sdi_cut_points,
+    GEOGRAPHY_CONCEPT_IDS, SDI_LABELS, _has_table, resolve_address_table, _index_addresses, assign_sdi_quintile, fit_sdi_cut_points,
     read_ruca_crosswalk, read_sdi_table, ruca_category, validate_sdi_cut_points,
 )
 
@@ -102,12 +102,17 @@ class StudyContext:
 
     def zip5(self) -> pd.DataFrame:
         if self._zip is None:
-            table = self.address_table
-            if table == "auto":
-                table = _ADDRESS_TABLE if (_has_table(self.con, _ADDRESS_TABLE)
-                                           and self.con.execute(f"SELECT count(*) FROM {_ADDRESS_TABLE}").fetchall()[0][0]) else None
-            if table is not None and not table.replace("_", "").isalnum():
-                raise ValueError(f"invalid address table name {table!r}.")
+            try:
+                table = resolve_address_table(self.con, self.address_table)
+            except ValueError as exc:
+                if self.address_table != "auto":
+                    raise
+                # a feature set mixes many features; the area ones become missing, said loudly (run_study fails on it)
+                import warnings
+
+                from omop_etl.data_gaps import DataGapWarning
+                warnings.warn(DataGapWarning(f"study features: {exc} ZIP-based features are missing.", "address_table"), stacklevel=2)
+                table = None
             self.con.register("_sf_stays", self.stays[list(_KEY)])
             try:
                 self._zip = _index_addresses(self.con, "SELECT person_id, stay_id, CAST(admit_date AS DATE) AS admit_date FROM _sf_stays", table)

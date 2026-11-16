@@ -286,10 +286,11 @@ def test_reuse_moves_old_site_files_out_of_the_shared_folder(tmp_path, monkeypat
     kw = dict(sites=keys, n_bootstraps=3, loso=False, figures=False, profile=None, document=False)
     run_study(db, out, **kw)
     priv = tmp_path / "out_private"
-    for p in priv.glob("*"):  # put the files where 0.24.0 left them
-        p.rename(out / p.name)
+    for p in priv.glob("*"):  # put the files where 0.24.0 left them (it wrote no .meta.json or run_private.json)
+        if p.suffix in (".parquet", ".csv"):
+            p.rename(out / p.name)
     r = run_study(db, out, reuse_features=True, site_labels={k: f"Site {c}" for k, c in zip(keys, "CAB")}, **kw)
-    assert not list(out.glob("features_*")) and len(list(priv.glob("features_*"))) == 3 and len(list(priv.glob("cohort_*"))) == 3
+    assert not list(out.glob("features_*")) and len(list(priv.glob("features_*.parquet"))) == 3 and len(list(priv.glob("cohort_*"))) == 3
     assert set(r["data"].site_anon) == {"Site A", "Site B", "Site C"} and KEYS[0] in r["data"].site_source.tolist()
 
 

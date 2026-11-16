@@ -1,0 +1,40 @@
+{
+  "name": "statins",
+  "domain": "medications",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 1539403
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1545958
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1551860
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 21601855
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

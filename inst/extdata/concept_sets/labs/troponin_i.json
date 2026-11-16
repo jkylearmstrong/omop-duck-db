@@ -1,0 +1,27 @@
+{
+  "name": "troponin_i",
+  "domain": "labs",
+  "expansion": "none",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "10839-9",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "42757-5",
+          "VOCABULARY_ID": "LOINC"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

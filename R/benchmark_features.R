@@ -12,6 +12,7 @@ DEFAULT_DISPOSITION_MAP <- c(`8536` = "home", `581476` = "home_health", `8863` =
 
 #' LOINC codes per lab and per vital sign for the benchmark feature table
 #'
+#' Read from the bundled OHDSI concept sets (`inst/extdata/concept_sets/labs`, `vitals`; see [concept_sets]).
 #' `BENCHMARK_LAB_LOINCS` is a superset of `CORE_14_LAB_PANEL`: sites code the same test under several LOINC codes (ALT is
 #' often 1743-4, HbA1c 17856-6, glucose 41653-7) and a code that is not listed silently drops the lab. It also lists
 #' `hematocrit`, `alkaline_phosphatase`, `ldl` and a measured `anion_gap`. `BENCHMARK_VITAL_LOINCS` adds heart rate,
@@ -21,20 +22,11 @@ DEFAULT_DISPOSITION_MAP <- c(`8536` = "home", `581476` = "home_health", `8863` =
 #' @name BENCHMARK_LAB_LOINCS
 #' @aliases BENCHMARK_VITAL_LOINCS
 #' @export
-BENCHMARK_LAB_LOINCS <- list(
-  bun = c("3094-0", "6299-2"), creatinine = c("2160-0", "38483-4"), sodium = c("2951-2", "2947-0"),
-  potassium = c("2823-3", "6298-4"), chloride = "2075-0", bicarbonate = c("1963-8", "2028-9", "2026-3"),
-  glucose = c("2345-7", "2339-0", "41653-7"), calcium = "17861-6", albumin = c("1751-7", "2862-1"),
-  bilirubin_total = "1975-2", ast = c("1920-8", "30239-8"), alt = c("1742-6", "1743-4", "1744-2"),
-  wbc = c("6690-2", "26464-8"), hemoglobin = c("718-7", "59260-0"), platelets = c("777-3", "26515-7"),
-  hba1c = c("4548-4", "17856-6", "17855-8", "59261-8"), hematocrit = c("20570-8", "4544-3", "4545-0"),
-  alkaline_phosphatase = "6768-6", ldl = c("13457-7", "2089-1", "18262-6"), anion_gap = c("33037-3", "41276-7", "1863-0"))
+BENCHMARK_LAB_LOINCS <- lapply(load_concept_sets("labs"), concept_set_codes)
 
 #' @rdname BENCHMARK_LAB_LOINCS
 #' @export
-BENCHMARK_VITAL_LOINCS <- list(
-  bmi = "39156-5", systolic_bp = "8480-6", diastolic_bp = "8462-4", heart_rate = "8867-4", respiratory_rate = "9279-1",
-  body_temperature = "8310-5", oxygen_saturation = c("2708-6", "59408-5"))
+BENCHMARK_VITAL_LOINCS <- lapply(load_concept_sets("vitals"), concept_set_codes)
 
 #' Physiologic plausibility bounds and rescaling for single vital / lab measurements
 #'
@@ -52,7 +44,7 @@ DEFAULT_BOUNDS <- list(
   sodium = c(100, 180), potassium = c(1.5, 10), chloride = c(60, 150), bicarbonate = c(5, 60), calcium = c(4, 16),
   hematocrit = c(10, 75), hemoglobin = c(1, 25), wbc = c(0.1, 200), platelets = c(5, 2000), albumin = c(0.5, 7),
   bilirubin_total = c(0.1, 40), alkaline_phosphatase = c(5, 2500), ast = c(1, 5000), alt = c(1, 5000), hba1c = c(3, 25),
-  ldl = c(10, 500), anion_gap = c(1, 45))
+  ldl = c(10, 500), anion_gap = c(1, 45), troponin_i = c(0, 1000), lactate = c(0.1, 30), pco2 = c(5, 200), po2 = c(10, 700))
 
 #' @rdname DEFAULT_BOUNDS
 #' @export
@@ -65,11 +57,7 @@ DEFAULT_RESCALE <- list(wbc = c(200, 200000, 1000))
 #' `extract_benchmark_features(profile = "ederri")` or `medication_set`.
 #' @format A named list of `list(ancestor_concept_ids = ...)` specs.
 #' @export
-EDERRI_MEDICATION_SPECS <- list(
-  biguanides = list(ancestor_concept_ids = 21600745), insulins = list(ancestor_concept_ids = 21600713),
-  sulfonylureas = list(ancestor_concept_ids = 21600749), raas = list(ancestor_concept_ids = 21601782),
-  antihypertensives = list(ancestor_concept_ids = 21600381), beta_blockers = list(ancestor_concept_ids = 21601664),
-  systemic_corticosteroids = list(ancestor_concept_ids = 21602722), lipid_modifying = list(ancestor_concept_ids = 21601853))
+EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), function(e) list(ancestor_concept_ids = concept_set_ids(e)))
 
 .bf_default_med_specs <- function() {
   stats::setNames(lapply(DEFAULT_MEDICATION_CONCEPTS, function(ids) list(ancestor_concept_ids = as.numeric(ids))),
@@ -100,20 +88,15 @@ EDERRI_MEDICATION_SPECS <- list(
   df
 }
 
-.bf_concept_map <- function(con, loincs, overrides) {
+.bf_concept_map <- function(con, loincs, overrides, sets = NULL) {
   rows <- list()
   for (nm in names(overrides)) for (i in overrides[[nm]]) rows[[length(rows) + 1L]] <- data.frame(name = nm, concept_id = as.numeric(i))
+  if (is.null(sets)) sets <- lapply(Filter(length, loincs), concept_set_from_codes)
+  sets <- sets[setdiff(names(sets), names(overrides))]
   has_concept <- nrow(DBI::dbGetQuery(con, "SELECT 1 FROM information_schema.tables WHERE table_name = 'concept'")) > 0
-  if (has_concept) {
-    codes <- do.call(rbind, lapply(setdiff(names(loincs), names(overrides)), function(n)
-      data.frame(name = n, code = as.character(unlist(loincs[[n]])), stringsAsFactors = FALSE)))
-    if (!is.null(codes) && nrow(codes)) {
-      duckdb::duckdb_register(con, "_bf_codes", codes)
-      on.exit(duckdb::duckdb_unregister(con, "_bf_codes"), add = TRUE)
-      got <- DBI::dbGetQuery(con, "SELECT DISTINCT k.name, CAST(c.concept_id AS DOUBLE) AS concept_id FROM _bf_codes k
-                                   JOIN concept c ON c.concept_code = k.code AND c.vocabulary_id = 'LOINC'")
-      if (nrow(got)) rows[[length(rows) + 1L]] <- got
-    }
+  if (has_concept && length(sets)) {
+    got <- resolve_concept_sets(con, sets, warn = FALSE)
+    if (nrow(got)) rows[[length(rows) + 1L]] <- got
   }
   if (!length(rows)) return(data.frame(name = character(), concept_id = numeric()))
   unique(do.call(rbind, rows))
@@ -292,7 +275,8 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
 #' @param sdoh_fallback `"indicator"` (default): when `ruca_crosswalk`, `sdi_table` or `sdi_cut_points` is missing, `include_sdoh = TRUE`
 #'   gives `sdi_quintile` / `ruca_category` = NA plus `sdoh_missing = 1` and a warning; `"raise"` keeps the error. No national cut points are bundled.
 #' @param address_table dated address history for `include_sdoh` (columns `person_id`, `zip5`, `address_start`, `address_end`,
-#'   `preferred`): `"auto"` (default) uses `person_address_history` when present, else `person.location_id`; or a table name (for
+#'   `preferred`): `"auto"` (default) uses the one non-empty dated address table ([resolve_address_table()]), else `person.location_id`
+#'   when it holds ZIPs, and stops otherwise; or a table name (for
 #'   example a study's own `ederri_address_history`); `NULL` for `person.location_id`.
 #' @param address_undated rank of an address with no start date (`undated` of `derive_geography_features()`).
 #' @param address_tie_break how `derive_geography_features()` resolves addresses that tie on every rule key (`tie_break`).
@@ -420,7 +404,7 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
 
   if (include_vitals) {
     vl <- if (!is.null(vital_loincs)) vital_loincs else BENCHMARK_VITAL_LOINCS
-    vmap <- .bf_concept_map(con, vl, vital_concept_ids)
+    vmap <- .bf_concept_map(con, vl, vital_concept_ids, if (is.null(vital_loincs)) load_concept_sets("vitals") else NULL)
     stats <- .bf_measurement_stats(con, cohort, vmap, lab_lookback_days, bounds, rescale)
     present <- intersect(names(vl), unique(vmap$name))
     skipped <- c(skipped, paste0("vital_", setdiff(names(vl), present)))
@@ -428,7 +412,9 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
   }
   if (include_labs) {
     ll <- if (!is.null(lab_loincs)) lab_loincs else BENCHMARK_LAB_LOINCS
-    lmap <- .bf_concept_map(con, ll, lab_concept_ids)
+    lab_sets <- if (is.null(lab_loincs)) load_concept_sets("labs") else lapply(Filter(length, ll), concept_set_from_codes)
+    lmap <- .bf_concept_map(con, ll, lab_concept_ids, lab_sets)
+    .cs_check_lab_coverage(con, lab_sets[setdiff(names(lab_sets), names(lab_concept_ids))], cohort, lab_lookback_days)
     stats <- .bf_measurement_stats(con, cohort, lmap, lab_lookback_days, bounds, rescale)
     present <- intersect(names(ll), unique(lmap$name))
     skipped <- c(skipped, paste0("lab_", setdiff(names(ll), present)))
@@ -484,9 +470,9 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
       stays <- data.frame(person_id = cohort$subject_id, stay_id = cohort$row_id, admit_date = cohort$cohort_start_date)
       geo <- derive_geography_features(con, ruca_crosswalk, sdi_table, sdi_cut_points, stays = stays, address_table = address_table,
                                         tie_break = address_tie_break, undated = address_undated)
-      if (all(is.na(geo$zip5))) warning("include_sdoh: no ZIP code was found for any stay, so sdi_quintile and ruca_category are all missing. ",
-                                        "The default address_table = 'auto' reads person_address_history, else person.location_id; pass ",
-                                        "address_table = the name of your dated address table.", call. = FALSE)
+      if (all(is.na(geo$zip5))) warning("include_sdoh: no ZIP code was found for any stay (address source: ", attr(geo, "address_table"),
+                                        "), so sdi_quintile and ruca_category are all missing. Pass address_table = the name of your ",
+                                        "dated address table.", call. = FALSE)
       geo <- geo[!duplicated(geo$stay_id), , drop = FALSE]
       idx <- match(cohort$row_id, geo$stay_id)
       add("sdoh", data.frame(sdi_quintile = geo$sdi_quintile[idx], ruca_category = geo$ruca_category[idx],

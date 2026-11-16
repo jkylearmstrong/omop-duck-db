@@ -1,0 +1,201 @@
+{
+  "name": "hemoglobin",
+  "domain": "labs",
+  "expand_from": [
+    "718-7"
+  ],
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "718-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3000963,
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "59260-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 40762351,
+          "CONCEPT_NAME": "Hemoglobin [Moles/volume] in Blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1091111,
+          "CONCEPT_CODE": "105040-0",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Mixed venous blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1091321,
+          "CONCEPT_CODE": "105274-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Venous blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3006239,
+          "CONCEPT_CODE": "14775-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Arterial blood by Oximetry",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3027484,
+          "CONCEPT_CODE": "20509-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3002173,
+          "CONCEPT_CODE": "30313-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3004119,
+          "CONCEPT_CODE": "30350-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3007302,
+          "CONCEPT_CODE": "30351-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3006184,
+          "CONCEPT_CODE": "30352-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 40758903,
+          "CONCEPT_CODE": "55782-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Blood by Oximetry",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46235391,
+          "CONCEPT_CODE": "76768-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Mixed venous blood by Oximetry",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46235392,
+          "CONCEPT_CODE": "76769-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Venous blood by Oximetry",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1617122,
+          "CONCEPT_CODE": "97550-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Central venous blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1617021,
+          "CONCEPT_CODE": "97555-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Central venous blood by Oximetry",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1616317,
+          "CONCEPT_CODE": "97556-5",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Hemoglobin [Mass/volume] in Capillary blood by Oximetry",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

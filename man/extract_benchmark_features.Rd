@@ -99,7 +99,8 @@ below; an explicit argument wins over the profile.}
 gives \code{sdi_quintile} / \code{ruca_category} = NA plus \code{sdoh_missing = 1} and a warning; \code{"raise"} keeps the error. No national cut points are bundled.}
 
 \item{address_table}{dated address history for \code{include_sdoh} (columns \code{person_id}, \code{zip5}, \code{address_start}, \code{address_end},
-\code{preferred}): \code{"auto"} (default) uses \code{person_address_history} when present, else \code{person.location_id}; or a table name (for
+\code{preferred}): \code{"auto"} (default) uses the one non-empty dated address table (\code{\link[=resolve_address_table]{resolve_address_table()}}), else \code{person.location_id}
+when it holds ZIPs, and stops otherwise; or a table name (for
 example a study's own \code{ederri_address_history}); \code{NULL} for \code{person.location_id}.}
 
 \item{address_undated}{rank of an address with no start date (\code{undated} of \code{derive_geography_features()}).}

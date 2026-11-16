@@ -1,0 +1,16 @@
+{
+  "name": "antihypertensives",
+  "domain": "medications_ederri",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 21600381
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

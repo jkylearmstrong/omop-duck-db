@@ -1,0 +1,257 @@
+{
+  "name": "bicarbonate",
+  "domain": "labs",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_CODE": "1963-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3016293,
+          "CONCEPT_NAME": "Bicarbonate [Moles/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "2028-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3015632,
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Serum or Plasma"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_CODE": "2026-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_ID": 3009609,
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Arterial blood"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3027273,
+          "CONCEPT_CODE": "14627-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bicarbonate [Moles/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3009293,
+          "CONCEPT_CODE": "16551-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3018225,
+          "CONCEPT_CODE": "19223-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3025817,
+          "CONCEPT_CODE": "19229-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bicarbonate [Moles/volume] in Mixed venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3006576,
+          "CONCEPT_CODE": "1959-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bicarbonate [Moles/volume] in Blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3008152,
+          "CONCEPT_CODE": "1960-4",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bicarbonate [Moles/volume] in Arterial blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3015235,
+          "CONCEPT_CODE": "1961-2",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bicarbonate [Moles/volume] in Capillary blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3010140,
+          "CONCEPT_CODE": "2027-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3014094,
+          "CONCEPT_CODE": "20565-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3031147,
+          "CONCEPT_CODE": "34728-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3037663,
+          "CONCEPT_CODE": "41647-9",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Arterial blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3049133,
+          "CONCEPT_CODE": "48391-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Venous blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 3038734,
+          "CONCEPT_CODE": "51781-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Capillary blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 40761029,
+          "CONCEPT_CODE": "57920-1",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Mixed venous blood by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 40761031,
+          "CONCEPT_CODE": "57922-7",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Serum or Plasma by calculation",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 46235079,
+          "CONCEPT_CODE": "77143-6",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Serum, Plasma or Blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1616794,
+          "CONCEPT_CODE": "97543-3",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Bicarbonate [Moles/volume] in Central venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      },
+      {
+        "concept": {
+          "CONCEPT_ID": 1617274,
+          "CONCEPT_CODE": "97545-8",
+          "VOCABULARY_ID": "LOINC",
+          "CONCEPT_NAME": "Carbon dioxide, total [Moles/volume] in Central venous blood",
+          "STANDARD_CONCEPT": "S"
+        },
+        "includeDescendants": false,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}

@@ -435,11 +435,12 @@ def _profile(con, spec: _Spec, fn: str, cohort_table, cohort_id, person_col, ind
     if source_and_standard and codes.ancestors:
         concept_ancestor, reason = _resolve_concept_ancestor(con)
         if concept_ancestor is None:
-            warnings.warn(
+            from omop_etl.data_gaps import DataGapWarning
+            warnings.warn(DataGapWarning(
                 f"{fn}(): source_and_standard=True but {reason}. Falling back to source-value (ICD prefix) matching "
                 "only; standard-concept (SNOMED descendant) matches are NOT included. Load or attach the vocabulary "
-                "(e.g. omop_connect()) or pass source_and_standard=False to silence this warning.",
-                UserWarning, stacklevel=3)
+                "(e.g. omop_connect()) or pass source_and_standard=False to silence this warning.", "vocabulary"),
+                stacklevel=3)
 
     sql = _build_sql(
         spec, codes, qualified=qualified, person=person, index_col=index_col, person_out=person_col,

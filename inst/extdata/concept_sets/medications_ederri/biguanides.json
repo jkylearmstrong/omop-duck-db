@@ -1,0 +1,16 @@
+{
+  "name": "biguanides",
+  "domain": "medications_ederri",
+  "expression": {
+    "items": [
+      {
+        "concept": {
+          "CONCEPT_ID": 21600745
+        },
+        "includeDescendants": true,
+        "includeMapped": false,
+        "isExcluded": false
+      }
+    ]
+  }
+}
