@@ -248,7 +248,7 @@ def _max_rel(d: pd.DataFrame) -> float | None:
 def _max_abs(d: pd.DataFrame, column_hint: str | None = None) -> float | None:
     best = None
     for r in d.itertuples(index=False):
-        if column_hint and column_hint not in str(r.column):
+        if column_hint and column_hint.lower() not in str(r.column).lower():
             continue
         for p, q in zip(_numbers(r.new), _numbers(r.old)):
             best = abs(p - q) if best is None else max(best, abs(p - q))

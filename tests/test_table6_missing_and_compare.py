@@ -251,4 +251,5 @@ def test_benchmark_suffix_stage_keyed_s3_and_s4_layout(tmp_path):
     assert a["15_same_letter_across_sheets"] and a["15_sheets_out_of_step"] == []
     s4a = a["9_per_sheet"]["Table S4 - All Tuning Grid"]
     assert s4a["cells_compared"] == 4 and s4a["differing_cells"] == 1 and s4a["columns_compared"] == ["auc_raw", "f1_raw"]
+    assert s4a["max_abs_auc_change"] == round(0.999 - 0.72, 4)  # "auc_raw" counts as an AUC column
     assert a["9_per_sheet"]["Table 3 - Tuning AUC vs F1"]["differing_cells"] == 0
