@@ -162,10 +162,12 @@ official tool for anything you publish.
   licence); until the licensed tool is run, CPT4 procedures map to
   concept 0. A few source fields (e.g. admission source) are not mapped
   yet.
-- **Not run live.** The BigQuery sync, Oracle cohort-SQL translation and
-  Oracle transfers are unit-tested only; the DGX Spark GPU path is
-  untested on the device. R behaviour on production-size data is less
-  field-tested than Python’s.
+- **Not run live.** The BigQuery sync and Oracle cohort-SQL translation
+  are unit-tested only. Oracle transfers (`to_sql` / `verify_transfer`)
+  and the DGX Spark image (`gpu-check`, `dgx-smoke`) have each been run
+  on one real system; `testing/tested-environments.md` says what those
+  runs show and what they do not. R behaviour on production-size data is
+  less field-tested than Python’s.
 
 See `NEWS.md` for changes and `vignette("status_and_roadmap")` for
 architecture notes and the R/Python parity table.

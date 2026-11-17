@@ -97,6 +97,7 @@ prints them; `omop_etl.STUDY_DECISIONS` and `omop_etl.STUDY_PRESETS` hold the sa
 | `attrition_mode` | `windowed`, `full_history` | `windowed` | `full_history` | CONSORT layout (Table S3). |
 | `consort_final_steps` | `True`, `False` | `True` | `False` | Table S3 ends with the window / one-stay and pinned-list steps, or with the last eligibility rule. |
 | `table6_increments` | `sd`, `clinical` | `sd` | `clinical` | Continuous Table 6 rows per 1 SD, or per 10 mmHg, 30 days, 5 mEq/L and so on (`CLINICAL_INCREMENTS`; a mapping `label -> (text, size)` gives your own). Same model: p-values and standardised betas do not change. |
+| `concept_sets` | `bundled`, `legacy_2026_11_11`, or an exact bundled version | `bundled` | `legacy_2026_11_11` | Lab and vital definitions. `legacy_2026_11_11` is the plain LOINC lists of 0.20.0 to 0.28.1 (no troponin I, lactate, pCO2 or pO2, no 0.29.0 code expansion), so a rerun compares with the delivered workbook without feature-definition changes. An exact version fails on a release that ships another. |
 
 Other choices with their own switch: `pinned_stays` (reuse the delivered stay-per-patient draw, or leave unset for a fresh random
 draw), `sites` and `site_labels` (the label mapping is supplied by the caller and never stored in the repository),

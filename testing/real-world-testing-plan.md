@@ -62,7 +62,7 @@ The live-db job runs the new tests green on Oracle Free (and XE 21c if added), t
 
 - `Dockerfile.dgx` builds on `nvcr.io/nvidia/pytorch:25.01-py3` for the DGX Spark (GB10, aarch64, sm_121). The file itself says to pin "the tag you have verified on the device"; nobody has.
 - No workflow builds it (`docker-release.yml` builds only the R image).
-- The build context is the **parent eDerri project**: it copies `omop-learn-repo/` and `pipeline/`, which are not in this repo, so it cannot build from a plain checkout.
+- ~~The build context is the parent eDerri project, so it cannot build from a plain checkout.~~ Fixed after 0.29.0: the repository is the build context; `omop-learn-repo/` and `pipeline/` are an optional named context (`--build-context ederri=<folder>`).
 - It has a build-time import check, plus `gpu-check` and `dgx-smoke` (`scripts/dgx_smoke_test.py --require-gpu`, which trains the study MLP on random data and requires leave-one-site-out AUROC above 0.6).
 
 ### Risks
@@ -82,7 +82,7 @@ The live-db job runs the new tests green on Oracle Free (and XE 21c if added), t
 
 ### What needs a person (on the Spark)
 
-1. Build from the parent folder: `docker build -f omop-duck-db/Dockerfile.dgx -t omop-duck-db:dgx .`
+1. Build from a clone of this repository: `docker build -f Dockerfile.dgx -t omop-duck-db:dgx .` (add `--build-context ederri=<folder with omop-learn-repo/ and pipeline/>` for step 4)
 2. `docker run --rm --gpus all omop-duck-db:dgx gpu-check`: expect the GB10 name and capability (12, 1).
 3. `docker run --rm --gpus all --ipc=host omop-duck-db:dgx dgx-smoke --rows 200000`: record the time, device and AUROCs.
 4. Run a few minutes of one real training job from `pipeline/` on a real tensors file, watching `nvidia-smi`.
