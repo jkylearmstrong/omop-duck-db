@@ -3,21 +3,33 @@
 # GPU image for deep models (SARD / multimodal transformer) on an NVIDIA DGX Spark (GB10 Grace-Blackwell, aarch64).
 # Python side only: omop-duck-db feature/tensor extraction + training. The R package image stays in ./Dockerfile.
 #
-# Build on the Spark itself, so the arm64 variant of the base image is pulled (see "Build context" below).
+# Build on the Spark itself, so the arm64 variant of the base image is pulled.
+# Build from a plain clone of this repository (the repository is the build context):
+#   docker build -f Dockerfile.dgx -t omop-duck-db:dgx .
+#
+# Optional extras from the parent eDERRI project (SARD / omop-learn and the training scripts in pipeline/) are not in this
+# repository. Add them with a named build context pointing at the folder that holds omop-learn-repo/ and pipeline/:
+#   docker build -f Dockerfile.dgx --build-context ederri=.. -t omop-duck-db:dgx .
+# Without it the image has empty /workspace/ederri/omop-learn-repo and /workspace/ederri/pipeline folders; mount them at run
+# time instead if you need them (-v <folder>/pipeline:/workspace/ederri/pipeline).
+#
 # Run:
 #   docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
 #       -v /workspace/ederri:/workspace/ederri omop-duck-db:dgx \
-#       python pipeline/train_clinical_deep_dgx.py --tensors-file /workspace/ederri/data/ederri_federated_tensors_track1.pt ...
-#
-# Build context: this Dockerfile lives in omop-duck-db/, but SARD (omop-learn) and the training scripts live in the
-# parent eDerri_data project. Build from the PARENT directory so all three are in the context:
-#   docker build -f omop-duck-db/Dockerfile.dgx -t omop-duck-db:dgx .
+#       python pipeline/train_clinical_deep_dgx.py --tensors-file /workspace/ederri/data/<tensors>.pt ...
 #
 # Base image: the NGC PyTorch container is the supported way to get a CUDA build of torch for GB10 (sm_121). Pin the tag
 # you have verified on the device; `nvidia-smi` and `python -c "import torch; print(torch.cuda.get_device_capability())"`
 # inside the container must both work before any long job. Do NOT pip-install torch over the NGC build.
+# BASE_IMAGE replaces the whole base (for example a CPU image with torch, to check the build without a GPU or NGC pull).
 ARG NGC_TAG=25.01-py3
-FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:${NGC_TAG}
+
+# Default for the optional eDERRI extras: empty folders. `--build-context ederri=<folder>` replaces this stage with that folder.
+FROM ${BASE_IMAGE} AS ederri
+RUN mkdir -p /omop-learn-repo /pipeline
+
+FROM ${BASE_IMAGE}
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -38,10 +50,10 @@ WORKDIR /workspace/ederri
 RUN python -c "import torch; print('NGC torch', torch.__version__)" \
     && python -c "import numpy, torch; open('/tmp/torch-constraint.txt','w').write('torch==' + torch.__version__.split('+')[0] + '\nnumpy==' + numpy.__version__ + '\n')"
 
-COPY omop-duck-db/pyproject.toml omop-duck-db/README.md /workspace/ederri/omop-duck-db/
-COPY omop-duck-db/python /workspace/ederri/omop-duck-db/python
-COPY omop-duck-db/inst /workspace/ederri/omop-duck-db/inst
-COPY omop-duck-db/scripts /workspace/ederri/omop-duck-db/scripts
+COPY pyproject.toml README.md /workspace/ederri/omop-duck-db/
+COPY python /workspace/ederri/omop-duck-db/python
+COPY inst /workspace/ederri/omop-duck-db/inst
+COPY scripts /workspace/ederri/omop-duck-db/scripts
 RUN pip install -c /tmp/torch-constraint.txt -e "/workspace/ederri/omop-duck-db[deep,oracle,bundle,zarr,sklearn,ml,plot,shap,delta,postgres-embedded]" \
     && pip install -c /tmp/torch-constraint.txt statsmodels openpyxl
 
@@ -54,13 +66,15 @@ RUN arch="$(dpkg --print-architecture)" \
     && ln -s "$(find /opt/quarto-${QUARTO_VERSION}/bin/tools -name pandoc -type f | head -n 1)" /usr/local/bin/pandoc \
     && quarto --version
 
-# omop-learn provides VisitTransformer / VisitClassifier used by pipeline/ederri_sard_deep_model.py (not on PyPI).
-COPY omop-learn-repo /workspace/ederri/omop-learn-repo
-RUN pip install -c /tmp/torch-constraint.txt --no-deps -e /workspace/ederri/omop-learn-repo || true
+# Optional (see the top): omop-learn provides VisitTransformer / VisitClassifier used by pipeline/ederri_sard_deep_model.py (not on
+# PyPI), and pipeline/ holds the training and extraction scripts. Both come from the `ederri` build context, empty by default.
+COPY --from=ederri /omop-learn-repo /workspace/ederri/omop-learn-repo
+COPY --from=ederri /pipeline /workspace/ederri/pipeline
+RUN if [ -f /workspace/ederri/omop-learn-repo/setup.py ] || [ -f /workspace/ederri/omop-learn-repo/pyproject.toml ]; then \
+        pip install -c /tmp/torch-constraint.txt --no-deps -e /workspace/ederri/omop-learn-repo \
+        || echo "WARNING: omop-learn did not install; SARD models will not import"; \
+    else echo "omop-learn not in the build context: SARD models need --build-context ederri=<folder> or a mount"; fi
 ENV PYTHONPATH=/workspace/ederri:/workspace/ederri/omop-learn-repo/src:/workspace/ederri/omop-duck-db/python
-
-# Training and extraction scripts
-COPY pipeline /workspace/ederri/pipeline
 
 # Build-time smoke test: imports only (no GPU is visible during `docker build`).
 RUN python - <<'EOF'

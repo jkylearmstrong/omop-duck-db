@@ -35,7 +35,9 @@ PM = "±"
 MANUSCRIPT_LABS = [(("lab_albumin",), "Albumin"), (("lab_alt",), "ALT"), (("lab_anion_gap",), "Anion gap"), (("lab_ast",), "AST"),
                    (("lab_bicarbonate",), "Bicarbonate (CO2)"), (("lab_bun",), "BUN"), (("lab_creatinine",), "Creatinine"),
                    (("lab_egfr",), "eGFR (2021)"), (("lab_glucose",), "Glucose"), (("lab_hba1c",), "HbA1c"), (("lab_hematocrit",), "Hematocrit"),
-                   (("lab_ldl",), "LDL"), (("lab_wbc",), "Leukocytes (WBC)"), (("lab_sodium",), "Sodium")]
+                   (("lab_lactate",), "Lactate"), (("lab_ldl",), "LDL"), (("lab_wbc",), "Leukocytes (WBC)"), (("lab_pco2",), "pCO2"),
+                   (("lab_po2",), "pO2"), (("lab_sodium",), "Sodium"), (("lab_troponin_i",), "Troponin I")]
+#: A lab whose column is absent (for example the four 0.29.0 labs under the ``legacy_2026_11_11`` concept sets) gets no row.
 _MEDS = [("med_insulins", "Medication: Insulins"), ("med_biguanides", "Medication: Biguanides (Metformin)"),
          ("med_sulfonylureas", "Medication: Sulfonylureas"), ("med_lipid_modifying", "Medication: Lipid Modifying Agents (Statins)"),
          ("med_antihypertensives", "Medication: Antihypertensives"), ("med_raas", "Medication: RAAS Inhibitors (ACEi/ARB)"),
@@ -270,7 +272,9 @@ CLINICAL_INCREMENTS: dict[str, tuple[str, float]] = {
     "Diastolic Blood Pressure (mmHg)": ("10 mmHg", 10), "Albumin": ("1 g/dL", 1), "ALT": ("10 U/L", 10), "Anion gap": ("1 mEq/L", 1),
     "AST": ("10 U/L", 10), "Bicarbonate (CO2)": ("5 mEq/L", 5), "BUN": ("10 mg/dL", 10), "Creatinine": ("1 mg/dL", 1),
     "eGFR (2021)": ("10 mL/min/1.73 m²", 10), "Glucose": ("50 mg/dL", 50), "HbA1c": ("1 percentage point", 1),
-    "Hematocrit": ("5 percentage points", 5), "LDL": ("30 mg/dL", 30), "Leukocytes (WBC)": ("5 x10^9/L", 5), "Sodium": ("5 mEq/L", 5)}
+    "Hematocrit": ("5 percentage points", 5), "LDL": ("30 mg/dL", 30), "Leukocytes (WBC)": ("5 x10^9/L", 5), "Sodium": ("5 mEq/L", 5),
+    # 0.29.0 labs. Troponin I stays per 1 SD: conventional (ng/mL) and high-sensitivity (ng/L) assays differ by 1000x in unit.
+    "Lactate": ("1 mmol/L", 1), "pCO2": ("10 mmHg", 10), "pO2": ("10 mmHg", 10)}
 
 
 def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d", frame: pd.DataFrame | None = None,

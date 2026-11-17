@@ -35,7 +35,7 @@ import pandas as pd
 
 __all__ = ["CONCEPT_SET_VERSION", "CONCEPT_SET_DOMAINS", "concept_set_dir", "list_concept_sets", "load_concept_set",
            "load_concept_sets", "concept_set_manifest", "concept_set_codes", "concept_set_ids", "codes_by_name", "ancestor_specs", "concept_set_from_codes", "concept_set_from_ids", "resolve_concept_set",
-           "resolve_concept_sets", "concept_set_fingerprint", "expand_loinc_concept_set", "EXPANSION_MODES", "loinc_coverage", "write_concept_set", "LOINC_BLOOD_SYSTEM"]
+           "resolve_concept_sets", "concept_set_fingerprint", "legacy_feature_codes", "concept_set_version_fingerprint", "LEGACY_CONCEPT_SETS", "expand_loinc_concept_set", "EXPANSION_MODES", "loinc_coverage", "write_concept_set", "LOINC_BLOOD_SYSTEM"]
 
 
 #: Domains with bundled sets: ``labs`` and ``vitals`` (LOINC), ``medications_ederri`` and ``medications`` (ATC / RxNorm).
@@ -409,3 +409,43 @@ def concept_set_fingerprint() -> dict[str, str]:
 
 #: Version of the bundled concept sets (``manifest.json`` ``version``; bump it whenever a file changes).
 CONCEPT_SET_VERSION: str = concept_set_manifest()["version"]
+
+
+#: Name of the lab and vital definitions in force before the bundled concept sets: the plain LOINC lists of releases 0.20.0 to 0.28.1
+#: (unchanged across them), which built the workbook delivered on 2026-11-11. No vocabulary expansion, no troponin I, lactate, pCO2
+#: or pO2. ``run_study(concept_sets=LEGACY_CONCEPT_SETS)`` (and the ``delivered_2026_11_11`` preset) uses them.
+LEGACY_CONCEPT_SETS: str = "legacy_2026_11_11"
+
+_LEGACY_CODES: dict[str, dict[str, list[str]]] = {
+    "labs": {
+        "bun": ["3094-0", "6299-2"], "creatinine": ["2160-0", "38483-4"], "sodium": ["2951-2", "2947-0"],
+        "potassium": ["2823-3", "6298-4"], "chloride": ["2075-0"], "bicarbonate": ["1963-8", "2028-9", "2026-3"],
+        "glucose": ["2345-7", "2339-0", "41653-7"], "calcium": ["17861-6"], "albumin": ["1751-7", "2862-1"],
+        "bilirubin_total": ["1975-2"], "ast": ["1920-8", "30239-8"], "alt": ["1742-6", "1743-4", "1744-2"],
+        "wbc": ["6690-2", "26464-8"], "hemoglobin": ["718-7", "59260-0"], "platelets": ["777-3", "26515-7"],
+        "hba1c": ["4548-4", "17856-6", "17855-8", "59261-8"], "hematocrit": ["20570-8", "4544-3", "4545-0"],
+        "alkaline_phosphatase": ["6768-6"], "ldl": ["13457-7", "2089-1", "18262-6"], "anion_gap": ["33037-3", "41276-7", "1863-0"],
+    },
+    "vitals": {
+        "bmi": ["39156-5"], "systolic_bp": ["8480-6"], "diastolic_bp": ["8462-4"], "heart_rate": ["8867-4"],
+        "respiratory_rate": ["9279-1"], "body_temperature": ["8310-5"], "oxygen_saturation": ["2708-6", "59408-5"],
+    },
+}
+
+
+def legacy_feature_codes() -> dict[str, dict[str, list[str]]]:
+    """``{"labs": {name: [LOINC, ...]}, "vitals": {...}}`` of :data:`LEGACY_CONCEPT_SETS` (a copy; the lists are frozen)."""
+    return {d: {n: list(c) for n, c in v.items()} for d, v in _LEGACY_CODES.items()}
+
+
+def concept_set_version_fingerprint(version: str = "bundled") -> dict[str, str]:
+    """:func:`concept_set_fingerprint` for ``"bundled"`` (or the bundled version string); for :data:`LEGACY_CONCEPT_SETS` the
+    ``{"version", "sha256"}`` of the frozen LOINC lists. Any other version raises: it is not in this release."""
+    import hashlib
+
+    if version == LEGACY_CONCEPT_SETS:
+        return {"version": LEGACY_CONCEPT_SETS, "sha256": hashlib.sha256(json.dumps(_LEGACY_CODES, sort_keys=True).encode()).hexdigest()}
+    if version in ("bundled", CONCEPT_SET_VERSION):
+        return concept_set_fingerprint()
+    raise ValueError(f"concept-set version {version!r} is not in this release (bundled: {CONCEPT_SET_VERSION!r}, "
+                     f"also available: {LEGACY_CONCEPT_SETS!r}); install the omop-duck-db release that ships it.")
