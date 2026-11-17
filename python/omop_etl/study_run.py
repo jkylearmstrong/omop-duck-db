@@ -49,14 +49,18 @@ STUDY_DECISIONS: dict[str, dict[str, Any]] = {
                                      "as in the delivered workbook (False)."},
     "table6_increments": {"options": ("sd", "clinical"),
                           "about": "Continuous Table 6 rows per 1 SD, or per clinical unit (10 mmHg, 30 days, ...) as delivered. Same model; only OR and CI are rescaled."},
+    "table6_missing": {"options": ("indicator", "median"),
+                       "about": "How a continuous Table 6 measure with missing values enters the model: 'indicator' (a 'not measured' term next to it, "
+                                "the measure's OR estimated from the stays where it was measured; right when a lab is measured only when ordered) or "
+                                "'median' (median imputation only, as delivered; biases the OR of a mostly-unmeasured lab towards 1)."},
 }
 STUDY_PRESETS: dict[str, dict[str, Any]] = {
     "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "deterministic", "sdi_missing_term": True, "table5": "manuscript", "attrition_mode": "windowed", "table6_increments": "sd", "age_method": "completed_years",
-                "concept_sets": "bundled"},
+                "concept_sets": "bundled", "table6_missing": "indicator"},
     "delivered_2026_11_11": {"consort_final_steps": False, "address_undated": "first", "address_tie_break": "first_listed", "sdi_missing_term": False, "table5": "manuscript", "attrition_mode": "full_history",
                              "table6_increments": "clinical", "age_method": "completed_years",
                              # pinned: a rerun on a later release must not mix feature-definition changes into the comparison with Nov 11
-                             "concept_sets": LEGACY_CONCEPT_SETS},
+                             "concept_sets": LEGACY_CONCEPT_SETS, "table6_missing": "median"},
 }
 
 
@@ -423,7 +427,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               reuse_features: bool = False, compare_to: str | Path | None = None, prefix: str = "Study", random_state: int = 42,
               min_cell: int | None = 11, attrition_mode: str | None = None, table5: str | None = None, sdi_missing_term: bool | None = None,
               address_tie_break: str | None = None, address_undated: str | None = None, table6_increments: str | None = None, consort_final_steps: bool | None = None,
-              age_method: str | None = None, concept_sets: str | None = None,
+              age_method: str | None = None, concept_sets: str | None = None, table6_missing: str | None = None,
               sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package",
               private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
@@ -457,7 +461,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     manuscript files are not moved into ``out_dir``.
     ``address_tie_break``: see :func:`omop_etl.geography.derive_geography_features`. ``preset`` names a set of the decisions above
     (:data:`STUDY_PRESETS`: ``"package"`` or ``"delivered_2026_11_11"``); any of ``attrition_mode``, ``table5``, ``sdi_missing_term``,
-    ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps``, ``age_method``, ``concept_sets`` given (not None) overrides the preset. ``concept_sets`` picks the lab and vital definitions (see :data:`STUDY_DECISIONS`); the ``delivered_2026_11_11`` preset pins the pre-0.29.0 LOINC lists, so a rerun on a later release compares only cohort and modelling changes with the delivered workbook. The run record names the version used. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage).
+    ``address_tie_break``, ``address_undated``, ``table6_increments``, ``consort_final_steps``, ``age_method``, ``concept_sets``, ``table6_missing`` given (not None) overrides the preset. ``concept_sets`` picks the lab and vital definitions (see :data:`STUDY_DECISIONS`); the ``delivered_2026_11_11`` preset pins the pre-0.29.0 LOINC lists, so a rerun on a later release compares only cohort and modelling changes with the delivered workbook. The run record names the version used. :data:`STUDY_DECISIONS` lists the options. The result has ``timings`` (seconds per stage).
     **Data gaps fail the run.** Each site is checked as soon as it is built (:mod:`omop_etl.data_gaps`): no usable address table,
     a feature group missing (or all zero) for at least ``data_gap_threshold`` of the stays (SDI / RUCA included), a group that
     could not be computed, no reachable vocabulary, pinned stays not found, a site with no stays. Any of these raises
@@ -472,7 +476,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
 
     dec = resolve_decisions(preset, attrition_mode=attrition_mode, table5=table5, sdi_missing_term=sdi_missing_term,
                             address_tie_break=address_tie_break, address_undated=address_undated, table6_increments=table6_increments,
-                            consort_final_steps=consort_final_steps, age_method=age_method, concept_sets=concept_sets)
+                            consort_final_steps=consort_final_steps, age_method=age_method, concept_sets=concept_sets,
+                            table6_missing=table6_missing)
     attrition_mode, table5, sdi_missing_term, address_tie_break = (dec["attrition_mode"], dec["table5"], dec["sdi_missing_term"], dec["address_tie_break"])
     undated = dec["address_undated"]
     c_params = dict(cohort_params or PROTOCOL_COHORT_PARAMS)
@@ -626,7 +631,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     timings["tables_figures"] = round(time.time() - t_tab, 1)
     wb = manuscript_workbook(pooled, res["tables"], out / f"{prefix}_Manuscript_Tables.xlsx", attrition=attrition, site_labels=labels, min_cell=min_cell,
                              title=f"{prefix} manuscript tables", table5=table5, sdi_missing_term=sdi_missing_term,
-                             table6_increments=dec["table6_increments"], sheet_site_labels=sheet_site_labels)
+                             table6_increments=dec["table6_increments"], table6_missing=dec["table6_missing"], sheet_site_labels=sheet_site_labels)
     comparison = None
     if compare_to is not None:
         summary, diffs = compare_workbooks(wb["path"], compare_to)

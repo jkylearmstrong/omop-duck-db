@@ -278,11 +278,21 @@ CLINICAL_INCREMENTS: dict[str, tuple[str, float]] = {
 
 
 def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d", frame: pd.DataFrame | None = None,
-                          sdi_missing_term: bool = True, increments: str | Mapping[str, tuple[str, float]] = "sd") -> pd.DataFrame:
+                          sdi_missing_term: bool = True, increments: str | Mapping[str, tuple[str, float]] = "sd",
+                          missing: str = "indicator", min_missing: int = 11) -> pd.DataFrame:
     """Table 6: one multivariable logistic regression, rows grouped as the manuscript prints them. Flags enter as 0/1 (OR for yes vs
     no, reference categories: age 18-44, female, White, non-Hispanic, SDI quintile 1, metropolitan, discharged home, never tobacco,
-    BMI 18.5-24.9); continuous measures are standardised (OR per 1 SD) and missing values median imputed. ``Standardized Beta`` is
-    the coefficient times the predictor's SD (unchanged by ``increments``).
+    BMI 18.5-24.9); continuous measures are standardised (OR per 1 SD). ``Standardized Beta`` is the coefficient times the predictor's
+    SD (unchanged by ``increments``).
+
+    ``missing``: how a continuous measure with missing values enters. ``"indicator"`` (default) adds a "not measured" (labs, vitals) or
+    "missing" (other measures) 0/1 term next to it, and fills the missing values with the mean of the measured stays, so the measure's
+    OR is estimated from the stays where it was measured, per 1 SD of those stays, and the indicator carries the difference of the
+    unmeasured stays. In EHR data a lab is measured because a clinician ordered it, so whether it was measured is itself a predictor;
+    median imputation without an indicator treats every unmeasured stay as a typical measured one, which pulls the OR towards 1 for a
+    lab measured in a minority of stays and moves the other terms. A measure with fewer than ``min_missing`` missing (or measured)
+    stays is median imputed without an indicator, to keep small cells out of the table. ``"median"``: median imputation only, the rule
+    of the workbook delivered on 2026-11-11.
 
     ``increments``: ``"sd"`` (default) reports continuous measures per 1 SD; ``"clinical"`` reports them per the clinical unit of the
     delivered workbook (:data:`CLINICAL_INCREMENTS`, for example 10 mmHg or 30 days); a mapping ``label -> (text, size)`` sets
@@ -290,6 +300,8 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     if isinstance(increments, str) and increments not in ("sd", "clinical"):
         raise ValueError("increments must be 'sd', 'clinical' or a mapping.")
     inc_map = CLINICAL_INCREMENTS if increments == "clinical" else ({} if increments == "sd" else dict(increments))
+    if missing not in ("indicator", "median"):
+        raise ValueError("missing must be 'indicator' or 'median'.")
     m = frame if frame is not None else manuscript_frame(df)
     y = m[label_col].astype(float).to_numpy()
     terms: list[tuple[str, str, str, pd.Series]] = []  # group, label, increment, values
@@ -298,9 +310,18 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
         if mask is not None:
             terms.append((group, label, "Yes vs. no", mask.astype(float)))
 
+    with_indicator: set[str] = set()
+
     def num(group: str, label: str, s: pd.Series | None):
-        if s is not None:
-            terms.append((group, label, "Per 1 SD", pd.to_numeric(s, errors="coerce")))
+        if s is None:
+            return
+        s = pd.to_numeric(s, errors="coerce")
+        terms.append((group, label, "Per 1 SD", s))
+        n_miss = int(s.isna().sum())
+        if missing == "indicator" and n_miss >= max(min_missing, 1) and len(s) - n_miss >= max(min_missing, 1):
+            with_indicator.add(label)
+            word = "not measured" if group in ("Vital Signs", "Laboratory values") else "missing"
+            terms.append((group, f"{label}: {word}", "Yes vs. no", s.isna().astype(float)))
 
     g = "Demographics"
     for lv in _AGE[1:]:
@@ -343,12 +364,23 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
 
     cols = {}
     sd: dict[str, float] = {}
+    terms_by_label = {label: s for _, label, _, s in terms}
     for _, label, inc, s in terms:
-        s = s.fillna(s.median()) if s.isna().any() else s
+        if label in with_indicator:  # measured stays set the scale; unmeasured ones sit at their mean (0 after standardising)
+            s = s.fillna(s.mean())
+        elif s.isna().any():
+            s = s.fillna(s.median())
         if s.nunique() < 2:
             continue
-        sd[label] = float(s.std(ddof=0))
-        cols[label] = ((s - s.mean()) / s.std(ddof=0)).to_numpy() if inc == "Per 1 SD" else s.to_numpy(float)
+        if label in with_indicator:
+            v = s[terms_by_label[label].notna()]
+            mu, sdv = float(v.mean()), float(v.std(ddof=0))
+        else:
+            mu, sdv = float(s.mean()), float(s.std(ddof=0))
+        if inc == "Per 1 SD" and not sdv > 0:
+            continue
+        sd[label] = sdv
+        cols[label] = ((s - mu) / sdv).to_numpy() if inc == "Per 1 SD" else s.to_numpy(float)
     A = np.column_stack([np.ones(len(y))] + list(cols.values()))
     beta, se = _newton_logit(A, y)
     from scipy import stats
@@ -380,13 +412,13 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
                         site_labels: Mapping[str, str] | None = None, label_col: str = "readmitted_30d", min_cell: int | None = 11,
                         title: str = "Manuscript tables", table5: str = "manuscript", sdi_missing_term: bool = True,
                         table6_increments: str | Mapping[str, tuple[str, float]] = "sd",
-                        sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, Any]:
+                        sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, table6_missing: str = "indicator") -> dict[str, Any]:
     """Builds the manuscript sheets from the ``tables`` returned by :func:`omop_etl.study_report.build_study_tables` and the feature table
     ``df``, and writes one workbook. ``attrition`` is the per-site attrition (``site``, ``step_name``, ``subjects_retained``) for
     Table S3. ``table5``: ``"manuscript"`` (default; AUC-ROC with CI, uncalibrated Brier, sensitivity and specificity at the 0.5 threshold of
     the balanced-trained model, as the manuscript reports) or ``"calibrated"`` (prior-shift calibrated Brier, top-10% sensitivity and PPV).
     ``sdi_missing_term``: keep an "SDI Quintile: Missing / Unknown" term in Table 6 (default; ``False`` leaves it out, as the manuscript did,
-    so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
+    so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``table6_missing``: ``"indicator"`` or ``"median"``, the ``missing`` of :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
     m = manuscript_frame(df)
     n = len(df)
     sheets: dict[str, tuple[str, pd.DataFrame]] = {}
@@ -418,7 +450,8 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
         lo.loc[len(lo)] = [x for part in mean_row for x in (part if isinstance(part, tuple) else (part,))]
         sheets["Table 5 - Cross-Site LOSO"] = (f"Table 5: Harmonized Leave-One-Site-Out (LOSO) Cross-Site External Validation Across {len(t)} Health Systems", lo)
     sheets["Table 6 - Multivariable LR"] = ("Table 6: Multivariable Logistic Regression Independent Risk Factors for 30-Day Readmission",
-                                           manuscript_regression(df, label_col=label_col, frame=m, sdi_missing_term=sdi_missing_term, increments=table6_increments))
+                                           manuscript_regression(df, label_col=label_col, frame=m, sdi_missing_term=sdi_missing_term, increments=table6_increments,
+                                                                 missing=table6_missing, min_missing=min_cell or 11))
     if "LOS_Distribution_By_Site" in tables:
         s1 = tables["LOS_Distribution_By_Site"].copy()
         if "Table S1" in (sheet_site_labels or {}):
@@ -443,17 +476,28 @@ def _numbers(v: Any) -> list[float]:
         return []
     if isinstance(v, (int, float, np.number)):
         return [float(v)]
-    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", str(v).replace(",", ""))]
+    # a minus sign counts only where it cannot be a range hyphen ("0.728-0.735" is two positive numbers, "OR -0.5" is negative)
+    return [float(x) for x in re.findall(r"(?<![\d.])-?\d+(?:\.\d+)?|\d+(?:\.\d+)?", str(v).replace(",", "").replace("\u2212", "-"))]
+
+
+def _cell_text(v: Any, digits: bool = True) -> str:
+    """A cell as text for an exact comparison; ``digits=False`` blanks the numbers (so only the words are compared)."""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return ""
+    t = re.sub(r"\s+", " ", str(v)).strip()
+    return t if digits else re.sub(r"-?\d+(?:\.\d+)?", "#", t.replace(",", ""))
 
 
 def compare_workbooks(new: str | Path, old: str | Path, *, key_columns: Mapping[str, int] | None = None, atol: float = 0.01,
-                      rtol: float = 0.02, header_row: int = 2) -> tuple[pd.DataFrame, pd.DataFrame]:
+                      rtol: float = 0.02, header_row: int = 2, text: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Compares two workbooks in the layout of :func:`manuscript_workbook` (title row, blank row, header row, then the table).
 
     Sheets are paired by name; rows by their first ``key_columns[sheet]`` columns (default 1; a repeated key is numbered); cells by the
     numbers they contain (``"0.731 (0.728-0.735)"`` is three numbers). A number differs when it is off by more than both ``atol`` and
-    ``rtol`` of the old value. Returns ``(summary, differences)``: per sheet the rows only in one workbook, the cells compared and
-    the cells that differ; and every differing cell."""
+    ``rtol`` of the old value; ``atol=0, rtol=0`` lists every number that moved, the last digit included. ``text=True`` also lists
+    cells whose numbers agree but whose text differs (a renamed model, a changed label) and cells with no number. Returns
+    ``(summary, differences)``: per sheet the rows only in one workbook, the cells compared and the cells that differ; and every
+    differing cell."""
     kc = dict(key_columns or {})
     kc.setdefault("Table 3 - Tuning AUC vs F1", 2)
     kc.setdefault("Table S4 - All Tuning Grid", 2)
@@ -482,11 +526,14 @@ def compare_workbooks(new: str | Path, old: str | Path, *, key_columns: Mapping[
         cells = differ = 0
         for k in common:
             for c in cols:
-                x, y = _numbers(A.at[k, c]), _numbers(B.at[k, c])
-                if not x and not y:
+                va, vb = A.at[k, c], B.at[k, c]
+                x, y = _numbers(va), _numbers(vb)
+                if not x and not y and not text:
                     continue
                 cells += 1
                 bad = len(x) != len(y) or any(abs(p - q) > atol and abs(p - q) > rtol * abs(q) for p, q in zip(x, y))
+                if not bad and text and _cell_text(va) != _cell_text(vb) and not (x and y and _cell_text(va, digits=False) == _cell_text(vb, digits=False)):
+                    bad = True
                 if bad:
                     differ += 1
                     diffs.append({"sheet": sheet, "row": k, "column": c, "new": A.at[k, c], "old": B.at[k, c]})
@@ -503,8 +550,10 @@ def workbook_deltas(new: str | Path, old: str | Path, **kw: Any) -> tuple[pd.Dat
 
     ``cells``: every differing cell of :func:`compare_workbooks` (same tolerances; pass ``atol``, ``rtol``, ``key_columns`` through
     ``kw``) with ``new_value`` / ``old_value`` (the first number in the cell), ``delta`` (new - old), ``rel_delta`` (delta / |old|) and
+    ``max_abs_delta`` (the largest change of any number in the cell, so a CI bound that moved shows even when the estimate did not) and
     ``kind`` (``"numeric"``, ``"text"`` for labels, ``"shape"`` when the cells hold a different count of numbers), largest ``|rel_delta|``
-    first. ``rows``: the rows present in only one workbook (``side`` is ``"only_new"`` or ``"only_old"``), which is where an extra
+    first. For an exact list of everything that moved, pass ``atol=0, rtol=0, text=True`` (what ``scripts/compare_study_deltas.py``
+    does unless ``--tolerant``). ``rows``: the rows present in only one workbook (``side`` is ``"only_new"`` or ``"only_old"``), which is where an extra
     attrition step or a missing model term shows up."""
     summary, diffs = compare_workbooks(new, old, **kw)
     rows_out: list[dict[str, Any]] = []
@@ -514,13 +563,14 @@ def workbook_deltas(new: str | Path, old: str | Path, **kw: Any) -> tuple[pd.Dat
             kind, d = "numeric", x[0] - y[0]
             rel = d / abs(y[0]) if y[0] else float("nan")
             rows_out.append({"sheet": r.sheet, "row": r.row, "column": r.column, "kind": kind, "new_value": x[0], "old_value": y[0],
-                             "delta": d, "rel_delta": rel, "new": r.new, "old": r.old})
+                             "delta": d, "rel_delta": rel, "max_abs_delta": max(abs(p - q) for p, q in zip(x, y)), "new": r.new, "old": r.old})
         else:
             rows_out.append({"sheet": r.sheet, "row": r.row, "column": r.column, "kind": "shape" if (x or y) else "text", "new_value": None,
-                             "old_value": None, "delta": None, "rel_delta": None, "new": r.new, "old": r.old})
-    cells = pd.DataFrame(rows_out, columns=["sheet", "row", "column", "kind", "new_value", "old_value", "delta", "rel_delta", "new", "old"])
+                             "old_value": None, "delta": None, "rel_delta": None, "max_abs_delta": None, "new": r.new, "old": r.old})
+    cells = pd.DataFrame(rows_out, columns=["sheet", "row", "column", "kind", "new_value", "old_value", "delta", "rel_delta", "max_abs_delta", "new", "old"])
     if len(cells):
-        cells = cells.assign(_m=cells["rel_delta"].abs().fillna(-1)).sort_values("_m", ascending=False).drop(columns="_m").reset_index(drop=True)
+        cells = (cells.assign(_m=cells["rel_delta"].abs().fillna(-1), _n=cells["max_abs_delta"].fillna(-1))
+                 .sort_values(["_m", "_n"], ascending=False, kind="stable").drop(columns=["_m", "_n"]).reset_index(drop=True))
     kc = dict(kw.get("key_columns") or {})
     for name in ("Table 3 - Tuning AUC vs F1", "Table S4 - All Tuning Grid", "Table S3 - CONSORT Attrition"):
         kc.setdefault(name, 2)
@@ -544,12 +594,17 @@ def workbook_deltas(new: str | Path, old: str | Path, **kw: Any) -> tuple[pd.Dat
 
 
 def delta_summary(cells: pd.DataFrame) -> pd.DataFrame:
-    """Per sheet: how many cells moved, how many are numeric, and the median and largest relative change (from :func:`workbook_deltas`)."""
+    """Per sheet: how many cells moved, how many are numeric, the median and largest relative change of the cell's first number, and
+    the largest absolute change of any number in a cell (``max_abs_delta``: a CI bound or a 4th-decimal AUC shows here) (from
+    :func:`workbook_deltas`)."""
     if cells.empty:
-        return pd.DataFrame(columns=["sheet", "cells", "numeric", "median_abs_rel", "max_abs_rel"])
+        return pd.DataFrame(columns=["sheet", "cells", "numeric", "median_abs_rel", "max_abs_rel", "max_abs_delta"])
+    if "max_abs_delta" not in cells:
+        cells = cells.assign(max_abs_delta=cells["delta"].abs())
     g = cells.assign(a=cells["rel_delta"].abs()).groupby("sheet", sort=False)
     return pd.DataFrame({"cells": g.size(), "numeric": g["kind"].apply(lambda s: int((s == "numeric").sum())),
-                         "median_abs_rel": g["a"].median().round(4), "max_abs_rel": g["a"].max().round(4)}).reset_index()
+                         "median_abs_rel": g["a"].median().round(4), "max_abs_rel": g["a"].max().round(4),
+                         "max_abs_delta": g["max_abs_delta"].max().round(4)}).reset_index()
 
 
 #: What "similar to the delivered manuscript" means, as checks a run must pass. These are proposals to be agreed with the study

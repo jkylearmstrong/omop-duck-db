@@ -47,6 +47,13 @@ def parse_args(args=None):
         "--fail-on-diff", action="store_true",
         help="Exit with non-zero status if any cell differences are detected.",
     )
+    p.add_argument(
+        "--tolerant", action="store_true",
+        help="Ignore number changes within --atol and --rtol and text-only changes (the default lists every cell that differs in any way, "
+             "the last digit of a CI bound included).",
+    )
+    p.add_argument("--atol", type=float, default=0.01, help="With --tolerant: absolute tolerance per number.")
+    p.add_argument("--rtol", type=float, default=0.02, help="With --tolerant: relative tolerance per number.")
     return p.parse_args(args)
 
 
@@ -61,7 +68,12 @@ def main(argv=None):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Comparing workbooks:\n  New:      {a.new}\n  Baseline: {a.baseline}")
-    cells, rows = workbook_deltas(a.new, a.baseline)
+    if a.tolerant:
+        cells, rows = workbook_deltas(a.new, a.baseline, atol=a.atol, rtol=a.rtol)
+        print(f"Mode: tolerant (atol {a.atol}, rtol {a.rtol}); smaller changes and text-only changes are not listed.")
+    else:
+        cells, rows = workbook_deltas(a.new, a.baseline, atol=0.0, rtol=0.0, text=True)
+        print("Mode: exact (every cell that differs in any number or in its text).")
 
     deltas_path = out_dir / f"{a.prefix}_Deltas.csv"
     delta_rows_path = out_dir / f"{a.prefix}_Delta_Rows.csv"
@@ -86,6 +98,7 @@ def main(argv=None):
             f"- **Baseline Workbook**: `{a.baseline.name}`",
             f"- **Total Differing Cells**: {len(cells):,}",
             f"- **Total Differing Rows**: {len(rows):,}",
+            f"- **Mode**: {'tolerant (atol ' + str(a.atol) + ', rtol ' + str(a.rtol) + ')' if a.tolerant else 'exact'}",
             "",
             "## Sheet-Level Summary",
             "",

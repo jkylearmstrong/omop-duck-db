@@ -55,6 +55,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-consort-final-steps", dest="consort_final_steps", action="store_false", help="Table S3 ends with the last eligibility rule (as delivered)")
     p.add_argument("--s1-s3-labels", nargs="*", help="labels for Tables S1 and S3 only, same order as --sites (the delivered workbook uses a different order than Table 5)")
     p.add_argument("--table6-increments", choices=["sd", "clinical"], help="continuous Table 6 rows per 1 SD or per clinical unit")
+    p.add_argument("--table6-missing", choices=["indicator", "median"],
+                   help="continuous Table 6 measures with missing values: a 'not measured' term next to each (indicator, the package preset) or median imputation only (median, as delivered)")
     p.add_argument("--tie-break", choices=["deterministic", "highest_zip", "ambiguous_missing", "arbitrary", "first_listed"])
     p.add_argument("--address-undated", choices=["last", "first"], help="rank of an address with no start date")
     p.add_argument("--concept-sets", choices=list(STUDY_DECISIONS["concept_sets"]["options"]),
@@ -95,7 +97,7 @@ def main(argv=None) -> int:
                       address_table=None if a.address_table == "person_location" else a.address_table, n_bootstraps=a.bootstraps,
                       loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix,
                       attrition_mode=a.attrition, table5=a.table5, sdi_missing_term=a.sdi_missing_term, address_tie_break=a.tie_break, address_undated=a.address_undated,
-                      table6_increments=a.table6_increments, consort_final_steps=a.consort_final_steps, age_method=a.age_method, concept_sets=a.concept_sets,
+                      table6_increments=a.table6_increments, consort_final_steps=a.consort_final_steps, age_method=a.age_method, concept_sets=a.concept_sets, table6_missing=a.table6_missing,
                       sheet_site_labels=({"Table S1": dict(zip(labels.values(), a.s1_s3_labels)), "Table S3": dict(zip(labels.values(), a.s1_s3_labels))}
                                          if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset,
                       private_dir=a.private_dir, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
