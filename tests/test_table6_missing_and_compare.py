@@ -152,3 +152,68 @@ def test_quoted_numbers_changed_counts_whole_tokens():
     pages = ["AUC 0.731 (95% CI 0.728 to 0.735) in 225,939 patients", "no change 0.7311 here", "again 0.731."]
     q = quoted_numbers_changed(pages, diffs)
     assert q == {"count": 5, "pages": [1, 3], "distinct_numbers": 4}
+
+
+def _full_workbook(path: Path, labels: dict[str, str], auc_hi: float = 0.735) -> Path:
+    df = make_features(n=900, seed=4)
+    sites = ["s1", "s2", "s3"]
+    n = {"s1": 400, "s2": 300, "s3": 200}
+    perf = pd.DataFrame({"Model": ["HistGBM"], "AUC-ROC (95% CI)": [f"0.731 (0.728–{auc_hi:.3f})"], "Sensitivity": [0.6], "Specificity": [0.7],
+                         "F1": [0.3], "Brier": [0.2]})
+    tun = pd.DataFrame({"Model": ["HistGBM"] * 3, "Selection": ["Fixed (benchmark)", "Tuned for AUC-ROC", "Tuned for F1"],
+                        "Configuration": ["depth 3", "depth 5", "depth 5"], "AUC-ROC": [0.72, 0.731, 0.731], "F1": [0.29, 0.3, 0.3]})
+    allc = pd.DataFrame({"Model": ["HistGBM", "HistGBM"], "Configuration": ["depth 3", "depth 5"], "auc_raw": [0.72, 0.731], "f1_raw": [0.29, 0.3]})
+    loso = pd.DataFrame({"site": [labels[s] for s in sites], "n": [n[s] for s in sites], "auroc": [0.71, 0.72, 0.69], "auroc_lo": [0.7, 0.7, 0.67],
+                         "auroc_hi": [0.72, 0.74, 0.71], "brier_uncalibrated": [0.19, 0.2, 0.21], "sensitivity_050": [0.6, 0.58, 0.62],
+                         "specificity_050": [0.72, 0.73, 0.7]})
+    los = pd.DataFrame({"Health System": [labels[s] for s in sites], "Total Cohort (N)": [n[s] for s in sites], "Median LOS": [3.0, 4.0, 5.0]})
+    att = pd.DataFrame([{"site": s, "step_name": st, "subjects_retained": v} for s in sites for st, v in (("Index", n[s] + 50), ("Final", n[s]))])
+    tables = {"Model_Performance": perf, "Tuning_AUC_vs_F1": tun, "Tuning_All_Configs": allc, "LOSO_By_Site": loso, "LOS_Distribution_By_Site": los}
+    return mt.manuscript_workbook(df, tables, path, attrition=att, site_labels=labels, table6_missing="median")["path"]
+
+
+def test_compare_with_delivered_files_and_documents(tmp_path):
+    import json
+    import zipfile
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    old = _full_workbook(tmp_path / "old.xlsx", {"s1": "Site A", "s2": "Site B", "s3": "Site C"})
+    new = _full_workbook(tmp_path / "new.xlsx", {"s1": "Site B", "s2": "Site C", "s3": "Site A"}, auc_hi=0.736)
+    # documents: the new run's Table 5 lists its sites in workbook order; the delivered PDF quotes the old CI bound
+    docx = tmp_path / "new.docx"
+    with zipfile.ZipFile(docx, "w") as z:
+        z.writestr("word/document.xml", "<w:document><w:p>Table 5 is below.</w:p><w:p>Table 5: LOSO</w:p><w:p>Site B</w:p><w:p>Site C</w:p>"
+                                        "<w:p>Site A</w:p><w:p>Table 6: LR</w:p><w:p>Site Z</w:p></w:document>")
+
+    def pdf(path: Path, text: str) -> Path:
+        f = plt.figure()
+        f.text(0.05, 0.5, text)
+        f.savefig(path)
+        plt.close(f)
+        return path
+
+    new_pdf = pdf(tmp_path / "new.pdf", "Table 5: LOSO Site B Site C Site A")
+    old_pdf = pdf(tmp_path / "old.pdf", "AUC 0.731 (0.728 to 0.735)")
+    import hashlib
+
+    sha = hashlib.sha256(old_pdf.read_bytes()).hexdigest()
+    r = compare_with_delivered(new, old, new_pdf=new_pdf, delivered_pdf=old_pdf, new_docx=docx, delivered_pdf_sha256=sha)
+    a = r["answers"]
+    assert a["1_delivered_pdf_hash_matches"] and a["2_new_pdf_differs"] and a["3_files_present"]
+    assert a["14_site_matching_unambiguous"] and a["15_same_letter_across_sheets"] and a["16_document_table5_letters_match"]
+    assert a["8_descriptive_identical"], a["8_per_sheet"]
+    assert a["9_per_sheet"]["Table 2 - Model Performance"]["differing_cells"] == 1 and a["12_selections_unchanged"]
+    assert a["17_quoted_numbers_changed"] and a["17_detail"]["pages"] == [1]
+    assert "Site B -> Site A" in r["detail"]
+    out = tmp_path / "res"
+    script = ROOT / "scripts" / "compare_with_delivered.py"
+    (tmp_path / "prev.json").write_text(json.dumps(a), encoding="utf-8")
+    res = subprocess.run([sys.executable, str(script), "--new", str(new), "--delivered", str(old), "--new-pdf", str(new_pdf), "--new-docx", str(docx),
+                          "--delivered-pdf", str(old_pdf), "--delivered-sha256", sha, "--previous", str(tmp_path / "prev.json"),
+                          "--answers", str(out / "a.json"), "--detail", str(out / "d.md")], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert json.loads((out / "a.json").read_text(encoding="utf-8"))["18_changed_since_previous"] == []
