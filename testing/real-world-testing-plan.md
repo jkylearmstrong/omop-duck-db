@@ -62,7 +62,7 @@ The live-db job runs the new tests green on Oracle Free (and XE 21c if added), t
 
 - `Dockerfile.dgx` builds on `nvcr.io/nvidia/pytorch:25.01-py3` for the DGX Spark (GB10, aarch64, sm_121). The file itself says to pin "the tag you have verified on the device"; nobody has.
 - No workflow builds it (`docker-release.yml` builds only the R image).
-- ~~The build context is the parent eDerri project, so it cannot build from a plain checkout.~~ Fixed after 0.29.0: the repository is the build context; `omop-learn-repo/` and `pipeline/` are an optional named context (`--build-context ederri=<folder>`).
+- ~~The build context is the parent eDerri project, so it cannot build from a plain checkout.~~ Fixed in 0.30.0: the repository is the build context; `omop-learn-repo/` and `pipeline/` are an optional named context (`--build-context ederri=<folder>`).
 - It has a build-time import check, plus `gpu-check` and `dgx-smoke` (`scripts/dgx_smoke_test.py --require-gpu`, which trains the study MLP on random data and requires leave-one-site-out AUROC above 0.6).
 
 ### Risks
