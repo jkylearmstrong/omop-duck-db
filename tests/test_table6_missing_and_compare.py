@@ -129,7 +129,7 @@ def test_compare_with_delivered_pairs_sites_and_reports_aggregates(tmp_path):
     a = r["answers"]
     assert a["14_site_matching_unambiguous"] and a["4_same_sheets"] and a["7_same_cohort_n"]
     assert a["9_per_sheet"]["Table 5 - Cross-Site LOSO"]["differing_cells"] == 0  # letters differ, numbers paired
-    assert a["9_per_sheet"]["Table 2 - Model Performance"] == {"differing_cells": 1, "max_abs_auc_change": 0.002}
+    assert a["9_per_sheet"]["Table 2 - Model Performance"] == {"cells_compared": 10, "differing_cells": 1, "max_abs_auc_change": 0.002}
     assert a["8_descriptive_identical"] and a["13_no_direction_or_significance_change"] and a["19_rows_line_up"]
     assert a["10_table2_auc"]["HistGBM"] == {"delivered": "0.731 (0.728–0.735)", "new": "0.733 (0.730–0.737)"}
     assert a["11_loso_mean_auc"] == {"delivered": 0.707, "new": 0.707}
@@ -149,9 +149,12 @@ def test_compare_with_delivered_pairs_sites_and_reports_aggregates(tmp_path):
 def test_quoted_numbers_changed_counts_whole_tokens():
     diffs = pd.DataFrame([{"sheet": "Table 2", "row": "HistGBM", "column": "AUC", "new": "0.733 (0.730–0.737)", "old": "0.731 (0.728–0.735)"},
                           {"sheet": "Table 1", "row": "N", "column": "x", "new": "225,798", "old": "225,939"}])
-    pages = ["AUC 0.731 (95% CI 0.728 to 0.735) in 225,939 patients", "no change 0.7311 here", "again 0.731."]
+    pages = ["The best model reached an AUC of 0.731 (95% CI 0.728 to 0.735) in the cohort of 225,939 patients overall.",
+             "HistGBM 0.731 (0.728-0.735) 0.628 0.710\nno change for the value 0.7311 written here in this sentence.",
+             "Again the model reached an AUC of 0.731. in the final validation cohort of these patients."]
     q = quoted_numbers_changed(pages, diffs)
-    assert q == {"count": 5, "pages": [1, 3], "distinct_numbers": 4}
+    assert (q["count"], q["pages"], q["distinct_numbers"]) == (5, [1, 3], 4)  # the table row on page 2 is not prose
+    assert (q["count_all_text"], q["pages_all_text"]) == (8, [1, 2, 3])
 
 
 def _full_workbook(path: Path, labels: dict[str, str], auc_hi: float = 0.735) -> Path:
@@ -197,7 +200,7 @@ def test_compare_with_delivered_files_and_documents(tmp_path):
         return path
 
     new_pdf = pdf(tmp_path / "new.pdf", "Table 5: LOSO Site B Site C Site A")
-    old_pdf = pdf(tmp_path / "old.pdf", "AUC 0.731 (0.728 to 0.735)")
+    old_pdf = pdf(tmp_path / "old.pdf", "The best model had an AUC of 0.731 (0.728 to 0.735) in the whole cohort")
     import hashlib
 
     sha = hashlib.sha256(old_pdf.read_bytes()).hexdigest()
@@ -217,3 +220,36 @@ def test_compare_with_delivered_files_and_documents(tmp_path):
                           "--answers", str(out / "a.json"), "--detail", str(out / "d.md")], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
     assert json.loads((out / "a.json").read_text(encoding="utf-8"))["18_changed_since_previous"] == []
+
+
+def test_benchmark_suffix_stage_keyed_s3_and_s4_layout(tmp_path):
+    import openpyxl
+
+    old = _full_workbook(tmp_path / "old.xlsx", {"s1": "Site A", "s2": "Site B", "s3": "Site C"})
+    new = _full_workbook(tmp_path / "new.xlsx", {"s1": "Site C", "s2": "Site A", "s3": "Site B"})
+    wb = openpyxl.load_workbook(old)
+    # delivered style: "(benchmark)" on the fixed configuration, and S4 lists each configuration once per selection rule
+    t3 = wb["Table 3 - Tuning AUC vs F1"]
+    for row in t3.iter_rows(min_row=4):
+        if row[2].value == "depth 3":
+            row[2].value = "depth 3 (benchmark)"
+    s4 = wb["Table S4 - All Tuning Grid"]
+    rows = [[c.value for c in r] for r in s4.iter_rows(min_row=4)]
+    s4.insert_cols(2)
+    s4.cell(row=3, column=2, value="Selection")
+    for i, r in enumerate(rows):
+        s4.cell(row=4 + i, column=2, value="Tuned for F1")
+    for j, r in enumerate(rows):
+        s4.append([r[0], "Tuned for AUC-ROC", *r[1:]])
+    s4.cell(row=4, column=4, value=0.999)  # one real change: HistGBM depth 3 auc_raw
+    # S3: one stage only in the delivered workbook, so positions shift
+    s3 = wb["Table S3 - CONSORT Attrition"]
+    s3.append(["Site B", "Step 3", "Extra rule", 290, 290, 10, 10, "x"])
+    wb.save(tmp_path / "old2.xlsx")
+    a = compare_with_delivered(new, tmp_path / "old2.xlsx")["answers"]
+    assert a["12_selections_unchanged"] and a["14_site_matching_unambiguous"] and a["14_ambiguous_sheets"] == []
+    assert a["15_same_letter_across_sheets"] and a["15_sheets_out_of_step"] == []
+    s4a = a["9_per_sheet"]["Table S4 - All Tuning Grid"]
+    assert s4a["cells_compared"] == 4 and s4a["differing_cells"] == 1 and s4a["columns_compared"] == ["auc_raw", "f1_raw"]
+    assert s4a["max_abs_auc_change"] == round(0.999 - 0.72, 4)  # "auc_raw" counts as an AUC column
+    assert a["9_per_sheet"]["Table 3 - Tuning AUC vs F1"]["differing_cells"] == 0

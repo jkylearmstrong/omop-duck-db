@@ -55,15 +55,23 @@ def _title(raw: pd.DataFrame) -> str:
     return str(raw.iat[0, 0]) if raw.shape[0] and raw.shape[1] else ""
 
 
-def _site_vectors(raw: pd.DataFrame) -> dict[str, list[float]]:
-    """Site label -> all numbers of its rows (in row order), for the site rows of one sheet."""
+def _site_vectors(raw: pd.DataFrame) -> dict[str, dict[str, list[float]]]:
+    """Site label -> {row key: numbers} for the site rows of one sheet. Table S3 has several rows per site, keyed by their stage
+    (``Stage / Description``) and holding only the remaining stays and patients, so a step present in one workbook only, or a renumbered
+    step, does not shift the other numbers. Other sheets have one row per site, keyed ``""``, holding all its numbers."""
     t = _table(raw)
-    out: dict[str, list[float]] = {}
+    out: dict[str, dict[str, list[float]]] = {}
     first = t.columns[0]
+    stage = next((c for c in t.columns if c.startswith("Stage")), None)
+    remaining = [c for c in t.columns if c.startswith("Remaining")]
     for _, r in t.iterrows():
         lab = str(r[first]).strip()
-        if _SITE.match(lab):
-            out.setdefault(lab, []).extend(x for v in r.iloc[1:] for x in _numbers(v))
+        if not _SITE.match(lab):
+            continue
+        if stage is not None and remaining:
+            out.setdefault(lab, {})[str(r[stage]).strip()] = [x for c in remaining for x in _numbers(r[c])]
+        else:
+            out.setdefault(lab, {}).setdefault("", []).extend(x for v in r.iloc[1:] for x in _numbers(v))
     return out
 
 
@@ -82,22 +90,28 @@ def _site_column(raw: pd.DataFrame, starts: str) -> dict[str, list[float]]:
     return out
 
 
-def match_sites(new: Mapping[str, list[float]], old: Mapping[str, list[float]], *, margin: float = 0.5) -> tuple[dict[str, str], bool]:
+def match_sites(new: Mapping[str, Any], old: Mapping[str, Any], *, margin: float = 0.5) -> tuple[dict[str, str], bool]:
     """Pairs new site labels with old ones by their numbers. Returns ``({new label: old label}, unambiguous)``.
 
-    The cost of a pair is the mean relative difference of their numbers (position by position). The pairing is unambiguous when every
+    Each site holds a list of numbers or ``{row key: numbers}`` (see :func:`_site_vectors`). The cost of a pair is the mean relative
+    difference of their numbers (position by position, over the row keys both have). The pairing is unambiguous when every
     old site's closest new site is a different one, each is also that new site's closest old site, and the runner-up costs at least
     ``1 / margin`` times as much (default: twice). Otherwise the closest pairs are taken greedily and ``unambiguous`` is False."""
     nl, ol = list(new), list(old)
     if not nl or not ol:
         return {}, False
 
-    def cost(a: list[float], b: list[float]) -> float:
+    def cost_list(a: list[float], b: list[float]) -> list[float]:
         k = min(len(a), len(b))
-        if k == 0:
-            return float("inf")
-        x, y = np.asarray(a[:k]), np.asarray(b[:k])
-        return float(np.mean(np.abs(x - y) / np.maximum(np.abs(y), 1e-9))) + (0.0 if len(a) == len(b) else 1.0)
+        x, y = np.asarray(a[:k], dtype=float), np.asarray(b[:k], dtype=float)
+        return list(np.abs(x - y) / np.maximum(np.abs(y), 1e-9))
+
+    def cost(a: Any, b: Any) -> float:
+        if isinstance(a, Mapping):  # {row key: numbers}: compare the rows both sites have
+            d = [v for k in a if k in b for v in cost_list(a[k], b[k])]
+        else:
+            d = cost_list(a, b) + ([1.0] if len(a) != len(b) else [])
+        return float(np.mean(d)) if d else float("inf")
 
     c = np.array([[cost(new[n], old[o]) for o in ol] for n in nl])
     ok = len(nl) == len(ol)
@@ -120,11 +134,20 @@ def match_sites(new: Mapping[str, list[float]], old: Mapping[str, list[float]], 
     return pairs, ok
 
 
-def _relabelled_copy(new: Path, mappings: Mapping[str, Mapping[str, str]], out: Path) -> Path:
-    """A copy of the new workbook with the site labels of each sheet in ``mappings`` replaced (all at once) by the old labels."""
+_BENCH = re.compile(r"\s*\(benchmark\)\s*$")
+
+
+def _config(v: Any) -> Any:
+    """A configuration label without the "(benchmark)" suffix, which the delivered workbook adds to the fixed configuration."""
+    return _BENCH.sub("", v) if isinstance(v, str) else v
+
+
+def _normalised_copy(src: Path, mappings: Mapping[str, Mapping[str, str]], out: Path) -> Path:
+    """A copy of a workbook with the site labels of each sheet in ``mappings`` replaced (all at once), and the "(benchmark)" suffix
+    taken off every cell of Tables 3 and S4 (a label, not a result)."""
     import openpyxl
 
-    wb = openpyxl.load_workbook(new)
+    wb = openpyxl.load_workbook(src)
     for sheet, m in mappings.items():
         if sheet not in wb.sheetnames:
             continue
@@ -133,6 +156,11 @@ def _relabelled_copy(new: Path, mappings: Mapping[str, Mapping[str, str]], out: 
             cell = row[0]
             if isinstance(cell.value, str) and cell.value.strip() in m:
                 cell.value = m[cell.value.strip()]
+    for sheet in ("Table 3 - Tuning AUC vs F1", "Table S4 - All Tuning Grid"):
+        if sheet in wb.sheetnames:
+            for row in wb[sheet].iter_rows(min_row=_HDR + 2):
+                for cell in row:
+                    cell.value = _config(cell.value)
     wb.save(out)
     return out
 
@@ -160,10 +188,24 @@ def _section_sites(text: str, heading: str = "Table 5") -> list[str]:
     return [re.sub(r"\s+", " ", s) for s in re.findall(r"Site\s+[A-Z]+\b", body)]
 
 
+def _prose_lines(text: str) -> list[str]:
+    """The lines of a page that read as sentences: at least 6 words of letters, which are at least 60% of the tokens. A row of a
+    printed table (a label then numbers) is not prose."""
+    out = []
+    for line in text.splitlines():
+        toks = line.split()
+        words = [t for t in toks if re.fullmatch(r"[A-Za-z][A-Za-z'()\-]*[.,;:]?", t)]
+        if len(words) >= 6 and len(words) >= 0.6 * len(toks):
+            out.append(line)
+    return out
+
+
 def quoted_numbers_changed(pdf_pages: list[str], differences: pd.DataFrame, *, min_chars: int = 4) -> dict[str, Any]:
     """Item 17, with a fixed method. From every differing cell, the old value's numbers that changed (same position, different value)
     are written as the old cell printed them; each one with at least ``min_chars`` characters (so "0.731", "1,234", "23.4", not "5")
-    is searched as a whole token in the delivered PDF. Returns the total count of hits, the pages (1-based) and the distinct numbers."""
+    is searched as a whole token in the delivered PDF. ``count`` and ``pages`` count hits in prose lines only (:func:`_prose_lines`):
+    the numbers the text quotes, not the tables printed in the PDF, which hold every changed cell by construction.
+    ``count_all_text`` / ``pages_all_text`` count every line. ``distinct_numbers`` is the number of changed numbers searched for."""
     tokens: set[str] = set()
     for r in differences.itertuples(index=False):
         old_s, new_s = str(r.old), str(r.new)
@@ -176,14 +218,20 @@ def quoted_numbers_changed(pdf_pages: list[str], differences: pd.DataFrame, *, m
             tok = tok.lstrip("-")
             if len(tok) >= min_chars:
                 tokens.add(tok)
-    hits, pages = 0, set()
-    for i, text in enumerate(pdf_pages, start=1):
-        for tok in tokens:
-            n = len(re.findall(r"(?<![\d.,])" + re.escape(tok) + r"(?![\d]|[.,]\d)", text))
+    pats = [re.compile(r"(?<![\d.,])" + re.escape(tok) + r"(?![\d]|[.,]\d)") for tok in tokens]
+
+    def count(texts: list[str]) -> tuple[int, list[int]]:
+        hits, pages = 0, set()
+        for i, text in enumerate(texts, start=1):
+            n = sum(len(p.findall(text)) for p in pats)
             if n:
                 hits += n
                 pages.add(i)
-    return {"count": hits, "pages": sorted(pages), "distinct_numbers": len(tokens)}
+        return hits, sorted(pages)
+
+    prose, prose_pages = count(["\n".join(_prose_lines(t)) for t in pdf_pages])
+    every, every_pages = count(pdf_pages)
+    return {"count": prose, "pages": prose_pages, "count_all_text": every, "pages_all_text": every_pages, "distinct_numbers": len(tokens)}
 
 
 def _max_rel(d: pd.DataFrame) -> float | None:
@@ -200,11 +248,44 @@ def _max_rel(d: pd.DataFrame) -> float | None:
 def _max_abs(d: pd.DataFrame, column_hint: str | None = None) -> float | None:
     best = None
     for r in d.itertuples(index=False):
-        if column_hint and column_hint not in str(r.column):
+        if column_hint and column_hint.lower() not in str(r.column).lower():
             continue
         for p, q in zip(_numbers(r.new), _numbers(r.old)):
             best = abs(p - q) if best is None else max(best, abs(p - q))
     return None if best is None else round(best, 4)
+
+
+def _compare_s4(new: Path, old: Path) -> tuple[int, pd.DataFrame, list[str] | None]:
+    """Table S4 by model and configuration, whatever the other columns: the delivered workbook lists each configuration once per
+    selection rule (three times), the package once. Rows are keyed ``Model | Configuration`` (first occurrence kept) and the columns
+    both workbooks have are compared exactly. Returns (cells compared, differing cells, columns compared)."""
+    empty = pd.DataFrame(columns=["sheet", "row", "column", "new", "old"])
+    sheet = "Table S4 - All Tuning Grid"
+    a_all, b_all = _read(new), _read(old)
+    if sheet not in a_all or sheet not in b_all:
+        return 0, empty, None
+    a, b = _table(a_all[sheet]), _table(b_all[sheet])
+    if not {"Model", "Configuration"} <= set(a.columns) & set(b.columns):
+        return 0, empty, []
+
+    def keyed(t: pd.DataFrame) -> pd.DataFrame:
+        k = t["Model"].astype(str) + " | " + t["Configuration"].map(_config).astype(str)
+        return t.assign(_k=k).drop_duplicates("_k").set_index("_k")
+
+    a, b = keyed(a), keyed(b)
+    cols = [c for c in b.columns if c in a.columns and c not in ("Model", "Configuration", "Selection")]
+    cells, out = 0, []
+    for k in b.index:
+        if k not in a.index:
+            continue
+        for c in cols:
+            x, y = _numbers(a.at[k, c]), _numbers(b.at[k, c])
+            if not x and not y:
+                continue
+            cells += 1
+            if x != y:
+                out.append({"sheet": sheet, "row": k, "column": c, "new": a.at[k, c], "old": b.at[k, c]})
+    return cells, pd.DataFrame(out, columns=empty.columns) if out else empty, cols
 
 
 def _cohort_n(raw: pd.DataFrame | None) -> dict[str, int | None]:
@@ -277,6 +358,7 @@ def compare_with_delivered(new_workbook: str | Path, delivered_workbook: str | P
             mappings[sheet], unamb[sheet] = m, ok
             det.append(f"- {sheet}: " + ", ".join(f"{k} -> {v}" for k, v in sorted(m.items())) + ("" if ok else "  (AMBIGUOUS)"))
     ans["14_site_matching_unambiguous"] = bool(unamb) and all(unamb.values())
+    ans["14_ambiguous_sheets"] = [k for k, v in unamb.items() if not v]
     det.append("")
 
     # 15 same letter per site across Table 5, S1, S3 in the new run: pair the new sheets with each other by numbers too
@@ -285,9 +367,18 @@ def compare_with_delivered(new_workbook: str | Path, delivered_workbook: str | P
         n5 = _site_column(A["Table 5 - Cross-Site LOSO"], "Test patients")
         s1 = _site_column(A["Table S1 - LOS Distribution"], "Total Cohort")
         s3 = _site_column(A["Table S3 - CONSORT Attrition"], "Remaining Patients")
-        m1, ok1 = match_sites(s1, n5)
-        m3, ok3 = match_sites(s3, n5)
-        ans["15_same_letter_across_sheets"] = ok1 and ok3 and all(k == v for k, v in m1.items()) and all(k == v for k, v in m3.items())
+        # by size order: Table S3's last step need not be the final cohort (it is not under the delivered layout), but the sites keep
+        # their order of size; a tie leaves the answer open (None)
+        def order(d: dict[str, list[float]]) -> list[str] | None:
+            vals = [v[0] for v in d.values()]
+            return None if len(set(vals)) < len(vals) else sorted(d, key=lambda k: -d[k][0])
+
+        o5, o1, o3 = order(n5), order(s1), order(s3)
+        if None in (o5, o1, o3) or not (len(o5) == len(o1) == len(o3)):
+            ans["15_same_letter_across_sheets"] = None
+        else:
+            ans["15_same_letter_across_sheets"] = o5 == o1 == o3
+            ans["15_sheets_out_of_step"] = [n for n, o in (("Table S1 - LOS Distribution", o1), ("Table S3 - CONSORT Attrition", o3)) if o != o5]
 
     # 5, 6 labels and titles, ignoring site letters
     kc = {"Table 3 - Tuning AUC vs F1": 2, "Table S4 - All Tuning Grid": 2, "Table S3 - CONSORT Attrition": 2}
@@ -317,18 +408,24 @@ def compare_with_delivered(new_workbook: str | Path, delivered_workbook: str | P
 
     # 8, 9 exact cell comparison after relabelling sites
     with tempfile.TemporaryDirectory() as td:
-        rel = _relabelled_copy(new_workbook, mappings, Path(td) / "new_relabelled.xlsx")
-        summary, diffs = compare_workbooks(rel, delivered_workbook, atol=0.0, rtol=0.0, text=True,
-                                           key_columns={"Table S4 - All Tuning Grid": 2})
+        rel = _normalised_copy(new_workbook, mappings, Path(td) / "new_normalised.xlsx")
+        dlv = _normalised_copy(delivered_workbook, {}, Path(td) / "delivered_normalised.xlsx")
+        summary, diffs = compare_workbooks(rel, dlv, atol=0.0, rtol=0.0, text=True)
+        s4_cells, s4_diffs, s4_cols = _compare_s4(rel, dlv)
+    diffs = pd.concat([diffs[diffs["sheet"] != "Table S4 - All Tuning Grid"], s4_diffs], ignore_index=True)
+    compared = {r.sheet: int(r.cells or 0) for r in summary.itertuples(index=False)}
+    compared["Table S4 - All Tuning Grid"] = s4_cells
     per8, per9 = {}, {}
     for sheet in DESCRIPTIVE_SHEETS:
         d = diffs[diffs["sheet"] == sheet]
         if sheet in B:
-            per8[sheet] = {"differing_cells": int(len(d)), "max_rel_change": _max_rel(d)}
+            per8[sheet] = {"cells_compared": compared.get(sheet, 0), "differing_cells": int(len(d)), "max_rel_change": _max_rel(d)}
     for sheet in MODEL_SHEETS:
         d = diffs[diffs["sheet"] == sheet]
         if sheet in B:
-            per9[sheet] = {"differing_cells": int(len(d)), "max_abs_auc_change": _max_abs(d, "AUC")}
+            per9[sheet] = {"cells_compared": compared.get(sheet, 0), "differing_cells": int(len(d)), "max_abs_auc_change": _max_abs(d, "AUC")}
+    if s4_cols is not None:
+        per9.setdefault("Table S4 - All Tuning Grid", {})["columns_compared"] = s4_cols
     ans["8_descriptive_identical"] = all(v["differing_cells"] == 0 for v in per8.values())
     ans["8_per_sheet"] = per8
     ans["9_model_tables_identical"] = all(v["differing_cells"] == 0 for v in per9.values())
@@ -354,8 +451,8 @@ def compare_with_delivered(new_workbook: str | Path, delivered_workbook: str | P
     # 12 Table 3 selections
     s3a, s3b = (_table(X["Table 3 - Tuning AUC vs F1"]) if "Table 3 - Tuning AUC vs F1" in X else None for X in (A, B))
     if s3a is not None and s3b is not None and {"Model", "Selection", "Configuration"} <= set(s3a.columns) & set(s3b.columns):
-        ka = {(r.Model, r.Selection): r.Configuration for r in s3a.itertuples(index=False)}
-        kb = {(r.Model, r.Selection): r.Configuration for r in s3b.itertuples(index=False)}
+        ka = {(r.Model, r.Selection): _config(r.Configuration) for r in s3a.itertuples(index=False)}
+        kb = {(r.Model, r.Selection): _config(r.Configuration) for r in s3b.itertuples(index=False)}
         changed = {f"{m} / {s}": {"delivered": kb[(m, s)], "new": ka.get((m, s))} for (m, s) in kb if ka.get((m, s)) != kb[(m, s)]}
         ans["12_selections_unchanged"] = not changed
         ans["12_changed_selections"] = changed
@@ -379,7 +476,7 @@ def compare_with_delivered(new_workbook: str | Path, delivered_workbook: str | P
         ans["13_direction_changes"], ans["13_p_crossings"] = flips, cross
 
     # 16 DOCX / PDF Table 5 letters match the workbook
-    wb5 = [k for k in _site_vectors(A["Table 5 - Cross-Site LOSO"])] if "Table 5 - Cross-Site LOSO" in A else []
+    wb5 = list(_site_vectors(A["Table 5 - Cross-Site LOSO"])) if "Table 5 - Cross-Site LOSO" in A else []
     doc_ok = []
     if new_docx is not None and Path(new_docx).exists():
         doc_ok.append(_section_sites(_docx_text(Path(new_docx))) == wb5)
