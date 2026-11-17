@@ -241,7 +241,7 @@ def test_benchmark_suffix_stage_keyed_s3_and_s4_layout(tmp_path):
         s4.cell(row=4 + i, column=2, value="Tuned for F1")
     for j, r in enumerate(rows):
         s4.append([r[0], "Tuned for AUC-ROC", *r[1:]])
-    s4.cell(row=4, column=5, value=0.999)  # one real change: HistGBM depth 3 auc_raw
+    s4.cell(row=4, column=4, value=0.999)  # one real change: HistGBM depth 3 auc_raw
     # S3: one stage only in the delivered workbook, so positions shift
     s3 = wb["Table S3 - CONSORT Attrition"]
     s3.append(["Site B", "Step 3", "Extra rule", 290, 290, 10, 10, "x"])
