@@ -460,7 +460,7 @@ def test_manuscript_cites_omop_duck_db_with_its_installed_version_through_gratef
     assert r["software"] == v and r["bib"] == tmp_path / "doc" / "Study_Manuscript.bib" and r["bib"].exists()
     assert "bibliography: Study_Manuscript.bib" in qmd.split("---")[1]  # in the YAML header
     assert "## Software" in qmd and f"omop-duck-db version {v} [@omopduckdb]" in qmd and "[@python]" in qmd and "grateful_py version" in qmd
-    assert qmd.index("## Software") < qmd.index("## Tables") and qmd.rstrip().endswith("::: {#refs}\n:::")
+    assert qmd.index("## Software") < qmd.index("## Supplementary Material") and qmd.rstrip().endswith("::: {#refs}\n:::")
     bib = r["bib"].read_text(encoding="utf-8")
     assert "@software{omopduckdb," in bib and f"version = {{{v}}}" in bib and "@software{gratefulpy," in bib and "@" not in bib.replace("@software{", "")
     assert not rp.scan_files([r["bib"]], ["Some Health System"])[1]  # the privacy scan reads the .bib as text
