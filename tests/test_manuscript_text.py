@@ -40,7 +40,7 @@ def test_template_selection_follows_the_installed_version():
 
 
 def test_numbers_come_from_the_workbook_and_tables_are_numbered_in_reading_order(workbook):
-    out = _render(workbook)
+    out = _render(workbook, version="0.32.0")
     md = out["markdown"]
     assert "AUC-ROC 0.731 (0.728–0.735)" in md or "HistGBM 0.731 (0.728–0.735)" in md
     # the workbook's Table 6 (regression) is the fifth table of the text, and its references say so

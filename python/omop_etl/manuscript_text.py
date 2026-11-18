@@ -197,6 +197,8 @@ def _regression(tabs) -> dict[str, Any]:
     rows, group, labs = [], None, []
     for _, r in t6.iterrows():
         feat = str(r.iloc[0]).strip()
+        if or_col and "reference" in str(r[or_col]).lower():
+            continue  # reference category of a multilevel feature (OR 1.00 by definition)
         ci = _ci(r[or_col]) if or_col else None
         if ci is None:
             group = feat

@@ -504,8 +504,14 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
 
     ``attrition`` needs ``step_name``, ``subjects_retained`` and ``subjects_dropped`` (the shape of
     :func:`omop_etl.consort.consort_from_counts` / ``pool_consort_tables``, summed over sites); the first row is the source
-    population. ``n`` is the analytic cohort size and ``n_readmitted`` its events. Returns the matplotlib Figure."""
-    from matplotlib.patches import FancyBboxPatch
+    population. ``n`` is the analytic cohort size and ``n_readmitted`` its events. Returns the matplotlib Figure.
+
+    Layout (since 0.33.0) follows the usual journal cohort figure (e.g. McCoy et al., JGIM 2017): the boxes form one column joined
+    by down arrows, and each exclusion is a horizontal arrow that branches off the middle of the down arrow into the step it
+    belongs to, with its text to the right. Long step names wrap instead of being cut."""
+    import textwrap
+
+    from matplotlib.patches import FancyArrowPatch, Rectangle
 
     for c in ("step_name", "subjects_retained", "subjects_dropped"):
         if c not in attrition:
@@ -513,31 +519,49 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     if n <= 0 or not 0 <= n_readmitted <= n:
         raise ValueError("n must be positive and 0 <= n_readmitted <= n.")
     steps = [(str(r.step_name), int(r.subjects_retained), int(r.subjects_dropped)) for r in attrition.itertuples()]
-    fig = _figure((9.5, 1.05 * (len(steps) + 2)))
+    box_h, pitch = 0.62, 1.55          # box height and distance between box centres; the gap holds the branching exclusion
+    cx, x0, x1 = 2.8, 0.2, 5.4         # main column centre and edges
+    branch_x = 5.95                    # where an exclusion arrow ends and its text starts
+    top = (len(steps) + 1) * pitch     # centre of the first box
+    centres = [top - i * pitch for i in range(len(steps) + 1)]  # the steps, then the analytic cohort
+    fig = _figure((9.5, 0.62 * (len(steps) + 2) * pitch + 0.4))
     ax = fig.subplots()
     ax.axis("off")
-    h = len(steps) + 1.2
     ax.set_xlim(0, 10)
+
+    def box(xa: float, xb: float, yc: float, text: str, bold: bool = True, fs: float = 8.5) -> None:
+        ax.add_patch(Rectangle((xa, yc - box_h / 2), xb - xa, box_h, fc="white", ec="black", lw=1.3))
+        ax.text((xa + xb) / 2, yc, text, ha="center", va="center", fontsize=fs, fontweight="bold" if bold else "normal")
+
+    def arrow(xa: float, ya: float, xb: float, yb: float) -> None:
+        ax.add_patch(FancyArrowPatch((xa, ya), (xb, yb), arrowstyle="-|>", mutation_scale=11, color="black", lw=1.1,
+                                     shrinkA=0, shrinkB=0))
+
     for i, (name, kept, dropped) in enumerate(steps):
-        y = h - i
+        y = centres[i]
         label = first_box if i == 0 else name
-        ax.add_patch(FancyBboxPatch((0.2, y - 0.3), 5.2, 0.6, boxstyle="round,pad=0.02", fc="#eef5fb", ec="#2c7fb8", lw=1.6))
-        ax.text(2.8, y + 0.08, label if len(label) < 70 else label[:67] + "...", ha="center", va="center", fontsize=8.5, fontweight="bold")
-        ax.text(2.8, y - 0.14, f"P = {kept:,} patients", ha="center", va="center", fontsize=8.5)
-        if i > 0 and dropped:
-            ax.annotate("", xy=(5.9, y + 0.5), xytext=(2.8, y + 0.5), arrowprops=dict(arrowstyle="->", color="#c0392b", ls="--"))
-            ax.add_patch(FancyBboxPatch((5.9, y + 0.28), 3.9, 0.46, boxstyle="round,pad=0.02", fc="#fdecea", ec="#e74c3c", lw=1.3))
-            ax.text(7.85, y + 0.51, f"Excluded: {name[:46]}  P = {dropped:,}", ha="center", va="center", fontsize=7)
-        if i < len(steps) - 1:
-            ax.annotate("", xy=(2.8, y - 0.72), xytext=(2.8, y - 0.32), arrowprops=dict(arrowstyle="->", color="#2c3e50", lw=1.5))
-    y = h - len(steps) + 0.2
-    ax.add_patch(FancyBboxPatch((0.2, y - 0.95), 5.2, 0.6, boxstyle="round,pad=0.02", fc="#e8f6ef", ec="#27ae60", lw=1.8))
-    ax.text(2.8, y - 0.65, f"Analytic cohort: {final_box}\nN = P = {n:,}", ha="center", va="center", fontsize=8.5, fontweight="bold")
-    ax.add_patch(FancyBboxPatch((0.2, y - 1.95), 2.5, 0.6, boxstyle="round,pad=0.02", fc="#fdecea", ec="#c0392b", lw=1.5))
-    ax.text(1.45, y - 1.65, f"30-day readmission\nN = {n_readmitted:,} ({100 * n_readmitted / n:.2f}%)", ha="center", va="center", fontsize=8)
-    ax.add_patch(FancyBboxPatch((2.9, y - 1.95), 2.5, 0.6, boxstyle="round,pad=0.02", fc="#e8f6ef", ec="#27ae60", lw=1.5))
-    ax.text(4.15, y - 1.65, f"No readmission\nN = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.2f}%)", ha="center", va="center", fontsize=8)
-    ax.set_ylim(y - 2.2, h + 0.8)
+        box(x0, x1, y, "\n".join(textwrap.wrap(label, 62, break_on_hyphens=False)[:2]) + f"\nP = {kept:,} patients", fs=8.3)
+        if i > 0:
+            # down arrow from the box above into this one; the exclusion branches off its midpoint
+            arrow(cx, centres[i - 1] - box_h / 2, cx, y + box_h / 2)
+            if dropped:
+                mid = y + pitch / 2
+                arrow(cx, mid, branch_x - 0.08, mid)
+                text = "\n".join(textwrap.wrap(f"Excluded: did not meet {name}", 46, break_on_hyphens=False)) + f"\nP = {dropped:,} patients"
+                ax.text(branch_x, mid, text, ha="left", va="center", fontsize=7.6, style="italic")
+    y = centres[-1]
+    arrow(cx, centres[-2] - box_h / 2, cx, y + box_h / 2)
+    box(x0, x1, y, f"Analytic cohort: {final_box}\nN = P = {n:,}")
+    yo = y - pitch * 0.85
+    lx, rx = (x0 + cx - 0.1) / 2, (cx + 0.1 + x1) / 2
+    box(x0, cx - 0.1, yo, f"30-day readmission\nN = {n_readmitted:,} ({100 * n_readmitted / n:.2f}%)", bold=False, fs=8)
+    box(cx + 0.1, x1, yo, f"No readmission\nN = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.2f}%)", bold=False, fs=8)
+    ym = (y - box_h / 2 + yo + box_h / 2) / 2
+    ax.plot([cx, cx], [y - box_h / 2, ym], color="black", lw=1.1)
+    ax.plot([lx, rx], [ym, ym], color="black", lw=1.1)
+    arrow(lx, ym, lx, yo + box_h / 2)
+    arrow(rx, ym, rx, yo + box_h / 2)
+    ax.set_ylim(yo - box_h, top + box_h)
     _save(fig, path, dpi)
     return fig
 
@@ -887,7 +911,9 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
         extra = []
         for site, g in res.predictions.groupby("site"):
             pred, yy = (g["p_raw"].to_numpy() >= 0.5), g["y"].to_numpy().astype(int)
+            tp, fp, fn = int((pred & (yy == 1)).sum()), int((pred & (yy == 0)).sum()), int((~pred & (yy == 1)).sum())
             extra.append({"site": site, "sensitivity_050": float((pred & (yy == 1)).sum() / max(1, (yy == 1).sum())),
+                          "f1_050": float(2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) else 0.0,
                           "specificity_050": float((~pred & (yy == 0)).sum() / max(1, (yy == 0).sum())),
                           "brier_uncalibrated": float(np.mean((g["p_raw"].to_numpy() - yy) ** 2))})
         tables["LOSO_By_Site"] = per.merge(pd.DataFrame(extra), on="site", how="left")
