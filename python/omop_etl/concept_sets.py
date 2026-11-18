@@ -396,14 +396,15 @@ def ancestor_specs(domain: str) -> dict[str, dict[str, list[int]]]:
 
 
 def concept_set_fingerprint() -> dict[str, str]:
-    """``{"version", "sha256"}`` of the bundled sets (every file, in path order): saved features built with other concept
-    sets are refused by ``--reuse-features``, and the run record names the sets a run used."""
+    """``{"version", "sha256"}`` of the bundled sets (every file, in path order, CRLF read as LF): saved features built with other
+    concept sets are refused by ``--reuse-features``, and the run record names the sets a run used."""
     import hashlib
 
     root = concept_set_dir()
     h = hashlib.sha256()
     for p in sorted(root.glob("**/*.json")):
-        h.update(p.relative_to(root).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
+        # line endings normalised: a Windows checkout (CRLF) holds the same sets as the installed package (LF)
+        h.update(p.relative_to(root).as_posix().encode() + b"\0" + p.read_bytes().replace(b"\r\n", b"\n") + b"\0")
     return {"version": CONCEPT_SET_VERSION, "sha256": h.hexdigest()}
 
 

@@ -188,15 +188,22 @@ def _docx_text(path: Path) -> str:
     return re.sub(r"<[^>]+>", " ", xml.replace("</w:p>", "\n"))
 
 
-def _section_sites(text: str, heading: str = "Table 5") -> list[str]:
-    """Site labels in the order they appear in the section that starts at the last ``heading:`` caption (the table, not a mention)."""
-    starts = [m.start() for m in re.finditer(re.escape(heading) + r"\s*:", text)]
+def _section_sites(text: str, heading: str = "Table 5", caption: str | None = r"Leave-One-Site-Out|Cross-Site") -> list[str]:
+    """Site labels in the order they appear in a table section of the document text (the table, not a mention). With ``caption``
+    (a regular expression), the section is the last ``Table <n>:`` caption whose title matches it, whatever its number: the manuscript
+    numbers tables in reading order, so the cross-site table is not always Table 5. Without a match (or with ``caption=None``) it is
+    the last ``heading:`` caption. The section ends at the next ``Table <n>:`` caption."""
+    caps = list(re.finditer(r"Table [0-9S]+\w*\s*:", text))
+    hit = [m for m in caps if caption and re.search(caption, re.sub(r"\s+", " ", text[m.end():m.end() + 160]))]
+    starts = [hit[-1].start()] if hit else [m.start() for m in re.finditer(re.escape(heading) + r"\s*:", text)]
     if not starts:
         return []
     body = text[starts[-1]:]
-    nxt = re.search(r"Table [0-9S]+\w*\s*:", body[len(heading) + 1:])
-    body = body[: len(heading) + 1 + nxt.start()] if nxt else body
-    return [re.sub(r"\s+", " ", s) for s in re.findall(r"Site\s+[A-Z]+\b", body)]
+    first = re.match(r"Table [0-9S]+\w*\s*:", body)
+    skip = first.end() if first else 0
+    nxt = re.search(r"Table [0-9S]+\w*\s*:", body[skip:])
+    body = body[: skip + nxt.start()] if nxt else body
+    return [re.sub(r"\s+", " ", s) for s in re.findall(r"Site\s+[A-Z]{1,2}\b", body)]
 
 
 def _prose_lines(text: str) -> list[str]:
