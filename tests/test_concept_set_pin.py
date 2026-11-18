@@ -103,3 +103,22 @@ def test_run_study_uses_the_pinned_definitions(tmp_path, monkeypatch, preset, ex
         assert all("lab_loincs" not in kw for kw in seen)
         assert "concept_set_coverage" not in rec["data_checks"]["allowed"]
     assert r["workbook"].exists()
+
+
+def test_fingerprint_ignores_line_endings(tmp_path, monkeypatch):
+    """A Windows checkout (CRLF) holds the same concept sets as the installed package (LF): same fingerprint, so --reuse-features works."""
+    import shutil
+
+    from omop_etl import concept_sets as cs
+
+    lf, crlf = tmp_path / "lf", tmp_path / "crlf"
+    shutil.copytree(cs.concept_set_dir(), lf)
+    shutil.copytree(cs.concept_set_dir(), crlf)
+    for p in crlf.glob("**/*.json"):
+        p.write_bytes(p.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(cs, "concept_set_dir", lambda: lf)
+    a = cs.concept_set_fingerprint()
+    monkeypatch.setattr(cs, "concept_set_dir", lambda: crlf)
+    assert cs.concept_set_fingerprint() == a
+    (crlf / "labs" / "albumin.json").write_bytes(b"{}")
+    assert cs.concept_set_fingerprint() != a

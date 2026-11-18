@@ -271,3 +271,15 @@ def test_s3_with_a_different_attrition_layout_is_reported_not_ambiguous(tmp_path
     a = compare_with_delivered(tmp_path / "new2.xlsx", old)["answers"]
     assert a["14_layout_differs_sheets"] == ["Table S3 - CONSORT Attrition"]
     assert a["14_ambiguous_sheets"] == [] and a["14_site_matching_unambiguous"]
+
+
+def test_document_cross_site_table_found_by_title_not_number():
+    """The manuscript numbers tables in reading order, so the cross-site table can be Table 4 and Table 5 the regression (item 16)."""
+    from omop_etl.delivered_compare import _section_sites
+
+    text = ("Table 4: Harmonized Leave-One-Site-Out (LOSO) Cross-Site External\nValidation\nSite B 0.71\nSite A 0.72\nSite C 0.70\n"
+            "Mean 0.71\nTable 5: Multivariable Logistic Regression\nAge 1.01\nTable S3: CONSORT Attrition\nSite A 100\n")
+    assert _section_sites(text) == ["Site B", "Site A", "Site C"]
+    assert _section_sites(text, caption=None) == []  # the old rule: the section after "Table 5:"
+    old = "Table 5: Cross-Site LOSO\nSite A 0.7\nSite B 0.7\nTable 6: Regression\n"
+    assert _section_sites(old) == ["Site A", "Site B"]
