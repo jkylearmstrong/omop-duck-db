@@ -42,13 +42,19 @@ def _bib_author(c: Any) -> str:
 
 
 def omop_duck_db_version() -> str:
-    """The installed omop-duck-db version (``importlib.metadata``), or ``omop_etl.__version__`` when running from a source checkout."""
+    """The omop-duck-db version of the code that is running: ``omop_etl.__version__``. The installed distribution's metadata
+    (``importlib.metadata``) is used only when the module has no version. Running a newer checkout over an older installed package
+    (for example a repository mounted into a released Docker image) must cite, and pick the manuscript template of, the code that
+    ran, not the package underneath it."""
+    import omop_etl
+
+    v = getattr(omop_etl, "__version__", None)
+    if v:
+        return str(v)
     try:
         return metadata.version(_SELF)
     except metadata.PackageNotFoundError:
-        import omop_etl
-
-        return str(getattr(omop_etl, "__version__", "unknown"))
+        return "unknown"
 
 
 def software_citations(bib_path: str | Path, *, packages: Sequence[str] = CITED_PACKAGES,
@@ -67,7 +73,9 @@ def software_citations(bib_path: str | Path, *, packages: Sequence[str] = CITED_
     from grateful_py.citation.paragraph import build_paragraph
     from grateful_py.models import PackageCitation
 
-    over = {_canon(k): str(v) for k, v in (versions or {}).items() if v}
+    # omop-duck-db is cited at the version of the code that ran, not the installed distribution's (they differ when a newer checkout
+    # runs over an older install); a version recorded with the run still wins
+    over = {_SELF: omop_duck_db_version(), **{_canon(k): str(v) for k, v in (versions or {}).items() if v}}
     cites = gp.get_pkgs_info(pkgs=["omop_duck_db", *packages, "grateful_py"], omit="none", skip_missing=True, include_interpreter=True)
     if not any(_canon(c.name) == _SELF for c in cites):  # source checkout: omop-duck-db is importable but not an installed distribution
         cites.append(PackageCitation(name=_SELF, version=omop_duck_db_version(), author="J Kyle Armstrong", citekey="omopduckdb",
