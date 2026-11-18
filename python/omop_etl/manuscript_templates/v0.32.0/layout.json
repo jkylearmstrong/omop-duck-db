@@ -1,0 +1,6 @@
+{
+  "about": "Order of the main tables, supplementary tables and figures. It sets their numbers; an absent item is skipped and later ones move up. Keys are the ones render_manuscript_body takes.",
+  "tables": ["table1", "performance", "tuning", "loso", "lr"],
+  "supplementary": ["stay_type", "completeness", "los", "attrition", "grid"],
+  "figures": ["flowchart", "shap"]
+}

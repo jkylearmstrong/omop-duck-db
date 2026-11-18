@@ -26,7 +26,7 @@ import pandas as pd
 from omop_etl.study_report import _newton_logit, export_workbook
 
 __all__ = ["manuscript_frame", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
-           "manuscript_workbook", "compare_workbooks", "workbook_similarity", "workbook_deltas", "delta_summary", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER"]
+           "manuscript_workbook", "compare_workbooks", "workbook_similarity", "workbook_deltas", "delta_summary", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER", "ManuscriptValidationError", "validate_manuscript_sheets"]
 
 EN = "–"
 _WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
@@ -262,6 +262,98 @@ def manuscript_consort(attrition: pd.DataFrame, *, site_col: str = "site", site_
     return pd.DataFrame(out)
 
 
+class ManuscriptValidationError(ValueError):
+    """A manuscript table holds a value that must not be published (a non-finite number, an inverted or absurdly wide confidence
+    interval, terms the model cannot tell apart). ``errors`` lists each problem; the run stops before any document is written."""
+
+    def __init__(self, errors: list[str]):
+        self.errors = list(errors)
+        super().__init__("manuscript tables failed validation:\n- " + "\n- ".join(self.errors))
+
+
+def _merge_identical_indicators(terms: list, with_indicator: set[str]) -> list:
+    """Missing-value indicators that are the same 0/1 column (eGFR is computed from creatinine, so both are missing in the same stays;
+    systolic and diastolic pressure come from one reading) cannot both enter the model: their coefficients are not identified and the
+    fit returns a meaningless split with a standard error set only by the ridge, so the CI runs to 10^60. Keeps one term per distinct
+    column, labelled with every measure it stands for ("Creatinine / eGFR (2021): not measured")."""
+    first: dict[bytes, int] = {}
+    names: dict[int, list[str]] = {}
+    keep: list = []
+    for t in terms:
+        group, label, inc, vals = t
+        base, sep, word = label.rpartition(": ")
+        if sep and base in with_indicator and word in ("not measured", "missing"):
+            key = np.asarray(vals, dtype=float).tobytes()
+            if key in first:
+                names[first[key]].append(base)
+                continue
+            first[key] = len(keep)
+            names[len(keep)] = [base]
+        keep.append(t)
+    for i, bases in names.items():
+        if len(bases) > 1:
+            group, label, inc, vals = keep[i]
+            keep[i] = (group, " / ".join(bases) + ": " + label.rpartition(": ")[2], inc, vals)
+    return keep
+
+
+def _check_full_rank(A: np.ndarray, labels: list[str]) -> None:
+    """Stops when two or more Table 6 terms are linear combinations of each other (their ORs would be arbitrary)."""
+    G = A.T @ A
+    d = np.sqrt(np.clip(np.diag(G), 1e-300, None))
+    C = G / np.outer(d, d)
+    ev, vec = np.linalg.eigh(C)
+    bad = ev < 1e-10 * max(ev.max(), 1.0)
+    if bad.any():
+        involved = sorted({labels[j] for k in np.where(bad)[0] for j in np.where(np.abs(vec[:, k]) > 0.1)[0]})
+        raise ManuscriptValidationError([f"Table 6: terms are collinear and cannot be estimated separately: {', '.join(involved)}"])
+
+
+_CI = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*\((-?\d+(?:\.\d+)?)\s*[–-]\s*(-?\d+(?:\.\d+)?)\)\s*$")
+#: A ratio CI wider than this (upper / lower) means a standard error of about 3.5 on the log scale: not estimable from this cohort.
+MAX_RATIO_CI_WIDTH = 1e6
+
+
+def validate_manuscript_sheets(sheets: Mapping[str, tuple[str, pd.DataFrame]], *, bootstrap_intervals: bool = True) -> None:
+    """Checks every cell of the manuscript sheets before anything is written. Fails (:class:`ManuscriptValidationError`) on
+    NaN or infinite numbers in "estimate (lower–upper)" cells, an estimate outside its interval, an interval whose bounds are
+    swapped, and in an odds-ratio column an upper bound or an upper / lower ratio above :data:`MAX_RATIO_CI_WIDTH`.
+
+    ``bootstrap_intervals=False`` skips the estimate-inside-interval check for the bootstrap (non-OR) intervals, for smoke runs with a
+    handful of bootstrap draws, whose percentile intervals can miss the estimate; Wald OR intervals are always checked."""
+    errors: list[str] = []
+    for name, (_, t) in sheets.items():
+        if not isinstance(t, pd.DataFrame) or t.empty:
+            continue
+        first = t.columns[0]
+        for col in t.columns:
+            is_or = bool(re.search(r"\bOR\b", str(col))) or "odds" in str(col).lower()
+            for i, v in t[col].items():
+                where = f"{name}, {t.at[i, first] if col != first else i}, {col}"
+                if isinstance(v, (float, np.floating)) and np.isinf(v):
+                    errors.append(f"{where}: infinite value")
+                    continue
+                if not isinstance(v, str):
+                    continue
+                if re.search(r"\b(nan|inf)\b", v, re.I):
+                    errors.append(f"{where}: non-finite value '{v}'")
+                    continue
+                mm = _CI.match(v.replace(",", ""))
+                if not mm:
+                    continue
+                pt, lo, hi = (float(x) for x in mm.groups())
+                if not all(np.isfinite([pt, lo, hi])):
+                    errors.append(f"{where}: non-finite value")
+                elif lo > hi:
+                    errors.append(f"{where}: lower bound above upper bound ({v})")
+                elif not lo <= pt <= hi and (is_or or bootstrap_intervals):
+                    errors.append(f"{where}: estimate outside its interval ({v})")
+                elif is_or and (hi > MAX_RATIO_CI_WIDTH or (lo > 0 and hi / lo > MAX_RATIO_CI_WIDTH)):
+                    errors.append(f"{where}: interval not estimable ({v[:40]}{'…' if len(v) > 40 else ''})")
+    if errors:
+        raise ManuscriptValidationError(errors)
+
+
 # ------------------------------------------------------------------ Table 6
 # Table 6 increments as the delivered workbook prints them: label -> (increment text, size in the measure's own unit).
 CLINICAL_INCREMENTS: dict[str, tuple[str, float]] = {
@@ -294,6 +386,11 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     stays is median imputed without an indicator, to keep small cells out of the table. ``"median"``: median imputation only, the rule
     of the workbook delivered on 2026-11-11.
 
+    Terms the data cannot estimate are handled before the fit, not printed: a flag whose stays all have the same outcome is left out
+    (its OR would be 0 or infinite); "not measured" terms that are the same column (eGFR is computed from creatinine, so both are
+    missing in the same stays) become one term named after every measure it covers; any remaining exact collinearity raises
+    :class:`ManuscriptValidationError`.
+
     ``increments``: ``"sd"`` (default) reports continuous measures per 1 SD; ``"clinical"`` reports them per the clinical unit of the
     delivered workbook (:data:`CLINICAL_INCREMENTS`, for example 10 mmHg or 30 days); a mapping ``label -> (text, size)`` sets
     its own (labels not in it stay per 1 SD). The fit is the same model, so p-values do not change; only OR and CI are rescaled."""
@@ -307,8 +404,13 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     terms: list[tuple[str, str, str, pd.Series]] = []  # group, label, increment, values
 
     def flag(group: str, label: str, mask: pd.Series | None):
-        if mask is not None:
-            terms.append((group, label, "Yes vs. no", mask.astype(float)))
+        if mask is None:
+            return
+        v = mask.astype(float)
+        on = v.to_numpy() == 1
+        if on.any() and y[on].min() == y[on].max():  # every flagged stay has the same outcome: the OR is not estimable (0 or infinity)
+            return
+        terms.append((group, label, "Yes vs. no", v))
 
     with_indicator: set[str] = set()
 
@@ -362,6 +464,7 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     for names, lab in MANUSCRIPT_ELIXHAUSER:
         flag(g, lab, _col(m, *names))
 
+    terms = _merge_identical_indicators(terms, with_indicator)
     cols = {}
     sd: dict[str, float] = {}
     terms_by_label = {label: s for _, label, _, s in terms}
@@ -382,6 +485,7 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
         sd[label] = sdv
         cols[label] = ((s - mu) / sdv).to_numpy() if inc == "Per 1 SD" else s.to_numpy(float)
     A = np.column_stack([np.ones(len(y))] + list(cols.values()))
+    _check_full_rank(A, ["(intercept)", *cols])
     beta, se = _newton_logit(A, y)
     from scipy import stats
 
@@ -412,13 +516,14 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
                         site_labels: Mapping[str, str] | None = None, label_col: str = "readmitted_30d", min_cell: int | None = 11,
                         title: str = "Manuscript tables", table5: str = "manuscript", sdi_missing_term: bool = True,
                         table6_increments: str | Mapping[str, tuple[str, float]] = "sd",
-                        sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, table6_missing: str = "indicator") -> dict[str, Any]:
+                        sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, table6_missing: str = "indicator",
+                        check_bootstrap_intervals: bool = True) -> dict[str, Any]:
     """Builds the manuscript sheets from the ``tables`` returned by :func:`omop_etl.study_report.build_study_tables` and the feature table
     ``df``, and writes one workbook. ``attrition`` is the per-site attrition (``site``, ``step_name``, ``subjects_retained``) for
     Table S3. ``table5``: ``"manuscript"`` (default; AUC-ROC with CI, uncalibrated Brier, sensitivity and specificity at the 0.5 threshold of
     the balanced-trained model, as the manuscript reports) or ``"calibrated"`` (prior-shift calibrated Brier, top-10% sensitivity and PPV).
     ``sdi_missing_term``: keep an "SDI Quintile: Missing / Unknown" term in Table 6 (default; ``False`` leaves it out, as the manuscript did,
-    so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``table6_missing``: ``"indicator"`` or ``"median"``, the ``missing`` of :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
+    so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``table6_missing``: ``"indicator"`` or ``"median"``, the ``missing`` of :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Every sheet is checked by :func:`validate_manuscript_sheets` before the workbook is written, and a failure raises :class:`ManuscriptValidationError`; ``check_bootstrap_intervals=False`` (smoke runs with few bootstrap draws) skips only the estimate-inside-interval check of the bootstrap intervals. Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
     m = manuscript_frame(df)
     n = len(df)
     sheets: dict[str, tuple[str, pd.DataFrame]] = {}
@@ -466,6 +571,7 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
                                                       if site_labels and "Table S3" in (sheet_site_labels or {}) else site_labels)))
     if "Tuning_All_Configs" in tables:
         sheets["Table S4 - All Tuning Grid"] = ("Table S4: Full Grid Evaluation Metrics for All Evaluated Hyperparameter Configurations", tables["Tuning_All_Configs"])
+    validate_manuscript_sheets(sheets, bootstrap_intervals=check_bootstrap_intervals)
     out = export_workbook([(name, cap, t) for name, (cap, t) in sheets.items()], path, title=title, subtitle=f"N = {n:,}; aggregate results only")
     return {"sheets": {k: v[1] for k, v in sheets.items()}, "path": out}
 

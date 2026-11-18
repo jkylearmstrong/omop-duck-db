@@ -99,7 +99,8 @@ def test_workbook_and_compare_roundtrip(feats, tmp_path, monkeypatch):
     df = feats.assign(person_id=feats.subject_id, admit_date=pd.Timestamp("2018-01-01"), discharge_date=pd.Timestamp("2018-01-05"))
     r = sr.build_study_tables(df, tmp_path / "t", prefix="X", n_bootstraps=5, workbook=False, first_stay_col="prior_ip_os_ed_count")
     att = pd.DataFrame({"site": ["a", "a"], "step_name": ["Index", "Final"], "subjects_retained": [2000, len(df)]})
-    wb = mt.manuscript_workbook(df, r["tables"], tmp_path / "m.xlsx", attrition=att, site_labels={"a": "Site A"})
+    # 5 bootstrap draws: a smoke run, whose percentile intervals can miss the estimate (run_study relaxes the same check below 50)
+    wb = mt.manuscript_workbook(df, r["tables"], tmp_path / "m.xlsx", attrition=att, site_labels={"a": "Site A"}, check_bootstrap_intervals=False)
     names = openpyxl.load_workbook(wb["path"]).sheetnames
     for want in ("Table 1 - Descriptive", "Table 2 - Model Performance", "Table 5 - Cross-Site LOSO", "Table 6 - Multivariable LR",
                  "Table S2 - Data Completeness", "Table S3 - CONSORT Attrition"):

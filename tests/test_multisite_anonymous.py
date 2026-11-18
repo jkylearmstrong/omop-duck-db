@@ -196,7 +196,11 @@ def test_relabel_changes_the_letters_and_nothing_else(tmp_path, monkeypatch):
              + (["Study_Manuscript.docx"] if CAN_DOCX else []) + (["Study_Manuscript.pdf"] if CAN_PDF else []))
     for name in files:  # the DOCX / PDF / qmd are rebuilt from the relabelled workbook: same text once the letters are mapped
         before, after = _all_text(out / name), _all_text(v2 / name)
-        assert relabel_text(before, trans) == after, name
+        # "Site A through Site E" names the set of labels, which relabelling keeps; every other letter must follow the mapping
+        # Letters differ in width, so PDF/DOCX lines can wrap at other places: compare with whitespace collapsed
+        span = re.compile(r"Site\s+[A-Z]{1,2}\s+through\s+Site\s+[A-Z]{1,2}")
+        flat = lambda t: re.sub(r"\s+", " ", span.sub("SPAN", t)).strip()
+        assert flat(relabel_text(before, trans)) == flat(after), name
         assert set(re.findall(r"(?<![-A-Za-z])Site [A-Z]{1,2}\b", after)) <= set(new.values())
     run = json.loads((v2 / "Study_run.json").read_text(encoding="utf-8"))
     assert run["relabelled"] and run["labels"] == sorted(new.values()) and set(run["timings_seconds"]) >= {f"site_{v}" for v in new.values()}

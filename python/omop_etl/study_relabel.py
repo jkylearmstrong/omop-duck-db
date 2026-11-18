@@ -149,7 +149,8 @@ def relabel_outputs(run_dir: str | Path, out_dir: str | Path, *, old_labels: Map
         window = record.get("window")
         d = render_manuscript_document(wb, stage, prefix=prefix, figures=figs, window=window, title=document_title, author=document_author,
                                        formats=document_formats, cache_dir=document_cache_dir,
-                                       software_versions=record.get("environment"))  # cite the versions that produced the run
+                                       software_versions=record.get("environment"),  # cite the versions that produced the run
+                                       run=record, summary=_read_json(out / f"{prefix}_summary.json"))
         staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"], "cache": d["cache"],
                            "cites_omop_duck_db": d.get("software")})
@@ -180,3 +181,8 @@ def relabel_outputs(run_dir: str | Path, out_dir: str | Path, *, old_labels: Map
         raise RunPrivacyError(f"{len(hits)} privacy finding(s) in the relabelled outputs, reported by file only: {where}. Do not share {out}.")
     return {"translation": trans, "files": [str(f) for f in files], "unchanged": unchanged, "skipped": skipped, "document": doc_record,
             "privacy_check": privacy, "prefix": prefix}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """A run's JSON record, or an empty mapping when it was not written."""
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}

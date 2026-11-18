@@ -142,7 +142,9 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
                                window: Sequence[str] | None = None, title: str | None = None, author: str = "",
                                formats: Sequence[str] = ("docx", "pdf"), min_cell: int | None = 11, max_rows: int = 500,
                                timeout: int = 600, cache_dir: str | Path | None = None, cite_software: bool = True,
-                               software_versions: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                               software_versions: Mapping[str, Any] | None = None, profile: str | None = None,
+                               params: Mapping[str, Any] | str | Path | None = None, run: Mapping[str, Any] | None = None,
+                               summary: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Writes ``<prefix>_Manuscript.qmd`` and renders ``.docx`` / ``.pdf`` (``formats``) under ``out_dir``.
 
     ``figures``: image files to include (default: ``<prefix>_*.png`` next to the workbook). ``title`` defaults to ``"<prefix> manuscript"``;
@@ -156,9 +158,20 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
     libraries through grateful_py (:func:`omop_etl.package_citations.software_citations`), write ``<prefix>_Manuscript.bib`` and end the
     document with a *References* list. ``software_versions`` (e.g. the ``environment`` block of ``<prefix>_run.json``) overrides the
     installed versions. The result's ``"bib"`` is the ``.bib`` path (None without citations) and ``"software"`` the cited omop-duck-db
-    version; without grateful_py the section is left out and ``note`` says so."""
+    version; without grateful_py the section is left out and ``note`` says so.
+
+    ``profile``: ``"full"`` (default; the ``OMOP_MANUSCRIPT_PROFILE`` environment variable can set it) writes the manuscript text from
+    the versioned template of the installed package (:mod:`omop_etl.manuscript_text`), with tables and figures numbered in reading order
+    and every reference following them; ``"tables_only"`` writes the headline sentences and every workbook table under its sheet name, the
+    view for checking and comparing runs. ``params`` (a mapping or a JSON / YAML file) holds the study team's own details (title,
+    authors, review-board statement), which the package does not store; ``run`` and ``summary`` are the run's records (decisions,
+    environment, feature counts). The result's ``"template"`` names the template version, and the list of values the run
+    did not record (shown in the text as ``[not in this run: ...]``) is ``"text_missing"``."""
     from omop_etl.manuscript_report import _check_aggregate, _sentences, _suppress_small, manuscript_facts, read_workbook_tables
 
+    profile = profile or os.environ.get("OMOP_MANUSCRIPT_PROFILE") or "full"
+    if profile not in ("full", "tables_only"):
+        raise ValueError("profile must be 'full' or 'tables_only'.")
     bad = set(formats) - {"docx", "pdf"}
     if bad:
         raise ValueError(f"Unknown formats {sorted(bad)}; use 'docx' and/or 'pdf'.")
@@ -188,23 +201,33 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
         if software:
             yaml.insert(-2, f"bibliography: {software['bib'].name}")
     md = list(yaml)
-    if software:
-        md += ["## Software", "", software["paragraph"], ""]
-    sent = _sentences(facts)
-    if sent:
-        md += ["## Results", "", *[_esc(s) for s in sent], ""]
-    md += ["## Tables", ""]
-    for name, (ttl, t) in tabs.items():
-        md += [f"### {_esc(ttl)}", "", _table_md(t), ""]
     copied = []
-    if imgs:
-        md += ["## Figures", ""]
-        for p in imgs:
-            if p.parent.resolve() != out.resolve():
-                shutil.copy2(p, out / p.name)
-                copied.append(out / p.name)
-            cap = _esc(_caption(p, prefix))
-            md += [f'![{cap}]({p.name}){{fig-alt="{cap.replace(chr(34), "")}" width="100%"}}', ""]
+    for p in imgs:
+        if p.parent.resolve() != out.resolve():
+            shutil.copy2(p, out / p.name)
+            copied.append(out / p.name)
+    text: dict[str, Any] = {}
+    if profile == "full":
+        from omop_etl.manuscript_text import full_manuscript_markdown, load_params
+
+        prm = load_params(params) if isinstance(params, (str, Path)) else dict(params or {})
+        text = full_manuscript_markdown(tabs, imgs, workbook=wb, run=run, summary=summary, params=prm,
+                                        software_paragraph=software["paragraph"] if software else None)
+        md += [text["markdown"], ""]
+    else:
+        if software:
+            md += ["## Software", "", software["paragraph"], ""]
+        sent = _sentences(facts)
+        if sent:
+            md += ["## Results", "", *[_esc(s) for s in sent], ""]
+        md += ["## Tables", ""]
+        for name, (ttl, t) in tabs.items():
+            md += [f"### {_esc(ttl)}", "", _table_md(t), ""]
+        if imgs:
+            md += ["## Figures", ""]
+            for p in imgs:
+                cap = _esc(_caption(p, prefix))
+                md += [f'![{cap}]({p.name}){{fig-alt="{cap.replace(chr(34), "")}" width="100%"}}', ""]
     if software:
         md += ["## References", "", "::: {#refs}", ":::", ""]
     qmd = out / f"{prefix}_Manuscript.qmd"
@@ -267,4 +290,5 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
             side.unlink()
     return {"qmd": qmd, "bib": software["bib"] if software else None, "software": software["omop_duck_db_version"] if software else None,
             "files": files, "figures": imgs, "copied": copied, "renderer": renderer, "missing": [f for f in formats if f not in files],
-            "note": "; ".join(notes), "cache": cache_used}
+            "note": "; ".join(notes), "cache": cache_used, "profile": profile, "template": text.get("template"),
+            "text_missing": text.get("missing", [])}

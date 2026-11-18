@@ -82,7 +82,8 @@ def test_quarto_path_scrubs_word_properties_and_cleans_up(tmp_path, monkeypatch)
             target.write_bytes(b"%PDF-1.4 stand-in")
 
     calls = _fake_quarto(tmp_path, monkeypatch, make)
-    r = md.render_manuscript_document(wb, tmp_path / "doc", figures=[fig_dir / "Study_Figure_Flow.png"], author="Study team", window=("2017-01-01", "2022-09-30"))
+    r = md.render_manuscript_document(wb, tmp_path / "doc", figures=[fig_dir / "Study_Figure_Flow.png"], author="Study team", window=("2017-01-01", "2022-09-30"),
+                                      profile="tables_only")  # the tables-only view lists every sheet, empty ones too
     assert r["renderer"] == "quarto" and set(r["files"]) == {"docx", "pdf"} and r["missing"] == [] and r["note"] == ""
     assert [c[3:5] for c in calls] == [["--to", "docx"], ["--to", "typst"]]
     assert (tmp_path / "doc" / "Study_Figure_Flow.png").exists() and r["copied"]
@@ -459,7 +460,7 @@ def test_manuscript_cites_omop_duck_db_with_its_installed_version_through_gratef
     assert r["software"] == v and r["bib"] == tmp_path / "doc" / "Study_Manuscript.bib" and r["bib"].exists()
     assert "bibliography: Study_Manuscript.bib" in qmd.split("---")[1]  # in the YAML header
     assert "## Software" in qmd and f"omop-duck-db version {v} [@omopduckdb]" in qmd and "[@python]" in qmd and "grateful_py version" in qmd
-    assert qmd.index("## Software") < qmd.index("## Tables") and qmd.rstrip().endswith("::: {#refs}\n:::")
+    assert qmd.index("## Software") < qmd.index("## Supplementary Material") and qmd.rstrip().endswith("::: {#refs}\n:::")
     bib = r["bib"].read_text(encoding="utf-8")
     assert "@software{omopduckdb," in bib and f"version = {{{v}}}" in bib and "@software{gratefulpy," in bib and "@" not in bib.replace("@software{", "")
     assert not rp.scan_files([r["bib"]], ["Some Health System"])[1]  # the privacy scan reads the .bib as text
