@@ -83,7 +83,7 @@ def test_document_full_profile_and_tables_only(workbook, tmp_path):
     from omop_etl.manuscript_document import render_manuscript_document
 
     full = render_manuscript_document(workbook, tmp_path / "full", formats=[], cite_software=False, run={"n_sites": 3})
-    assert full["profile"] == "full" and full["template"] == "0.32.0" and "## 2 Methods" in full["qmd"].read_text(encoding="utf-8")
+    assert full["profile"] == "full" and full["template"] == mtx.available_templates()[-1] and "## 2 Methods" in full["qmd"].read_text(encoding="utf-8")
     tab = render_manuscript_document(workbook, tmp_path / "tab", formats=[], cite_software=False, profile="tables_only")
     assert "## Tables" in tab["qmd"].read_text(encoding="utf-8") and tab["template"] is None
     with pytest.raises(ValueError):
@@ -110,7 +110,7 @@ def test_check_script_runs_on_a_pdf(workbook, tmp_path):
     assert check_manuscript_text.main(["--workbook", str(workbook), "--pdf", str(pdf), "--answers", str(ans),
                                        "--detail", str(tmp_path / "d.md"), "--rendered", str(tmp_path / "r.md")]) == 0
     a = json.loads(ans.read_text())
-    assert a["template"] == "0.32.0" and a["reference_sentences"] >= 1 and "by_section" in a
+    assert a["template"] == mtx.available_templates()[-1] and a["reference_sentences"] >= 1 and "by_section" in a
 
 
 @pytest.mark.parametrize("labels, span, word", [
