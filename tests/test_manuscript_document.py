@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -459,8 +460,9 @@ def test_manuscript_cites_omop_duck_db_with_its_installed_version_through_gratef
     qmd = r["qmd"].read_text(encoding="utf-8")
     assert r["software"] == v and r["bib"] == tmp_path / "doc" / "Study_Manuscript.bib" and r["bib"].exists()
     assert "bibliography: Study_Manuscript.bib" in qmd.split("---")[1]  # in the YAML header
-    assert "## Software" in qmd and f"omop-duck-db version {v} [@omopduckdb]" in qmd and "[@python]" in qmd and "grateful_py version" in qmd
-    assert qmd.index("## Software") < qmd.index("## Supplementary Material") and qmd.rstrip().endswith("::: {#refs}\n:::")
+    software = re.search(r"^## \d+ Software$", qmd, re.M)  # numbered as in the delivered manuscript
+    assert software and f"omop-duck-db version {v} [@omopduckdb]" in qmd and "[@python]" in qmd and "grateful_py version" in qmd
+    assert software.start() < qmd.index("## Supplementary Material") and qmd.rstrip().endswith("::: {#refs}\n:::")
     bib = r["bib"].read_text(encoding="utf-8")
     assert "@software{omopduckdb," in bib and f"version = {{{v}}}" in bib and "@software{gratefulpy," in bib and "@" not in bib.replace("@software{", "")
     assert not rp.scan_files([r["bib"]], ["Some Health System"])[1]  # the privacy scan reads the .bib as text
@@ -470,7 +472,7 @@ def test_manuscript_cites_omop_duck_db_with_its_installed_version_through_gratef
     assert "omop-duck-db version 0.0.1 [@omopduckdb]" in s["paragraph"] and "Python version 3.13.17 [@python]" in s["paragraph"]
 
     r = md.render_manuscript_document(wb, tmp_path / "plain", figures=[], cite_software=False)
-    assert r["bib"] is None and "## Software" not in r["qmd"].read_text(encoding="utf-8") and not (tmp_path / "plain" / "Study_Manuscript.bib").exists()
+    assert r["bib"] is None and not re.search(r"^## \d* ?Software$", r["qmd"].read_text(encoding="utf-8"), re.M) and not (tmp_path / "plain" / "Study_Manuscript.bib").exists()
 
 
 def test_manuscript_without_grateful_py_says_so_and_pandoc_gets_citeproc(tmp_path, monkeypatch):

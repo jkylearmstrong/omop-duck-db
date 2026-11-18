@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run", type=Path, default=None, help="<prefix>_run.json of the run (optional)")
     p.add_argument("--summary", type=Path, default=None, help="<prefix>_summary.json of the run (optional)")
     p.add_argument("--params", type=Path, default=None, help="the study team's title, authors and review-board statement (JSON / YAML)")
-    p.add_argument("--figures", type=Path, default=None, help="folder with the run's figure PNGs (optional)")
+    p.add_argument("--figures", type=Path, default=None, help="folder with the run's figure PNGs (default: the workbook's folder)")
     p.add_argument("--preset", default="delivered_2026_11_11", choices=sorted(STUDY_PRESETS),
                    help="decisions the text describes when --run is not given (default: the delivered preset)")
     p.add_argument("--window", nargs=2, default=["2017-01-01", "2022-09-30"], metavar=("START", "END"),
@@ -52,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     tabs = {k: v for k, v in read_workbook_tables(a.workbook).items() if not k.startswith("Manifest")}
     if a.min_cell:
         tabs = {k: (t, _suppress_small(df, a.min_cell)) for k, (t, df) in tabs.items()}
-    imgs = sorted(a.figures.glob("*.png")) if a.figures else []
+    fig_dir = a.figures or a.workbook.parent  # the run's figures sit next to its workbook
+    imgs = sorted(fig_dir.glob("*.png")) if fig_dir.is_dir() else []
     body = full_manuscript_markdown(tabs, imgs, workbook=a.workbook, run=run, summary=summary, params=load_params(a.params))
     ref_text = "\n".join(pg.extract_text() or "" for pg in PdfReader(str(a.pdf)).pages)
     res = compare_prose(ref_text, body["markdown"])
