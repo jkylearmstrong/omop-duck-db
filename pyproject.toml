@@ -16,6 +16,7 @@ dependencies = [
     "pyarrow>=15.0,<19.0",
     "pypdf>=4.0",  # the study run scans its PDF manuscript for real site names
     "grateful_py>=0.2.1",  # cites omop-duck-db (its installed version), Python and the study's libraries in the manuscript
+    "jinja2>=3.0",  # the manuscript text is a versioned template filled from the run's results
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

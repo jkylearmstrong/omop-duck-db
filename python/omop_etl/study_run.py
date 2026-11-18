@@ -437,7 +437,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
               privacy_check: bool = True, document_cache_dir: str | Path | None = None, allow_data_gaps: Sequence[str] = (),
-              data_gap_threshold: float = 0.95, run_args: Mapping[str, Any] | None = None, check_only: bool = False) -> dict[str, Any]:
+              data_gap_threshold: float = 0.95, run_args: Mapping[str, Any] | None = None, check_only: bool = False,
+              manuscript_profile: str | None = None, manuscript_params: Mapping[str, Any] | str | Path | None = None) -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
@@ -459,7 +460,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     ``private_dir`` (default ``<out_dir>_private`` next to ``out_dir``; keep it unshared). Every site must have its own label
     (:func:`validate_site_labels`; a site without one used to appear under its own name). ``document=True`` (default) also writes
     ``<prefix>_Manuscript.docx`` / ``.pdf`` / ``.qmd`` from the workbook (:func:`omop_etl.manuscript_document.render_manuscript_document`,
-    formats ``document_formats``; without Quarto the run record says what was not rendered; ``document_cache_dir``: a writable folder for
+    formats ``document_formats``; ``manuscript_profile`` ``"full"`` (default) writes the manuscript text from the package's versioned
+    template, ``"tables_only"`` the tables under their sheet names; ``manuscript_params`` is the study team's own file of title, authors and
+    review-board statement, never stored in the package; without Quarto the run record says what was not rendered; ``document_cache_dir``: a writable folder for
     Quarto's cache in a sandbox, see :func:`omop_etl.manuscript_document.renderer_env`). ``privacy_check=True`` (default) then scans
     every file in ``out_dir`` (text, workbook, DOCX and PDF text and metadata, :mod:`omop_etl.run_privacy`) for ``site_names`` (a list or
     a names file, one per line) and the site keys; a hit raises :class:`RunPrivacyError` after the run record is written, and the
@@ -664,10 +667,14 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         figs = [Path(x) for x in res["files"] if str(x).lower().endswith(".png")]
         d = render_manuscript_document(wb["path"], stage, prefix=prefix, figures=figs, window=(start, end), title=document_title,
                                        author=document_author, formats=document_formats, min_cell=min_cell, cache_dir=document_cache_dir,
-                                       software_versions=run_environment())
+                                       software_versions=run_environment(), profile=manuscript_profile, params=manuscript_params,
+                                       run={"n_sites": len(labels), "window": [start, end], "decisions": dec, "bootstraps": n_bootstraps,
+                                            "random_state": random_state, "preset": preset, "environment": run_environment()},
+                                       summary=res.get("summary"))
         staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
-                           "cache": d["cache"], "cites_omop_duck_db": d.get("software")})
+                           "cache": d["cache"], "cites_omop_duck_db": d.get("software"), "profile": d.get("profile"),
+                           "template": d.get("template"), "text_missing": d.get("text_missing", [])})
         timings["document"] = round(time.time() - t_doc, 1)
     privacy: dict[str, Any] = {"checked": False}
     hits: list = []

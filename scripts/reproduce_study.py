@@ -72,6 +72,10 @@ def main(argv=None) -> int:
     p.add_argument("--names-file", help="text file, one real site name per line (kept outside the repository): the outputs are scanned for them")
     p.add_argument("--names", nargs="*", default=[], help="real site names to scan for (they end up in shell history; prefer --names-file)")
     p.add_argument("--no-privacy-check", action="store_true", help="skip the scan of the outputs for site names")
+    p.add_argument("--manuscript-profile", choices=["full", "tables_only"], default=None,
+                   help="full (default): the manuscript text from the package's versioned template; tables_only: every table under its sheet name")
+    p.add_argument("--manuscript-params", type=Path, default=None,
+                   help="JSON or YAML file with the study team's title, authors and review-board statement (kept outside the package)")
     p.add_argument("--list-decisions", action="store_true", help="print every decision, its options and the presets, then exit")
     a = p.parse_args(argv)
     if a.list_decisions:
@@ -100,6 +104,7 @@ def main(argv=None) -> int:
                       table6_increments=a.table6_increments, consort_final_steps=a.consort_final_steps, age_method=a.age_method, concept_sets=a.concept_sets, table6_missing=a.table6_missing,
                       sheet_site_labels=({"Table S1": dict(zip(labels.values(), a.s1_s3_labels)), "Table S3": dict(zip(labels.values(), a.s1_s3_labels))}
                                          if a.s1_s3_labels and isinstance(labels, dict) else None), preset=a.preset,
+                      manuscript_profile=a.manuscript_profile, manuscript_params=a.manuscript_params,
                       private_dir=a.private_dir, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
                       document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check,
                       document_cache_dir=a.quarto_cache_dir, allow_data_gaps=a.allow_data_gaps, data_gap_threshold=a.data_gap_threshold, check_only=a.check_data,

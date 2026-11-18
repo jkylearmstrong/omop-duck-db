@@ -82,7 +82,8 @@ def test_quarto_path_scrubs_word_properties_and_cleans_up(tmp_path, monkeypatch)
             target.write_bytes(b"%PDF-1.4 stand-in")
 
     calls = _fake_quarto(tmp_path, monkeypatch, make)
-    r = md.render_manuscript_document(wb, tmp_path / "doc", figures=[fig_dir / "Study_Figure_Flow.png"], author="Study team", window=("2017-01-01", "2022-09-30"))
+    r = md.render_manuscript_document(wb, tmp_path / "doc", figures=[fig_dir / "Study_Figure_Flow.png"], author="Study team", window=("2017-01-01", "2022-09-30"),
+                                      profile="tables_only")  # the tables-only view lists every sheet, empty ones too
     assert r["renderer"] == "quarto" and set(r["files"]) == {"docx", "pdf"} and r["missing"] == [] and r["note"] == ""
     assert [c[3:5] for c in calls] == [["--to", "docx"], ["--to", "typst"]]
     assert (tmp_path / "doc" / "Study_Figure_Flow.png").exists() and r["copied"]
