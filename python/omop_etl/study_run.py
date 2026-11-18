@@ -143,6 +143,9 @@ def run_environment() -> dict[str, str | None]:
             out[pkg] = metadata.version(pkg)
         except metadata.PackageNotFoundError:
             out[pkg] = None
+    from omop_etl.package_citations import omop_duck_db_version
+
+    out["omop-duck-db"] = omop_duck_db_version()  # the code that ran, even from a checkout over an older installed package
     out.update(_platform_details())
     return out
 

@@ -166,3 +166,37 @@ def test_figure_caption_carries_no_number_quarto_adds_it():
     assert '![Cohort selection flowchart.' in md and '{#fig-flowchart fig-alt="Figure 1: Cohort selection flowchart.' in md
     assert "summed over the five health systems" in md and "(Top 15 Predictors, 2,000 Sampled Patients)" in md
     assert "![Figure" not in md
+
+
+def test_template_and_citation_follow_the_running_code(monkeypatch):
+    """A newer checkout run over an older installed package (a repository mounted into a released image) uses its own version."""
+    from importlib import metadata
+
+    import omop_etl
+    from omop_etl import manuscript_text
+    from omop_etl.package_citations import omop_duck_db_version
+    from omop_etl.study_run import run_environment
+
+    real = metadata.version
+    monkeypatch.setattr(metadata, "version", lambda d: "0.0.1" if d == "omop-duck-db" else real(d))
+    assert omop_duck_db_version() == omop_etl.__version__
+    assert run_environment()["omop-duck-db"] == omop_etl.__version__
+    assert manuscript_text.template_dir().name == "v" + manuscript_text.available_templates()[-1]
+
+
+def test_version_falls_back_to_installed_metadata(monkeypatch):
+    """A module without a version (never the case in a release) falls back to the installed distribution, then to "unknown"."""
+    from importlib import metadata
+
+    import omop_etl
+    from omop_etl.package_citations import omop_duck_db_version
+
+    monkeypatch.setattr(omop_etl, "__version__", "")
+    monkeypatch.setattr(metadata, "version", lambda d: "9.9.9")
+    assert omop_duck_db_version() == "9.9.9"
+
+    def missing(d):
+        raise metadata.PackageNotFoundError(d)
+
+    monkeypatch.setattr(metadata, "version", missing)
+    assert omop_duck_db_version() == "unknown"
