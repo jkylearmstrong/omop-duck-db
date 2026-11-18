@@ -26,7 +26,7 @@ def build(path: Path, **kw) -> Path:
     perf = pd.DataFrame({"Model": ["HistGBM", "Logistic Regression"], "AUC-ROC (95% CI)": ["0.731 (0.728–0.735)", "0.724 (0.721–0.727)"],
                          "Sensitivity": [0.628, 0.63], "Specificity": [0.71, 0.701], "F1": [0.304, 0.299], "Brier": [0.196, 0.21]})
     loso = pd.DataFrame({"site": ["Site A", "Site B", "Site C"], "n": [1200, 1000, 800], "auroc": [0.71, 0.72, 0.69], "auroc_lo": [0.70, 0.70, 0.67],
-                         "auroc_hi": [0.72, 0.74, 0.71], "brier_uncalibrated": [0.19, 0.2, 0.21], "sensitivity_050": [0.6, 0.58, 0.62],
+                         "auroc_hi": [0.72, 0.74, 0.71], "brier_uncalibrated": [0.19, 0.2, 0.21], "f1_050": [0.3, 0.31, 0.29], "sensitivity_050": [0.6, 0.58, 0.62],
                          "specificity_050": [0.72, 0.73, 0.7]})
     att = pd.DataFrame({"site": ["a", "a"], "step_name": ["Index", "Final"], "subjects_retained": [3500, len(df)]})
     return mt.manuscript_workbook(df, {"Model_Performance": perf, "LOSO_By_Site": loso}, path, attrition=att, site_labels={"a": "Site A"}, **kw)["path"]

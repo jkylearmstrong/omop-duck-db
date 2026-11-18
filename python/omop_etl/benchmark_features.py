@@ -27,7 +27,7 @@ import pandas as pd
 from omop_etl.concept_sets import ancestor_specs, codes_by_name, concept_set_from_codes, load_concept_set, load_concept_sets, loinc_coverage, resolve_concept_sets
 from omop_etl.data_gaps import DataGapWarning
 
-__all__ = ["extract_benchmark_features", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS", "BENCHMARK_LAB_CONCEPT_SETS", "BENCHMARK_VITAL_CONCEPT_SETS",
+__all__ = ["extract_benchmark_features", "ederri_disposition_level", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS", "BENCHMARK_LAB_CONCEPT_SETS", "BENCHMARK_VITAL_CONCEPT_SETS",
            "DEFAULT_BOUNDS", "DEFAULT_RESCALE", "EDERRI_MEDICATION_SPECS"]
 
 #: Lab concept sets (feature ``lab_<name>``), read from the bundled OHDSI concept-set files ``concept_sets/labs/<name>.json``
@@ -67,11 +67,38 @@ DEFAULT_RESCALE: dict[str, tuple[float, float, float]] = {"wbc": (200.0, 200000.
 EDERRI_MEDICATION_SPECS: dict[str, dict[str, list[int]]] = ancestor_specs("medications_ederri")  # concept_sets/medications_ederri
 
 #: discharge disposition concept -> benchmark category. 8536 Home, 581476 Home Health, 8863 SNF, 32216 AMA (as written by
-#: the PCORnet ETL). Everything else is "other"; a missing disposition is its own indicator.
-DEFAULT_DISPOSITION_MAP: dict[int, str] = {8536: "home", 581476: "home_health", 8863: "snf", 32216: "ama"}
+#: the PCORnet ETL; HH is written as 32215 and RH as 32228 since 0.11.1). Everything else is "other"; a missing disposition is its own
+#: indicator.
+DEFAULT_DISPOSITION_MAP: dict[int, str] = {8536: "home", 581476: "home_health", 32215: "home_health", 8863: "snf", 32228: "snf",
+                                            32216: "ama"}
 _DISPOSITION_LEVELS = ("home", "home_health", "snf", "ama", "other", "missing")
 #: The study protocol's discharge-status rule (concept sets, or the source value HO / HH / SN, RH / AM): ``disposition_map="ederri"``.
-_EDERRI_DISPOSITION_CONCEPTS = {"home": {8536, 4161979}, "home_health": {8844, 4038234}, "snf": {8863, 8676, 8827, 4163901}, "ama": {4155309, 44814650}}
+#: Since 0.33.0 each set also holds the concept this package's PCORnet ETL writes for that status (HH 32215, RH 32228, AM 32216), so
+#: the class no longer depends on the source value alone.
+_EDERRI_DISPOSITION_CONCEPTS = {"home": {8536, 4161979}, "home_health": {8844, 4038234, 32215}, "snf": {8863, 8676, 8827, 4163901, 32228},
+                                "ama": {4155309, 44814650, 32216}}
+#: PCORnet DISCHARGE_STATUS values that carry no information (no information, unknown, blank): the stay's status is missing,
+#: not "other". Any other unmatched value (hospice, assisted living, other, ...) is "other".
+_MISSING_DISPOSITION_SOURCE = {"", "NI", "UN", "UNKNOWN", "NULL"}
+
+def ederri_disposition_level(concept_id: Any, source_value: Any) -> str:
+    """The study protocol's discharge-status class of one stay: ``home``, ``home_health``, ``snf``, ``ama``, ``other`` or ``missing``,
+    from its ``discharged_to_concept_id`` or, where that is not in the protocol's concept sets, its ``discharged_to_source_value``
+    (trimmed, upper case). ``missing`` is a stay with no concept and no informative source value (PCORnet NI, UN or blank)."""
+    c = -1 if concept_id is None or pd.isna(concept_id) else int(concept_id)
+    sv = None if source_value is None or (not isinstance(source_value, str) and pd.isna(source_value)) else str(source_value).strip().upper()
+    if c in _EDERRI_DISPOSITION_CONCEPTS["home"] or sv in ("HO", "HOME"):
+        return "home"
+    if c in _EDERRI_DISPOSITION_CONCEPTS["home_health"] or sv in ("HH", "HOME HEALTH"):
+        return "home_health"
+    if c in _EDERRI_DISPOSITION_CONCEPTS["snf"] or sv in ("SN", "RH", "SNF", "REHAB"):
+        return "snf"
+    if c in _EDERRI_DISPOSITION_CONCEPTS["ama"] or sv in ("AM", "AMA"):
+        return "ama"
+    if c <= 0 and (sv is None or sv in _MISSING_DISPOSITION_SOURCE):
+        return "missing"  # no concept and no informative source value
+    return "other"
+
 
 def _default_medication_specs() -> dict[str, dict[str, list[int]]]:
     from omop_etl.table1 import DEFAULT_MEDICATION_CONCEPTS
@@ -594,7 +621,7 @@ def extract_benchmark_features(
             src = pd.Series([None] * len(cohort), dtype=object)
             if "visit_occurrence_id" in cohort:
                 try:
-                    src = pd.Series(con.execute("SELECT upper(v.discharged_to_source_value) FROM (SELECT unnest(?) AS vid, generate_subscripts(?, 1) AS ord) k "
+                    src = pd.Series(con.execute("SELECT upper(trim(v.discharged_to_source_value)) FROM (SELECT unnest(?) AS vid, generate_subscripts(?, 1) AS ord) k "
                                                 "LEFT JOIN visit_occurrence v ON v.visit_occurrence_id = k.vid ORDER BY k.ord",
                                                 [cohort["visit_occurrence_id"].tolist()] * 2).df().iloc[:, 0].to_numpy(), dtype=object)
                 except duckdb.Error as exc:  # no source value column: concept ids only
@@ -602,19 +629,7 @@ def extract_benchmark_features(
                                   "eDERRI disposition uses concept ids only.", UserWarning, stacklevel=2)
             d = disp.reset_index(drop=True)
 
-            def _level(c, sv):
-                c = -1 if pd.isna(c) else int(c)
-                if c in _EDERRI_DISPOSITION_CONCEPTS["home"] or sv in ("HO", "HOME"):
-                    return "home"
-                if c in _EDERRI_DISPOSITION_CONCEPTS["home_health"] or sv in ("HH", "HOME HEALTH"):
-                    return "home_health"
-                if c in _EDERRI_DISPOSITION_CONCEPTS["snf"] or sv in ("SN", "RH", "SNF", "REHAB"):
-                    return "snf"
-                if c in _EDERRI_DISPOSITION_CONCEPTS["ama"] or sv in ("AM", "AMA"):
-                    return "ama"
-                return "other"
-
-            cat = pd.Series([_level(c, sv) for c, sv in zip(d, src)])
+            cat = pd.Series([ederri_disposition_level(c, sv) for c, sv in zip(d, src)])
             add("disposition", pd.DataFrame({f"disp_{lv}": (cat == lv).astype("int8").to_numpy() for lv in _DISPOSITION_LEVELS}))
         else:
             cat = disp.map(lambda c: "missing" if pd.isna(c) else mapping.get(int(c), "other"))

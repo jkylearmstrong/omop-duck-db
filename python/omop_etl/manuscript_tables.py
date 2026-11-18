@@ -60,7 +60,9 @@ MANUSCRIPT_ELIXHAUSER = [(("elix_mets", "elix_metastatic_cancer"), "Metastatic C
                          (("elix_rheumatic", "elix_rheumatoid_arthritis"), "Rheumatoid Arthritis / Collagen Vascular"), (("elix_obesity",), "Obesity")]
 _SDI = ["SDI Quintile 1 (Least Deprived)", "SDI Quintile 2", "SDI Quintile 3", "SDI Quintile 4", "SDI Quintile 5 (Most Deprived)"]
 _RUCA = ["RUCA: Metropolitan (1.0)", "RUCA: Micropolitan (2.0)", "RUCA: Small Town / Rural (3+)", "RUCA: Missing / Unknown"]
-_DISC = ["Home", "Home Health", "SNF / Rehab", "Against Medical Advice", "Missing / Unknown"]
+#: "Other" (hospice, assisted living, PCORnet OT ...) is its own level since 0.33.0; "Missing / Unknown" is only a stay with no
+#: discharge status (PCORnet NI / UN / blank), or a feature table that has no ``disp_other`` column.
+_DISC = ["Home", "Home Health", "SNF / Rehab", "Against Medical Advice", "Other", "Missing / Unknown"]
 _BMI = [f"BMI: Underweight (<18.5 kg/m²)", f"BMI: Normal (18.5{EN}24.9 kg/m²)", f"BMI: Overweight (25.0{EN}29.9 kg/m²)",
         "BMI: Obese (30.0+ kg/m²)", "BMI: Missing / Unknown"]
 _AGE = [f"Age: 18{EN}44 years", f"Age: 45{EN}64 years", f"Age: 65{EN}74 years", "Age: 75+ years"]
@@ -106,16 +108,16 @@ def manuscript_frame(df: pd.DataFrame) -> pd.DataFrame:
         o["m_hispanic"] = o["ethnicity_concept_id"] == 38003563
     elif "ethnicity" in o:
         o["m_hispanic"] = o["ethnicity"] == "Hispanic"
-    disp = [c for c in ("disp_home", "disp_home_health", "disp_snf", "disp_ama") if c in o]
+    disp = [c for c in ("disp_home", "disp_home_health", "disp_snf", "disp_ama", "disp_other") if c in o]
     if disp:
-        names = dict(zip(("disp_home", "disp_home_health", "disp_snf", "disp_ama"), _DISC))
-        d = pd.Series(_DISC[4], index=o.index, dtype=object)
+        names = dict(zip(("disp_home", "disp_home_health", "disp_snf", "disp_ama", "disp_other"), _DISC))
+        d = pd.Series(_DISC[-1], index=o.index, dtype=object)
         for c in reversed(disp):
             d[o[c].astype(float) == 1] = names[c]
         o["m_disch"] = d
     elif "discharge_status" in o:
         o["m_disch"] = o["discharge_status"].map({"Home": _DISC[0], "Home Health": _DISC[1], "SNF / Rehab": _DISC[2],
-                                                  "Against Medical Advice": _DISC[3]}).fillna(_DISC[4])
+                                                  "Against Medical Advice": _DISC[3], "Other": _DISC[4]}).fillna(_DISC[-1])
     bmi = _col(o, "vital_bmi", "bmi")
     if bmi is not None:
         o["m_bmi"] = pd.cut(bmi, [-np.inf, 18.5, 25, 30, np.inf], labels=_BMI[:4], right=False).astype(object)
@@ -208,7 +210,7 @@ def manuscript_completeness(df: pd.DataFrame, *, label_col: str = "readmitted_30
     if "m_race" in m:
         items.append(("Race: Other / Unknown", (m["m_race"] == _RACE[2]).to_numpy()))
     if "m_disch" in m:
-        items.append(("Discharge Status: Missing / Unknown", (m["m_disch"] == _DISC[4]).to_numpy()))
+        items.append(("Discharge Status: Missing / Unknown", (m["m_disch"] == _DISC[-1]).to_numpy()))
     if "m_bmi" in m:
         items.append(("BMI: Missing / Unknown", (m["m_bmi"] == _BMI[4]).to_numpy()))
     if "m_sdi" in m:
@@ -309,6 +311,9 @@ def _check_full_rank(A: np.ndarray, labels: list[str]) -> None:
         raise ManuscriptValidationError([f"Table 6: terms are collinear and cannot be estimated separately: {', '.join(involved)}"])
 
 
+#: The odds-ratio cell of a reference-category row in Table 6.
+REFERENCE_OR = "1.00 (reference)"
+
 _CI = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*\((-?\d+(?:\.\d+)?)\s*[–-]\s*(-?\d+(?:\.\d+)?)\)\s*$")
 #: A ratio CI wider than this (upper / lower) means a standard error of about 3.5 on the log scale: not estimable from this cohort.
 MAX_RATIO_CI_WIDTH = 1e6
@@ -374,7 +379,9 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
                           missing: str = "indicator", min_missing: int = 11) -> pd.DataFrame:
     """Table 6: one multivariable logistic regression, rows grouped as the manuscript prints them. Flags enter as 0/1 (OR for yes vs
     no, reference categories: age 18-44, female, White, non-Hispanic, SDI quintile 1, metropolitan, discharged home, never tobacco,
-    BMI 18.5-24.9); continuous measures are standardised (OR per 1 SD). ``Standardized Beta`` is the coefficient times the predictor's
+    BMI 18.5-24.9). Since 0.33.0 each multilevel feature (age, race, SDI, RUCA, discharge status, tobacco, BMI) prints its reference
+    category as a row of its own, Increment "Reference" and OR :data:`REFERENCE_OR`, and its other levels say "Vs. reference";
+    continuous measures are standardised (OR per 1 SD). ``Standardized Beta`` is the coefficient times the predictor's
     SD (unchanged by ``increments``).
 
     ``missing``: how a continuous measure with missing values enters. ``"indicator"`` (default) adds a "not measured" (labs, vitals) or
@@ -410,8 +417,15 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
         on = v.to_numpy() == 1
         if on.any() and y[on].min() == y[on].max():  # every flagged stay has the same outcome: the OR is not estimable (0 or infinity)
             return
-        terms.append((group, label, "Yes vs. no", v))
+        terms.append((group, label, "Vs. reference" if group_of_levels else "Yes vs. no", v))
 
+    def ref(group: str, label: str, col: str) -> None:
+        """The reference category of a multilevel feature: printed as its own row (OR 1.00), not fitted."""
+        if col in m:
+            terms.append((group, label, "Reference", None))
+
+    group_of_levels = False
+    members: dict[str, list[str]] = {}  # reference label -> the labels of its fitted levels
     with_indicator: set[str] = set()
 
     def num(group: str, label: str, s: pd.Series | None):
@@ -425,17 +439,29 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
             word = "not measured" if group in ("Vital Signs", "Laboratory values") else "missing"
             terms.append((group, f"{label}: {word}", "Yes vs. no", s.isna().astype(float)))
 
+    def levels(group: str, col: str, reference: str, others: Sequence[str], before: Sequence[str] = (),
+               rename: Mapping[str, str] | None = None) -> None:
+        """A multilevel feature: ``before`` levels, the reference row, then ``others``; each fitted level is "vs. reference"."""
+        nonlocal group_of_levels
+        group_of_levels = True
+        if col in m:
+            members[reference] = [(rename or {}).get(lv, lv) for lv in (*before, *others)]
+        for lv in before:
+            flag(group, (rename or {}).get(lv, lv), (m[col] == lv) if col in m else None)
+        ref(group, reference, col)
+        for lv in others:
+            flag(group, (rename or {}).get(lv, lv), (m[col] == lv) if col in m else None)
+        group_of_levels = False
+
     g = "Demographics"
-    for lv in _AGE[1:]:
-        flag(g, lv, (m["m_age"] == lv) if "m_age" in m else None)
+    levels(g, "m_age", _AGE[0], _AGE[1:])
     flag(g, "Sex: Male", (m["m_sex"] == "Male") if "m_sex" in m else None)
     flag(g, "Ethnicity: Hispanic", m["m_hispanic"] if "m_hispanic" in m else None)
-    for lv in _RACE[1:]:
-        flag(g, lv, (m["m_race"] == lv) if "m_race" in m else None)
-    for lv in _SDI[1:] + (["SDI: Missing / Unknown"] if sdi_missing_term else []):
-        flag(g, lv.replace("SDI: Missing / Unknown", "SDI Quintile: Missing / Unknown"), (m["m_sdi"] == lv) if "m_sdi" in m else None)
-    for lv in _RUCA[1:]:
-        flag(g, lv, (m["m_ruca"] == lv) if "m_ruca" in m else None)
+    levels(g, "m_race", _RACE[0], _RACE[1:])
+    levels(g, "m_sdi", _SDI[0] if sdi_missing_term else _SDI[0] + " and Missing / Unknown",
+           _SDI[1:] + (["SDI: Missing / Unknown"] if sdi_missing_term else []),
+           rename={"SDI: Missing / Unknown": "SDI Quintile: Missing / Unknown"})
+    levels(g, "m_ruca", _RUCA[0], _RUCA[1:])
     g = "Encounter Information"
     ip, allp = _col(m, "prior_ip_os_ed_count"), _col(m, "prior_encounters_all_count")
     num(g, "Prior Inpatient / Obs / ED Count", ip)
@@ -446,8 +472,7 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     num(g, "Days Since Prior Encounter", _col(m, "days_since_prior_encounter"))
     num(g, "Days Since Prior Inpatient / Obs / ED Encounter", _col(m, "days_since_prior_ip_ed"))
     num(g, "Prior Readmissions in Past 12 Months", _col(m, "readmission_count_twelve_months"))
-    for lv in _DISC[1:]:
-        flag(g, "Discharge Status: " + lv, (m["m_disch"] == lv) if "m_disch" in m else None)
+    levels(g, "m_disch", "Discharge Status: " + _DISC[0], _DISC[1:], rename={lv: "Discharge Status: " + lv for lv in _DISC})
     g = "Vital Signs"
     num(g, "Systolic Blood Pressure (mmHg)", _col(m, "vital_systolic_bp", "systolic_bp"))
     num(g, "Diastolic Blood Pressure (mmHg)", _col(m, "vital_diastolic_bp", "diastolic_bp"))
@@ -455,10 +480,8 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     for names, lab in MANUSCRIPT_LABS:
         num(g, lab, _col(m, *names))
     g = "Other clinical features"
-    for lv in _TOB[1:]:
-        flag(g, lv, (m["m_tobacco"] == lv) if "m_tobacco" in m else None)
-    for lv in [_BMI[0], _BMI[2], _BMI[3], _BMI[4]]:
-        flag(g, lv, (m["m_bmi"] == lv) if "m_bmi" in m else None)
+    levels(g, "m_tobacco", _TOB[0], _TOB[1:])
+    levels(g, "m_bmi", _BMI[1], _BMI[2:], before=_BMI[:1])
     for c, lab in _MEDS:
         flag(g, lab, _col(m, c))
     for names, lab in MANUSCRIPT_ELIXHAUSER:
@@ -469,6 +492,8 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     sd: dict[str, float] = {}
     terms_by_label = {label: s for _, label, _, s in terms}
     for _, label, inc, s in terms:
+        if inc == "Reference":
+            continue
         if label in with_indicator:  # measured stays set the scale; unmeasured ones sit at their mean (0 after standardising)
             s = s.fillna(s.mean())
         elif s.isna().any():
@@ -493,11 +518,18 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     out: list[dict[str, Any]] = []
     last = None
     for group, label, inc, _ in terms:
-        if label not in res:
+        if inc == "Reference":
+            if not any(lab in res for lab in members.get(label, [])):
+                continue  # no level of this feature was estimated
+        elif label not in res:
             continue
         if group != last:
             out.append({"Feature": group, "Increment": None, "Adjusted OR (95% CI)*": None, "Standardized Beta": None, "P-Value": None})
             last = group
+        if inc == "Reference":
+            out.append({"Feature": label, "Increment": "Reference", "Adjusted OR (95% CI)*": REFERENCE_OR, "Standardized Beta": None,
+                        "P-Value": None})
+            continue
         b, e = res[label]
         sdv = 1.0 if inc == "Per 1 SD" else sd[label]
         p = 2 * (1 - stats.norm.cdf(abs(b / e))) if e > 0 else np.nan
@@ -520,8 +552,8 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
                         check_bootstrap_intervals: bool = True) -> dict[str, Any]:
     """Builds the manuscript sheets from the ``tables`` returned by :func:`omop_etl.study_report.build_study_tables` and the feature table
     ``df``, and writes one workbook. ``attrition`` is the per-site attrition (``site``, ``step_name``, ``subjects_retained``) for
-    Table S3. ``table5``: ``"manuscript"`` (default; AUC-ROC with CI, uncalibrated Brier, sensitivity and specificity at the 0.5 threshold of
-    the balanced-trained model, as the manuscript reports) or ``"calibrated"`` (prior-shift calibrated Brier, top-10% sensitivity and PPV).
+    Table S3. ``table5``: ``"manuscript"`` (default; AUC-ROC with CI, F1, sensitivity and specificity at the 0.5 threshold of
+    the balanced-trained model (F1 replaced the uncalibrated Brier score in 0.33.0), as the manuscript reports) or ``"calibrated"`` (prior-shift calibrated Brier, top-10% sensitivity and PPV).
     ``sdi_missing_term``: keep an "SDI Quintile: Missing / Unknown" term in Table 6 (default; ``False`` leaves it out, as the manuscript did,
     so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``table6_missing``: ``"indicator"`` or ``"median"``, the ``missing`` of :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Every sheet is checked by :func:`validate_manuscript_sheets` before the workbook is written, and a failure raises :class:`ManuscriptValidationError`; ``check_bootstrap_intervals=False`` (smoke runs with few bootstrap draws) skips only the estimate-inside-interval check of the bootstrap intervals. Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
     m = manuscript_frame(df)
@@ -547,7 +579,9 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
                 "Training patients (other systems)": (t["n"].sum() - t["n"]).map("{:,}".format),
                 "AUC-ROC (95% CI)": [f"{a:.3f} ({l:.3f}{EN}{h:.3f})" for a, l, h in zip(t["auroc"], t["auroc_lo"], t["auroc_hi"])]}
         if table5 == "manuscript" and "sensitivity_050" in t:
-            cols = [("Brier", "brier_uncalibrated"), ("Sensitivity", "sensitivity_050"), ("Specificity", "specificity_050")]
+            # F1 at the 0.5 threshold since 0.33.0 (the models are tuned to F1); a results table from an earlier release has only Brier
+            first = ("F1", "f1_050") if "f1_050" in t else ("Brier", "brier_uncalibrated")
+            cols = [first, ("Sensitivity", "sensitivity_050"), ("Specificity", "specificity_050")]
         else:
             cols = [("Brier", "brier"), ("Top-10% sensitivity", "top10_sensitivity"), ("Top-10% PPV", "top10_ppv")]
         lo = pd.DataFrame({**base, **{name: t[src].round(3) for name, src in cols}})
