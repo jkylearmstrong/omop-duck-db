@@ -188,6 +188,9 @@ def test_run_study_end_to_end(feats, tmp_path, monkeypatch):
     r = run_study(db, out, **kw)
     assert len(r["data"]) == len(feats) and set(r["data"].site_anon) == {"Site A", "Site B", "Site C"} and Path(r["workbook"]).exists()
     assert r["comparison"] is None and (out / "Study_run.json").exists()
+    summ = json.loads((out / "Study_summary.json").read_text())  # the feature counts and the cohort call the manuscript text quotes
+    assert summ["n_binary"] + summ["n_continuous"] == summ["n_features"] and summ["n_columns"] >= summ["n_features"]
+    assert json.loads((out / "Study_run.json").read_text())["cohort_params"]["min_age"] == 18
     # pinned draw: only the listed stays survive; reuse_features re-reads the saved parquet; compare_to compares with the first workbook
     even = feats[feats.subject_id % 2 == 0]
     pins = even[["visit_occurrence_id"]].assign(site_source=even.site_anon.str[-1].to_numpy())

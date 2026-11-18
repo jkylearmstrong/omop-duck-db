@@ -213,7 +213,9 @@ def _regression(tabs) -> dict[str, Any]:
     risk = sorted([r for r in sig if r["or"] > 1 and r["beta"] is not None], key=lambda r: -r["beta"])
     protective = [r for r in sig if r["hi"] < 1]
     by = {r["feature"]: r for r in rows}
-    return {"n_terms": len(rows), "rows": rows, "by_feature": by, "top_risk": risk[:2], "protective": protective,
+    per_unit = [r for r in risk if r["increment"] and "vs" not in r["increment"].lower()]
+    example = next((r for r in per_unit if "readmission" in r["feature"].lower()), per_unit[0] if per_unit else None)
+    return {"n_terms": len(rows), "rows": rows, "by_feature": by, "top_risk": risk[:2], "protective": protective, "example": example,
             "protective_names": [r["feature"] for r in protective], "labs": labs,
             "indicator_terms": [r["feature"] for r in rows if r["feature"].endswith((": not measured", ": missing"))]}
 
@@ -298,6 +300,7 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     dec = run_rec.get("decisions") or {}
     ctx["decisions"] = dec
     ctx["run"] = {k: run_rec[k] for k in ("n_sites", "bootstraps", "random_state", "preset") if run_rec.get(k) is not None}
+    ctx["cohort_call"] = cohort_call(run_rec.get("cohort_params"), window)
     labels = list(run_rec.get("labels") or [])
     if not labels:
         for prefix_ in ("Table 5", "Table S1"):
@@ -321,11 +324,20 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
         ctx.setdefault("window", {})["last_discharge_text"] = _date_text(dates["discharge_last"])
     if summ.get("n_features"):
         ctx["features"] = {"n": int(summ["n_features"])}
+        for k in ("n_binary", "n_continuous", "n_columns"):
+            if summ.get(k) is not None:
+                ctx["features"][k] = int(summ[k])
+        if summ.get("empty_columns"):
+            ctx["features"]["empty"] = [_column_words(c) for c in summ["empty_columns"]]
+    ctx["files"] = {"workbook": wb.name}
+    ctx["hyper"] = benchmark_hyperparameters(ctx["run"].get("random_state", 42))
     shap_path = Path(shap_table) if shap_table else (wb.with_name(f"{prefix}_Table_SHAP_Top_Predictors.csv") if prefix else None)
     if shap_path is not None and shap_path.exists():
         st = pd.read_csv(shap_path)
         col = next((c for c in st.columns if c.lower() in ("feature", "predictor", "label")), st.columns[0])
         ctx["shap"] = {"top": [str(x) for x in st[col].head(10)]}
+        if summ.get("shap_sample_n"):
+            ctx["shap"]["n_sample"] = int(summ["shap_sample_n"])
     ctx["params"] = dict(load_params(params) if isinstance(params, (str, Path)) else (params or {}))
     for k, v in (facts or {}).items():
         if isinstance(v, Mapping) and isinstance(ctx.get(k), dict):
@@ -333,6 +345,52 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
         else:
             ctx[k] = v
     return {k: v for k, v in ctx.items() if v not in ({}, None)}
+
+
+def cohort_call(params: Mapping[str, Any] | None = None, window: Sequence[str] | None = None) -> str:
+    """The ``define_study_cohort(...)`` call of a run, as code text for the Data & Code Availability section: the run's own cohort
+    parameters (run record ``cohort_params``), otherwise the package's protocol defaults, with the window and stay rule the study adds."""
+    from omop_etl.study_run import PROTOCOL_COHORT_PARAMS
+
+    p = dict(params or PROTOCOL_COHORT_PARAMS)
+    if window:
+        p.update(min_admit_date=str(window[0]), max_admit_date=str(window[1]))
+    p["sample_stay_rule"] = "random"
+    lines = [f"    {k}={v!r}," for k, v in p.items()]
+    return "define_study_cohort(\n    con,\n" + "\n".join(lines) + "\n)"
+
+
+_HYPER_KEYS = {"Logistic Regression": ("C",), "Random Forest": ("n_estimators", "max_depth", "min_samples_split"),
+               "HistGBM": ("max_iter", "learning_rate", "max_depth", "l2_regularization"),
+               "XGBoost": ("n_estimators", "learning_rate", "max_depth", "subsample", "colsample_bytree")}
+
+
+def benchmark_hyperparameters(random_state: int = 42) -> dict[str, dict[str, Any]]:
+    """``{model: {"text": "n_estimators=100, max_depth=12, ...", parameter: value}}`` for the fixed benchmark configuration of each model
+    in :func:`omop_etl.study_report.default_model_grid`, read from the estimators themselves so the text cannot drift from the code."""
+    try:
+        from omop_etl.study_report import default_model_grid
+
+        grid = default_model_grid(random_state, n_jobs=1)
+    except Exception:  # scikit-learn missing: the template shows no hyperparameters
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for name, (_, configs) in grid.items():
+        try:
+            est = configs[0][1]()
+            prm = est.get_params()
+        except Exception:
+            continue
+        keys = [k for k in _HYPER_KEYS.get(name, ()) if prm.get(k) is not None]
+        vals = {k: prm[k] for k in keys}
+        out[name] = {**vals, "text": ", ".join(f"{k}={v}" for k, v in vals.items())}
+    return out
+
+
+def _column_words(col: str) -> str:
+    """A feature-table column name as words: ``heart_rate_mean`` -> "heart rate"."""
+    w = re.sub(r"_(mean|last|first|min|max|value|index|idx)$", "", str(col).lower())
+    return w.replace("_", " ").strip()
 
 
 def _date_text(d: str, month_only: bool = False) -> str:
@@ -389,7 +447,9 @@ def _environment(missing: list[str]):
 
     def join(items, word="and"):
         items = [str(i) for i in (items or [])]
-        return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} {word} {items[-1]}" if items else ""
+        if len(items) <= 2:
+            return f" {word} ".join(items)
+        return f"{', '.join(items[:-1])}, {word} {items[-1]}"  # serial comma, as in the delivered text
 
     words_ = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
 
@@ -462,10 +522,15 @@ def render_manuscript_body(context: Mapping[str, Any], *, tables: Mapping[str, s
     figure_md = {}
     for k, v in figures.items():
         cap, file = v if isinstance(v, tuple) else ("", v)
+        cap = _caption_with_context(cap, context)
         text = f"{numbers.get(k, 'Figure')}: {cap}" if cap else numbers.get(k, "Figure")
         alt = text.replace('"', "")
-        figure_md[k] = f'![{text}]({file}){{fig-alt="{alt}" width="100%"}}'
+        # Quarto numbers a figure with an id itself ("Figure 1:"), in document order, which is the layout's order
+        figure_md[k] = f'![{cap}]({file}){{#fig-{k} fig-alt="{alt}" width="100%"}}'
     md = tpl.render(**context, ref=ref, table_md=table_md, figure_md=figure_md)
+    # Pandoc needs a blank line before a heading and around a figure, or it reads them as paragraph text
+    md = re.sub(r"(?m)^(?!\n)(.+)\n(#{1,6} )", r"\1\n\n\2", md)
+    md = re.sub(r"(?m)^(!\[.*)$", r"\n\1\n", md)
     md = re.sub(r"\n{3,}", "\n\n", md)
     return {"markdown": md, "missing": sorted(set(missing)), "template": folder.name.lstrip("v"), "numbers": numbers}
 
@@ -475,9 +540,18 @@ SHEET_KEYS = {"Table 1": "table1", "Table 2": "performance", "Table 3": "tuning"
               "Table S1": "los", "Table S2": "completeness", "Table S3": "attrition", "Table S4": "grid"}
 _FIGURE_KEYS = (("flowchart", ("Flowchart", "CONSORT")), ("shap", ("SHAP_XGBoost", "SHAP_4Panel", "SHAP")))
 _FIGURE_CAPTIONS = {"flowchart": "Cohort selection flowchart. P = unique patients; each step is a patient-level count from the omop-duck-db cohort "
-                                 "attrition table, summed over the health systems. The final box is the analytic cohort: one qualifying stay drawn "
-                                 "at random for each patient.",
-                    "shap": "SHAP summary plot for XGBoost with 50/50 balanced training (top predictors, sampled patients)."}
+                                 "attrition table, summed over the {nsites_word} health systems. The final box is the analytic cohort: one qualifying "
+                                 "stay drawn at random for each patient.",
+                    "shap": "SHAP Summary Plot for XGBoost with 50/50 Balanced Training (Top 15 Predictors, {shap_n} Sampled Patients)"}
+
+
+def _caption_with_context(cap: str, context: Mapping[str, Any]) -> str:
+    """Fills ``{nsites_word}`` and ``{shap_n}`` in a figure caption from the run; a value the run does not hold is dropped with its word."""
+    n = (context.get("run") or {}).get("n_sites")
+    words_ = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+    cap = cap.replace("{nsites_word}", words_.get(n, str(n)) if n else "").replace("  ", " ")
+    shap_n = (context.get("shap") or {}).get("n_sample")
+    return cap.replace("{shap_n}", f"{shap_n:,}") if shap_n else cap.replace(", {shap_n} Sampled Patients", "")
 
 
 def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], images: Sequence[Path], *, workbook: str | Path,
@@ -513,18 +587,47 @@ _SECTIONS = ("Abstract", "Introduction", "Methods", "Results", "Discussion", "Et
 
 
 def _plain_from_markdown(md: str) -> str:
-    """Markdown to running text: no tables, images, YAML, emphasis or heading marks; headings kept as their own lines."""
-    out = []
+    """Markdown to running text laid out as a PDF's extracted text is: no tables, images, YAML or emphasis; a top-level section heading
+    (``##``) on its own line; a sub-heading (``###``, ``####``) and its first paragraph run together, and list items run on from the
+    paragraph above them (numbered items keep "1.", bullets become "•"), because the PDF text of the delivered manuscript reads that way."""
+    out: list[str] = []
     in_yaml = False
+    glue = False  # the next non-blank line continues the current paragraph
     for line in md.splitlines():
         if line.strip() == "---":
             in_yaml = not in_yaml
             continue
-        if in_yaml or line.lstrip().startswith(("|", "![", ":::")):
+        img = re.match(r"^\s*!\[([^\]]*)\]", line)
+        if img:  # a figure's caption ("Figure 1: ...", the alt text) is part of the PDF's text
+            alt = re.search(r'fig-alt="([^"]*)"', line)
+            out += ["", (alt.group(1) if alt else img.group(1)).replace("**", ""), ""]
+            glue = False
             continue
-        line = re.sub(r"^#+\s*", "\n", line)
-        line = re.sub(r"^\s*(?:[-*]|\d+\.)\s+", "", line)
-        out.append(line.replace("**", "").replace("\\", ""))
+        if in_yaml or line.lstrip().startswith(("|", ":::")):
+            continue
+        text = re.sub(r"[~^]([^~^\s]+)[~^]", r"\1", line.replace("**", "").replace("\\", ""))  # Pandoc sub/superscripts
+        if not text.strip():
+            if not glue:
+                out.append("")
+            continue
+        m = re.match(r"^(#+)\s*(.*)$", text)
+        if m:
+            if len(m.group(1)) <= 2:
+                out += ["", m.group(2), ""]
+                glue = False
+            else:
+                out += ["", m.group(2)]
+                glue = True
+            continue
+        item = re.match(r"^\s*([-*]|\d+\.)\s+(.*)$", text)
+        if item:
+            while out and not out[-1].strip():
+                out.pop()  # the item continues the paragraph above it
+            out.append(("• " if item.group(1) in "-*" else item.group(1) + " ") + item.group(2))
+            glue = False
+            continue
+        out.append(text)
+        glue = False
     return "\n".join(out)
 
 
@@ -567,7 +670,7 @@ def _sentences_of(text: str) -> list[tuple[str, str]]:
     flush()
     out = []
     for sec, p in paras:
-        for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", p):
+        for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(•])", p):
             toks = s.split()
             words = [t for t in toks if re.fullmatch(r"[A-Za-z][A-Za-z'()\-]*[.,;:]?", t)]
             if len(words) >= 6 and len(words) >= 0.6 * len(toks):

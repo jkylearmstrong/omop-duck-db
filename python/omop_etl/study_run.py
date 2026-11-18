@@ -669,7 +669,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                        author=document_author, formats=document_formats, min_cell=min_cell, cache_dir=document_cache_dir,
                                        software_versions=run_environment(), profile=manuscript_profile, params=manuscript_params,
                                        run={"n_sites": len(labels), "window": [start, end], "decisions": dec, "bootstraps": n_bootstraps,
-                                            "random_state": random_state, "preset": preset, "environment": run_environment()},
+                                            "random_state": random_state, "preset": preset, "environment": run_environment(),
+                                            "cohort_params": c_params},
                                        summary=res.get("summary"))
         staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
@@ -706,6 +707,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                   str(site_labels_arg) not in ("random", "ordered") else str(site_labels_arg or "ordered"))
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
                                                        "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
+                                                       "cohort_params": json.loads(json.dumps(c_params, default=str)),
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},
                                                        "sdoh": {"on": ruca_crosswalk is not None and sdi_table is not None, "sdi_cut_points": list(sdi_cut_points or ())},
                                                        "transfer_source_values": list(transfer_source_values), "site_labels": label_mode,

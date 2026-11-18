@@ -891,8 +891,13 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
                           "specificity_050": float((~pred & (yy == 0)).sum() / max(1, (yy == 0).sum())),
                           "brier_uncalibrated": float(np.mean((g["p_raw"].to_numpy() - yy) ** 2))})
         tables["LOSO_By_Site"] = per.merge(pd.DataFrame(extra), on="site", how="left")
+    binary = [c for c in X.columns if set(pd.unique(X[c].dropna())) <= {0, 1}]
+    empty = [str(c) for c in df.columns if c != label_col and df[c].isna().all()]
     summary: dict[str, Any] = {"n": int(len(y)), "n_features": int(X.shape[1]), "readmit_rate_pct": round(float(y.mean() * 100), 2),
-                               "tuning": tuned["summary"]}
+                               "tuning": tuned["summary"], "n_binary": len(binary), "n_continuous": int(X.shape[1] - len(binary)),
+                               "n_columns": int(df.shape[1]), "empty_columns": empty}
+    if figures:
+        summary["shap_sample_n"] = int(min(shap_sample_n, len(y)))
     if "admit_date" in df and "discharge_date" in df and site_col in df:
         summary["dates"] = index_stay_dates(df, site_col=site_col, window_start=window[0] if window else None,
                                             window_end=window[1] if window else None)
