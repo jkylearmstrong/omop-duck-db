@@ -381,8 +381,8 @@ def los_by_site(df: pd.DataFrame, *, site_col: str = "site_anon", los_col: str =
     and no statistics."""
     from scipy import stats
 
-    def p_text(p):
-        return "<0.001" if p < 0.001 else f"{p:.3f}"
+    def p_text(p):  # a test with no variation in a group has no p-value: shown as a dash, never as "nan"
+        return "—" if not np.isfinite(p) else "<0.001" if p < 0.001 else f"{p:.3f}"
 
     def ms(s):
         return f"{s.mean():.2f} ± {s.std():.2f}"

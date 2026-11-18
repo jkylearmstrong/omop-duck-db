@@ -1,3 +1,10 @@
+# omopduckdb (development version)
+
+- **Table 6 no longer prints intervals it cannot estimate (Python).** eGFR is computed from creatinine, so the two are missing in the same stays and their "not measured" terms were the same column: the model could not tell them apart, and the 0.31.0 `package` run printed intervals running to 10^60. Identical "not measured" terms now enter as one term named after both ("Creatinine / eGFR (2021): not measured"); a flag whose stays all share one outcome is left out; any other exact collinearity stops the run.
+- **Manuscript tables are checked before anything is written (Python).** `validate_manuscript_sheets` (called by `manuscript_workbook`, so by `run_study`) raises `ManuscriptValidationError` on a NaN or infinite value, an interval with swapped bounds, an estimate outside its interval, or an odds-ratio interval above 10^6. Runs with fewer than 50 bootstrap draws skip only the estimate-inside-interval check of bootstrap intervals. Table S1 shows a dash, not "nan", for a test that has no p-value.
+- **The `package` preset follows the Nov 11 deliverable except where it was wrong.** `address_tie_break="first_listed"`, `attrition_mode="full_history"` and `table6_increments="clinical"` now match `delivered_2026_11_11`. The package keeps its own rule for `concept_sets`, `table6_missing`, `sdi_missing_term`, `consort_final_steps` and `address_undated`, each a correction of the delivered workbook (see the vignette table).
+- **Delivered comparison:** a site sheet with fewer than half of the delivered rows in common is listed in `14_layout_differs_sheets` instead of being called ambiguous, and `compare_study_deltas.py` prints "N differing cells" above its summary.
+
 # omopduckdb 0.31.0
 
 Minor release: Table 6 gives each mostly-unmeasured lab or vital a "not measured" term instead of median imputation alone (the package default; the `delivered_2026_11_11` preset keeps median imputation); the delta tool lists every cell that moved; and a fixed, committed method compares a rerun with the delivered manuscript. Version bump 0.30.0 to 0.31.0.

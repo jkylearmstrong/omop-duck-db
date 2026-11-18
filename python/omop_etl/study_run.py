@@ -55,7 +55,12 @@ STUDY_DECISIONS: dict[str, dict[str, Any]] = {
                                 "'median' (median imputation only, as delivered; biases the OR of a mostly-unmeasured lab towards 1)."},
 }
 STUDY_PRESETS: dict[str, dict[str, Any]] = {
-    "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "deterministic", "sdi_missing_term": True, "table5": "manuscript", "attrition_mode": "windowed", "table6_increments": "sd", "age_method": "completed_years",
+    # The package follows the Nov 11 deliverable except where it was wrong (Kyle, 2026-11-17): hierarchy-based concept sets, a
+    # "not measured" term instead of median imputation alone, an SDI-missing term (without it missing SDI joins the reference
+    # quintile), a CONSORT table that ends at the analysed cohort, and dated addresses ahead of undated ones (the delivered order
+    # came from an operator-precedence slip in the study pipeline).
+    "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "first_listed", "sdi_missing_term": True, "table5": "manuscript",
+                "attrition_mode": "full_history", "table6_increments": "clinical", "age_method": "completed_years",
                 "concept_sets": "bundled", "table6_missing": "indicator"},
     "delivered_2026_11_11": {"consort_final_steps": False, "address_undated": "first", "address_tie_break": "first_listed", "sdi_missing_term": False, "table5": "manuscript", "attrition_mode": "full_history",
                              "table6_increments": "clinical", "age_method": "completed_years",
@@ -631,7 +636,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     timings["tables_figures"] = round(time.time() - t_tab, 1)
     wb = manuscript_workbook(pooled, res["tables"], out / f"{prefix}_Manuscript_Tables.xlsx", attrition=attrition, site_labels=labels, min_cell=min_cell,
                              title=f"{prefix} manuscript tables", table5=table5, sdi_missing_term=sdi_missing_term,
-                             table6_increments=dec["table6_increments"], table6_missing=dec["table6_missing"], sheet_site_labels=sheet_site_labels)
+                             table6_increments=dec["table6_increments"], table6_missing=dec["table6_missing"], sheet_site_labels=sheet_site_labels,
+                             check_bootstrap_intervals=n_bootstraps >= 50)  # fewer draws: a smoke run, its percentile CIs are not meaningful
     comparison = None
     if compare_to is not None:
         summary, diffs = compare_workbooks(wb["path"], compare_to)
