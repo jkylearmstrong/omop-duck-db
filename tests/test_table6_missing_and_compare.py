@@ -253,3 +253,21 @@ def test_benchmark_suffix_stage_keyed_s3_and_s4_layout(tmp_path):
     assert s4a["cells_compared"] == 4 and s4a["differing_cells"] == 1 and s4a["columns_compared"] == ["auc_raw", "f1_raw"]
     assert s4a["max_abs_auc_change"] == round(0.999 - 0.72, 4)  # "auc_raw" counts as an AUC column
     assert a["9_per_sheet"]["Table 3 - Tuning AUC vs F1"]["differing_cells"] == 0
+
+
+def test_s3_with_a_different_attrition_layout_is_reported_not_ambiguous(tmp_path):
+    import openpyxl
+
+    old = _full_workbook(tmp_path / "old.xlsx", {"s1": "Site A", "s2": "Site B", "s3": "Site C"})
+    new = _full_workbook(tmp_path / "new.xlsx", {"s1": "Site C", "s2": "Site A", "s3": "Site B"})
+    # another preset's CONSORT steps: no stage in common with the delivered workbook
+    wb = openpyxl.load_workbook(new)
+    s3 = wb["Table S3 - CONSORT Attrition"]
+    col = next(c.column for c in s3[3] if str(c.value or "").startswith("Stage"))
+    for (cell,) in s3.iter_rows(min_row=4, min_col=col, max_col=col):
+        if cell.value:
+            cell.value = f"Other rule: {cell.value}"
+    wb.save(tmp_path / "new2.xlsx")
+    a = compare_with_delivered(tmp_path / "new2.xlsx", old)["answers"]
+    assert a["14_layout_differs_sheets"] == ["Table S3 - CONSORT Attrition"]
+    assert a["14_ambiguous_sheets"] == [] and a["14_site_matching_unambiguous"]

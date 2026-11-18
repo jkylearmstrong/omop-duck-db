@@ -88,6 +88,7 @@ def main(argv=None):
     if summary.empty:
         print("All sheets and cells matched identically (0 differing cells).")
     else:
+        print(f"{len(cells):,} differing cells across {summary.shape[0]} sheet(s) (not the total number of cells compared).")
         print(summary.to_string(index=False))
 
     if a.markdown is not None:

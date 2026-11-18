@@ -90,6 +90,17 @@ def _site_column(raw: pd.DataFrame, starts: str) -> dict[str, list[float]]:
     return out
 
 
+def _shared_row_share(new: Mapping[str, Any], old: Mapping[str, Any]) -> float:
+    """Share of the delivered workbook's row keys (over all its sites) that the new workbook also has. 1.0 for sheets with one row
+    per site; lower for Table S3 when the attrition steps differ (another preset or CONSORT layout)."""
+    def keys(v: Mapping[str, Any]) -> set[str]:
+        return {k for rows in v.values() if isinstance(rows, Mapping) for k in rows}
+    ko, kn = keys(old), keys(new)
+    if not ko:
+        return 1.0
+    return len(ko & kn) / len(ko)
+
+
 def match_sites(new: Mapping[str, Any], old: Mapping[str, Any], *, margin: float = 0.5) -> tuple[dict[str, str], bool]:
     """Pairs new site labels with old ones by their numbers. Returns ``({new label: old label}, unambiguous)``.
 
@@ -351,14 +362,22 @@ def compare_with_delivered(new_workbook: str | Path, delivered_workbook: str | P
     # site pairing per sheet (by numbers)
     mappings: dict[str, dict[str, str]] = {}
     unamb: dict[str, bool] = {}
+    layout_differs: list[str] = []
     det += ["## Site pairing (new label -> delivered label)", ""]
     for sheet in SITE_SHEETS:
         if sheet in A and sheet in B:
-            m, ok = match_sites(_site_vectors(A[sheet]), _site_vectors(B[sheet]))
+            va, vb = _site_vectors(A[sheet]), _site_vectors(B[sheet])
+            if _shared_row_share(va, vb) < 0.5:
+                # e.g. Table S3 under a preset with different attrition steps: too few rows in common to pair sites by numbers
+                layout_differs.append(sheet)
+                det.append(f"- {sheet}: layout differs from the delivered workbook (fewer than half of its rows in common); not paired")
+                continue
+            m, ok = match_sites(va, vb)
             mappings[sheet], unamb[sheet] = m, ok
             det.append(f"- {sheet}: " + ", ".join(f"{k} -> {v}" for k, v in sorted(m.items())) + ("" if ok else "  (AMBIGUOUS)"))
     ans["14_site_matching_unambiguous"] = bool(unamb) and all(unamb.values())
     ans["14_ambiguous_sheets"] = [k for k, v in unamb.items() if not v]
+    ans["14_layout_differs_sheets"] = layout_differs
     det.append("")
 
     # 15 same letter per site across Table 5, S1, S3 in the new run: pair the new sheets with each other by numbers too
