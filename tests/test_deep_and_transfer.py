@@ -84,9 +84,9 @@ def test_loso_table_carries_uncalibrated_threshold_metrics_and_table5_options(tm
     r = sr.build_study_tables(df, tmp_path / "t", prefix="X", n_bootstraps=3, workbook=False, descriptive=False)
     lo = r["tables"]["LOSO_By_Site"]
     assert {"sensitivity_050", "specificity_050", "brier_uncalibrated"} <= set(lo.columns) and lo["sensitivity_050"].between(0, 1).all()
-    man = mt.manuscript_workbook(df, r["tables"], tmp_path / "m.xlsx")["sheets"]["Table 5 - Cross-Site LOSO"]
+    man = mt.manuscript_workbook(df, r["tables"], tmp_path / "m.xlsx", check_bootstrap_intervals=False)["sheets"]["Table 5 - Cross-Site LOSO"]
     assert list(man.columns)[-3:] == ["Brier", "Sensitivity", "Specificity"] and man.iloc[-1, 0] == "Mean of three sites"
-    cal = mt.manuscript_workbook(df, r["tables"], tmp_path / "c.xlsx", table5="calibrated")["sheets"]["Table 5 - Cross-Site LOSO"]
+    cal = mt.manuscript_workbook(df, r["tables"], tmp_path / "c.xlsx", table5="calibrated", check_bootstrap_intervals=False)["sheets"]["Table 5 - Cross-Site LOSO"]
     assert "Top-10% PPV" in cal.columns
     with pytest.raises(ValueError, match="table5"):
         mt.manuscript_workbook(df, r["tables"], tmp_path / "x.xlsx", table5="nope")
