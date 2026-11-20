@@ -641,7 +641,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                              window=(start, end), min_cell=min_cell, random_state=random_state)
     timings["tables_figures"] = round(time.time() - t_tab, 1)
     wb = manuscript_workbook(pooled, res["tables"], out / f"{prefix}_Manuscript_Tables.xlsx", attrition=attrition, site_labels=labels, min_cell=min_cell,
-                             title=f"{prefix} manuscript tables", table5=table5, sdi_missing_term=sdi_missing_term,
+                             title=document_title or f"{prefix} manuscript tables", byline=f"Authors: {document_author}" if document_author else "",
+                             table5=table5, sdi_missing_term=sdi_missing_term,
                              table6_increments=dec["table6_increments"], table6_missing=dec["table6_missing"], sheet_site_labels=sheet_site_labels,
                              check_bootstrap_intervals=n_bootstraps >= 50)  # fewer draws: a smoke run, its percentile CIs are not meaningful
     comparison = None

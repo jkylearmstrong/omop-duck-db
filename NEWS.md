@@ -1,3 +1,11 @@
+# omopduckdb 0.33.1
+
+Patch release after run C3 (2026-11-20): Figure 1 and the workbook's titles and index sheet. No number, cohort or model changes. Version bump 0.33.0 to 0.33.1.
+
+- **Figure 1 boxes fit their text.** Every text in the cohort flowchart is wrapped to the width it has, measured in the rendered font, and each box is as tall as its wrapped text (the diabetes phenotype step had three lines in a box sized for two, so its text crossed the border and the arrow). Each gap is as tall as its exclusion note, so a long note no longer runs into the next box, and step names are no longer cut after two lines. `omop_etl.study_report.flowchart_overlaps(fig)` lists any text that leaves its box or overlaps another; the tests check it on the study's step names, on very long names and on 15 steps.
+- **Workbook titles as delivered on 2026-11-11.** Table 2 says "5-Fold Grouped CV" again (the folds are grouped by patient) and Table S2 ends with "(N = <cohort N>)" from the run. Table 1's title already matched (only its N differs, from the data).
+- **"Manifest & Index" sheet as delivered.** `manuscript_workbook()` names the index sheet "Manifest & Index" with the delivered columns (Sheet Name, Manuscript Table Title, Rows, Description / Key Dimension: "Primary Manuscript Table" or "Supplementary Material / Listing") and a byline row under the title. New arguments `byline` (e.g. "Authors: ..."; blank by default, the package stores no names) and `subtitle`; `run_study()` fills the byline from `document_author` and the title from `document_title` when given. `export_workbook()` takes `manifest_sheet`, `byline`, `manifest_headers` and `describe`; its defaults are unchanged. Readers already skip both sheet names.
+
 # omopduckdb 0.33.0
 
 Minor release: the revisions requested on 2026-11-18 (Figure 1 drawn as a journal cohort figure, the tuning-comparison table dropped, F1 in the cross-site table, reference categories in the regression table), discharge status that tells "other" apart from "missing", and everything prepared for 0.32.0, which was not released on its own (the versioned manuscript template, the Table 6 estimability fix and the manuscript validator). Version bump 0.31.0 to 0.33.0.

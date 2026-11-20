@@ -431,9 +431,14 @@ def index_stay_dates(df: pd.DataFrame, *, admit_col: str = "admit_date", dischar
 
 # ------------------------------------------------------------------ workbook
 def export_workbook(sheets: Sequence[tuple[str, str, pd.DataFrame]], path: str | Path, *, title: str = "Study tables",
-                    subtitle: str = "") -> Path:
+                    subtitle: str = "", manifest_sheet: str = "Manifest", byline: str | None = None,
+                    manifest_headers: Sequence[str] = ("Sheet", "Caption", "Rows"),
+                    describe: Callable[[str], str] | None = None) -> Path:
     """Writes ``[(sheet_name, caption, table), ...]`` to one formatted .xlsx with a manifest sheet listing each table.
 
+    The manifest sheet (named ``manifest_sheet``) has the title, the subtitle, then, when ``byline`` is not ``None``, a byline row
+    (an empty string leaves that row blank) and the table index one row lower. ``manifest_headers`` names the index columns (sheet,
+    caption, rows); ``describe(caption)``, when given, fills a fourth column (its header is ``manifest_headers[3]``).
     Sheet names are truncated to Excel's 31 characters. Requires openpyxl (``pip install openpyxl``)."""
     try:
         import openpyxl
@@ -443,16 +448,24 @@ def export_workbook(sheets: Sequence[tuple[str, str, pd.DataFrame]], path: str |
         raise ImportError("openpyxl is required for export_workbook: pip install openpyxl") from exc
     wb = openpyxl.Workbook()
     ws0 = wb.active
-    ws0.title = "Manifest"
+    ws0.title = manifest_sheet[:31]
     head_fill, head_font = PatternFill("solid", start_color="1F4E79", end_color="1F4E79"), Font(bold=True, color="FFFFFF")
     ws0["A1"], ws0["A1"].font = title, Font(bold=True, size=14, color="1F4E79")
     if subtitle:
-        ws0["A2"] = subtitle
-    for j, h in enumerate(["Sheet", "Caption", "Rows"], 1):
-        c = ws0.cell(row=4, column=j, value=h)
+        ws0["A2"], ws0["A2"].font = subtitle, Font(color="595959")
+    head_row = 4
+    if byline is not None:
+        if byline:
+            ws0["A3"], ws0["A3"].font = byline, Font(size=10, color="595959")
+        head_row = 5
+    headers = list(manifest_headers)[:4 if describe else 3]
+    if describe and len(headers) < 4:
+        headers.append("Description")
+    for j, h in enumerate(headers, 1):
+        c = ws0.cell(row=head_row, column=j, value=h)
         c.fill, c.font = head_fill, head_font
     used: set[str] = set()
-    for i, (name, caption, table) in enumerate(sheets, 5):
+    for i, (name, caption, table) in enumerate(sheets, head_row + 1):
         sheet = name[:31]
         k = 1
         while sheet in used:
@@ -474,7 +487,11 @@ def export_workbook(sheets: Sequence[tuple[str, str, pd.DataFrame]], path: str |
         ws0.cell(row=i, column=1, value=sheet)
         ws0.cell(row=i, column=2, value=caption)
         ws0.cell(row=i, column=3, value=int(len(table)))
+        if describe:
+            ws0.cell(row=i, column=4, value=describe(caption))
     ws0.column_dimensions["A"].width, ws0.column_dimensions["B"].width = 34, 110
+    if describe:
+        ws0.column_dimensions["D"].width = 36
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
@@ -497,6 +514,15 @@ def _save(fig: Any, path: str | Path | None, dpi: int) -> None:
         fig.savefig(str(path), dpi=dpi, bbox_inches="tight")
 
 
+def _renderer(fig: Any) -> Any:
+    """A renderer for measuring text: the figure's own canvas, or an Agg canvas attached to it (a bare Figure has none)."""
+    if not hasattr(fig.canvas, "get_renderer"):
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        FigureCanvasAgg(fig)
+    return fig.canvas.get_renderer()
+
+
 def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *, path: str | Path | None = None,
                           first_box: str = "All patients with an inpatient or emergency-to-inpatient stay",
                           final_box: str = "one randomly drawn stay per patient", dpi: int = 200) -> Any:
@@ -508,9 +534,9 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
 
     Layout (since 0.33.0) follows the usual journal cohort figure (e.g. McCoy et al., JGIM 2017): the boxes form one column joined
     by down arrows, and each exclusion is a horizontal arrow that branches off the middle of the down arrow into the step it
-    belongs to, with its text to the right. Long step names wrap instead of being cut."""
-    import textwrap
-
+    belongs to, with its text to the right. Since 0.33.1 every text is wrapped to the width it has, measured in the rendered font,
+    and each box is as tall as its wrapped text and each gap as tall as its exclusion text, so no text leaves its box or runs
+    into the next step however long the step names are (:func:`flowchart_overlaps` checks this)."""
     from matplotlib.patches import FancyArrowPatch, Rectangle
 
     for c in ("step_name", "subjects_retained", "subjects_dropped"):
@@ -519,51 +545,117 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     if n <= 0 or not 0 <= n_readmitted <= n:
         raise ValueError("n must be positive and 0 <= n_readmitted <= n.")
     steps = [(str(r.step_name), int(r.subjects_retained), int(r.subjects_dropped)) for r in attrition.itertuples()]
-    box_h, pitch = 0.62, 1.55          # box height and distance between box centres; the gap holds the branching exclusion
-    cx, x0, x1 = 2.8, 0.2, 5.4         # main column centre and edges
-    branch_x = 5.95                    # where an exclusion arrow ends and its text starts
-    top = (len(steps) + 1) * pitch     # centre of the first box
-    centres = [top - i * pitch for i in range(len(steps) + 1)]  # the steps, then the analytic cohort
-    fig = _figure((9.5, 0.62 * (len(steps) + 2) * pitch + 0.4))
-    ax = fig.subplots()
+    # all positions are in inches: the axes fill the figure, x runs 0..W, y runs down from 0 and the height is set at the end
+    W = 9.5
+    x0, x1 = 0.2, 5.1                  # main column edges
+    cx = (x0 + x1) / 2                 # main column centre: the down arrows
+    branch_x = 5.6                     # where an exclusion arrow ends and its text starts
+    pad_x, pad_y = 0.12, 0.08          # text padding inside a box
+    min_gap, min_box = 0.42, 0.40
+    fig = _figure((W, 4.0))
+    ax = fig.add_axes((0, 0, 1, 1))
     ax.axis("off")
-    ax.set_xlim(0, 10)
+    ax.set_xlim(0, W)
+    renderer = _renderer(fig)
 
-    def box(xa: float, xb: float, yc: float, text: str, bold: bool = True, fs: float = 8.5) -> None:
-        ax.add_patch(Rectangle((xa, yc - box_h / 2), xb - xa, box_h, fc="white", ec="black", lw=1.3))
-        ax.text((xa + xb) / 2, yc, text, ha="center", va="center", fontsize=fs, fontweight="bold" if bold else "normal")
+    def style(fs: float, bold: bool = False, italic: bool = False) -> dict[str, Any]:
+        return {"fontsize": fs, "fontweight": "bold" if bold else "normal", "fontstyle": "italic" if italic else "normal"}
+
+    def measure(text: str, st: Mapping[str, Any]) -> tuple[float, float]:
+        t = ax.text(0, 0, text, **st)
+        bb = t.get_window_extent(renderer)
+        t.remove()
+        return bb.width / fig.dpi, bb.height / fig.dpi
+
+    def wrap(text: str, width: float, st: Mapping[str, Any]) -> list[str]:
+        lines: list[str] = []
+        cur = ""
+        for word in text.split():
+            cand = f"{cur} {word}" if cur else word
+            if cur and measure(cand, st)[0] > width:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = cand
+        return lines + [cur] if cur else lines
+
+    def box_text(parts: Sequence[str], width: float, st: Mapping[str, Any]) -> tuple[str, float]:
+        text = "\n".join(line for part in parts for line in wrap(part, width - 2 * pad_x, st))
+        return text, max(min_box, measure(text, st)[1] + 2 * pad_y)
+
+    def box(xa: float, xb: float, top: float, text: str, h: float, st: Mapping[str, Any]) -> float:
+        ax.add_patch(Rectangle((xa, top - h), xb - xa, h, fc="white", ec="black", lw=1.3))
+        ax.text((xa + xb) / 2, top - h / 2, text, ha="center", va="center", multialignment="center", **st)
+        return top - h
 
     def arrow(xa: float, ya: float, xb: float, yb: float) -> None:
         ax.add_patch(FancyArrowPatch((xa, ya), (xb, yb), arrowstyle="-|>", mutation_scale=11, color="black", lw=1.1,
                                      shrinkA=0, shrinkB=0))
 
+    main, excl, outcome = style(8.3, bold=True), style(7.6, italic=True), style(8)
+    y = -0.1                           # top of the next box
+    bottom = y
     for i, (name, kept, dropped) in enumerate(steps):
-        y = centres[i]
-        label = first_box if i == 0 else name
-        box(x0, x1, y, "\n".join(textwrap.wrap(label, 62, break_on_hyphens=False)[:2]) + f"\nP = {kept:,} patients", fs=8.3)
+        text, h = box_text([first_box if i == 0 else name, f"P = {kept:,} patients"], x1 - x0, main)
         if i > 0:
-            # down arrow from the box above into this one; the exclusion branches off its midpoint
-            arrow(cx, centres[i - 1] - box_h / 2, cx, y + box_h / 2)
+            gap = min_gap
             if dropped:
-                mid = y + pitch / 2
+                note = "\n".join(wrap(f"Excluded: did not meet {name}", W - branch_x - 0.15, excl) + [f"P = {dropped:,} patients"])
+                gap = max(min_gap, measure(note, excl)[1] + 0.18)
+                mid = bottom - gap / 2
                 arrow(cx, mid, branch_x - 0.08, mid)
-                text = "\n".join(textwrap.wrap(f"Excluded: did not meet {name}", 46, break_on_hyphens=False)) + f"\nP = {dropped:,} patients"
-                ax.text(branch_x, mid, text, ha="left", va="center", fontsize=7.6, style="italic")
-    y = centres[-1]
-    arrow(cx, centres[-2] - box_h / 2, cx, y + box_h / 2)
-    box(x0, x1, y, f"Analytic cohort: {final_box}\nN = P = {n:,}")
-    yo = y - pitch * 0.85
+                ax.text(branch_x, mid, note, ha="left", va="center", **excl)
+            y = bottom - gap
+            arrow(cx, bottom, cx, y)   # down arrow from the box above into this one; the exclusion branches off its midpoint
+        bottom = box(x0, x1, y, text, h, main)
+    text, h = box_text([f"Analytic cohort: {final_box}", f"N = P = {n:,}"], x1 - x0, main)
+    y = bottom - min_gap
+    arrow(cx, bottom, cx, y)
+    final_bottom = box(x0, x1, y, text, h, main)
     lx, rx = (x0 + cx - 0.1) / 2, (cx + 0.1 + x1) / 2
-    box(x0, cx - 0.1, yo, f"30-day readmission\nN = {n_readmitted:,} ({100 * n_readmitted / n:.2f}%)", bold=False, fs=8)
-    box(cx + 0.1, x1, yo, f"No readmission\nN = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.2f}%)", bold=False, fs=8)
-    ym = (y - box_h / 2 + yo + box_h / 2) / 2
-    ax.plot([cx, cx], [y - box_h / 2, ym], color="black", lw=1.1)
+    left, lh = box_text(["30-day readmission", f"N = {n_readmitted:,} ({100 * n_readmitted / n:.2f}%)"], cx - 0.1 - x0, outcome)
+    right, rh = box_text(["No readmission", f"N = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.2f}%)"], x1 - cx - 0.1, outcome)
+    yo = final_bottom - 0.5
+    ym = (final_bottom + yo) / 2
+    ax.plot([cx, cx], [final_bottom, ym], color="black", lw=1.1)
     ax.plot([lx, rx], [ym, ym], color="black", lw=1.1)
-    arrow(lx, ym, lx, yo + box_h / 2)
-    arrow(rx, ym, rx, yo + box_h / 2)
-    ax.set_ylim(yo - box_h, top + box_h)
+    arrow(lx, ym, lx, yo)
+    arrow(rx, ym, rx, yo)
+    oh = max(lh, rh)
+    box(x0, cx - 0.1, yo, left, oh, outcome)
+    box(cx + 0.1, x1, yo, right, oh, outcome)
+    low = yo - oh - 0.1
+    ax.set_ylim(low, 0)
+    fig.set_size_inches(W, -low)
     _save(fig, path, dpi)
     return fig
+
+
+def flowchart_overlaps(fig: Any, tol_px: float = 0.5) -> list[str]:
+    """Layout problems in a flowchart Figure (:func:`plot_cohort_flowchart`): a text centred in a box that does not fit inside it,
+    or a text outside the boxes (an exclusion note) that overlaps a box or another such text. Returns one line per problem;
+    an empty list means every text sits where it belongs."""
+    from matplotlib.patches import Rectangle
+
+    ax = fig.axes[0]
+    renderer = _renderer(fig)
+    boxes = [p.get_window_extent(renderer) for p in ax.patches if isinstance(p, Rectangle)]
+    free, problems = [], []
+    for t in ax.texts:
+        bb = t.get_window_extent(renderer)
+        cxp, cyp = (bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2
+        home = [b for b in boxes if b.x0 <= cxp <= b.x1 and b.y0 <= cyp <= b.y1]
+        label = t.get_text().split("\n")[0]
+        if home:
+            b = home[0]
+            if bb.x0 < b.x0 - tol_px or bb.x1 > b.x1 + tol_px or bb.y0 < b.y0 - tol_px or bb.y1 > b.y1 + tol_px:
+                problems.append(f"text overflows its box: {label!r}")
+        else:
+            if any(bb.overlaps(b) for b in boxes):
+                problems.append(f"text overlaps a box: {label!r}")
+            problems += [f"texts overlap: {label!r} and {o!r}" for o, ob in free if bb.overlaps(ob)]
+            free.append((label, bb))
+    return problems
 
 
 def shap_ranking(values: Any, data: pd.DataFrame) -> pd.DataFrame:
