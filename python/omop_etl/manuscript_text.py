@@ -212,7 +212,10 @@ def _regression(tabs) -> dict[str, Any]:
         if group and group.lower().startswith("laboratory") and ":" not in feat:
             labs.append(feat)
     sig = [r for r in rows if r["p"] is not None and r["p"] < 0.05]
-    risk = sorted([r for r in sig if r["or"] > 1 and r["beta"] is not None], key=lambda r: -r["beta"])
+    # the abstract's "strongest independent risk factors": clinical terms only. A "not measured" / "missing" indicator says whether a
+    # value was recorded (care process, data capture), not a patient characteristic, so it is not a headline risk factor (run C4 led
+    # with "diastolic blood pressure: not measured").
+    risk = sorted([r for r in sig if r["or"] > 1 and r["beta"] is not None and not _is_indicator_term(r["feature"])], key=lambda r: -r["beta"])
     protective = [r for r in sig if r["hi"] < 1]
     by = {r["feature"]: r for r in rows}
     per_unit = [r for r in risk if r["increment"] and "vs" not in r["increment"].lower()]
@@ -220,6 +223,27 @@ def _regression(tabs) -> dict[str, Any]:
     return {"n_terms": len(rows), "rows": rows, "by_feature": by, "top_risk": risk[:2], "protective": protective, "example": example,
             "protective_names": [r["feature"] for r in protective], "labs": labs,
             "indicator_terms": [r["feature"] for r in rows if r["feature"].endswith((": not measured", ": missing"))]}
+
+
+def _is_indicator_term(feature: str) -> bool:
+    """A Table 6 missing-value indicator ("Albumin: not measured", "SDI Quintile: Missing / Unknown" is a level, not one)."""
+    return str(feature).endswith((": not measured", ": missing"))
+
+
+def lower_first(s: str | None) -> str | None:
+    """A Table 6 / SHAP label as it reads inside a sentence: the ordinary capitalised words of the feature name (before the first
+    ": ") are lower-cased, while acronyms and mixed-case words (ALT, BMI, RUCA, ED, HbA1c, pCO2, eGFR, mmHg) and the level after
+    ": " stay as written. "Diastolic Blood Pressure (mmHg): not measured" -> "diastolic blood pressure (mmHg): not measured",
+    "Race: Black / African American" -> "race: Black / African American", "ALT: not measured" unchanged."""
+    if not s:
+        return s
+    name, sep, rest = s.partition(": ")
+
+    def word(w: str) -> str:
+        core = "".join(ch for ch in w if ch.isalpha())
+        return w.lower() if core[:1].isupper() and (len(core) == 1 or core[1:].islower()) and core != "I" else w
+
+    return " ".join(word(w) for w in name.split(" ")) + sep + rest
 
 
 def _stay_type(tabs) -> dict[str, Any]:
@@ -330,7 +354,8 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
             if summ.get(k) is not None:
                 ctx["features"][k] = int(summ[k])
         if summ.get("empty_columns"):
-            ctx["features"]["empty"] = [_column_words(c) for c in summ["empty_columns"]]
+            ctx["features"]["n_empty"] = len(summ["empty_columns"])
+            ctx["features"]["empty"] = list(dict.fromkeys(_column_words(c) for c in summ["empty_columns"]))  # one name per measure
     ctx["files"] = {"workbook": wb.name}
     ctx["hyper"] = benchmark_hyperparameters(ctx["run"].get("random_state", 42))
     shap_path = Path(shap_table) if shap_table else (wb.with_name(f"{prefix}_Table_SHAP_Top_Predictors.csv") if prefix else None)
@@ -358,6 +383,14 @@ def cohort_call(params: Mapping[str, Any] | None = None, window: Sequence[str] |
     if window:
         p.update(min_admit_date=str(window[0]), max_admit_date=str(window[1]))
     p["sample_stay_rule"] = "random"
+    if "random_seed" not in p and "random_state" not in p:
+        # the draw's seed is define_study_cohort's own default unless the run set one; print it so readers can repeat the draw
+        import inspect
+
+        from omop_etl.cohort import define_study_cohort
+
+        default = inspect.signature(define_study_cohort).parameters.get("random_state")
+        p["random_seed"] = default.default if default is not None else 42
     lines = [f"    {k}={v!r}," for k, v in p.items()]
     return "define_study_cohort(\n    con,\n" + "\n".join(lines) + "\n)"
 
@@ -480,7 +513,7 @@ def _environment(missing: list[str]):
                 return f"{order[0]} through {order[-1]}"
         return join(sorted(labels))
 
-    env.filters.update(fmt=fmt, n=n, pct=pct, or_ci=or_ci, join_and=join, lower_first=lambda s: s[:1].lower() + s[1:] if s else s,
+    env.filters.update(fmt=fmt, n=n, pct=pct, or_ci=or_ci, join_and=join, lower_first=lower_first,
                        words=words, label_span=label_span)
     return env
 
@@ -569,6 +602,8 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
         key = SHEET_KEYS.get(m.group(1)) if m else None
         if key and isinstance(t, pd.DataFrame) and len(t):
             cap = re.sub(r"^Table S?\d+:\s*", "", str(title))
+            if key == "grid":  # the workbook keeps the unrounded auc_raw / f1_raw tuning selects on; the printed table does not
+                t = t.drop(columns=[c for c in t.columns if str(c).endswith("_raw")])
             tables[key] = (_esc(cap), _table_md(t))
     figures: dict[str, tuple[str, str]] = {}
     for key, marks in _FIGURE_KEYS:

@@ -273,24 +273,39 @@ class ManuscriptValidationError(ValueError):
         super().__init__("manuscript tables failed validation:\n- " + "\n- ".join(self.errors))
 
 
-def _merge_identical_indicators(terms: list, with_indicator: set[str]) -> list:
-    """Missing-value indicators that are the same 0/1 column (eGFR is computed from creatinine, so both are missing in the same stays;
-    systolic and diastolic pressure come from one reading) cannot both enter the model: their coefficients are not identified and the
-    fit returns a meaningless split with a standard error set only by the ridge, so the CI runs to 10^60. Keeps one term per distinct
-    column, labelled with every measure it stands for ("Creatinine / eGFR (2021): not measured")."""
-    first: dict[bytes, int] = {}
-    names: dict[int, list[str]] = {}
+#: Two missing-value indicators enter Table 6 as one term when they disagree in fewer than this share of the stays where either is
+#: missing. Systolic and diastolic pressure come from one reading and are missing together in all but a few stays; fitted
+#: separately, the two indicators are nearly collinear and split one effect into two opposite, unstable ones (run C4: systolic
+#: "not measured" OR 0.41 and diastolic OR 1.92, estimated from about 120 stays where only one of them was missing).
+INDICATOR_MERGE_TOLERANCE = 0.02
+
+
+def _merge_identical_indicators(terms: list, with_indicator: set[str], *, tolerance: float = INDICATOR_MERGE_TOLERANCE) -> list:
+    """Missing-value indicators that are the same 0/1 column, or nearly so, cannot both enter the model (eGFR is computed from
+    creatinine, so both are missing in the same stays; systolic and diastolic pressure come from one reading). Identical columns
+    leave the coefficients unidentified (a split with a standard error set only by the ridge, a CI to 10^60); nearly identical ones
+    give two large, opposite and unstable odds ratios. Indicators that differ in fewer than ``tolerance`` of the stays where either is
+    missing become one term, missing when any of its measures is missing, labelled with every measure it stands for
+    ("Creatinine / eGFR (2021): not measured", "Systolic Blood Pressure (mmHg) / Diastolic Blood Pressure (mmHg): not measured")."""
     keep: list = []
+    names: dict[int, list[str]] = {}
     for t in terms:
         group, label, inc, vals = t
         base, sep, word = label.rpartition(": ")
         if sep and base in with_indicator and word in ("not measured", "missing"):
-            key = np.asarray(vals, dtype=float).tobytes()
-            if key in first:
-                names[first[key]].append(base)
-                continue
-            first[key] = len(keep)
-            names[len(keep)] = [base]
+            v = np.asarray(vals, dtype=float)
+            for i in names:
+                kv = np.asarray(keep[i][3], dtype=float)
+                either = int(((kv == 1) | (v == 1)).sum())
+                if keep[i][2] == inc and either and int((kv != v).sum()) <= tolerance * either:
+                    names[i].append(base)
+                    g0, l0, i0, _ = keep[i]
+                    keep[i] = (g0, l0, i0, pd.Series(np.maximum(kv, v), index=getattr(vals, "index", None)))
+                    break
+            else:
+                names[len(keep)] = [base]
+                keep.append(t)
+            continue
         keep.append(t)
     for i, bases in names.items():
         if len(bases) > 1:
