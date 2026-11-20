@@ -1,0 +1,20 @@
+{
+  "about": "Order of the main tables, supplementary tables and figures. It sets their numbers; an absent item is skipped and later ones move up. Keys are the ones render_manuscript_body takes. Since v0.33.0 the tuning comparison (workbook Table 3) is not printed; its values still feed the text.",
+  "tables": [
+    "table1",
+    "performance",
+    "loso",
+    "lr"
+  ],
+  "supplementary": [
+    "stay_type",
+    "completeness",
+    "los",
+    "attrition",
+    "grid"
+  ],
+  "figures": [
+    "flowchart",
+    "shap"
+  ]
+}

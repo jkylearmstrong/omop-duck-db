@@ -1,3 +1,14 @@
+# omopduckdb 0.33.2
+
+Patch release after a reviewer check of run C4 (2026-11-20). Table 6 (printed as Table 4) changes for the BP indicators; the prediction models, cohort and features do not change. Version bump 0.33.1 to 0.33.2; manuscript template v0.33.2.
+
+- **Nearly identical "not measured" indicators are one term.** `manuscript_regression` merged missing-value indicators only when they were the same column. Systolic and diastolic pressure come from one reading and are missing together in all but about 120 of some 24,600 stays, so their two indicators were nearly collinear and split one effect into OR 0.41 and OR 1.92 with wide intervals. Indicators that differ in fewer than 2% of the stays where either is missing (`INDICATOR_MERGE_TOLERANCE`) now enter as one term, missing when any of its measures is missing, labelled with every measure it covers.
+- **The abstract's risk factors leave out missing-value indicators.** The "strongest independent risk factors" sentence ranked every significant term with OR > 1 by standardized beta, so run C4 led with "diastolic blood pressure: not measured". "Not measured" and "missing" terms describe whether a value was recorded and are no longer ranked.
+- **SDI wording follows the run.** With `sdi_missing_term=False` (the `delivered_2026_11_11` preset) missing SDI joins quintile 1 in the reference row, while the Methods said missing ZIPs are not assigned a reference category. The text now says which applies. The study run for the manuscript should set `--sdi-missing-term` (the `package` preset already does), which gives missing SDI its own term.
+- **Casing in the text.** Labels inside a sentence lower-case only the ordinary words of the feature name: "diastolic blood pressure (mmHg)", "prior readmissions in past 12 months", while ALT, BMI, RUCA, HbA1c, pCO2 and the level after ": " stay as written (it printed "aLT", "bMI", "rUCA").
+- **The cohort call prints the seed.** The Data & Code Availability call shows `random_seed` (define_study_cohort's default, 42, unless the run set one); the stay draw itself is unchanged.
+- **The printed grid table (Table S5)** no longer shows the unrounded `auc_raw` / `f1_raw` columns; the workbook sheet keeps them, as tuning selects on them and the delivered comparison reads them. The columns with no observed values are named once per measure.
+
 # omopduckdb 0.33.1
 
 Patch release after run C3 (2026-11-20): Figure 1 and the workbook's titles and index sheet. No number, cohort or model changes. Version bump 0.33.0 to 0.33.1.
