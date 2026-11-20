@@ -544,25 +544,34 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
 
 
 # ------------------------------------------------------------------ workbook
+MANIFEST_SHEET = "Manifest & Index"  # the delivered workbook's (2026-11-11) index sheet
+MANIFEST_HEADERS = ("Sheet Name", "Manuscript Table Title", "Rows", "Description / Key Dimension")
+
+
+def _manifest_description(caption: str) -> str:
+    """The delivered index's description column: supplementary tables ("Table S…") are listings, the rest primary tables."""
+    return "Supplementary Material / Listing" if caption.startswith("Table S") else "Primary Manuscript Table"
+
+
 def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], path: str | Path, *, attrition: pd.DataFrame | None = None,
                         site_labels: Mapping[str, str] | None = None, label_col: str = "readmitted_30d", min_cell: int | None = 11,
                         title: str = "Manuscript tables", table5: str = "manuscript", sdi_missing_term: bool = True,
                         table6_increments: str | Mapping[str, tuple[str, float]] = "sd",
                         sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, table6_missing: str = "indicator",
-                        check_bootstrap_intervals: bool = True) -> dict[str, Any]:
+                        check_bootstrap_intervals: bool = True, byline: str = "", subtitle: str | None = None) -> dict[str, Any]:
     """Builds the manuscript sheets from the ``tables`` returned by :func:`omop_etl.study_report.build_study_tables` and the feature table
     ``df``, and writes one workbook. ``attrition`` is the per-site attrition (``site``, ``step_name``, ``subjects_retained``) for
     Table S3. ``table5``: ``"manuscript"`` (default; AUC-ROC with CI, F1, sensitivity and specificity at the 0.5 threshold of
     the balanced-trained model (F1 replaced the uncalibrated Brier score in 0.33.0), as the manuscript reports) or ``"calibrated"`` (prior-shift calibrated Brier, top-10% sensitivity and PPV).
     ``sdi_missing_term``: keep an "SDI Quintile: Missing / Unknown" term in Table 6 (default; ``False`` leaves it out, as the manuscript did,
-    so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``table6_missing``: ``"indicator"`` or ``"median"``, the ``missing`` of :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Every sheet is checked by :func:`validate_manuscript_sheets` before the workbook is written, and a failure raises :class:`ManuscriptValidationError`; ``check_bootstrap_intervals=False`` (smoke runs with few bootstrap draws) skips only the estimate-inside-interval check of the bootstrap intervals. Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
+    so those stays join the reference quintile). ``table6_increments``: ``"sd"`` or ``"clinical"``, see :func:`manuscript_regression`. ``table6_missing``: ``"indicator"`` or ``"median"``, the ``missing`` of :func:`manuscript_regression`. ``sheet_site_labels``: ``{"Table S1": {label: other label}, "Table S3": {...}}`` relabels the sites of those sheets only (the delivered workbook labels the sites one way in Table 5 and another in Tables S1 and S3; the default uses one labelling throughout). Every sheet is checked by :func:`validate_manuscript_sheets` before the workbook is written, and a failure raises :class:`ManuscriptValidationError`; ``check_bootstrap_intervals=False`` (smoke runs with few bootstrap draws) skips only the estimate-inside-interval check of the bootstrap intervals. The first sheet is the "Manifest & Index" of the workbook delivered on 2026-11-11: ``title``, ``subtitle`` (default ``"N = <n>; aggregate results only"``), ``byline`` (e.g. ``"Authors: ..."``; empty leaves the row blank; the package stores no names), then one row per sheet with its title, row count and whether it is a primary or a supplementary table. Returns ``{"sheets": {sheet name: DataFrame}, "path": Path}``."""
     m = manuscript_frame(df)
     n = len(df)
     sheets: dict[str, tuple[str, pd.DataFrame]] = {}
     sheets["Table 1 - Descriptive"] = (f"Table 1: Baseline Descriptive Characteristics at the Randomly Drawn Index Stay (N = {n:,})",
                                       manuscript_table1(df, label_col=label_col, min_cell=min_cell, frame=m))
     if "Model_Performance" in tables:
-        sheets["Table 2 - Model Performance"] = ("Table 2: Primary Benchmark Model Performance (50/50 Balanced Training, F1-Tuned, 5-Fold CV)", tables["Model_Performance"])
+        sheets["Table 2 - Model Performance"] = ("Table 2: Primary Benchmark Model Performance (50/50 Balanced Training, F1-Tuned, 5-Fold Grouped CV)", tables["Model_Performance"])
     if "Tuning_AUC_vs_F1" in tables:
         sheets["Table 3 - Tuning AUC vs F1"] = ("Table 3: Hyperparameter Selection Comparison: Fixed Benchmark vs. Tuned for AUC-ROC vs. Tuned for F1", tables["Tuning_AUC_vs_F1"])
     if "By_Stay_Type_AUC" in tables:
@@ -596,7 +605,7 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
         if "Table S1" in (sheet_site_labels or {}):
             s1[s1.columns[0]] = s1[s1.columns[0]].map(lambda x: sheet_site_labels["Table S1"].get(x, x))
         sheets["Table S1 - LOS Distribution"] = ("Table S1: Distribution of Index Stay Length of Stay (Days) by Participating Health System", s1)
-    sheets["Table S2 - Data Completeness"] = ("Table S2: Missingness and Measurement Completeness Across Clinical Features",
+    sheets["Table S2 - Data Completeness"] = (f"Table S2: Missingness and Measurement Completeness Across Clinical Features (N = {n:,})",
                                               manuscript_completeness(df, label_col=label_col, min_cell=min_cell, frame=m))
     if attrition is not None:
         sheets["Table S3 - CONSORT Attrition"] = ("Table S3: Multi-Center CONSORT Stepwise Cohort Attrition and Eligibility Accounting",
@@ -606,7 +615,9 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
     if "Tuning_All_Configs" in tables:
         sheets["Table S4 - All Tuning Grid"] = ("Table S4: Full Grid Evaluation Metrics for All Evaluated Hyperparameter Configurations", tables["Tuning_All_Configs"])
     validate_manuscript_sheets(sheets, bootstrap_intervals=check_bootstrap_intervals)
-    out = export_workbook([(name, cap, t) for name, (cap, t) in sheets.items()], path, title=title, subtitle=f"N = {n:,}; aggregate results only")
+    out = export_workbook([(name, cap, t) for name, (cap, t) in sheets.items()], path, title=title,
+                          subtitle=f"N = {n:,}; aggregate results only" if subtitle is None else subtitle, manifest_sheet=MANIFEST_SHEET,
+                          byline=byline, manifest_headers=MANIFEST_HEADERS, describe=_manifest_description)
     return {"sheets": {k: v[1] for k, v in sheets.items()}, "path": out}
 
 
