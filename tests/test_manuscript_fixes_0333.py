@@ -46,7 +46,7 @@ def test_flowchart_uses_the_exclusion_label():
     from omop_etl.study_report import flowchart_overlaps, plot_cohort_flowchart
 
     fig = plot_cohort_flowchart(figure1_attrition(_attrition(), "2017-01-01", "2022-09-30"), 90, 9)
-    texts = [t.get_text() for t in fig.axes[0].texts]
+    texts = [" ".join(t.get_text().split()) for t in fig.axes[0].texts]  # box texts are wrapped to the width the font allows
     assert any(t.startswith("Grant protocol window") for t in texts)
     assert any("grant protocol window" in t and t.startswith("Excluded: no qualifying") for t in texts)
     assert not any("did not meet Grant" in t for t in texts)
