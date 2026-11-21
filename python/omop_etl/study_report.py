@@ -530,7 +530,8 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
 
     ``attrition`` needs ``step_name``, ``subjects_retained`` and ``subjects_dropped`` (the shape of
     :func:`omop_etl.consort.consort_from_counts` / ``pool_consort_tables``, summed over sites); the first row is the source
-    population. ``n`` is the analytic cohort size and ``n_readmitted`` its events. Returns the matplotlib Figure.
+    population. An optional ``excluded_label`` column replaces the exclusion text of a step (default ``"Excluded: did not meet <step>"``).
+    ``n`` is the analytic cohort size and ``n_readmitted`` its events. Returns the matplotlib Figure.
 
     Layout (since 0.33.0) follows the usual journal cohort figure (e.g. McCoy et al., JGIM 2017): the boxes form one column joined
     by down arrows, and each exclusion is a horizontal arrow that branches off the middle of the down arrow into the step it
@@ -544,7 +545,9 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
             raise ValueError(f"attrition needs a {c!r} column.")
     if n <= 0 or not 0 <= n_readmitted <= n:
         raise ValueError("n must be positive and 0 <= n_readmitted <= n.")
+    labels = attrition["excluded_label"] if "excluded_label" in attrition else pd.Series([None] * len(attrition), index=attrition.index)
     steps = [(str(r.step_name), int(r.subjects_retained), int(r.subjects_dropped)) for r in attrition.itertuples()]
+    excluded = [str(x) if isinstance(x, str) and x.strip() else None for x in labels]
     # all positions are in inches: the axes fill the figure, x runs 0..W, y runs down from 0 and the height is set at the end
     W = 9.5
     x0, x1 = 0.2, 5.1                  # main column edges
@@ -600,7 +603,7 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
         if i > 0:
             gap = min_gap
             if dropped:
-                note = "\n".join(wrap(f"Excluded: did not meet {name}", W - branch_x - 0.15, excl) + [f"P = {dropped:,} patients"])
+                note = "\n".join(wrap(excluded[i] or f"Excluded: did not meet {name}", W - branch_x - 0.15, excl) + [f"P = {dropped:,} patients"])
                 gap = max(min_gap, measure(note, excl)[1] + 0.18)
                 mid = bottom - gap / 2
                 arrow(cx, mid, branch_x - 0.08, mid)
@@ -979,7 +982,7 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
         tables["Logistic_Regression"] = logistic_regression_table(X.drop(columns=[c for c in lr_drop_cols if c in X.columns]), y)
         tables["Missingness"] = missingness_table(df, site_col=site_col, label_col=label_col, min_cell=min_cell)
     if attrition is not None:
-        tables["CONSORT_Attrition"] = attrition.reset_index(drop=True)
+        tables["CONSORT_Attrition"] = attrition.drop(columns=["excluded_label"], errors="ignore").reset_index(drop=True)
     for k, v in (extra_tables or {}).items():
         tables[k] = v
     if los_col in df and site_col in df:

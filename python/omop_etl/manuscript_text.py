@@ -283,6 +283,8 @@ def _attrition(tabs, n: int | None) -> dict[str, Any]:
         return {}
     stage = comb.get("Stage / Description", pd.Series([""] * len(comb), index=comb.index)).astype(str)
     stays = [(_first_number(v) or 0) for v in comb["Remaining Stays (N)"]]
+    if "Remaining Patients (P)" in comb and stays == [(_first_number(v) or 0) for v in comb["Remaining Patients (P)"]]:
+        return {}  # patient-level steps only (stays equal patients): the table holds no stay count, so none is printed
     one = [i for i, s in enumerate(stage) if "one stay per patient" in s.lower() or "one stay" in s.lower()]
     qual = stays[one[0] - 1] if one and one[0] > 0 else max(stays)
     if not qual or (n and qual <= n):  # no step before the draw, or nothing was dropped by it: the count is not separately known
@@ -312,7 +314,10 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     tabs = read_workbook_tables(wb)
     ctx: dict[str, Any] = {"cohort": _cohort(tabs), "models": _models(tabs), "tuning": _tuning(tabs), "loso": _loso(tabs),
                            "lr": _regression(tabs), "stay_type": _stay_type(tabs), "completeness": _completeness(tabs)}
-    ctx["attrition"] = _attrition(tabs, ctx["cohort"].get("n"))
+    n_ = ctx["cohort"].get("n")
+    q = run_rec.get("qualifying_stays")
+    ctx["attrition"] = ({"qualifying_stays": int(q), "stays_per_patient": int(q) / n_ if n_ else None} if q and (not n_ or int(q) >= n_)
+                        else _attrition(tabs, n_))
     if ctx["cohort"].get("contrast"):
         ctx["table1_contrast"] = " and ".join(ctx["cohort"].pop("contrast"))
     window = run_rec.get("window")
@@ -552,6 +557,8 @@ def render_manuscript_body(context: Mapping[str, Any], *, tables: Mapping[str, s
     ref = {k: v for k, v in ref.items() if v}
     table_md = {}
     for k, v in tables.items():
+        if k not in numbers:  # layout.json decides what is printed: a table it does not list is left out, not printed unnumbered
+            continue
         cap, body = v if isinstance(v, tuple) else ("", v)
         table_md[k] = f"**{numbers.get(k, 'Table')}: {cap}**\n\n{body}" if cap else body
     figure_md = {}
@@ -596,6 +603,8 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
     cells suppressed), the figure files ``images``, and the run's records. Returns :func:`render_manuscript_body`'s result."""
     from omop_etl.manuscript_document import _esc, _table_md
 
+    folder = template_dir(version)
+    layout = json.loads((folder / "layout.json").read_text(encoding="utf-8"))
     tables: dict[str, tuple[str, str]] = {}
     for name, (title, t) in tabs.items():
         m = re.match(r"(Table S?\d+)", name)
@@ -604,6 +613,8 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
             cap = re.sub(r"^Table S?\d+:\s*", "", str(title))
             if key == "grid":  # the workbook keeps the unrounded auc_raw / f1_raw tuning selects on; the printed table does not
                 t = t.drop(columns=[c for c in t.columns if str(c).endswith("_raw")])
+            if key in layout.get("transpose", []):
+                t = transpose_for_print(t)
             tables[key] = (_esc(cap), _table_md(t))
     figures: dict[str, tuple[str, str]] = {}
     for key, marks in _FIGURE_KEYS:
@@ -615,7 +626,16 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
     ctx = manuscript_context(workbook, run=run or {}, summary=summary or {}, params=params or {})
     if software_paragraph:
         ctx["software_paragraph"] = software_paragraph
-    return render_manuscript_body(ctx, tables=tables, figures=figures, version=version)
+    return render_manuscript_body(ctx, tables=tables, figures=figures, template=folder)
+
+
+def transpose_for_print(t: pd.DataFrame, stub: str = "Statistic") -> pd.DataFrame:
+    """A one-row-per-site table turned for printing like a Table 1: the sites (and the combined row) become the columns, in their
+    order, and each statistic becomes a row headed by its name. The workbook keeps the delivered orientation."""
+    first = t.columns[0]
+    out = t.set_index(first).T.reset_index().rename(columns={"index": stub})
+    out.columns = [stub, *[str(c) for c in out.columns[1:]]]
+    return out
 
 
 # ------------------------------------------------------------------ comparing the text with a delivered manuscript
