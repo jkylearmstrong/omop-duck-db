@@ -1,0 +1,22 @@
+{
+  "about": "Order of the main tables, supplementary tables and figures. It sets their numbers; an absent item is skipped and later ones move up. Keys are the ones render_manuscript_body takes. Since v0.33.0 the tuning comparison (workbook Table 3) is not printed; its values still feed the text. Since v0.33.3 the CONSORT table (workbook Table S3) is not printed, because Figure 1 shows the same steps down to the analysed cohort, and the length-of-stay table is printed with the sites as columns ('transpose'); the workbook keeps both as delivered.",
+  "tables": [
+    "table1",
+    "performance",
+    "loso",
+    "lr"
+  ],
+  "supplementary": [
+    "stay_type",
+    "completeness",
+    "los",
+    "grid"
+  ],
+  "figures": [
+    "flowchart",
+    "shap"
+  ],
+  "transpose": [
+    "los"
+  ]
+}

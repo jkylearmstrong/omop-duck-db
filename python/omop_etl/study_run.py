@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 from omop_etl.concept_sets import CONCEPT_SET_VERSION, LEGACY_CONCEPT_SETS  # noqa: E402
 
@@ -283,6 +283,13 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
             att = pd.DataFrame(full.attrs.get("attrition"))
             att["site"] = site
             n_final = int(cohort["subject_id"].nunique()) if "subject_id" in cohort else len(cohort)
+            # the qualifying stays the one-per-patient draw chose from: every eligible stay with an index admission in the window.
+            # Recorded only when those stays belong to exactly the analysed patients, so the text never prints a patient count as stays.
+            if {"cohort_start_date", "subject_id"} <= set(full.columns):
+                d = pd.to_datetime(full["cohort_start_date"])
+                in_win = full[(d >= pd.Timestamp(start)) & (d <= pd.Timestamp(end))]
+                if int(in_win["subject_id"].nunique()) == n_final:
+                    meta["qualifying_stays"] = int(len(in_win))
             att = pd.concat([att, pd.DataFrame([{"step_name": f"Index admission {start} to {end}, one stay per patient", "subjects_retained": n_final, "site": site}])],
                             ignore_index=True)
         elif attrition_mode != "windowed":
@@ -411,6 +418,29 @@ def _with_coverage(raised: list[dict[str, Any]], frame: pd.DataFrame, meta: Mapp
     have = {f["check"] for f in raised}
     return raised + [f for f in cover if not (f["check"] in have and f["check"] in ("sdoh", "group_skipped", "empty_site", "address_table"))
                      and not (f["check"] == "sdoh" and "address_table" in have)]
+
+
+def _final_steps(attrition: pd.DataFrame) -> pd.Series:
+    """Rows of the steps run_study adds after the eligibility rules: the window / one-stay-per-patient step and the pinned-list step."""
+    name = attrition["step_name"].astype(str)
+    return name.str.startswith("Index admission ") | name.str.startswith("Stay selected for the patient")
+
+
+def figure1_attrition(attrition: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """The steps Figure 1 draws, summed over sites: every eligibility rule, then the grant protocol window (index admission from
+    ``start`` to ``end``, one stay per patient) and, with pinned stays, the pinned list, so the figure ends at the analysed cohort.
+    Returns ``step_name``, ``subjects_retained``, ``subjects_dropped`` and ``excluded_label`` (the text of the exclusion arrow)."""
+    from omop_etl.manuscript_text import _date_text
+
+    first = attrition.groupby("step_name", sort=False)["subjects_retained"].sum().rename("subjects_retained").reset_index()
+    first["subjects_dropped"] = (first["subjects_retained"].shift(1) - first["subjects_retained"]).fillna(0).astype(int)
+    first["excluded_label"] = None
+    win = first["step_name"].astype(str).str.startswith("Index admission ")
+    first.loc[win, "excluded_label"] = "Excluded: no qualifying index admission in the grant protocol window"
+    first.loc[win, "step_name"] = f"Grant protocol window: index admission {_date_text(start)} to {_date_text(end)}"
+    pin = first["step_name"].astype(str).str.startswith("Stay selected for the patient")
+    first.loc[pin, "excluded_label"] = "Excluded: no stay on the pinned list"
+    return first
 
 
 def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -575,6 +605,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     t_start = time.time()
     timings: dict[str, float] = {}
     frames, atts = [], []
+    qualifying_stays: dict[str, int | None] = {}
     for site in sites:
         t_site = time.time()
         f = priv / f"features_{site}.parquet"
@@ -601,6 +632,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             if meta.get("geography"):
                 geography[labels[site]] = {k: v for k, v in meta["geography"].items() if k != "address_table"}
             _gate(_with_coverage(saved, df, meta, labels[site], data_gap_threshold))
+            qualifying_stays[labels[site]] = meta.get("qualifying_stays")
             frames.append(df)
             atts.append(pd.read_csv(a))
             continue
@@ -621,6 +653,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         if meta.get("geography"):
             geography[labels[site]] = {k: v for k, v in meta["geography"].items() if k != "address_table"}
         _gate(_with_coverage(raised, df, meta, labels[site], data_gap_threshold))
+        qualifying_stays[labels[site]] = meta.get("qualifying_stays")
         frames.append(df)
         atts.append(att)
         timings[f"site_{labels.get(site, site)}"] = round(time.time() - t_site, 1)  # keyed by the anonymous letter: the run record is shareable and must not name sites
@@ -631,11 +664,16 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                 "private_dir": priv, "checked_only": True}
     pooled = _canonical_order(frames)
     attrition = pd.concat(atts, ignore_index=True)
+    # Figure 1 always shows every step down to the analysed cohort, the grant protocol window included, so the figure, the text and
+    # the tables give the same N; consort_final_steps only decides whether Table S3 of the workbook lists the last two steps
+    first = figure1_attrition(attrition, start, end)
+    if int(first["subjects_retained"].iloc[-1]) != int(len(pooled)):
+        _gate([{"site": "all", "check": "figure1_cohort", "severity": "warning",
+                "message": f"Figure 1 ends at {int(first['subjects_retained'].iloc[-1]):,} patients but the analysed cohort has {len(pooled):,}"}])
     if not dec["consort_final_steps"]:
-        final = attrition["step_name"].astype(str).str.startswith("Index admission ") | attrition["step_name"].astype(str).str.startswith("Stay selected for the patient")
-        attrition = attrition[~final].reset_index(drop=True)
-    first = (attrition.groupby("step_name", sort=False)["subjects_retained"].sum().rename("subjects_retained").reset_index())
-    first["subjects_dropped"] = (first["subjects_retained"].shift(1) - first["subjects_retained"]).fillna(0).astype(int)
+        attrition = attrition[~_final_steps(attrition)].reset_index(drop=True)
+    qualifying = [qualifying_stays.get(labels[s_]) for s_ in sites]
+    n_qualifying = sum(qualifying) if qualifying and all(q is not None for q in qualifying) else None
     t_tab = time.time()
     res = build_study_tables(pooled, out, prefix=prefix, n_bootstraps=n_bootstraps, loso=loso, attrition=first, figures=figures, workbook=False,
                              window=(start, end), min_cell=min_cell, random_state=random_state)
@@ -674,7 +712,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                        software_versions=run_environment(), profile=manuscript_profile, params=manuscript_params,
                                        run={"n_sites": len(labels), "window": [start, end], "decisions": dec, "bootstraps": n_bootstraps,
                                             "random_state": random_state, "preset": preset, "environment": run_environment(),
-                                            "cohort_params": c_params},
+                                            "cohort_params": c_params, "qualifying_stays": n_qualifying},
                                        summary=res.get("summary"))
         staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
@@ -710,7 +748,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     label_mode = ("explicit" if isinstance(site_labels_arg, Mapping) else "file" if isinstance(site_labels_arg, (str, Path)) and
                   str(site_labels_arg) not in ("random", "ordered") else str(site_labels_arg or "ordered"))
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
-                                                       "n": int(len(pooled)), "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
+                                                       "n": int(len(pooled)), "qualifying_stays": n_qualifying, "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
                                                        "cohort_params": json.loads(json.dumps(c_params, default=str)),
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},
                                                        "sdoh": {"on": ruca_crosswalk is not None and sdi_table is not None, "sdi_cut_points": list(sdi_cut_points or ())},

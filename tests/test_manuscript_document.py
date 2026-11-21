@@ -93,7 +93,7 @@ def test_quarto_path_scrubs_word_properties_and_cleans_up(tmp_path, monkeypatch)
         core = z.read("docProps/core.xml").decode("utf-8")
     assert "someone.local" not in core and "<dc:creator>Study team</dc:creator>" in core
     qmd = r["qmd"].read_text(encoding="utf-8")
-    assert 'author: "Study team"' in qmd and "_(empty)_" in qmd and "Manifest" not in qmd and 'fig-alt="Figure Flow"' in qmd
+    assert '  - name: "Study team"' in qmd and "_(empty)_" in qmd and "Manifest" not in qmd and 'fig-alt="Figure Flow"' in qmd
 
 
 def test_renderer_failures_are_reported_not_raised(tmp_path, monkeypatch):
@@ -130,7 +130,7 @@ def test_pandoc_fallback_uses_typst_for_the_pdf(tmp_path, monkeypatch):
     monkeypatch.setattr(md.subprocess, "run", run)
     r = md.render_manuscript_document(wb, tmp_path / "doc")
     assert r["renderer"] == "pandoc" and set(r["files"]) == {"docx", "pdf"}
-    assert seen[1][-2:] == ["--pdf-engine", "typst"]
+    assert seen[1][seen[1].index("--pdf-engine") + 1] == "typst" and "margin=(x: 1in, y: 1in)" in seen[1]
 
 
 # Quarto 1.10's output when %LOCALAPPDATA%\quarto is read only: the cause comes first, then a Deno stack ending in core/cri/cri.ts.
@@ -464,7 +464,7 @@ def test_manuscript_cites_omop_duck_db_with_its_installed_version_through_gratef
     assert software and f"omop-duck-db version {v} [@omopduckdb]" in qmd and "[@python]" in qmd and "grateful_py version" in qmd
     assert software.start() < qmd.index("## Supplementary Material") and qmd.rstrip().endswith("::: {#refs}\n:::")
     bib = r["bib"].read_text(encoding="utf-8")
-    assert "@software{omopduckdb," in bib and f"version = {{{v}}}" in bib and "@software{gratefulpy," in bib and "@" not in bib.replace("@software{", "")
+    assert "@software{omopduckdb," in bib and f"version = {{{v}}}" in bib and "@software{gratefulpy," in bib and "@" not in bib.replace("@software{", "").replace("@article{", "").replace("@inproceedings{", "")
     assert not rp.scan_files([r["bib"]], ["Some Health System"])[1]  # the privacy scan reads the .bib as text
 
     # versions recorded with the run win over the installed ones (a relabelled document cites what made the numbers)
