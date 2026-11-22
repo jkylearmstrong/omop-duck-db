@@ -115,3 +115,27 @@ def test_abstract_sentence_names_the_largest_odds_ratio(tmp_path):
     out = env.from_string(line).render(lr=lr, ref={"lr": "Table 4"})
     assert "prior readmissions in past 12 months (OR 1.17" in out
     assert "and discharge status: Against Medical Advice had the largest odds ratio (OR 1.88" in out and out.rstrip().endswith("(Table 4).")
+
+
+# ------------------------------------------------------------------ printed table format (Kyle, 2026-11-22: C7 Table 3 hard to read)
+def test_printed_tables_size_columns_by_content_and_align_numbers():
+    from omop_etl.manuscript_document import TABLE_TYPST, _table_md
+
+    t = pd.DataFrame({"Held-out site": ["Site A", "Site B", "Mean of five sites"], "Test patients": [14216, 53072, None],
+                      "AUC-ROC (95% CI)": ["0.720 (0.707–0.734)", "0.713 (0.707–0.719)", "0.722"], "F1": [0.281, 0.323, 0.302],
+                      "Sensitivity": [0.638, 0.52, 0.547], "Configuration": ["depth 12", "depth 8", "C=1"], "Beta": [0.3, 0.12, 0.0]})
+    lines = _table_md(t).splitlines()
+    rule = lines[1].strip("|").split("|")
+    widths = [len(r.strip(":")) for r in rule]
+    assert widths[2] > widths[3] and widths[2] >= len("0.720 (0.707–0.734)")  # the CI column is the widest number column
+    assert rule[0].startswith(":") and rule[5].startswith(":")  # text columns left-aligned
+    assert all(rule[i].endswith(":") for i in (1, 2, 3, 4, 6))  # number columns right-aligned
+    assert "| 14,216 |" in lines[2] and "| 0.520 |" in lines[3] and "| 0.30 |" in lines[2] and "| 0.00 |" in lines[4]
+    assert "justify: false" in TABLE_TYPST and "hyphenate: false" in TABLE_TYPST
+
+
+def test_table_cells_are_escaped_once():
+    from omop_etl.manuscript_document import _table_md
+
+    md_ = _table_md(pd.DataFrame({"Statistic": ["Median [IQR] (days)"], "Site A": ["4.0 [3.0–6.0]"]}))
+    assert "\\\\[" not in md_ and md_.count("\\[") == 2
