@@ -1,3 +1,11 @@
+# omopduckdb 0.33.5
+
+Patch release after Kyle's review of run C7 (2026-11-22). The cohort and the saved features do not change; the models, Tables 2, 3 and S4, Figure 2 and the Section 3.5 text change because the models no longer see the last lab values. Version bump 0.33.4 to 0.33.5; manuscript template v0.33.5.
+
+- **Models use index-stay mean labs only.** The feature table offers each laboratory twice, as the index-stay mean (`lab_<name>`) and the latest in-stay value (`lab_<name>_last`), and the models used both, while the Abstract, Section 2.2, Table 1 and Table 4 describe the means only (C7's Figure 2 showed "BUN (last value)"). New decision `last_lab_values` (`"drop"` in both presets, `--last-lab-values keep` to restore): the `_last` columns are removed after the features are built, so saved features stay reusable and the run record names the choice.
+- **Figure 1 wording.** The pinned-list step is drawn as "Randomly selected qualifying stay per patient" with no exclusion arrow ("Stay selected for the patient (pinned list)" / "Excluded: no stay on the pinned list" were internal wording). The figure's CSV and the run record keep the step's counts. `figure1_attrition()` adds an `excluded_shown` column, which `plot_cohort_flowchart()` honours.
+- **Abstract risk factors (template v0.33.5).** The two strongest clinical risk factors are still ranked by standardized beta ("by standardized effect"); the significant clinical risk factor with the largest odds ratio is named after them when it is not one of the two (C7: discharge against medical advice, OR 1.88).
+
 # omopduckdb 0.33.4
 
 Patch release after Kyle's review of the run C6 manuscript (2026-11-22). The cohort, features, models and workbook do not change; the printed manuscript, its title and Figure 2's labels do. Version bump 0.33.3 to 0.33.4; manuscript template v0.33.4.

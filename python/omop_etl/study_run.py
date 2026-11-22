@@ -53,6 +53,10 @@ STUDY_DECISIONS: dict[str, dict[str, Any]] = {
                        "about": "How a continuous Table 6 measure with missing values enters the model: 'indicator' (a 'not measured' term next to it, "
                                 "the measure's OR estimated from the stays where it was measured; right when a lab is measured only when ordered) or "
                                 "'median' (median imputation only, as delivered; biases the OR of a mostly-unmeasured lab towards 1)."},
+    "last_lab_values": {"options": ("drop", "keep"),
+                        "about": "The latest in-stay laboratory values (lab_<name>_last) as model features. 'drop' (both presets since 0.33.5): every model "
+                                 "uses the index-stay mean of each laboratory only, as the Methods, Table 1 and Table 4 describe; 'keep' also offers the "
+                                 "last value to the models. The saved features keep both, so features can be reused either way."},
 }
 STUDY_PRESETS: dict[str, dict[str, Any]] = {
     # The package follows the Nov 11 deliverable except where it was wrong (Kyle, 2026-11-17): hierarchy-based concept sets, a
@@ -61,11 +65,13 @@ STUDY_PRESETS: dict[str, dict[str, Any]] = {
     # came from an operator-precedence slip in the study pipeline).
     "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "first_listed", "sdi_missing_term": True, "table5": "manuscript",
                 "attrition_mode": "full_history", "table6_increments": "clinical", "age_method": "completed_years",
-                "concept_sets": "bundled", "table6_missing": "indicator"},
+                "concept_sets": "bundled", "table6_missing": "indicator", "last_lab_values": "drop"},
     "delivered_2026_11_11": {"consort_final_steps": False, "address_undated": "first", "address_tie_break": "first_listed", "sdi_missing_term": False, "table5": "manuscript", "attrition_mode": "full_history",
                              "table6_increments": "clinical", "age_method": "completed_years",
                              # pinned: a rerun on a later release must not mix feature-definition changes into the comparison with Nov 11
-                             "concept_sets": LEGACY_CONCEPT_SETS, "table6_missing": "median"},
+                             "concept_sets": LEGACY_CONCEPT_SETS, "table6_missing": "median",
+                             # Kyle, 2026-11-22: the manuscript describes index-stay mean labs only, so the models use only those
+                             "last_lab_values": "drop"},
 }
 
 
@@ -429,7 +435,9 @@ def _final_steps(attrition: pd.DataFrame) -> pd.Series:
 def figure1_attrition(attrition: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
     """The steps Figure 1 draws, summed over sites: every eligibility rule, then the grant protocol window (index admission from
     ``start`` to ``end``, one stay per patient) and, with pinned stays, the pinned list, so the figure ends at the analysed cohort.
-    Returns ``step_name``, ``subjects_retained``, ``subjects_dropped`` and ``excluded_label`` (the text of the exclusion arrow)."""
+    Returns ``step_name``, ``subjects_retained``, ``subjects_dropped``, ``excluded_label`` (the text of the exclusion arrow) and
+    ``excluded_shown`` (False for the pinned-list step, which the figure labels "Randomly selected qualifying stay per patient" and draws
+    without an exclusion arrow)."""
     from omop_etl.manuscript_text import _date_text
 
     first = attrition.groupby("step_name", sort=False)["subjects_retained"].sum().rename("subjects_retained").reset_index()
@@ -438,8 +446,11 @@ def figure1_attrition(attrition: pd.DataFrame, start: str, end: str) -> pd.DataF
     win = first["step_name"].astype(str).str.startswith("Index admission ")
     first.loc[win, "excluded_label"] = "Excluded: no qualifying index admission in the grant protocol window"
     first.loc[win, "step_name"] = f"Grant protocol window: index admission {_date_text(start)} to {_date_text(end)}"
+    # the pinned list is the study's own random draw of one qualifying stay per patient: the figure names the step for what it is and
+    # draws no exclusion arrow for it (Kyle, 2026-11-22: "pinned list" is internal wording); the run record keeps the step's counts
     pin = first["step_name"].astype(str).str.startswith("Stay selected for the patient")
-    first.loc[pin, "excluded_label"] = "Excluded: no stay on the pinned list"
+    first["excluded_shown"] = ~pin
+    first.loc[pin, "step_name"] = "Randomly selected qualifying stay per patient"
     return first
 
 
@@ -465,7 +476,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               reuse_features: bool = False, compare_to: str | Path | None = None, prefix: str = "Study", random_state: int = 42,
               min_cell: int | None = 11, attrition_mode: str | None = None, table5: str | None = None, sdi_missing_term: bool | None = None,
               address_tie_break: str | None = None, address_undated: str | None = None, table6_increments: str | None = None, consort_final_steps: bool | None = None,
-              age_method: str | None = None, concept_sets: str | None = None, table6_missing: str | None = None,
+              age_method: str | None = None, concept_sets: str | None = None, table6_missing: str | None = None, last_lab_values: str | None = None,
               sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package",
               private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
@@ -518,7 +529,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     dec = resolve_decisions(preset, attrition_mode=attrition_mode, table5=table5, sdi_missing_term=sdi_missing_term,
                             address_tie_break=address_tie_break, address_undated=address_undated, table6_increments=table6_increments,
                             consort_final_steps=consort_final_steps, age_method=age_method, concept_sets=concept_sets,
-                            table6_missing=table6_missing)
+                            table6_missing=table6_missing, last_lab_values=last_lab_values)
     attrition_mode, table5, sdi_missing_term, address_tie_break = (dec["attrition_mode"], dec["table5"], dec["sdi_missing_term"], dec["address_tie_break"])
     undated = dec["address_undated"]
     c_params = dict(cohort_params or PROTOCOL_COHORT_PARAMS)
@@ -663,6 +674,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         return {"data_checks": findings, "address_table": address_used, "share_missing_by_group": coverage, "geography": geography,
                 "private_dir": priv, "checked_only": True}
     pooled = _canonical_order(frames)
+    if dec["last_lab_values"] == "drop":  # the models see the index-stay mean of each laboratory only (Methods 2.2, Tables 1 and 4)
+        pooled = pooled.drop(columns=[c for c in pooled.columns if re.fullmatch(r"lab_.+_last", str(c))])
     attrition = pd.concat(atts, ignore_index=True)
     # Figure 1 always shows every step down to the analysed cohort, the grant protocol window included, so the figure, the text and
     # the tables give the same N; consort_final_steps only decides whether Table S3 of the workbook lists the last two steps

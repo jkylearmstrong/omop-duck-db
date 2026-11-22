@@ -220,7 +220,11 @@ def _regression(tabs) -> dict[str, Any]:
     by = {r["feature"]: r for r in rows}
     per_unit = [r for r in risk if r["increment"] and "vs" not in r["increment"].lower()]
     example = next((r for r in per_unit if "readmission" in r["feature"].lower()), per_unit[0] if per_unit else None)
-    return {"n_terms": len(rows), "rows": rows, "by_feature": by, "top_risk": risk[:2], "protective": protective, "example": example,
+    # the clinical risk factor with the largest odds ratio when the standardized-beta ranking leaves it out (Kyle, 2026-11-22: run C7's
+    # abstract named prior readmissions and anion gap but not discharge against medical advice, OR 1.88)
+    largest = max(risk, key=lambda r: r["or"], default=None)
+    largest_or = largest if largest is not None and largest not in risk[:2] else None
+    return {"n_terms": len(rows), "rows": rows, "by_feature": by, "top_risk": risk[:2], "largest_or": largest_or, "protective": protective, "example": example,
             "protective_names": [r["feature"] for r in protective], "labs": labs,
             "indicator_terms": [r["feature"] for r in rows if r["feature"].endswith((": not measured", ": missing"))]}
 
