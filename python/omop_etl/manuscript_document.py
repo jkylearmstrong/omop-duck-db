@@ -28,6 +28,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 __all__ = ["render_manuscript_document", "find_renderer", "renderer_env", "stderr_summary", "PAGE_MARGIN"]
@@ -41,13 +42,60 @@ def _esc(x: Any) -> str:
     return _MD_SPECIAL.sub(r"\\\1", s.replace("\r", " ").replace("\n", " "))
 
 
+def _print_cells(t: pd.DataFrame) -> list[list[str]]:
+    """The cells of ``t`` as printed: within a column every decimal number has the same number of places (the most it shows, at most
+    three: 0.52 next to 0.638 prints as 0.520, a beta of 0.3 next to 0.12 as 0.30) and whole numbers of 1,000 or more get thousands
+    separators; text is kept as it is."""
+    def places(v: float) -> int:
+        txt = f"{v:.3f}".rstrip("0")
+        return len(txt.split(".")[1]) if "." in txt else 0
+
+    out = [[None] * t.shape[1] for _ in range(len(t))]
+    for j in range(t.shape[1]):
+        col = t.iloc[:, j].tolist()
+        floats = [v for v in col if isinstance(v, float) and not pd.isna(v) and not float(v).is_integer()]
+        dp = max((places(v) for v in floats), default=0)
+        for i, v in enumerate(col):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                out[i][j] = ""
+            elif isinstance(v, bool):
+                out[i][j] = str(v)
+            elif isinstance(v, (int, np.integer)) or (isinstance(v, float) and v.is_integer() and dp == 0):
+                out[i][j] = f"{int(v):,}" if abs(int(v)) >= 1000 else str(int(v))
+            elif isinstance(v, (float, np.floating)):
+                out[i][j] = f"{float(v):,.{dp}f}" if dp else f"{float(v):,.1f}"
+            else:
+                out[i][j] = _esc(v)
+    return out
+
+
+_NUMERIC_CELL = re.compile(r"^[−\-–+<>≤≥]?\s*[\d.,]+")
+
+
 def _table_md(t: pd.DataFrame) -> str:
+    """A Markdown pipe table for the manuscript. Columns are sized by their content (Pandoc reads a wide pipe table's column widths
+    from the dashes under each header; equal dashes gave equal widths, so F1 and sensitivity were wide while a "0.720 (0.707–0.734)"
+    cell wrapped): each column gets dashes for its widest cell, and a header for half its length (it wraps onto two lines at most).
+    Text columns are left-aligned and number columns right-aligned; numbers are printed by :func:`_print_cells`."""
     if t.empty:
         return "_(empty)_"
     cols = [_esc(c) or " " for c in t.columns]
-    rows = [[_esc(v) for v in r] for r in t.astype(object).where(t.notna(), "").values.tolist()]
-    head = "| " + " | ".join(cols) + " |\n|" + "|".join([":---"] + ["---:"] * (len(cols) - 1)) + "|\n"
+    rows = _print_cells(t.astype(object))  # already Markdown-escaped
+    width, rule = [], []
+    for i, c in enumerate(cols):
+        words = [len(w) for w in str(c).split()] or [1]
+        w = max([max(words), -(-len(str(c)) // 2)] + [len(r[i]) for r in rows] + [3]) + 1
+        filled = [r[i] for r in rows if r[i].strip() and r[i] not in ("—", "-", "–")]
+        numeric = i > 0 and filled and sum(bool(_NUMERIC_CELL.match(x)) for x in filled) >= 0.8 * len(filled)
+        width.append(w)
+        rule.append("-" * w + ":" if numeric else ":" + "-" * w)
+    head = "| " + " | ".join(cols) + " |\n|" + "|".join(rule) + "|\n"
     return head + "\n".join("| " + " | ".join(r) + " |" for r in rows)
+
+
+#: Typst rules for the PDF's tables: cells are not justified or hyphenated (justified two-line headers spread their words apart and
+#: broke "patients" into "pa- tients"). Word ignores the raw Typst block.
+TABLE_TYPST = "```{=typst}\n#show table: set par(justify: false)\n#show table: set text(hyphenate: false)\n```"
 
 
 def find_renderer() -> dict[str, str | None]:
@@ -345,7 +393,7 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
                     fh.write("\n" + LITERATURE_BIB)
                 yaml.insert(-2, "nocite: |\n  " + ", ".join(f"@{k}" for k in LITERATURE_KEYS))
             yaml.insert(-2, f"bibliography: {software['bib'].name}")
-    md = list(yaml)
+    md = list(yaml) + [TABLE_TYPST, ""]
     copied = []
     for p in imgs:
         if p.parent.resolve() != out.resolve():
