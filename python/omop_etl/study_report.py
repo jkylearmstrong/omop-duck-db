@@ -741,9 +741,11 @@ def explain_models(X: pd.DataFrame, y: pd.Series | np.ndarray, *, grid: Mapping[
 
 
 def plot_shap_beeswarm(values: Any, data: pd.DataFrame, *, max_display: int = 15, title: str | None = None, ax: Any = None,
-                       path: str | Path | None = None, dpi: int = 200, seed: int = 0) -> Any:
+                       path: str | Path | None = None, dpi: int = 200, seed: int = 0, labels: Callable[[str], str] | None = None) -> Any:
     """Beeswarm of SHAP values for the ``max_display`` most important features (one dot per patient, coloured by the
-    feature's value rank from low to high). Returns the Figure (or the Axes' figure when ``ax`` is given).
+    feature's value rank from low to high). Returns the Figure (or the Axes' figure when ``ax`` is given). ``labels`` turns a
+    column name into its axis label; the default is the clinical label of :func:`omop_etl.manuscript_tables.feature_label`
+    (``labels=str`` keeps the column names).
 
     Drawn with matplotlib alone, so it looks the same whether or not the ``shap`` package is installed."""
     sv = np.asarray(values, dtype=float)
@@ -767,7 +769,9 @@ def plot_shap_beeswarm(values: Any, data: pd.DataFrame, *, max_display: int = 15
         ax.scatter(sv[:, j], row + rng.uniform(-0.28, 0.28, len(a)), c=cmap(rank), s=5, linewidths=0, rasterized=True)
     ax.axvline(0, color="#888888", lw=0.8)
     ax.set_yticks(range(len(top)))
-    ax.set_yticklabels([str(data.columns[j]) for j in top[::-1]], fontsize=8)
+    if labels is None:
+        from omop_etl.manuscript_tables import feature_label as labels
+    ax.set_yticklabels([labels(str(data.columns[j])) for j in top[::-1]], fontsize=8)
     ax.set_xlabel("SHAP value (impact on model output)")
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
@@ -784,7 +788,8 @@ def plot_shap_beeswarm(values: Any, data: pd.DataFrame, *, max_display: int = 15
 
 
 def plot_shap_panels(explained: Mapping[str, Mapping[str, Any]], *, top: int = 10, path: str | Path | None = None, dpi: int = 200,
-                     order: Sequence[str] = ("Logistic Regression", "Random Forest", "HistGBM", "XGBoost")) -> Any:
+                     order: Sequence[str] = ("Logistic Regression", "Random Forest", "HistGBM", "XGBoost"),
+                     labels: Callable[[str], str] | None = None) -> Any:
     """The 2 x 2 composite of SHAP beeswarms, panels lettered (A)-(D) in ``order``; ``explained`` is :func:`explain_models` output."""
     names = [m for m in order if m in explained] + [m for m in explained if m not in order]
     if not names:
@@ -794,7 +799,7 @@ def plot_shap_panels(explained: Mapping[str, Mapping[str, Any]], *, top: int = 1
     for i, name in enumerate(names):
         ax = fig.add_subplot(rows, 2, i + 1)
         plot_shap_beeswarm(explained[name]["values"], explained[name]["data"], max_display=top, ax=ax,
-                           title=f"({chr(65 + i)}) {name}")
+                           title=f"({chr(65 + i)}) {name}", labels=labels)
     fig.tight_layout(w_pad=4, h_pad=2)
     _save(fig, path, dpi)
     return fig

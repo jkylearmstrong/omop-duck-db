@@ -150,8 +150,10 @@ def test_title_and_authors_come_from_the_params(tmp_path, monkeypatch):
     assert '  - name: "A. Author"\n    affiliations:\n      - name: "Dept. X"' in head and '  - name: "B. Author"' in head
     assert "Study manuscript" not in head
     assert re.search(r"margin:\n\s+x: 1in\n\s+y: 1in", head) and "citeproc: true" in head
-    # an explicit author still wins, and without params the neutral title stays
-    r2 = md.render_manuscript_document(_workbook(tmp_path), tmp_path / "doc2", figures=[], author="Study team", run={"n_sites": 3})
+    # an explicit author still wins, and without params the tables-only view keeps the neutral title (since 0.33.4 the full text
+    # takes its template's title, see test_manuscript_fixes_0334)
+    r2 = md.render_manuscript_document(_workbook(tmp_path), tmp_path / "doc2", figures=[], author="Study team", run={"n_sites": 3},
+                                       profile="tables_only")
     head2 = r2["qmd"].read_text(encoding="utf-8").split("\n---\n")[0]
     assert 'title: "Study manuscript"' in head2 and '  - name: "Study team"' in head2 and "A. Author" not in head2
 

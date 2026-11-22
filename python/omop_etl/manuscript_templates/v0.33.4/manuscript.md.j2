@@ -1,0 +1,354 @@
+{#- Manuscript text, template v0.33.4 (v0.33.3 with Kyle's review of run C6, 2026-11-22: paragraphs that end in a block tag keep their blank line ("+%}"), so the abstract's Results and Conclusions, the Section 2.4 model list and the Table 1 caption start on their own; Section 2.2 names the utilization features in words; v0.33.3 was v0.33.2 with Kyle's review of run C5, 2026-11-21: Figure 1 carries the grant protocol window and is referenced where the eligibility steps are described, the CONSORT table is no longer printed, and the length-of-stay table is printed with the sites as columns; v0.33.2 was v0.33.0 with the reviewer fixes of 2026-11-20: SDI-missing wording follows the run, nearly identical missing-value indicators merged, the seed printed in the cohort call; v0.33.0 was v0.32.0 with the 2026-11-18 revisions: no tuning-comparison table, F1 in the cross-site table, reference rows in the regression table, discharge status split into other and missing). Prose follows the manuscript delivered on 2026-11-11; every number is a variable.
+    Where that text described the method incorrectly, this template says what the package does (see NOTES.md next to it).
+    ref.<key> is the number of a table or figure ("Table 5"); table_md / figure_md hold the rendered tables and images. -#}
+{%- set P = params -%}
+{%- set consortium = P.consortium or "Electronic Diabetes and Emergency Risk Reduction Initiative" -%}
+{%- set consortium_short = P.consortium_short or "eDERRI" -%}
+{%- set nsites = run.n_sites -%}
+{%- set nsites_word = nsites | words -%}
+{%- set M = models.list -%}
+{%- set lr_t = tuning["Logistic Regression"] -%}
+{%- set x_t = tuning["XGBoost"] -%}
+{#- site labels come from the run (any number of sites, any labels); "Site A through Site H" when they run in sequence -#}
+{%- set site_span = site_labels | label_span -%}
+{#- Results subsections after 3.2 and closing sections after 6 are numbered as they appear -#}
+{%- set ns = namespace(res=2, sec=6) -%}
+{#- architectures in the delivered order, with their long names -#}
+{%- set ARCH_ORDER = ["Logistic Regression", "Random Forest", "HistGBM", "XGBoost"] -%}
+{%- set arch = (ARCH_ORDER | select("in", models.names or []) | list) + ((models.names or []) | reject("in", ARCH_ORDER) | list) -%}
+{%- set LONG = {"HistGBM": "Histogram-based Gradient Boosting (HistGBM)", "XGBoost": "Extreme Gradient Boosting (XGBoost)"} -%}
+{%- set an = namespace(long=[]) -%}{%- for a in arch -%}{%- set an.long = an.long + [LONG.get(a, a)] -%}{%- endfor -%}
+{%- set arch_long = an.long -%}
+## Abstract
+
+**Background:** Hospital readmission within 30 days of inpatient discharge is a primary metric of healthcare quality, patient safety, and resource utilization across health systems. Developing reliable, automated risk prediction models requires standardized Electronic Health Record (EHR) data pipelines that function consistently across distinct clinical environments without relying on site-specific coding practices.
+
+**Objective:** To establish a standardized multi-center benchmark comparing {{ models.n | words }} traditional machine learning architectures—{{ arch_long | join_and }}—for predicting 30-day all-cause hospital readmission across {{ nsites_word }} major academic health systems within the {{ consortium }} ({{ consortium_short }}) research network.
+
+**Methods:** We conducted a multi-site retrospective cohort study of {{ cohort.n | n }} adult patients with diabetes, each represented by one qualifying inpatient stay drawn at random from that patient's eligible stays, across {{ nsites_word }} academic health systems within the {{ consortium }} ({{ consortium_short }}) research network (anonymized as {{ site_span }}, in compliance with multi-institution data governance policies). Each system's PCORnet extract was loaded into an OMOP CDM v5.4 database and the cohort was defined with the open-source omop-duck-db package: adults with an inpatient or emergency-to-inpatient stay of at least one day, at least 365 days of prior observation, a diabetes diagnosis, antidiabetic medication or HbA1c ≥ 6.5%, discharge alive, and a verified 30-day follow-up window. Predictors were vital signs and laboratory values (mean of the measurements within the index admission), prior-year healthcare utilization, 1-year medication exposure, 31 Elixhauser comorbidity domains from diagnoses recorded up to discharge, demographics, and address-derived Social Deprivation Index (SDI) and rurality (RUCA). Index admissions ran from {{ window.start_text }} to {{ window.end_text }}. All models were trained on 50/50 balanced training folds and evaluated on out-of-fold predictions from 5-fold cross-validation, scored on the natural distribution, with bootstrap confidence intervals. Hyperparameters were tuned targeting the F1 score across a predefined grid evaluated under 5-fold cross-validation, with configurations selected by F1 and by AUC-ROC compared with fixed baselines.{% if sensitivity %} Sensitivity analyses repeated the draw with {{ sensitivity.n_seeds_word }} random seeds and used all eligible stays.{% endif +%}
+
+**Results:** The cohort comprised {{ cohort.n | n }} adult patients with diabetes, each represented by one qualifying stay drawn at random from that patient's eligible stays ({{ cohort.n_readmitted | n }} followed by a 30-day readmission; {{ cohort.rate_pct | pct }}); index admissions strictly ran from {{ window.start_month }} to {{ window.end_month }}. {% if models.best in models.tree_models and models.boosting_beats_lr %}Gradient boosting architectures achieved the highest discrimination{% else %}{{ models.best }} achieved the highest discrimination{% endif %} ({{ ref.performance }}).
+
+Out-of-fold AUC-ROC (95% bootstrap CI) with 50/50 balanced training: {% for name, m in M.items() %}{{ name }} {{ m.auc_text }}{{ "; " if not loop.last else "." }}{% endfor %} At the 0.50 threshold, sensitivity was {{ models.sens_range[0] | fmt }} to {{ models.sens_range[1] | fmt }} and specificity {{ models.spec_range[0] | fmt }} to {{ models.spec_range[1] | fmt }}.
+
+Hyperparameter tuning confirmed that selecting configurations by AUC-ROC yields stable discrimination, whereas selecting by F1 alters threshold operating trade-offs without improving ranking{% if ref.grid %} ({{ ref.grid }}){% endif %}.
+
+{% if loso %}Leave-one-site-out cross-site external validation {% if loso.auc_mean >= models.auc_range[0] - 0.02 %}demonstrated robust transportability across health systems{% else %}showed lower discrimination at held-out health systems{% endif %} (mean AUC-ROC {{ loso.auc_mean | fmt }}; {{ ref.loso }}).
+{% endif %}
+
+{% if lr.top_risk | length >= 2 %}In the multivariable Logistic Regression, {{ lr.top_risk[0].feature | lower_first }} ({{ lr.top_risk[0] | or_ci }}) and {{ lr.top_risk[1].feature | lower_first }} ({{ lr.top_risk[1] | or_ci }}) were the strongest independent risk factors ({{ ref.lr }}).{% endif +%}
+
+**Conclusions:** Standardized multi-domain EHR features derived with open OMOP tooling gave modest discrimination for 30-day readmission at a randomly selected qualifying admission (AUC-ROC {{ models.auc_range[0] | fmt }} to {{ models.auc_range[1] | fmt }} across architectures); the cohort definition is reproducible with open software.{% if stay_type %} The randomly drawn stay is a mix of first and later admissions, which differ in baseline risk and in the prior history available, so discrimination depends on which admission is scored; it was {% if stay_type.first.auc < models.list[stay_type.model].auc and stay_type.later.auc < models.list[stay_type.model].auc %}lower within each stay type than in the pooled draw{% else %}different within each stay type than in the pooled draw{% endif %}.{% endif %} Tuning the hyperparameters changed discrimination little; selecting them by F1 at a fixed threshold mainly moved the sensitivity and specificity trade-off, so AUC-ROC was the more stable selection criterion.
+
+## 1 Introduction
+
+30-day all-cause hospital readmissions pose a substantial burden on healthcare systems, reflecting ongoing patient vulnerability, sub-optimal post-discharge transitions, and high financial costs under value-based care initiatives such as the Centers for Medicare & Medicaid Services (CMS) Hospital Readmissions Reduction Program (HRRP). Proactive risk stratification models embedded directly within EHR clinical workflows can assist care management teams in prioritizing post-discharge follow-up, medication reconciliation, and home health services.
+
+Building risk prediction models that generalize across multiple health systems presents significant methodological challenges. Disparities in electronic documentation practices, localized laboratory ordering behaviors, variations in billing workflows, and differences in regional patient demographics often degrade model performance when algorithms trained on one institution are applied to another.
+
+To address these challenges, the {{ consortium }} ({{ consortium_short }}) consortium established a multi-institutional research infrastructure to standardize longitudinal EHR data across diverse health systems. In this benchmark study, we evaluate {{ models.n | words }} established traditional machine learning algorithms across {{ cohort.n | n }} unique patients, each represented by one randomly drawn qualifying inpatient stay, from {{ nsites_word }} distinct clinical sites, designated {{ site_span }} to preserve institutional confidentiality in accordance with consortium data use and publication guidelines.
+
+We describe the comprehensive epidemiological cohort derivation, feature engineering, laboratory consolidation from OMOP vocabulary hierarchies, feature scaling, temporal window alignment, and comparative model evaluation. This manuscript provides a descriptive methods and results baseline for the consortium. Standalone table deliverables are also maintained as standalone Excel ({{ files.workbook }}) and CSV files for direct editing.
+
+## 2 Methods
+
+### 2.1 Cohort Derivation & Eligibility Criteria
+
+The {{ nsites_word }} health systems' PCORnet extracts of adults with diabetes were loaded into OMOP CDM v5.4 databases with omop-duck-db. The study cohort was then defined inside OMOP with the package's define_study_cohort() function, with no externally supplied list of index stays (the exact call is given in the Data & Code Availability section). The index stays in the analytic cohort were strictly restricted to admissions between {{ window.start_text }} and {{ window.end_text }}{% if window.last_discharge_text %} (last discharge {{ window.last_discharge_text }}){% endif %}, enforcing 100% fidelity to the grant protocol and DUA parameters.{% if site_dates %} Index stays spanned all {{ nsites_word }} participating health systems ({% for s in site_dates %}{{ s.label }}, {{ s.first }} to {{ s.last }}{{ "; " if not loop.last else "" }}{% endfor %}).{% endif %} Criteria were applied in this order:
+
+1. Index stay: inpatient (OMOP visit concept 9201) or emergency-room-to-inpatient (262) stays. Observation and emergency-department-only visits are used only to count prior utilization.
+2. Age: at least 18 years at admission.
+3. Length of stay: at least 1 day.
+4. Wash-in: at least 365 days of observation before admission.
+5. Discharge alive: stays ending in in-hospital death were excluded (Section 2.1.1).
+6. Diabetes phenotype: an ICD-9 249/250 or ICD-10 E08–E13 diagnosis, an antidiabetic medication, or HbA1c ≥ 6.5% on or before the index date; patients whose only diabetes-related medication exposure was metformin and who had prediabetes or polycystic ovary syndrome (PCOS) were excluded.
+7. Verified 30-day follow-up: a readmission within 30 days of discharge, or any recorded encounter on or after day 30 after discharge (Section 2.1.1).
+8. One randomly drawn stay per patient (primary analysis): every stay that met the criteria above is a candidate index stay, with its own 30-day outcome and its own history window. For each patient one candidate was drawn uniformly at random (a seeded pseudo-random draw, so the selection is reproducible), so every patient is one observation and the cohort has no repeated patients.{% if sensitivity %} Sensitivity analyses (i) repeat the draw with {{ sensitivity.n_further_seeds_word }} further seeds and (ii) keep every candidate stay ({{ attrition.qualifying_stays | n }} stays; patient-grouped cross-validation).{% endif +%}
+
+
+Predictors were taken from the index stay and from the history before it; none uses information recorded after discharge. Vital signs and laboratory values are means of the measurements recorded within the index admission (admission to discharge); utilization counts cover the 365 days before admission; medication exposure covers the 365 days before discharge; comorbidity flags use all diagnoses recorded on or before the discharge date; and the 30-day outcome window starts on the day after discharge.
+
+#### 2.1.1 Exclusion Criteria & Temporal Alignment
+
+1. In-Hospital Mortality & Acute Care Facility Transfers: Stays ending in in-hospital death (a discharge-to-deceased concept or a death record on or before discharge) were excluded because patients were not at risk for post-discharge readmission. Stays discharged to another acute-care hospital (PCORnet discharge status IP, OMOP concept 8717) were also excluded, because the patient's care continued outside the capturing network.
+2. Discharges Against Medical Advice (AMA) Retained: Patients discharged against medical advice (AMA) were explicitly retained as an eligible discharge status. While traditional administrative quality penalties (such as CMS HRRP) sometimes exclude AMA encounters, in prospective clinical practice AMA patients represent a clinically important high-risk subgroup who exhibit markedly elevated readmission rates ({{ cohort.ama_rate_pct | pct(1) }} vs. {{ cohort.non_ama_rate_pct | pct(1) }} for other discharges), with fragmented care transitions that clinical risk prediction models must actively identify.
+3. Non-Target Screening Diagnoses: Patients with a prediabetes or polycystic ovary syndrome (PCOS) diagnosis whose only diabetes-related medication exposure was metformin were excluded, because metformin use alone does not establish diabetes in these conditions.
+4. Incomplete Follow-Up Window Exclusion: Patients without a verified 30-day follow-up window (no readmission within 30 days and no recorded encounter on or after day 30) were excluded (stays with unverified follow-up status were excluded), while patients whose post-discharge encounter within 30 days was an acute readmission are included in the readmitted outcome group (Y = 1).
+5. Strict Disjoint Temporal Scoping: Predictors come from the index stay and the history before it, and the outcome is any inpatient or emergency-to-inpatient stay that starts on days 1 to 30 after discharge, so predictors and outcome never overlap.
+
+After applying these criteria, {{ cohort.n | n }} unique patients across the {{ nsites_word }} anonymized sites had at least one qualifying stay{% if attrition %} ({{ attrition.qualifying_stays | n }} qualifying stays in all, {{ attrition.stays_per_patient | fmt(2) }} per patient on average){% endif %}. The primary cohort has one randomly drawn stay per patient ({{ cohort.n | n }} stays), with a 30-day readmission rate of {{ cohort.rate_pct | pct }} (N = {{ cohort.n_readmitted | n }} followed by a readmission; N = {{ cohort.n_not | n }} not).{% if sensitivity and sensitivity.all_stays_rate_pct %} The rate across all {{ attrition.qualifying_stays | n }} qualifying stays is {{ sensitivity.all_stays_rate_pct | pct(1) }}, higher because patients who are admitted repeatedly contribute more stays.{% endif +%}
+
+- Grant protocol calendar window: {{ window.start_text }} through {{ window.end_text }} (100% compliant with grant scope).
+{% if attrition %}- Total qualifying stays across {{ nsites }} sites: {{ attrition.qualifying_stays | n }} stays ({{ attrition.stays_per_patient | fmt(2) }} per patient).
+{% endif %}- Analytic cohort (1 random stay per patient): {{ cohort.n | n }} stays ({{ cohort.n_readmitted | n }} readmissions, {{ cohort.rate_pct | pct }}).
+- Random selection mechanism: Uniform pseudo-random draw per patient (seeded, so the draw is reproducible).
+
+{% if ref.flowchart %}{{ ref.flowchart }} shows the patients remaining after each eligibility step (all sites combined), then the grant protocol window ({{ window.start_text }} through {{ window.end_text }}) and the analytic cohort of {{ cohort.n | n }} patients. {% endif %}The step counts are patient-level: they count patients with at least one qualifying stay. The primary analysis draws one of each patient's qualifying stays at random.
+
+### 2.2 Data Standardization & Feature Engineering
+
+Features were extracted from the {{ nsites_word }} OMOP CDM v5.4 databases.{% if features.n_columns %} The feature table has {{ features.n_columns }} columns; after removing identifiers, the outcome{% if features.empty %} and {{ (features.n_empty or (features.empty | length)) | words }} columns with no observed values ({{ features.empty | join(', ') }}){% endif %}, {{ features.n }} features entered the models{% if features.n_binary is not none and features.n_continuous is not none %} ({{ features.n_binary }} binary, {{ features.n_continuous }} continuous){% endif %}:{% else %} {{ features.n }} features entered the models:{% endif +%}
+
+- Demographic Features: Age (categories 18–44, 45–64, 65–74, 75+), sex, race, ethnicity, Social Deprivation Index (SDI quintiles 1–5), RUCA urban/rural codes, and BMI classifications. Each site's address history is loaded into the OMOP location table, and each stay is assigned the address in effect at admission (otherwise the latest earlier address, otherwise the earliest). The address ZIP code is linked to the RUCA primary code (original coding: 1 metropolitan, 2 micropolitan, 3 and above small town or rural) and to the 2015–2019 ZIP-level Social Deprivation Index score, which is cut into quintiles over the cohort. Stays without a usable ZIP code are reported as Missing/Unknown{% if decisions.sdi_missing_term is sameas false %}; in the multivariable regression, stays with missing SDI share the reference category with SDI quintile 1{% else %} rather than assigned a reference category, and in the multivariable regression missing SDI has its own term{% endif %}.
+- Discharge Status: Home, home health, skilled nursing or rehabilitation facility, against medical advice, other (for example hospice or assisted living), or missing / unknown when the source record carries no discharge status (PCORnet NI, UN or blank), read from the index stay's OMOP discharge concept and, where that is unmapped, its source value.
+- Vital Signs: Mean systolic and diastolic blood pressure and BMI recorded between admission and discharge of the index stay.
+- Laboratory Measures (Index Stay Mean): The mean of the laboratory measurements recorded between admission and discharge of the index stay, matched across health systems through the OMOP vocabulary hierarchy (each laboratory is a concept set built from concept_ancestor, not a hand-picked list of LOINC codes) and restricted to physiologically plausible ranges. Panels include {{ lr.labs | join_and }}.
+- Medication Exposure (OMOP Drug Exposure): Exposure in the 365 days before discharge to 8 therapeutic classes, assigned by rolling branded and clinical drugs up to their ingredients: Biguanides (Metformin), Insulins, Sulfonylureas, RAAS Inhibitors (ACE inhibitors / ARBs), Antihypertensives, Beta Blockers, Systemic Corticosteroids, and Lipid Modifying Agents (Statins).
+- Comorbidity Indices: 31 Elixhauser comorbidity domains from ICD-9-CM and ICD-10-CM diagnosis codes recorded on or before the index discharge date (all available history, including diagnoses coded during the index stay), and the number of distinct conditions recorded before the index admission.
+- Historical Healthcare Utilization: Counts of visits in the 365 days before admission (prior inpatient, observation and emergency visits combined, prior inpatient stays, prior emergency visits, and all prior encounters), summed prior inpatient length of stay, days since the prior encounter (set to 365 when there was none), and prior 12-month inpatient readmissions, which counts inpatient stays in the prior 365 days. The number of secondary diagnosis categories (distinct CCS condition categories recorded during the index stay) and the index length of stay complete the utilization features.
+
+{% if figure_md.flowchart %}{{ figure_md.flowchart }}{% endif +%}
+
+### 2.3 Preprocessing, Imputation & Feature Scaling
+
+To maintain strict separation of training and evaluation data and prevent out-of-fold information overlap, preprocessing steps were executed within each cross-validation fold:
+
+1. Imputation & Multicollinearity Defenses: Missing values in the model matrix (laboratory, vital sign and other continuous features) were imputed using median values calculated strictly on training folds and applied to test folds. Tree-based ensembles (XGBoost, HistGBM, Random Forest) natively handle correlated feature pairs (e.g., BUN and creatinine, hemoglobin and hematocrit); for the Logistic Regression benchmark model, L2-ridge regularization ({{ hyper['Logistic Regression'].text or 'C=1.0' }}) was applied to stabilize coefficient estimation.
+2. Scaling & Odds Ratio Interpretation: In the benchmark, continuous features were Z-score standardized (fit on training folds) for Logistic Regression only; the tree-based models use unscaled features. The multivariable Logistic Regression table was fit separately by unpenalized maximum likelihood on the whole cohort, and its coefficients were back-transformed to the original units. Standardized Beta coefficients (β~std~ = β~raw~ × SD~X~, the change in log-odds per one standard deviation) are reported to rank relative feature importance across disparate clinical scales, while Adjusted Odds Ratios (OR = exp(β~raw~ × Δ)) are reported {% if decisions.table6_increments == "sd" %}per one standard deviation of each continuous feature{% else %}per a clinically meaningful increment Δ (e.g., 10 mmHg of blood pressure, 10 mg/dL of BUN, 5 mEq/L of sodium, 10 outpatient encounters){% endif %} or, for indicator variables, for presence versus absence.{% if decisions.table6_missing == "indicator" %} In that table, a laboratory value or vital sign missing for at least 11 stays enters with a "not measured" indicator next to it: its missing values are set to the mean of the measured stays, so its odds ratio is estimated from the stays where it was measured, and the indicator carries the difference of the unmeasured stays. A laboratory is measured because a clinician ordered it, so whether it was measured carries risk information of its own. Indicators that coincide or nearly coincide (differing in fewer than 2% of the stays where either is missing) enter as one term: eGFR is computed from creatinine, and systolic and diastolic pressure come from one reading, so each pair is missing in the same stays. Missing-value indicators describe whether a value was recorded, so they are not ranked among the risk factors in the text.{% elif decisions.table6_missing == "median" %} In that table, missing continuous values were median-imputed.{% endif +%}
+
+
+### 2.4 Traditional Machine Learning Algorithms & Hyperparameter Tuning
+
+{{ models.n | words | capitalize }} traditional machine learning architectures were trained across the multi-center cohort: {{ arch_long | join_and }}. To optimize classification performance at the clinical decision threshold, models were tuned targeting the F1 score across a predefined hyperparameter grid evaluated with 5-fold cross-validation on 50/50 balanced training folds. The primary benchmark performance ({{ ref.performance }}) reports these F1-tuned model configurations, {% if ref.grid %}while the metrics of every configuration of the grid are reported in {{ ref.grid }}.{% else %}while the full grid is part of the study's results files.{% endif +%}
+
+{% for name in arch %}{% set h = hyper[name] or {} %}{% set t = tuning[name] or {} %}
+{{ loop.index }}. {% if name == "Logistic Regression" -%}
+Logistic Regression (L2-Regularized) (Yuan et al. 2011; Pedregosa et al. 2011): Serves as the primary linear baseline{% if t %} ({{ t.f1 }} selected by F1 tuning; {{ t.fixed }} in fixed baseline){% endif %}. The odds ratios in the multivariable logistic regression table were estimated separately by unpenalized maximum likelihood on the OMOP cohort, with 95% Wald confidence intervals and p-values from the model-based standard errors.
+{%- elif name == "Random Forest" -%}
+Random Forest Classifier (Breiman 2001; Pedregosa et al. 2011): Ensembled {{ h.n_estimators or "" }} decision trees{% if h.text %} ({{ h.text }}){% endif %} utilizing Gini impurity split criteria (no class weighting; class imbalance is addressed by 50/50 balanced training folds).{% if t %} F1 tuning selected {{ t.f1 }}.{% endif %}
+{%- elif name == "HistGBM" -%}
+Histogram-Based Gradient Boosting (HistGBM) (Pedregosa et al. 2011): Scikit-learn's binned gradient boosted trees{% if h.text %} ({{ h.text }}, early stopping on a 0.1 validation fraction when a training fold exceeds 10,000 stays){% endif %}.{% if t %} F1 tuning selected {{ t.f1 }}.{% endif %}
+{%- elif name == "XGBoost" -%}
+XGBoost (Extreme Gradient Boosting) (Chen and Guestrin 2016): Gradient boosted decision trees using tree-based learning with regularization{% if h.text %} ({{ h.text }}){% endif %}.{% if t %} F1 tuning selected {{ t.f1 }}.{% endif %}
+{%- else -%}
+{{ name }}{% if t %}: {{ t.f1 }} selected by F1 tuning; {{ t.fixed }} in the fixed baseline{% endif %}.
+{%- endif +%}
+{% endfor %}
+
+### 2.5 Model Evaluation Protocol & Classification Thresholding
+
+Models were evaluated using 5-fold stratified cross-validation on Out-of-Fold (OOF) predictions, with folds grouped by patient (scikit-learn StratifiedGroupKFold, shuffled, seed {{ run.random_state if run.random_state is not none else 42 }}) so that no patient's stays appear in both training and test folds. Within each training fold, readmitted stays were resampled with replacement until the two classes were equal in number (50/50 balanced training); test folds were left at their natural prevalence, so every reported metric describes performance on the real-world distribution. Confidence intervals come from {% if run.bootstraps %}{{ run.bootstraps }} {% endif %}bootstrap replicates of the out-of-fold predictions (patients resampled with replacement). Given the {{ cohort.rate_pct | pct }} stay-level readmission base rate, predicted continuous probabilities p ∈ [0, 1] were evaluated using Brier scores; because balanced training imposes a 50% prior, these probabilities are not calibrated to the natural readmission rate. Classification metrics (Sensitivity, Specificity, F1) are reported at a default 0.50 decision threshold; in clinical deployment, thresholds are customizable to match institutional care management intervention capacity (e.g., selecting top 10% or top 20% highest-risk patients). Performance was quantified using key metrics:
+
+1. AUC-ROC: Area Under the Receiver Operating Characteristic Curve.
+2. F1 Score: Harmonic mean of precision and recall at the 0.50 decision threshold.
+3. Sensitivity (Recall): Proportion of true readmissions correctly identified.
+4. Specificity: Proportion of non-readmissions correctly identified.
+5. Brier Score: Mean squared difference between predicted probability and actual outcome (calibration measure; range 0–1, lower is better).
+
+Model explainability was evaluated using SHAP (SHapley Additive exPlanations) summary plots (Lundberg and Lee 2017) and feature dependence analysis to visualize non-linear risk relationships.
+
+## 3 Results
+
+### 3.1 Baseline Cohort Descriptive Statistics
+
+{{ ref.table1 }} summarizes baseline characteristics of the {{ cohort.n | n }} patients at their randomly drawn index stay, as well as for patients readmitted within 30 days (N = {{ cohort.n_readmitted | n }}) and not (N = {{ cohort.n_not | n }}). Each value describes the index admission: blood pressure, BMI and laboratory values are the mean of the plausible measurements recorded within the index admission (admission to discharge, the lookback window), the same values the models use, summarized across patients as mean±SD; patients with no measurement are counted under missingness ({{ ref.completeness }}). Rows are presented in strict logical order (SDI Quintiles 1 → 5; BMI Underweight → Obese, with each category's "Missing/Unknown" row last). Data completeness and missingness indicators are reported in {{ ref.completeness }}.
+
+{% if table1_contrast %}Baseline descriptive characteristics across the {{ cohort.n | n }} patients reflect a representative multi-center diabetic inpatient population. Patients who experienced 30-day readmissions exhibited {{ table1_contrast }}.{% endif +%}
+
+{{ table_md.table1 }}
+
+### 3.2 Overall Model Discrimination & Calibration
+
+Across the {{ cohort.n | n }} patients of the combined multi-site cohort (one randomly drawn stay each), {{ ref.performance }} compares the {{ models.n | words }} architectures.
+
+All {{ models.n | words }} were trained on 50/50 balanced training folds and scored on out-of-fold predictions at the natural prevalence; sensitivity, specificity and F1 use a 0.50 threshold.
+
+{% for name, m in M.items() %}
+- {{ name }}: AUC-ROC {{ m.auc_text }}; at 0.50 threshold: sensitivity {{ m.sensitivity | fmt }}, specificity {{ m.specificity | fmt }}, F1 {{ m.f1 | fmt }}; Brier score {{ m.brier | fmt }}.
+
+{% endfor %}
+
+Balanced training is a classification rule that sets the operating point at a fixed 0.50 cutoff. Its predicted probabilities reflect an artificial 50% prior, which is why the Brier scores are about {{ models.brier_range[0] | fmt(2) }}–{{ models.brier_range[1] | fmt(2) }}, so they should not be read as patient risk without recalibration.
+
+{{ table_md.performance }}
+
+To optimize operational classification, hyperparameters across all architectures were tuned targeting the F1 score under the standard evaluation protocol (5-fold cross-validation, 50/50 balanced training folds, scored on out-of-fold natural prevalence at a 0.50 threshold). Tuning for F1 selected configurations that balance sensitivity and positive predictive value, and the resulting F1-tuned models are the primary benchmark ({{ ref.performance }}){% if ref.grid %}; every configuration of the grid is reported in {{ ref.grid }}{% endif %}.
+
+{% if loso %}
+{%- set ns.res = ns.res + 1 %}
+### 3.{{ ns.res }} Cross-Site Generalization (Leave-One-Site-Out)
+
+To test transport between health systems, the F1-tuned XGBoost configuration of the primary benchmark ({{ x_t.f1 }}) was trained on a 50/50 balanced sample of {{ (nsites - 1) | words }} systems and scored on the remaining one at its natural prevalence, for each system in turn. Across held-out academic health systems, external AUC-ROC ranged from {{ loso.auc_min | fmt }} to {{ loso.auc_max | fmt }} (mean {{ loso.auc_mean | fmt }}) ({{ ref.loso }}). The model uses the exact primary benchmark configuration, demonstrating cross-site transportability directly aligned with {{ ref.performance }}. {% if loso.auc_mean >= models.auc_range[0] - 0.02 %}The held-out discrimination is close to the pooled cross-validation estimates, confirming that discrimination transports robustly across these {{ nsites_word }} distinct academic medical centers.{% else %}The held-out discrimination is below the pooled cross-validation estimates.{% endif %} Each held-out system is evaluated at its natural prevalence with bootstrap 95% confidence intervals for the AUC-ROC; F1, sensitivity and specificity are reported at the 0.50 threshold. The address-derived SDI and RUCA features were included.
+
+{{ table_md.loso }}
+{% endif %}
+
+{%- set ns.res = ns.res + 1 %}
+### 3.{{ ns.res }} Multivariable Risk Factors & Odds Ratio Benchmark
+
+Multivariable Logistic Regression odds ratios and 95% confidence intervals across all {{ lr.n_terms }} model terms (including discharge disposition and index laboratory values) are presented in {{ ref.lr }}. The model was fit by unpenalized maximum likelihood on the {{ cohort.n | n }} patients' randomly drawn stays, so observations are independent; the 95% confidence intervals are Wald intervals from the model-based standard errors. To facilitate clinical interpretation and cross-variable comparison, Adjusted Odds Ratios ({% if decisions.table6_increments == "sd" %}per one standard deviation for continuous features{% else %}per the clinical increment shown in the Increment column{% endif %}) and Standardized Beta coefficients (per 1 SD) are presented side-by-side, to two decimal places, with features grouped in the order of {{ ref.table1 }} (comorbidities and other clinical features follow the laboratory values). Each multilevel feature (age, race, SDI, RUCA, discharge status, tobacco use and BMI) is shown with its reference category (OR 1.00), against which its other levels are compared. This table is an association model fit on the whole cohort at its natural prevalence, not one of the balanced-training prediction models.
+
+{{ table_md.lr }}
+
+{% set ex = lr.example %}Note on Odds Ratio Formats & Column Definitions: 1. Adjusted Odds Ratio (95% CI): The risk multiplier per the increment in the Increment column{% if decisions.table6_increments != "sd" %} (e.g., +10 mmHg systolic pressure, +10 mg/dL BUN, +5 mEq/L sodium){% endif %}, or presence versus absence for indicators, with all other model terms held constant{% if ex %} ({{ ex.feature }}: OR {{ ex.or | fmt(2) }} (95% CI {{ ex.lo | fmt(2) }}–{{ ex.hi | fmt(2) }}){% if ex.increment %} per {{ ex.increment }}{% endif %}){% endif %}. 2. Standardized Beta: The log-odds change per one standard deviation of the feature (indicators included), which allows ranking of relative predictor strength across disparate clinical measurement domains. Because it scales with the feature's spread, it is not comparable with the odds ratio per increment.{% if lr.protective %} 3. Interpreting protective associations: Several terms show odds ratios {% if lr.protective | map(attribute="or") | min >= 0.8 %}slightly {% endif %}below 1 with p < 0.05 ({{ lr.protective_names | map("lower_first") | join_and }}). These are conditional associations among stays that were already admitted, adjusted for prior utilization, length of stay and other comorbidities, and they may reflect the mechanisms below rather than any effect of the factor itself. They should not be read as causal protection: conditioning on an index admission (collider stratification), correlated comorbidity indicators, and treatment and outpatient-management patterns that distinguish stable patients can all reverse the sign seen in unadjusted comparisons.{% endif %} {% if lr.protective %}4{% else %}3{% endif %}. {% if decisions.table6_missing == "indicator" %}A laboratory value or vital sign that was not measured for at least 11 stays has its own "not measured" term, so its odds ratio describes the stays where it was measured.{% else %}Continuous laboratory values were median-imputed (see Preprocessing), so their coefficients describe the effect among imputed and measured values together.{% endif %} Odds ratios are rounded to two decimals, so an odds ratio shown as 1.00 with a small p-value is a small per-increment effect, not a null one.
+
+
+All odds ratios are derived from multivariable logistic regression on the unweighted natural prevalence cohort, adjusting simultaneously for all demographic, utilization, diagnostic, vital, and laboratory covariates.
+
+{% if figure_md.shap or shap or "XGBoost" in (models.names or []) %}
+{%- set ns.res = ns.res + 1 %}
+### 3.{{ ns.res }} SHAP Feature Importance & Explainability Analysis
+
+SHAP values were computed for the XGBoost model trained on 50/50 balanced folds, on {% if shap.n_sample %}{{ shap.n_sample | n }} randomly sampled patients{% else %}a random sample of patients{% endif %} from the primary cohort ({{ ref.shap }}). Points to the right of zero increase the predicted risk of 30-day readmission and points to the left reduce it; red points are high feature values and blue points are low values.
+
+{% if shap %}
+- Top {{ shap.top | length }} Predictors: {{ shap.top | join_and }}.
+
+{% if shap.top | length >= 3 %}Global SHAP feature importance ranks {{ shap.top[0] | lower_first }}, {{ shap.top[1] | lower_first }} and {{ shap.top[2] | lower_first }} as the primary drivers of predicted 30-day readmission risk.{% endif +%}
+
+{% endif %}
+{{ figure_md.shap }}
+{% endif %}
+
+## 4 Discussion & Conclusions
+
+This multi-center study establishes a standardized benchmark for 30-day hospital readmission risk prediction across {{ cohort.n | n }} patients, each scored at one randomly drawn qualifying stay, at {{ nsites_word }} major academic health systems. By restricting predictors to the index stay and the history before it and constructing strictly disjoint post-discharge outcome windows [t~discharge~, t~discharge~ + 30 days] (Section 2.1.1), all evaluated model architectures—whether linear baselines (Logistic Regression) or traditional machine learning ensembles{% if models.tree_models %} ({{ models.tree_models | join(', ') }}){% endif %}—predict risk under rigorous, prospectively aligned temporal boundaries.
+
+Under this multi-center evaluation protocol (N = {{ cohort.n | n }}), {% if models.boosting_beats_lr %}gradient boosting architectures (HistGBM and XGBoost AUC-ROC {{ models.boosting_auc_range[0] | fmt }}–{{ models.boosting_auc_range[1] | fmt }}) outperformed the linear Logistic Regression baseline ({{ M["Logistic Regression"].auc | fmt }}){% else %}the architectures reached AUC-ROC {{ models.auc_range[0] | fmt }}–{{ models.auc_range[1] | fmt }}, with no consistent advantage of gradient boosting over Logistic Regression ({{ M["Logistic Regression"].auc | fmt }}){% endif %}. With 50/50 balanced training, sensitivity at a 0.50 threshold ranged from {{ models.sens_range[0] | fmt }} to {{ models.sens_range[1] | fmt }} with specificity of {{ models.spec_range[0] | fmt }} to {{ models.spec_range[1] | fmt }}.
+
+### 4.1 Comparison to Established Clinical Risk Rules
+
+Traditional bedside risk scores—such as the LACE Index (Length of stay, Acuity, Comorbidities, Emergency visits) and the HOSPITAL Score—are widely utilized in hospital workflows due to manual scoring simplicity. In large-scale EHR validation literature, LACE typically achieves moderate discriminatory accuracy (AUC-ROC ≈ 0.65–0.68).
+
+The choice of stay matters for interpreting the headline figure. The primary analysis draws one eligible stay per patient at random, so every patient counts once and its AUC-ROC ({{ models.auc_range[0] | fmt }} to {{ models.auc_range[1] | fmt }}) describes prediction at a randomly chosen admission, mixing first and later admissions that differ in baseline risk and prior history.{% if sensitivity %} Scoring every eligible stay (weighting frequently admitted patients by their number of stays) gave {{ sensitivity.all_stays_auc_text }}; the random draw was stable across seeds.{% endif %} Readers comparing these results with other studies should check which stay was scored and whether patients or stays were weighted equally. The readmission rate ({{ cohort.rate_pct | pct }}) is a per-patient rate at the drawn stay{% if sensitivity %}; it is lower than the rate across all stays ({{ sensitivity.all_stays_rate_pct | pct(1) }}){% endif %} and should not be compared with program benchmarks without matching their definitions of eligible and planned readmissions.
+
+### 4.2 Limitations & Selection Bias Considerations
+
+Ascertainment of the 30-day readmission outcome required a verified post-discharge follow-up signal (a readmission within 30 days, or any later documented encounter confirming continued observation within the health system network). Patients whose only available signal after their index discharge was silence — no further encounter of any kind within the network — were excluded as unverifiable rather than assumed non-readmitted (stays with unverified follow-up status were excluded). This protocol protects against misclassifying patients who were readmitted to outside health systems as false-negative non-readmissions; however, it introduces a potential selection bias by excluding patients who died or permanently relocated outside the regional health network shortly after discharge. Quantifying the direction and magnitude of this selection bias through linkage with national death registries (e.g. Social Security Death Master File) or regional Health Information Exchanges (HIEs) represents an important area for future study.
+
+The primary cohort draws one stay per patient at random, so it discards the other eligible stays of patients with several admissions{% if attrition %} ({{ attrition.qualifying_stays | n }} eligible stays in all){% endif %}, and the readmission rate and AUC-ROC depend on which admission is scored. Index admissions were strictly restricted to the {{ window.start }} to {{ window.end }} protocol period (spanning from {{ window.start_text }} to {{ window.end_text }}), standardizing the observation window across all {{ nsites_word }} systems. Primary models were tuned targeting the F1 score across a predefined grid; while hyperparameter tuning produced small gains in rank discrimination over fixed configurations{% if ref.grid %} ({{ ref.grid }}){% endif %}, it achieved balanced sensitivity and specificity at the operational threshold.{% if completeness.sdi_missing_pct is not none and completeness.sdi_missing_pct %} Address-based SDI and RUCA are missing for about {{ completeness.sdi_missing_pct | round | int }}% of stays overall.{% endif %} Predictors use diagnoses recorded up to the discharge date, which are often finalized after discharge, so the models would not have all of these inputs at the bedside.
+
+## 5 Ethical Approval & IRB Compliance
+
+{{ P.irb_statement or "[Review board statement: supplied by the study team, not stored in the package]" }}
+
+## 6 Data & Code Availability
+
+The study used patient-level electronic health record data from {{ nsites_word }} health systems under data use agreements and IRB oversight. These data contain protected health information and cannot be shared publicly. Aggregate results are reported in this manuscript and its tables.
+
+The PCORnet extracts were converted to OMOP CDM v5.4 databases and the study cohort was defined, the features extracted and the models, tables and this manuscript produced with the open-source omop-duck-db package{% if environment and environment["omop-duck-db"] %} (version {{ environment["omop-duck-db"] }}){% endif %}. The study cohort was defined with this call:
+
+```python
+{{ cohort_call }}
+```
+
+Every stay that meets the criteria is a candidate; the call keeps one per patient, drawn at random with the seed given in the call (random_seed), which is deterministic given the seed and the data. The central vocabulary's concept_ancestor table is attached so that descendant concepts resolve. The run record that accompanies the tables lists every analysis decision and the software versions.
+
+{% if P.authors %}
+{%- set ns.sec = ns.sec + 1 %}
+## {{ ns.sec }} Author Contributions & Acknowledgments
+
+{% for a in P.authors %}
+- {{ a.name }}{% if a.role %}: {{ a.role }}{% endif %}
+{% endfor %}
+{% endif %}
+
+{% if software_paragraph %}
+{%- set ns.sec = ns.sec + 1 %}
+## {{ ns.sec }} Software
+
+{{ software_paragraph }}
+{% endif %}
+
+## Supplementary Material
+
+{% if table_md.stay_type %}{{ table_md.stay_type }}{% endif +%}
+
+{{ table_md.completeness }}
+
+{% if table_md.los %}{{ table_md.los }}{% endif +%}
+
+{% if table_md.grid %}{{ table_md.grid }}{% endif +%}
+
+## Appendix A: Study Resampling & Cross-Validation Methodology
+
+### Study Resampling and Cross-Validation Framework
+
+Model training and validation were conducted using a rigorous 5-fold stratified, patient-grouped cross-validation scheme designed to evaluate generalizability, prevent data leakage, and ensure reproducible risk estimation across the {{ nsites_word }} health systems.
+
+### Stratified, Patient-Grouped 5-Fold Partitioning
+
+To keep each patient entirely in training or entirely in validation and maintain similar class balance across subsets, the primary cohort (N = {{ cohort.n | n }} patients, one randomly drawn stay each) was partitioned into five mutually exclusive folds, grouping on the patient and stratifying on the 30-day readmission outcome (Y ∈ {0, 1}). Each fold approximately preserves the readmission rate of {{ cohort.rate_pct | pct }} (N = {{ cohort.n_readmitted | n }} events); no patient appears in both a training and a test fold.
+
+In each fold iteration: 1. Four folds (about 80% of patients and their stays) were assigned to model fitting and parameter estimation. 2. One held-out fold (about 20% of patients and their stays) served as the strictly unseen evaluation set. 3. Out-of-fold (OOF) predicted probabilities p̂~i~ ∈ [0, 1] were aggregated across all five evaluation folds to compute consortium-wide performance metrics without optimistic bias.
+
+### Preprocessing and Imputation Isolation
+
+To prevent information leakage from test folds into training steps: Missing Value Imputation: Continuous laboratory measures and vital signs were imputed using median values computed exclusively from the active training partition (4 folds) and subsequently applied to the corresponding held-out evaluation fold. Feature Normalization: Z-score standardization (used for Logistic Regression only) was fit on training folds only; the tree-based models use unscaled features.
+
+### 50/50 Balanced Training Protocol
+
+Given the stay-level base rate ({{ cohort.rate_pct | pct }}), standard machine learning loss functions naturally optimize for overall classification accuracy by favoring the majority non-readmitted class, yielding high specificity at the expense of sensitivity. All models in this study were therefore trained on balanced data: 1. The training partition (80% of data) was resampled by drawing readmitted stays with replacement until they matched the number of non-readmitted stays (a 1:1 class ratio, 50% readmitted, 50% non-readmitted). 2. Model parameters were estimated on this balanced training distribution. 3. Evaluation on the Real-World Prospective Distribution: Trained models were evaluated exclusively on the unadjusted, natural-prevalence held-out test fold ({{ cohort.rate_pct | pct }} readmission rate) at a standard decision threshold of τ = 0.50. This protocol recovers clinically useful sensitivity ({{ ref.performance }}) while measuring true prospective discriminatory power.
+
+### Non-Parametric Bootstrap Confidence Intervals
+
+Statistical uncertainty for all evaluation metrics (AUROC, AUPRC, Sensitivity, Specificity, F1-Score, and Brier Score) was quantified using non-parametric bootstrap replicates of the out-of-fold predictions: {{ run.bootstraps }} replicates in which patients were resampled with replacement. Two-sided 95% confidence intervals were computed using the 2.5th and 97.5th percentiles of the empirical bootstrap distribution.
+
+## Appendix B: Biostatistical Evaluation Metrics & Machine Learning Architectures
+
+### Machine Learning Model Architectures
+
+All predictive modeling was executed in Python{% if environment and environment.python %} (version {{ environment.python }}){% endif %} utilizing standardized implementations from scikit-learn (Pedregosa et al. 2011){% if "XGBoost" in models.names %} and xgboost (Chen and Guestrin 2016){% endif %}.
+
+{% for name in arch %}{% set h = hyper[name] or {} %}
+#### {{ loop.index }}. {{ {"Logistic Regression": "Multivariable Logistic Regression (L2-Regularized)", "Random Forest": "Random Forest Classifier", "HistGBM": "Histogram-Based Gradient Boosting (HistGBM)", "XGBoost": "Extreme Gradient Boosting (XGBoost)"}.get(name, name) }}
+
+{% if name == "Logistic Regression" -%}
+Serves as the primary parametric benchmark. L2-ridge regularization{% if h.text %} ({{ h.text | replace("C=", "C = ") }}){% endif %} is applied to constrain coefficient magnitudes in the presence of correlated clinical measurements (such as blood urea nitrogen and creatinine):
+
+$$\min_{w,c} \frac{1}{2} w^T w + C \sum_{i=1}^{n} \log\left(1 + \exp\left(-y_i (w^T x_i + c)\right)\right)$$
+
+Standardized Beta coefficients (β~std~ = β~raw~ × SD~X~, the change in log-odds per one standard deviation of the feature) are reported to rank predictor strength across clinical measurement domains. Adjusted Odds Ratios (OR = exp(β~raw~ × Δ)) are reported {% if decisions.table6_increments == "sd" %}per one standard deviation of each continuous feature{% else %}per clinically meaningful increment Δ (for example 10 mmHg of systolic blood pressure, 10 mg/dL of blood urea nitrogen, 5 mEq/L of sodium){% endif %} or, for indicator variables, for presence versus absence. The odds ratio table itself is fit without a penalty; its confidence intervals are Wald intervals from the model-based standard errors.
+{%- elif name == "Random Forest" -%}
+An ensemble of {{ h.n_estimators or "" }} decorrelated decision trees{% if h.text %} ({{ h.text }}){% endif %} trained on bootstrap subsets of the cohort. Splitting decisions optimize Gini impurity across randomly selected feature subsets (√p features per split), providing resilience against local documentation variances across sites.
+{%- elif name == "HistGBM" -%}
+Scikit-learn's optimized gradient boosted tree implementation for large-scale datasets{% if h.text %} ({{ h.text }}){% endif %}. Continuous features are discretized into 256 integer bins during training, reducing computational complexity and accelerating tree split discovery across {{ cohort.n | n }} patient-level index stays.
+{%- elif name == "XGBoost" -%}
+Gradient-boosted decision trees optimizing binary logistic loss with second-order Taylor approximations{% if h.text %} ({{ h.text }}){% endif %}:
+
+$$\mathcal{L}^{(t)} = \sum_{i=1}^{n} \left[ g_i f_t(x_i) + \frac{1}{2} h_i f_t^2(x_i) \right] + \Omega(f_t)$$
+
+where g~i~ and h~i~ are first- and second-order gradients of the log-loss, and Ω penalizes tree complexity.
+{%- endif %}
+{{ "" }}
+{% endfor %}
+
+### Biostatistical Evaluation Metrics
+
+Model performance for predicting 30-day binary readmission was assessed using standardized discriminatory, classification, and calibration metrics:
+
+#### Area Under the Receiver Operating Characteristic Curve (AUROC)
+
+Measures threshold-independent discriminatory ability across all possible operating cutoffs:
+
+$$\text{AUROC} = \int_0^1 \text{Sensitivity}\left(\text{FPR}^{-1}(t)\right) dt$$
+
+An AUROC of 0.50 denotes chance discrimination, whereas 1.0 indicates perfect class separation.
+
+#### Area Under the Precision-Recall Curve (AUPRC)
+
+Evaluates precision across varying recall thresholds. Particularly informative in imbalanced binary classification where true readmissions represent a minority subset ({{ cohort.rate_pct | pct }}):
+
+$$\text{AUPRC} = \sum_{k=1}^{K} (\text{Recall}_k - \text{Recall}_{k-1}) \cdot \text{Precision}_k$$
+
+#### Brier Score (Probability Calibration)
+
+Quantifies mean squared error between predicted readmission probabilities p̂~i~ ∈ [0, 1] and actual binary outcomes y~i~ ∈ {0, 1}:
+
+$$\text{Brier} = \frac{1}{N} \sum_{i=1}^{N} (\hat{p}_i - y_i)^2$$
+
+Scores range from 0 (perfect calibration and accuracy) to 1.{% if cohort.rate_pct %} For an uninformative model assigning the base prevalence (ȳ ≈ {{ (cohort.rate_pct / 100) | fmt }} in the primary randomly drawn cohort) to every patient, the baseline Brier score is ȳ(1 − ȳ) ≈ {{ (cohort.rate_pct / 100 * (1 - cohort.rate_pct / 100)) | fmt }}. Under 50/50 balanced training evaluated on the natural-prevalence test fold, Brier scores range from {{ models.brier_range[0] | fmt }}–{{ models.brier_range[1] | fmt }}; they exceed the uninformative baseline because balanced training shifts predicted probabilities toward a 50% prior, not because the models rank patients poorly.{% endif %}{% if sensitivity and sensitivity.all_stays_prevalence %} In the all-eligible-stays sensitivity analysis (ȳ ≈ {{ sensitivity.all_stays_prevalence | fmt }}, baseline Brier ≈ {{ (sensitivity.all_stays_prevalence * (1 - sensitivity.all_stays_prevalence)) | fmt }}) the balanced-training scores are {{ sensitivity.all_stays_brier_text }}.{% endif +%}
+
+#### Classification Metrics at Decision Threshold τ = 0.50
+
+- Sensitivity (True Positive Rate / Recall): $\frac{TP}{TP + FN}$
+- Specificity (True Negative Rate): $\frac{TN}{TN + FP}$
+- F1-Score: Harmonic mean of Precision and Recall: $\frac{2 \cdot TP}{2 \cdot TP + FP + FN}$
+
+### Model Explainability (TreeSHAP)
+
+To explain model predictions, Shapley Additive exPlanations (SHAP) based on cooperative game theory (Lundberg and Lee 2017) were calculated using the TreeSHAP algorithm. For each patient encounter x, the model prediction is decomposed additively into feature contributions:
+
+$$f(x) = \phi_0 + \sum_{j=1}^{M} \phi_j(x)$$
+
+where ϕ~0~ is the base expected model prediction and ϕ~j~(x) represents the marginal impact of feature j on readmission risk.
