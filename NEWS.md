@@ -1,3 +1,12 @@
+# omopduckdb 0.33.4
+
+Patch release after Kyle's review of the run C6 manuscript (2026-11-22). The cohort, features, models and workbook do not change; the printed manuscript, its title and Figure 2's labels do. Version bump 0.33.3 to 0.33.4; manuscript template v0.33.4.
+
+- **Title.** A parameters file without a `"title"` left page 1 and the DOCX's `dc:title` as "Study manuscript". The full manuscript now falls back to its template's title (`layout.json` `"title"`: "Multi-Center Benchmark of Traditional Machine Learning Models for 30-Day Hospital Readmission Risk Prediction"); an explicit `title` and the parameters' `"title"` still win, and the tables-only view keeps the neutral title. New `manuscript_document.template_title()`.
+- **Clinical feature labels.** Figure 2 (SHAP) and the Section 3.5 predictor list printed model column names. New `manuscript_tables.feature_label()` / `FEATURE_LABELS` give each column the label Tables 1 and 4 use (e.g. `lab_bun_last` -> "BUN (last value)", `elix_mets` -> "Metastatic Cancer", `readmission_count_twelve_months` -> "Prior Readmissions in Past 12 Months"), and turn unknown columns into words. `plot_shap_beeswarm()` / `plot_shap_panels()` use it by default (`labels=str` keeps the column names); the text applies it to the SHAP table, so a SHAP table from an earlier run is labelled too. The SHAP CSV keeps the column names. Section 2.2 names its utilization features in words.
+- **Paragraphs and lists.** Template lines that end in a block tag swallowed the blank line after them, so the abstract's Results and Conclusions, the Table 1 caption and twelve other paragraphs ran on from the one before; the Section 2.4 model list was one paragraph. Fixed in template v0.33.4.
+- **Short tables keep together.** Tables 2 and 3 (performance, leave-one-site-out) and their captions are kept on one page in the PDF (`layout.json` `"keep_together"`).
+
 # omopduckdb 0.33.3
 
 Patch release after Kyle's review of the run C5 manuscript (2026-11-21). The cohort, features, models and workbook numbers do not change; Figure 1, the printed manuscript and its title page do. Version bump 0.33.2 to 0.33.3; manuscript template v0.33.3.

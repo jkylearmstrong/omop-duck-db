@@ -367,7 +367,9 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     if shap_path is not None and shap_path.exists():
         st = pd.read_csv(shap_path)
         col = next((c for c in st.columns if c.lower() in ("feature", "predictor", "label")), st.columns[0])
-        ctx["shap"] = {"top": [str(x) for x in st[col].head(10)]}
+        from omop_etl.manuscript_tables import feature_label
+
+        ctx["shap"] = {"top": [feature_label(x) for x in st[col].head(10)]}  # clinical labels, also for a table saved before 0.33.4
         if summ.get("shap_sample_n"):
             ctx["shap"]["n_sample"] = int(summ["shap_sample_n"])
     ctx["params"] = dict(load_params(params) if isinstance(params, (str, Path)) else (params or {}))
@@ -561,6 +563,8 @@ def render_manuscript_body(context: Mapping[str, Any], *, tables: Mapping[str, s
             continue
         cap, body = v if isinstance(v, tuple) else ("", v)
         table_md[k] = f"**{numbers.get(k, 'Table')}: {cap}**\n\n{body}" if cap else body
+        if k in layout.get("keep_together", []):  # the PDF keeps the caption and the table on one page; Word ignores the raw Typst
+            table_md[k] = f"```{{=typst}}\n#block(breakable: false)[\n```\n\n{table_md[k]}\n\n```{{=typst}}\n]\n```"
     figure_md = {}
     for k, v in figures.items():
         cap, file = v if isinstance(v, tuple) else ("", v)

@@ -19,6 +19,7 @@ actual error is) and its last lines, with the home folder and account name repla
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -213,6 +214,18 @@ def _param_authors(prm: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def template_title(version: str | None = None) -> str:
+    """The manuscript title of the template for ``version`` (default: the installed package): ``"title"`` in its ``layout.json``, the
+    title the full text is written for; empty for templates before v0.33.4, which have none."""
+    from omop_etl.manuscript_text import template_dir
+
+    try:
+        layout = json.loads((template_dir(version) / "layout.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return ""
+    return str(layout.get("title") or "").strip()
+
+
 def _reference_docx(path: Path) -> Path | None:
     """The Word reference document of the manuscript template (``reference.docx`` next to ``manuscript.md.j2``: Pandoc's default
     styles with US-letter pages and :data:`PAGE_MARGIN` on every side; Pandoc's own default sets no page size or margins, so Word
@@ -255,7 +268,7 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
                                summary: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Writes ``<prefix>_Manuscript.qmd`` and renders ``.docx`` / ``.pdf`` (``formats``) under ``out_dir``.
 
-    ``figures``: image files to include (default: ``<prefix>_*.png`` next to the workbook). ``title`` defaults to ``"<prefix> manuscript"``;
+    ``figures``: image files to include (default: ``<prefix>_*.png`` next to the workbook). ``title`` defaults to the parameters' ``"title"``, then (``profile="full"``) the template's title (:func:`template_title`), then ``"<prefix> manuscript"``;
     ``author`` (default empty) is the only name the document carries. Returns ``{"qmd": Path, "files": {fmt: Path}, "renderer": str | None,
     "missing": [fmt, ...], "note": str}``: a format that could not be rendered is listed in ``missing`` with the reason in ``note`` (the start
     and end of the renderer's error output, :func:`stderr_summary`). ``cache_dir`` (default ``OMOP_QUARTO_CACHE_DIR``): a writable folder
@@ -295,8 +308,9 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
     from omop_etl.manuscript_text import load_params
 
     prm = load_params(params) if isinstance(params, (str, Path)) else dict(params or {})
-    # the title page: an explicit title / author wins, then the study team's parameters file, then the neutral default
-    title = title or str(prm.get("title") or "").strip() or f"{prefix} manuscript"
+    # the title page: an explicit title / author wins, then the study team's parameters file, then the title of the manuscript template
+    # (the full text describes one study, so its template names it), then the neutral default
+    title = title or str(prm.get("title") or "").strip() or (template_title() if profile == "full" else "") or f"{prefix} manuscript"
     authors = [{"name": author}] if author else _param_authors(prm)
     yaml = ["---", f"title: {_yaml_str(title)}"]
     if prm.get("subtitle"):

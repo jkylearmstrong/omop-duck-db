@@ -25,7 +25,7 @@ import pandas as pd
 
 from omop_etl.study_report import _newton_logit, export_workbook
 
-__all__ = ["manuscript_frame", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
+__all__ = ["feature_label", "FEATURE_LABELS", "manuscript_frame", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
            "manuscript_workbook", "compare_workbooks", "workbook_similarity", "workbook_deltas", "delta_summary", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER", "ManuscriptValidationError", "validate_manuscript_sheets"]
 
 EN = "–"
@@ -68,6 +68,70 @@ _BMI = [f"BMI: Underweight (<18.5 kg/m²)", f"BMI: Normal (18.5{EN}24.9 kg/m²)"
 _AGE = [f"Age: 18{EN}44 years", f"Age: 45{EN}64 years", f"Age: 65{EN}74 years", "Age: 75+ years"]
 _RACE = ["Race: White", "Race: Black / African American", "Race: Other / Unknown"]
 _TOB = ["Tobacco: Never user", "Tobacco: Former user", "Tobacco: Current user"]
+
+#: Model feature columns -> the clinical label printed in Figure 2 (SHAP) and the text; the labels of Tables 1 and 4 where they exist.
+FEATURE_LABELS = {
+    "age_at_index": "Age at Index Admission (years)", "female": "Sex: Female", "male": "Sex: Male",
+    "race_concept_id": "Race (OMOP concept)", "ethnicity_concept_id": "Ethnicity (OMOP concept)", "hispanic": "Ethnicity: Hispanic",
+    "index_los_days": "Index Admission Length of Stay (days)", "los_days": "Index Admission Length of Stay (days)",
+    "prior_ip_os_ed_count": "Prior Inpatient / Obs / ED Count", "prior_encounters_all_count": "Prior Encounters (All Types)",
+    "prior_ip_count": "Prior Inpatient Stays (12 Months)", "prior_ed_count": "Prior ED Visits (12 Months)", "n_prior_ed": "Prior ED Visits (12 Months)",
+    "prior_ip_los_days": "Prior Inpatient Length of Stay (days)", "n_secondary_dx_ccs": "Number of Secondary Diagnosis CCS Categories",
+    "days_since_prior_encounter": "Days Since Prior Encounter", "days_since_prior_ip_ed": "Days Since Prior Inpatient / Obs / ED Encounter",
+    "readmission_count_twelve_months": "Prior Readmissions in Past 12 Months",
+    "ip_velocity": "Inpatient Visit Velocity", "ed_velocity": "ED Visit Velocity", "utilization_density": "Utilization Density",
+    "vital_bmi": "BMI (kg/m²)", "vital_systolic_bp": "Systolic Blood Pressure (mmHg)", "vital_diastolic_bp": "Diastolic Blood Pressure (mmHg)",
+    "systolic_bp": "Systolic Blood Pressure (mmHg)", "diastolic_bp": "Diastolic Blood Pressure (mmHg)",
+    "elix_van_walraven_score": "Elixhauser Score (van Walraven)", "elix_total_conditions": "Elixhauser Comorbidity Count",
+    "elix_pre_index_conditions_count": "Conditions Recorded Before Admission",
+    "disp_home": "Discharge Status: Home", "disp_home_health": "Discharge Status: Home Health", "disp_snf": "Discharge Status: SNF / Rehab",
+    "disp_ama": "Discharge Status: Against Medical Advice", "disp_other": "Discharge Status: Other", "disp_missing": "Discharge Status: Missing / Unknown",
+}
+#: laboratories that have a model column but no row in Tables 1 and 4
+_EXTRA_LABS = {"lab_hemoglobin": "Hemoglobin", "lab_potassium": "Potassium", "lab_chloride": "Chloride", "lab_platelets": "Platelets",
+               "lab_bilirubin_total": "Total Bilirubin", "lab_alk_phos": "Alkaline Phosphatase", "lab_calcium": "Calcium"}
+#: one-hot prefixes (``<feature>_<level>``) whose levels carry no feature name of their own
+_LEVEL_PREFIX = {"tobacco": "Tobacco", "sdi_quintile": "SDI", "ruca_category": "RUCA", "bmi_category": "BMI", "age_group": "Age",
+                 "race": "Race", "sex": "Sex", "discharge_status": "Discharge Status"}
+_ACRONYMS = {"ip": "IP", "ed": "ED", "os": "Obs", "bmi": "BMI", "bp": "BP", "ccs": "CCS", "sdi": "SDI", "ruca": "RUCA", "los": "LOS",
+             "ama": "AMA", "snf": "SNF", "hba1c": "HbA1c", "egfr": "eGFR", "bun": "BUN", "ldl": "LDL", "wbc": "WBC", "alt": "ALT", "ast": "AST"}
+
+
+def feature_label(col: Any) -> str:
+    """The clinical label of a model feature column (``"lab_bun_last"`` -> ``"BUN (last value)"``, ``"elix_mets"`` -> ``"Metastatic
+    Cancer"``, ``"tobacco_Never user"`` -> ``"Tobacco: Never user"``), as Tables 1 and 4 name it; a column the package does not know is
+    turned into words, so no column name with underscores reaches the figure or the text."""
+    c = str(col)
+    if c in FEATURE_LABELS:
+        return FEATURE_LABELS[c]
+    labs = {n: lab for names, lab in MANUSCRIPT_LABS for n in names} | _EXTRA_LABS
+    for suffix, words in (("_last", " (last value)"), ("_first", " (first value)"), ("_min", " (minimum)"), ("_max", " (maximum)")):
+        if c.endswith(suffix) and (c[: -len(suffix)] in labs or c[: -len(suffix)] in FEATURE_LABELS):
+            return feature_label(c[: -len(suffix)]) + words
+    if c in labs:
+        return labs[c]
+    elix = {n: lab for names, lab in MANUSCRIPT_ELIXHAUSER for n in names}
+    if c in elix:
+        return elix[c]
+    meds = dict(_MEDS)
+    if c in meds:
+        return meds[c]
+    for pre, name in sorted(_LEVEL_PREFIX.items(), key=lambda kv: -len(kv[0])):
+        if c.startswith(pre + "_") and len(c) > len(pre) + 1:
+            level = c[len(pre) + 1:]
+            return level if ":" in level or level.startswith(name) else f"{name}: {level}"
+    if c.startswith("lab_"):
+        return _words(c[4:])
+    if c.startswith("med_"):
+        return "Medication: " + _words(c[4:])
+    if c.startswith("elix_"):
+        return _words(c[5:])
+    return _words(c)
+
+
+def _words(c: str) -> str:
+    parts = [p for p in re.split(r"[_\s]+", c) if p]
+    return " ".join(_ACRONYMS.get(p.lower(), p if any(ch.isupper() for ch in p) else p.capitalize()) for p in parts) or c
 
 
 def _col(df: pd.DataFrame, *names: str) -> pd.Series | None:
