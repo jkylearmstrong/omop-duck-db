@@ -234,6 +234,10 @@ def _is_indicator_term(feature: str) -> bool:
     return str(feature).endswith((": not measured", ": missing"))
 
 
+#: Names that keep their capital inside a sentence (C8: "elixhauser score (van walraven)").
+PROPER_NOUNS = frozenset({"Elixhauser", "Walraven", "Charlson", "Hispanic", "Medicare", "Medicaid", "Wald", "Gini", "Shapley"})
+
+
 def lower_first(s: str | None) -> str | None:
     """A Table 6 / SHAP label as it reads inside a sentence: the ordinary capitalised words of the feature name (before the first
     ": ") are lower-cased, while acronyms and mixed-case words (ALT, BMI, RUCA, ED, HbA1c, pCO2, eGFR, mmHg) and the level after
@@ -245,7 +249,8 @@ def lower_first(s: str | None) -> str | None:
 
     def word(w: str) -> str:
         core = "".join(ch for ch in w if ch.isalpha())
-        return w.lower() if core[:1].isupper() and (len(core) == 1 or core[1:].islower()) and core != "I" else w
+        keep = core == "I" or core in PROPER_NOUNS
+        return w.lower() if core[:1].isupper() and (len(core) == 1 or core[1:].islower()) and not keep else w
 
     return " ".join(word(w) for w in name.split(" ")) + sep + rest
 
@@ -309,9 +314,13 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     prefix = wb.name.replace("_Manuscript_Tables.xlsx", "") if wb.name.endswith("_Manuscript_Tables.xlsx") else None
 
     def _json(v, suffix):
+        # the run's own file next to the workbook, with what was passed on top: a caller that passes part of the record (or
+        # none) still gets the rest, such as the qualifying-stay count C8 left out of the text
+        own = wb.with_name(f"{prefix}{suffix}") if prefix else None
         if isinstance(v, Mapping):
-            return dict(v)
-        p = Path(v) if v is not None else (wb.with_name(f"{prefix}{suffix}") if prefix else None)
+            base = json.loads(own.read_text(encoding="utf-8")) if own is not None and own.exists() else {}
+            return {**base, **dict(v)}
+        p = Path(v) if v is not None else own
         return json.loads(p.read_text(encoding="utf-8")) if p is not None and p.exists() else {}
 
     run_rec, summ = _json(run, "_run.json"), _json(summary, "_summary.json")
@@ -364,7 +373,18 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
                 ctx["features"][k] = int(summ[k])
         if summ.get("empty_columns"):
             ctx["features"]["n_empty"] = len(summ["empty_columns"])
-            ctx["features"]["empty"] = list(dict.fromkeys(_column_words(c) for c in summ["empty_columns"]))  # one name per measure
+            ctx["features"]["empty"] = list(dict.fromkeys(_empty_words(c) for c in summ["empty_columns"]))  # one name per measure
+    miss = wb.with_name(f"{prefix}_Missingness.csv") if prefix else None
+    if miss is not None and miss.exists() and ctx["lr"].get("labs"):
+        # the laboratories the models used: Table 4's, then any the tables leave out (C8: hemoglobin was a top SHAP predictor
+        # but missing from the Section 2.2 list, which was read from Table 4 only)
+        from omop_etl.manuscript_tables import feature_label
+
+        cols = pd.read_csv(miss).iloc[:, 0].astype(str)
+        model_labs = [feature_label(c) for c in cols if re.fullmatch(r"lab_[a-z0-9_]+", c) and not c.endswith("_last")]
+        extra = [x for x in dict.fromkeys(model_labs) if x not in ctx["lr"]["labs"]]
+        if extra:
+            ctx["lr"]["labs"] = list(ctx["lr"]["labs"]) + extra
     ctx["files"] = {"workbook": wb.name}
     ctx["hyper"] = benchmark_hyperparameters(ctx["run"].get("random_state", 42))
     shap_path = Path(shap_table) if shap_table else (wb.with_name(f"{prefix}_Table_SHAP_Top_Predictors.csv") if prefix else None)
@@ -439,6 +459,16 @@ def _column_words(col: str) -> str:
     return w.replace("_", " ").strip()
 
 
+def _empty_words(col: str) -> str:
+    """An empty feature column as the text names it: its clinical label in sentence case ("lab_potassium" -> "potassium",
+    "vital_heart_rate" -> "heart rate"; C8 printed "lab potassium" and "vital heart rate")."""
+    from omop_etl.manuscript_tables import feature_label
+
+    base = re.sub(r"_(mean|last|first|min|max|value|index|idx)$", "", str(col))
+    lab = feature_label(base)
+    return lab if lab == base else lower_first(lab)
+
+
 def _date_text(d: str, month_only: bool = False) -> str:
     try:
         t = pd.Timestamp(d)
@@ -485,6 +515,13 @@ def _environment(missing: list[str]):
     def n(v):
         return f"{int(round(float(v))):,}" if _ok(v) else str(v)
 
+    def fmt_range(r, digits=3, sep="–"):
+        """``(lo, hi)`` as "lo–hi" (or "lo to hi"), or one value when both print the same (C8: "AUC-ROC 0.777–0.777")."""
+        if not _ok(r) or len(r) != 2:
+            return str(r)
+        lo, hi = fmt(r[0], digits), fmt(r[1], digits)
+        return lo if lo == hi else f"{lo}{sep}{hi}"
+
     def pct(v, digits=2):
         return f"{float(v):.{digits}f}%" if _ok(v) else str(v)
 
@@ -524,7 +561,7 @@ def _environment(missing: list[str]):
                 return f"{order[0]} through {order[-1]}"
         return join(sorted(labels))
 
-    env.filters.update(fmt=fmt, n=n, pct=pct, or_ci=or_ci, join_and=join, lower_first=lower_first,
+    env.filters.update(fmt=fmt, fmt_range=fmt_range, n=n, pct=pct, or_ci=or_ci, join_and=join, lower_first=lower_first,
                        words=words, label_span=label_span)
     return env
 

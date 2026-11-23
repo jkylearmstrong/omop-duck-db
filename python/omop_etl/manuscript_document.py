@@ -45,7 +45,8 @@ def _esc(x: Any) -> str:
 def _print_cells(t: pd.DataFrame) -> list[list[str]]:
     """The cells of ``t`` as printed: within a column every decimal number has the same number of places (the most it shows, at most
     three: 0.52 next to 0.638 prints as 0.520, a beta of 0.3 next to 0.12 as 0.30) and whole numbers of 1,000 or more get thousands
-    separators; text is kept as it is."""
+    separators, in numbers and in text cells alike ("12345 (10.00%)" prints as "12,345 (10.00%)"; dates, ranges and years in
+    sentences are left alone, see :func:`_group_digits`)."""
     def places(v: float) -> int:
         txt = f"{v:.3f}".rstrip("0")
         return len(txt.split(".")[1]) if "." in txt else 0
@@ -65,37 +66,78 @@ def _print_cells(t: pd.DataFrame) -> list[list[str]]:
             elif isinstance(v, (float, np.floating)):
                 out[i][j] = f"{float(v):,.{dp}f}" if dp else f"{float(v):,.1f}"
             else:
-                out[i][j] = _esc(v)
+                out[i][j] = _esc(_powers(_group_digits(v)))
     return out
 
+
+_LONG_INT = re.compile(r"(?<![\w.,/:\-–−])(\d{4,})(?=(?:\.\d+)?(?![\w,/:\-–−]))")
+_COUNT_CELL = re.compile(r"^\d{4}(?:\.\d+)?(?:\s*[(\[±]|\s+[A-Z])")
+
+
+_SUPERSCRIPT = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+
+
+def _powers(x: Any) -> Any:
+    """A unit written with a caret as printed: "5 x10^9/L" -> "5 ×10⁹/L" (C8 Table 4)."""
+    if not isinstance(x, str) or "^" not in x:
+        return x
+    return re.sub(r"(?:(?<=\d )|(?<=\d))x?(10)\^(-?\d+)", lambda m: f"×{m.group(1)}{m.group(2).translate(_SUPERSCRIPT)}", x)
+
+
+def _group_digits(x: Any) -> Any:
+    """Thousands separators for the whole numbers in a text cell (C8: Table 1 printed "123456 Unique Patients" and "12345 (10.00%)",
+    because the workbook keeps those cells as text, as in the Nov 11 deliverable). Numbers joined to a hyphen, dash, slash, colon,
+    point or letter (dates, ranges, codes) are left alone, and so are four-digit years (1900 to 2099) unless the cell is a count."""
+    if not isinstance(x, str):
+        return x
+
+    def sub(m: re.Match) -> str:
+        d = m.group(1)
+        if len(d) == 4 and 1900 <= int(d) <= 2099 and not (m.start() == 0 and _COUNT_CELL.match(x)):
+            return d
+        return f"{int(d):,}"
+    return _LONG_INT.sub(sub, x)
+
+
+#: Characters of 10-point table text that fit across the page, and the most a wrapping text column takes in a table wider than that.
+PAGE_COLUMNS = 90
+TEXT_COLUMN_MAX = 26
 
 _NUMERIC_CELL = re.compile(r"^[−\-–+<>≤≥]?\s*[\d.,]+")
 
 
 def _table_md(t: pd.DataFrame) -> str:
     """A Markdown pipe table for the manuscript. Columns are sized by their content (Pandoc reads a wide pipe table's column widths
-    from the dashes under each header; equal dashes gave equal widths, so F1 and sensitivity were wide while a "0.720 (0.707–0.734)"
+    from the dashes under each header; equal dashes gave equal widths, so F1 and sensitivity were wide while a "0.765 (0.751–0.779)"
     cell wrapped): each column gets dashes for its widest cell, and a header for half its length (it wraps onto two lines at most).
-    Text columns are left-aligned and number columns right-aligned; numbers are printed by :func:`_print_cells`."""
+    Text columns are left-aligned and number columns right-aligned; numbers are printed by :func:`_print_cells`. In a table wider
+    than the page, a text column is held to :data:`TEXT_COLUMN_MAX` characters (its words wrap) so that the number columns keep
+    their full width: in C8 the long feature labels of Table 4 took the page and "1.23 (1.11–1.37)" broke after the dash."""
     if t.empty:
         return "_(empty)_"
     cols = [_esc(c) or " " for c in t.columns]
     rows = _print_cells(t.astype(object))  # already Markdown-escaped
-    width, rule = [], []
+    width, numeric, longest_word = [], [], []
     for i, c in enumerate(cols):
         words = [len(w) for w in str(c).split()] or [1]
         w = max([max(words), -(-len(str(c)) // 2)] + [len(r[i]) for r in rows] + [3]) + 1
         filled = [r[i] for r in rows if r[i].strip() and r[i] not in ("—", "-", "–")]
-        numeric = i > 0 and filled and sum(bool(_NUMERIC_CELL.match(x)) for x in filled) >= 0.8 * len(filled)
         width.append(w)
-        rule.append("-" * w + ":" if numeric else ":" + "-" * w)
+        numeric.append(bool(i > 0 and filled and sum(bool(_NUMERIC_CELL.match(x)) for x in filled) >= 0.8 * len(filled)))
+        longest_word.append(max([len(x) for r in rows for x in r[i].split()] + words) + 1)
+    if sum(width) > PAGE_COLUMNS:
+        width = [w if num else min(w, max(TEXT_COLUMN_MAX, lw)) for w, num, lw in zip(width, numeric, longest_word)]
+    rule = ["-" * w + ":" if num else ":" + "-" * w for w, num in zip(width, numeric)]
     head = "| " + " | ".join(cols) + " |\n|" + "|".join(rule) + "|\n"
     return head + "\n".join("| " + " | ".join(r) + " |" for r in rows)
 
 
 #: Typst rules for the PDF's tables: cells are not justified or hyphenated (justified two-line headers spread their words apart and
-#: broke "patients" into "pa- tients"). Word ignores the raw Typst block.
-TABLE_TYPST = "```{=typst}\n#show table: set par(justify: false)\n#show table: set text(hyphenate: false)\n```"
+#: broke "patients" into "pa- tients"), and an estimate with its interval ("1.23 (1.11–1.37)") or an interval alone ("2.34–2.56")
+#: is never broken across lines, in the tables or the text (C8: Table 4 and the abstract broke after the dash). Word ignores the
+#: raw Typst block.
+TABLE_TYPST = ("```{=typst}\n#show table: set par(justify: false)\n#show table: set text(hyphenate: false)\n"
+               "#show regex(\"\\d[\\d.,]*\\s?\\(\\d[\\d.,]*–\\d[\\d.,]*\\)|\\d[\\d.,]*–\\d[\\d.,]*\"): it => box(it)\n```")
 
 
 def find_renderer() -> dict[str, str | None]:
