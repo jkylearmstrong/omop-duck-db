@@ -250,3 +250,42 @@ def test_secondary_diagnoses_and_outpatient_visits():
     labels = list(t1.iloc[:, 0].astype(str))
     assert "Secondary Diagnosis Count (Index Stay)" in labels and "Prior Outpatient Visit Count" in labels
     assert not [x for x in labels if "CCS" in x or "Outpatient / Other" in x]
+
+
+def test_table_s4_prints_two_decimals_and_anion_gap_is_title_case(tmp_path):
+    from omop_etl.manuscript_text import full_manuscript_markdown, metric_cells
+
+    grid = pd.DataFrame({"Model": ["LR", "LR"], "Configuration": ["C=0.001", "C=0.01"], "AUC": [0.7, 0.731], "F1": [0.3, 0.312],
+                         "Brier": [0.081, 0.08], "auc_raw": [0.70012, 0.73104]})
+    out = metric_cells(grid.drop(columns=["auc_raw"]))
+    assert list(out["AUC"]) == ["0.70", "0.73"] and list(out["Configuration"]) == ["C=0.001", "C=0.01"]
+    assert list(out["Brier"]) == ["0.08", "0.08"]
+    src = (Path(__file__).resolve().parents[1] / "python" / "omop_etl" / "manuscript_text.py").read_text(encoding="utf-8")
+    assert '("performance", "loso", "grid")' in src
+    assert mt.feature_label("lab_anion_gap") == "Anion Gap"
+    assert dict((lab, name) for cols, name in mt.MANUSCRIPT_LABS for lab in cols)["lab_anion_gap"] == "Anion Gap"
+
+
+def test_lab_funnel_counts_rows_by_concept_and_names_unmapped_concepts(tmp_path):
+    """C10 prep (Nov 23): one site stores lab names, not LOINC, in measurement_source_value; the funnel must still see its rows
+    under the lab's concepts, and say which concepts a lab's LOINC rows carry when they are not the set's."""
+    duckdb = pytest.importorskip("duckdb")
+    import time
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import site_quality_report as sq
+
+    con = duckdb.connect(str(tmp_path / "omop_s1.duckdb"))
+    con.execute("""CREATE TABLE concept AS SELECT * FROM (VALUES
+        (3021337, '10839-9', 'LOINC', 'S', 'Measurement', 'Lab Test', 'Troponin I', NULL),
+        (3027946, '2019-8', 'LOINC', 'S', 'Measurement', 'Lab Test', 'pCO2', NULL))
+        t(concept_id, concept_code, vocabulary_id, standard_concept, domain_id, concept_class_id, concept_name, invalid_reason)""")
+    con.execute("""CREATE TABLE measurement AS SELECT * FROM (VALUES
+        (3021337, 0.04, DATE '2018-01-02', '10839-9', 'ng/mL'), (3021337, 0.05, DATE '2018-01-03', 'TROPONIN I', 'ng/mL'),
+        (3027946, 40.0, DATE '2018-01-02', 'PCO2 ART', 'mm[Hg]'), (0, 41.0, DATE '2018-01-02', '2019-8', 'mm[Hg]'))
+        t(measurement_concept_id, value_as_number, measurement_date, measurement_source_value, unit_source_value)""")
+    con.close()
+    f = sq.lab_funnel(tmp_path, {"s1": "Site A"}, "2017-01-01", "2022-09-30", time.time() + 60).set_index("name")
+    assert f.loc["troponin_i", "source_rows"] == 1 and f.loc["troponin_i", "concept_rows"] == 2
+    assert f.loc["troponin_i", "pct_mapped"] == 100.0
+    assert f.loc["pco2", "pct_mapped"] == 0.0 and f.loc["pco2", "concept_rows"] == 1 and f.loc["pco2", "unmapped_concepts"] == "0 100%"

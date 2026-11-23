@@ -702,7 +702,7 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
             cap = re.sub(r"^Table S?\d+:\s*", "", str(title))
             if key == "grid":  # the workbook keeps the unrounded auc_raw / f1_raw tuning selects on; the printed table does not
                 t = t.drop(columns=[c for c in t.columns if str(c).endswith("_raw")])
-            if key in ("performance", "loso"):
+            if key in ("performance", "loso", "grid"):  # Table S4 too: Rubin's 2 decimals (C10 review)
                 t = metric_cells(t)
             if key in layout.get("transpose", []):
                 t = transpose_for_print(t)

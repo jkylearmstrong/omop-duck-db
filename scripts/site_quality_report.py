@@ -204,7 +204,25 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
                     FROM measurement m JOIN _lf_src s ON m.measurement_source_value = s.loinc
                     WHERE m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE) GROUP BY 1, 2) WHERE k <= 3
                 GROUP BY name""", [start, end]).df()
-            f = f.merge(units, on="name", how="left")
+            # rows the vocabulary puts under the lab's concepts whatever their source text (one site stores lab names, not LOINC, in
+            # measurement_source_value), and the concepts the unmapped source rows carry instead (C10 prep, Nov 23)
+            mapped = con.execute("""
+                SELECT k.name, count(*) AS concept_rows FROM measurement m JOIN (SELECT DISTINCT name, concept_id FROM _lf_map) k
+                  ON k.concept_id = m.measurement_concept_id
+                WHERE m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE) GROUP BY 1""", [start, end]).df()
+            other = con.execute("""
+                SELECT name, string_agg(CAST(cid AS VARCHAR) || ' ' || pct || '%', '; ' ORDER BY n DESC) AS unmapped_concepts FROM (
+                    SELECT s.name, m.measurement_concept_id AS cid, count(*) AS n,
+                           CAST(round(100.0 * count(*) / sum(count(*)) OVER (PARTITION BY s.name)) AS INTEGER) AS pct,
+                           row_number() OVER (PARTITION BY s.name ORDER BY count(*) DESC) AS k
+                    FROM measurement m JOIN _lf_src s ON m.measurement_source_value = s.loinc
+                    WHERE (m.measurement_date IS NULL OR m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE))
+                      AND NOT EXISTS (SELECT 1 FROM _lf_map x WHERE x.name = s.name AND x.concept_id = m.measurement_concept_id)
+                    GROUP BY 1, 2) WHERE k <= 3
+                GROUP BY name""", [start, end]).df()
+            f = f.merge(units, on="name", how="outer").merge(mapped, on="name", how="outer").merge(other, on="name", how="left")
+            f["source_rows"] = f["source_rows"].fillna(0).astype(int)
+            f["concept_rows"] = f["concept_rows"].fillna(0).astype(int)
             f["site"] = label
             out.append(f)
         finally:
@@ -318,8 +336,11 @@ def main(argv: list[str] | None = None) -> int:
     if len(bnd):
         md += ["## Measurements outside the physiologic limits (%)", "", _wide(bnd, "concept_id", "pct_out_of_range")]
     if len(fun):
-        md += ["## Lab funnel: rows with the lab's LOINC, and where they are lost", ""]
-        for col in ("source_rows", "pct_mapped", "pct_no_date", "pct_no_number", "pct_out_of_bounds", "top_units"):
+        md += ["## Lab funnel: rows with the lab's LOINC, and where they are lost", "",
+               "source_rows: rows whose measurement_source_value is one of the lab's LOINC codes; concept_rows: rows mapped to the lab's "
+               "concepts whatever their source text; unmapped_concepts: the concepts the unmapped source rows carry.", ""]
+        for col in ("source_rows", "concept_rows", "pct_mapped", "unmapped_concepts", "pct_no_date", "pct_no_number", "pct_out_of_bounds",
+                    "top_units"):
             md += [f"### {col}", "", _wide(fun, "name", col)]
     md += ["## Flags (measures where the sites differ)", "", pd.DataFrame(fl).pipe(_md, index=False) if fl else "(none)", ""]
     a.detail.write_text("\n".join(md), encoding="utf-8")
