@@ -143,7 +143,7 @@ def test_empty_columns_named_once_but_counted_per_column(tmp_path):
     summary = {"n_features": 95, "n_columns": 104, "n_binary": 60, "n_continuous": 35,
                "empty_columns": ["lab_potassium_mean", "lab_potassium_last", "vital_heart_rate_mean"]}
     md = _render(tmp_path, {"sdi_missing_term": True}, summary)["markdown"]
-    assert "three columns with no observed values (lab potassium, vital heart rate)" in md
+    assert "three columns with no observed values (potassium, heart rate)" in md  # clinical names since 0.33.6
 
 
 def test_printed_grid_table_has_no_unrounded_columns(tmp_path):

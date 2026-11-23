@@ -121,16 +121,16 @@ def test_abstract_sentence_names_the_largest_odds_ratio(tmp_path):
 def test_printed_tables_size_columns_by_content_and_align_numbers():
     from omop_etl.manuscript_document import TABLE_TYPST, _table_md
 
-    t = pd.DataFrame({"Held-out site": ["Site A", "Site B", "Mean of five sites"], "Test patients": [14216, 53072, None],
-                      "AUC-ROC (95% CI)": ["0.720 (0.707–0.734)", "0.713 (0.707–0.719)", "0.722"], "F1": [0.281, 0.323, 0.302],
-                      "Sensitivity": [0.638, 0.52, 0.547], "Configuration": ["depth 12", "depth 8", "C=1"], "Beta": [0.3, 0.12, 0.0]})
+    t = pd.DataFrame({"Held-out site": ["Site A", "Site B", "Mean of five sites"], "Test patients": [12345, 67890, None],
+                      "AUC-ROC (95% CI)": ["0.701 (0.690–0.712)", "0.705 (0.699–0.711)", "0.722"], "F1": [0.271, 0.333, 0.302],
+                      "Sensitivity": [0.611, 0.52, 0.565], "Configuration": ["depth 12", "depth 8", "C=1"], "Beta": [0.3, 0.12, 0.0]})
     lines = _table_md(t).splitlines()
     rule = lines[1].strip("|").split("|")
     widths = [len(r.strip(":")) for r in rule]
-    assert widths[2] > widths[3] and widths[2] >= len("0.720 (0.707–0.734)")  # the CI column is the widest number column
+    assert widths[2] > widths[3] and widths[2] >= len("0.701 (0.690–0.712)")  # the CI column is the widest number column
     assert rule[0].startswith(":") and rule[5].startswith(":")  # text columns left-aligned
     assert all(rule[i].endswith(":") for i in (1, 2, 3, 4, 6))  # number columns right-aligned
-    assert "| 14,216 |" in lines[2] and "| 0.520 |" in lines[3] and "| 0.30 |" in lines[2] and "| 0.00 |" in lines[4]
+    assert "| 12,345 |" in lines[2] and "| 0.520 |" in lines[3] and "| 0.30 |" in lines[2] and "| 0.00 |" in lines[4]
     assert "justify: false" in TABLE_TYPST and "hyphenate: false" in TABLE_TYPST
 
 

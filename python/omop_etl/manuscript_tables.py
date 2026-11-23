@@ -80,6 +80,8 @@ FEATURE_LABELS = {
     "days_since_prior_encounter": "Days Since Prior Encounter", "days_since_prior_ip_ed": "Days Since Prior Inpatient / Obs / ED Encounter",
     "readmission_count_twelve_months": "Prior Readmissions in Past 12 Months",
     "ip_velocity": "Inpatient Visit Velocity", "ed_velocity": "ED Visit Velocity", "utilization_density": "Utilization Density",
+    "vital_heart_rate": "Heart Rate", "vital_respiratory_rate": "Respiratory Rate", "vital_body_temperature": "Body Temperature",
+    "vital_oxygen_saturation": "Oxygen Saturation", "lab_alkaline_phosphatase": "Alkaline Phosphatase",
     "vital_bmi": "BMI (kg/m²)", "vital_systolic_bp": "Systolic Blood Pressure (mmHg)", "vital_diastolic_bp": "Diastolic Blood Pressure (mmHg)",
     "systolic_bp": "Systolic Blood Pressure (mmHg)", "diastolic_bp": "Diastolic Blood Pressure (mmHg)",
     "elix_van_walraven_score": "Elixhauser Score (van Walraven)", "elix_total_conditions": "Elixhauser Comorbidity Count",
