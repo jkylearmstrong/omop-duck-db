@@ -297,7 +297,7 @@ def test_export_consort_flowchart_reasons_and_terminal_split(tmp_path):
                        "percent_retained": [100.0, 90.0], "exclusion_reason": ["", "Age < 18"]})
     svg = export_consort_flowchart(df, tmp_path / "f.svg", terminal_split={"Readmitted": 100, "No readmission": 800})
     txt = svg.read_text(encoding="utf-8")
-    assert "Age &lt; 18" in txt and "Readmitted" in txt and "88.89%" in txt
+    assert "Age &lt; 18" in txt and "Readmitted" in txt and "88.9%" in txt
 
 
 def _bundle_with(extra_obs):

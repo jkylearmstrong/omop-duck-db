@@ -289,3 +289,34 @@ def test_lab_funnel_counts_rows_by_concept_and_names_unmapped_concepts(tmp_path)
     assert f.loc["troponin_i", "source_rows"] == 1 and f.loc["troponin_i", "concept_rows"] == 2
     assert f.loc["troponin_i", "pct_mapped"] == 100.0
     assert f.loc["pco2", "pct_mapped"] == 0.0 and f.loc["pco2", "concept_rows"] == 1 and f.loc["pco2", "unmapped_concepts"] == "0 100%"
+
+
+def test_lab_funnel_reads_a_central_vocabulary(tmp_path):
+    """C10 (Nov 23): the site files keep their concept tables as views on central_vocabulary.duckdb. Unattached, only the set
+    items with a CONCEPT_ID resolved, so troponin I and pCO2 (listed by LOINC code only) showed 0% mapped."""
+    duckdb = pytest.importorskip("duckdb")
+    import time
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import site_quality_report as sq
+
+    v = duckdb.connect(str(tmp_path / "central_vocabulary.duckdb"))
+    v.execute("""CREATE TABLE concept AS SELECT * FROM (VALUES
+        (3021337, '10839-9', 'LOINC', 'S', 'Measurement', 'Lab Test', 'Troponin I', NULL),
+        (3000905, '6690-2', 'LOINC', 'S', 'Measurement', 'Lab Test', 'WBC', NULL))
+        t(concept_id, concept_code, vocabulary_id, standard_concept, domain_id, concept_class_id, concept_name, invalid_reason)""")
+    v.execute("CREATE TABLE concept_ancestor AS SELECT concept_id AS ancestor_concept_id, concept_id AS descendant_concept_id, "
+              "0 AS min_levels_of_separation, 0 AS max_levels_of_separation FROM concept")
+    v.close()
+    con = duckdb.connect(str(tmp_path / "omop_s1.duckdb"))
+    con.execute(f"ATTACH '{tmp_path / 'central_vocabulary.duckdb'}' AS central_vocab (READ_ONLY)")
+    con.execute("CREATE VIEW concept AS SELECT * FROM central_vocab.concept")
+    con.execute("CREATE VIEW concept_ancestor AS SELECT * FROM central_vocab.concept_ancestor")
+    con.execute("""CREATE TABLE measurement AS SELECT * FROM (VALUES
+        (3021337, 0.04, DATE '2018-01-02', '10839-9', 'ng/mL'), (3000905, 7.5, DATE '2018-01-02', '6690-2', '10*3/uL'))
+        t(measurement_concept_id, value_as_number, measurement_date, measurement_source_value, unit_source_value)""")
+    con.execute("DETACH central_vocab")
+    con.close()
+    f = sq.lab_funnel(tmp_path, {"s1": "Site A"}, "2017-01-01", "2022-09-30", time.time() + 60).set_index("name")
+    assert f.loc["troponin_i", "pct_mapped"] == 100.0 and f.loc["troponin_i", "concept_rows"] == 1
+    assert f.loc["wbc", "pct_mapped"] == 100.0

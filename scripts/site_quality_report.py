@@ -25,6 +25,7 @@ import json
 import re
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -166,7 +167,7 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
     import duckdb
 
     from omop_etl.benchmark_features import (BENCHMARK_LAB_CONCEPT_SETS, BENCHMARK_LAB_LOINCS, DEFAULT_BOUNDS, DEFAULT_RESCALE,
-                                             _bounds_frame, _concept_map)
+                                             _bounds_frame, _concept_map, _ensure_vocabulary)
 
     src = pd.DataFrame([(n, str(c)) for n, cs in BENCHMARK_LAB_LOINCS.items() for c in cs], columns=["name", "loinc"])
     out = []
@@ -176,6 +177,11 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
             break
         con = duckdb.connect(str(db_dir / f"omop_{site}.duckdb"), read_only=True)
         try:
+            # as feature extraction does: a site file whose concept tables are views on a central vocabulary file needs that file
+            # attached, or only the set items that carry a CONCEPT_ID resolve (troponin I and pCO2 showed 0% mapped, C10 Nov 23)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                _ensure_vocabulary(con, "auto")
             cmap = _bounds_frame(_concept_map(con, None, None, BENCHMARK_LAB_CONCEPT_SETS), DEFAULT_BOUNDS, DEFAULT_RESCALE)
             con.register("_lf_src", src)
             con.register("_lf_map", cmap)

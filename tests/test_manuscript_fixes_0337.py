@@ -73,7 +73,7 @@ def test_figure1_has_one_random_stay_box_and_the_draw_branches_off_the_last_arro
     assert texts[-3] == "Analytic cohort: one randomly drawn stay per patient N = P = 887"
     assert f"{RANDOM_DRAW_EXCLUDED} P = 13 patients" in texts
     assert any(t.startswith("Grant protocol window: index admission January 1, 2017 to September 30, 2022 P = 900 patients") for t in texts)
-    assert texts[-2:] == ["30-day readmission N = 92 (10.37%)", "No readmission N = 795 (89.63%)"]
+    assert texts[-2:] == ["30-day readmission N = 92 (10.4%)", "No readmission N = 795 (89.6%)"]
     # every exclusion branches off a down arrow: one horizontal arrow per exclusion note, each starting on the centre line
     arrows = [p for p in fig.axes[0].patches if type(p).__name__ == "FancyArrowPatch"]
     notes = [t for t in texts if t.startswith("Excluded")]

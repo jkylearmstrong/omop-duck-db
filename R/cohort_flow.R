@@ -481,7 +481,7 @@ export_consort_flowchart <- function(attrition, out_path = "figure1.png", title 
     for (j in seq_len(k)) {
       x <- 3.6 + (j - (k + 1) / 2) * 3.4
       b <- box(x, -1, sprintf("%s
-N = %s (%.2f%%)", names(terminal_split)[[j]], format(cnt[[j]], big.mark = ",", scientific = FALSE),
+N = %s (%.1f%%)", names(terminal_split)[[j]], format(cnt[[j]], big.mark = ",", scientific = FALSE),
                               if (sum(cnt) > 0) 100 * cnt[[j]] / sum(cnt) else 0), "white")
       graphics::arrows(3.6, 1.5 - 0.26, x, -1 + b[[2]], length = 0.08, lwd = 1.2)
     }

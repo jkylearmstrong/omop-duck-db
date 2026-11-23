@@ -347,7 +347,7 @@ def manuscript_completeness(df: pd.DataFrame, *, label_col: str = "readmitted_30
     def fmt(mask: np.ndarray, base: np.ndarray) -> str:
         n, d = int((mask & base).sum()), int(base.sum())
         shown = f"<{min_cell}" if (min_cell and 0 < n < min_cell) else f"{n:,}"
-        return f"{shown} ({100 * n / d:.2f}%)" if d else ""
+        return f"{shown} ({100 * n / d:.1f}%)" if d else ""
 
     return pd.DataFrame([{"Feature": lab, **{g: fmt(mk, base) for g, base in groups}} for lab, mk in items])
 
@@ -720,7 +720,7 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
         auc_col = [c for c in t.columns if c.endswith("AUC")][0]
         sheets["Table 4 - Stay Type Decomp"] = ("Table 4: Cohort Partition by Whether the Drawn Stay Was the Patient's First Admission (Simpson's Paradox)", pd.DataFrame({
             "Stay drawn for the patient": t["Subset"], "Patients (N)": t["Stays"], "Share of patients": (100 * t["Share"]).map("{:.1f}%".format),
-            "30-Day Readmission Rate": (100 * t["Readmit rate"]).map("{:.2f}%".format), auc_col.replace("AUC", "AUC-ROC"): t[auc_col].round(3)}))
+            "30-Day Readmission Rate": (100 * t["Readmit rate"]).map("{:.1f}%".format), auc_col.replace("AUC", "AUC-ROC"): t[auc_col].round(3)}))
     if "LOSO_By_Site" in tables:
         if table5 not in ("manuscript", "calibrated"):
             raise ValueError("table5 must be 'manuscript' or 'calibrated'.")

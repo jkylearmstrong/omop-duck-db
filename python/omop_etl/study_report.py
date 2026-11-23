@@ -403,7 +403,7 @@ def los_by_site(df: pd.DataFrame, *, site_col: str = "site_anon", los_col: str =
             rows.append([name, f"<{min_cell}" if len(d) < min_cell else len(d)] + [""] * (len(cols) - 2))
             continue
         allv = d[los_col].dropna()
-        rows.append([name, len(d), int(y.sum()), int((~y).sum()), f"{100 * y.mean():.2f}%", ms(allv), ms(a), ms(b), md(allv), md(a), md(b),
+        rows.append([name, len(d), int(y.sum()), int((~y).sum()), f"{100 * y.mean():.1f}%", ms(allv), ms(a), ms(b), md(allv), md(a), md(b),
                      a.max(), b.max(), p_text(stats.ttest_ind(a, b, equal_var=False).pvalue), p_text(stats.mannwhitneyu(a, b).pvalue)])
     return pd.DataFrame(rows, columns=cols)
 
@@ -635,8 +635,8 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     arrow(cx, bottom, cx, y)
     final_bottom = box(x0, x1, y, text, h, main)
     lx, rx = (x0 + cx - 0.1) / 2, (cx + 0.1 + x1) / 2
-    left, lh = box_text(["30-day readmission", f"N = {n_readmitted:,} ({100 * n_readmitted / n:.2f}%)"], cx - 0.1 - x0, outcome)
-    right, rh = box_text(["No readmission", f"N = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.2f}%)"], x1 - cx - 0.1, outcome)
+    left, lh = box_text(["30-day readmission", f"N = {n_readmitted:,} ({100 * n_readmitted / n:.1f}%)"], cx - 0.1 - x0, outcome)
+    right, rh = box_text(["No readmission", f"N = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.1f}%)"], x1 - cx - 0.1, outcome)
     yo = final_bottom - 0.5
     ym = (final_bottom + yo) / 2
     ax.plot([cx, cx], [final_bottom, ym], color="black", lw=1.1)
