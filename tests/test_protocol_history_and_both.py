@@ -49,7 +49,7 @@ def test_protocol_history_values(con):
     assert h.loc[0, "days_since_prior_encounter"] == 40 and h.loc[0, "days_since_prior_ip_ed"] == 40
     assert h.loc[0, "readmission_count_twelve_months"] == 1
     assert h.loc[1, "days_since_prior_encounter"] == 365 and h.loc[1, "prior_encounters_all_count"] == 0   # none: the window length
-    assert h.loc[0, "n_secondary_dx_ccs"] == 1 and h.loc[0, "elix_pre_index_conditions_count"] == 1       # a post-discharge diagnosis is ignored
+    assert h.loc[0, "n_secondary_dx"] == 1 and h.loc[0, "prior_outpatient_count"] == 1 and h.loc[0, "elix_pre_index_conditions_count"] == 1       # a post-discharge diagnosis is ignored
     assert h["tobacco"].tolist() == ["Current user", "Former user", "Never user"]                           # ICD F17 / ICD Z87.891 / observation "never smoker" 4052039
     assert extract_protocol_history_features(con, _cohort(), lookback_days=30).loc[1, "days_since_prior_encounter"] == 30
     with pytest.raises(ValueError, match="non-negative"):

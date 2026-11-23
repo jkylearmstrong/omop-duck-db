@@ -290,7 +290,7 @@ def test_python_extended_enc_type_and_sex_mappings():
         assert genders == [("P1", 8521), ("P2", 8551), ("P3", 8551)]
 
         visits = con.execute("SELECT visit_source_value, visit_concept_id FROM visit_occurrence ORDER BY visit_source_value").fetchall()
-        assert visits == [("E1", 5083), ("E2", 581385), ("E3", 9202)]
+        assert visits == [("E1", 5083), ("E2", 581385), ("E3", 0)]  # OT: unknown type, not outpatient (0.34.0)
         con.close()
 
 

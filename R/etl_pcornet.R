@@ -598,7 +598,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             WHEN 'ED' THEN 9203 -- Emergency
             WHEN 'AV' THEN 9202 -- Outpatient
             WHEN 'OA' THEN 9202 -- Outpatient
-            WHEN 'OT' THEN 9202 -- Other Ambulatory
+            -- OT (other) and NI / UN fall through to 0: an encounter of unknown type is not an outpatient visit (0.34.0)
             WHEN 'TH' THEN 5083 -- Telehealth
             ELSE 0
         END AS visit_concept_id,

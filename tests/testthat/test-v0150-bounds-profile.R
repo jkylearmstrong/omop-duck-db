@@ -133,7 +133,7 @@ test_that("extract_protocol_history_features follows the protocol's windows", {
   expect_equal(c(h$days_since_prior_encounter[[1]], h$days_since_prior_ip_ed[[1]]), c(40, 40))
   expect_equal(h$readmission_count_twelve_months[[1]], 1)
   expect_equal(c(h$days_since_prior_encounter[[2]], h$prior_encounters_all_count[[2]]), c(365, 0))
-  expect_equal(c(h$n_secondary_dx_ccs[[1]], h$elix_pre_index_conditions_count[[1]]), c(1, 1))
+  expect_equal(c(h$n_secondary_dx[[1]], h$elix_pre_index_conditions_count[[1]], h$prior_outpatient_count[[1]]), c(1, 1, 1))
   expect_equal(h$tobacco, c("Current user", "Former user", "Never user"))
   expect_equal(extract_protocol_history_features(con, cohort, lookback_days = 30)$days_since_prior_encounter[[2]], 30)
   expect_error(extract_protocol_history_features(con, cohort, lookback_days = -1), "non-negative")

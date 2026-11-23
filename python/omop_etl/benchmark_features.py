@@ -215,6 +215,28 @@ def _check_lab_coverage(con, sets: Mapping[str, Mapping[str, Any]], cohort: pd.D
         warnings.warn(f"lab_{name}: in-stay rows use codes of the same analyte in another unit type or specimen, not counted "
                       f"({fmt(g)}); the set leaves them out on purpose or they need a unit conversion", stacklevel=3)
 
+#: Visit concepts of an outpatient visit (0.34.0): outpatient (9202; PCORnet AV and OA), office visit (581477) and telehealth (5083).
+OUTPATIENT_VISIT_CONCEPTS: tuple[int, ...] = (9202, 581477, 5083)
+_OUTPATIENT_SQL = ", ".join(str(i) for i in OUTPATIENT_VISIT_CONCEPTS)
+#: Condition type / status concepts of a principal (primary) diagnosis: primary condition (44786627, written by the PCORnet ETL for
+#: PDX = "P"), first position condition (44786628) and primary diagnosis (32902).
+PRINCIPAL_DX_CONCEPTS: tuple[int, ...] = (44786627, 44786628, 32902)
+
+
+def _principal_sql(con) -> str:
+    """SQL that is true for a principal diagnosis row ``co``, using the columns this condition_occurrence has."""
+    cols = {r[0].lower() for r in con.execute("DESCRIBE condition_occurrence").fetchall()}
+    ids = ", ".join(str(i) for i in PRINCIPAL_DX_CONCEPTS)
+    parts = [f"coalesce(co.{c}, 0) IN ({ids})" for c in ("condition_type_concept_id", "condition_status_concept_id") if c in cols]
+    if "condition_status_source_value" in cols:
+        parts.append("upper(coalesce(co.condition_status_source_value, '')) = 'P'")
+    return "(" + " OR ".join(parts or ["FALSE"]) + ")"
+
+
+_DX_CODE_SQL = ("coalesce(nullif(upper(replace(trim(co.condition_source_value), '.', '')), ''), "
+                "'concept:' || CAST(co.condition_concept_id AS VARCHAR))")
+
+
 def _bounds_frame(cmap: pd.DataFrame, bounds: Mapping[str, Sequence[float | None]] | None,
                   rescale: Mapping[str, Sequence[float]] | None) -> pd.DataFrame:
     """Adds per-name ``lo`` / ``hi`` / ``rs_lo`` / ``rs_hi`` / ``rs_div`` columns (open bounds as +-1e300; no rescale as div 1)."""
@@ -436,7 +458,7 @@ def extract_benchmark_features(
     include_protocol_history : bool or None
         Adds the protocol's history columns (:func:`extract_protocol_history_features`): ``prior_encounters_all_count``,
         ``prior_ip_os_ed_count``, ``days_since_prior_encounter``, ``days_since_prior_ip_ed``,
-        ``readmission_count_twelve_months``, ``n_secondary_dx_ccs``, ``elix_pre_index_conditions_count`` and ``tobacco``.
+        ``readmission_count_twelve_months``, ``prior_outpatient_count``, ``n_secondary_dx``, ``elix_pre_index_conditions_count`` and ``tobacco``.
         Default: on with ``profile="ederri"`` or ``"both"``.
     include_utilization : bool
         Prior IP / ED / OS counts, length of stay, days since last encounter, prior readmissions in ``lookback_days``
@@ -714,11 +736,17 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
     observations dated up to the discharge date.
 
     * ``prior_encounters_all_count`` - all prior visits; ``prior_ip_os_ed_count`` - prior inpatient (9201, 262), ED (9203) and
-      concept 2000000048 visits;
+      concept 2000000048 visits; ``prior_outpatient_count`` - prior outpatient (9202, 581477) and telehealth (5083) visits only
+      (0.34.0; "all minus inpatient / ED" also counted visits of unknown or other type);
     * ``days_since_prior_encounter`` / ``days_since_prior_ip_ed`` - days from the latest such prior visit to the admission
       (``lookback_days`` when there is none; ED/inpatient visits only for the second);
     * ``readmission_count_twelve_months`` - inpatient visits in the 365 days before the admission;
-    * ``n_secondary_dx_ccs`` - distinct condition concepts dated from admission to discharge;
+    * ``n_secondary_dx`` - secondary diagnoses of the index stay (0.34.0): distinct diagnosis codes as recorded (ICD-9-CM /
+      ICD-10-CM source value, dots and case ignored; the standard concept when there is none) dated from admission to discharge,
+      leaving out the code(s) of the principal diagnosis (PCORnet PDX = "P", or a primary condition type / status concept), even
+      when the same code is also recorded as a secondary diagnosis. Until 0.33.7 the
+      column was ``n_secondary_dx_ccs`` and counted distinct standard concepts with the principal diagnosis, so one ICD code that
+      maps to two SNOMED concepts counted twice;
     * ``elix_pre_index_conditions_count`` - distinct condition concepts dated before the admission (all history);
     * ``tobacco`` - ``"Current user"`` (tobacco observation concepts 4005823 / 4276526, or ICD F17, Z72.0, 305.1), ``"Former user"``
       (4310280, Z87.891, V15.82), else ``"Never user"`` (the protocol has no "unknown" level).
@@ -732,6 +760,7 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
             SELECT c.row_id,
                    COUNT(pv.visit_occurrence_id) AS prior_encounters_all_count,
                    COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
+                   COUNT(CASE WHEN pv.visit_concept_id IN ({_OUTPATIENT_SQL}) THEN 1 END) AS prior_outpatient_count,
                    COALESCE(date_diff('day', MAX(pv.visit_start_date), CAST(c.cohort_start_date AS DATE)), {lb}) AS days_since_prior_encounter,
                    COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262) THEN pv.visit_start_date END),
                                       CAST(c.cohort_start_date AS DATE)), {lb}) AS days_since_prior_ip_ed,
@@ -742,10 +771,12 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
                  AND pv.visit_start_date < CAST(c.cohort_start_date AS DATE)
                  AND pv.visit_start_date >= CAST(c.cohort_start_date AS DATE) - {lb}
             GROUP BY c.row_id, c.cohort_start_date ORDER BY c.row_id""").df()
-        dx = con.execute("""
+        principal = _principal_sql(con)
+        dx = con.execute(f"""
             SELECT c.row_id,
-                   COUNT(DISTINCT CASE WHEN co.condition_start_date >= CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END)
-                       AS n_secondary_dx_ccs,
+                   COUNT(DISTINCT CASE WHEN co.condition_start_date >= CAST(c.cohort_start_date AS DATE) THEN {_DX_CODE_SQL} END)
+                   - COUNT(DISTINCT CASE WHEN co.condition_start_date >= CAST(c.cohort_start_date AS DATE) AND {principal}
+                                         THEN {_DX_CODE_SQL} END) AS n_secondary_dx,
                    COUNT(DISTINCT CASE WHEN co.condition_start_date < CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END)
                        AS elix_pre_index_conditions_count,
                    MAX(CASE WHEN co.condition_source_value LIKE 'F17%' OR co.condition_source_value LIKE 'Z72.0%'
@@ -768,7 +799,7 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
     cur = (dx["tob_cur_dx"].to_numpy() == 1) | (obs["tob_cur_obs"].to_numpy() == 1)
     former = (dx["tob_former_dx"].to_numpy() == 1) | (obs["tob_former_obs"].to_numpy() == 1)
     out = util.drop(columns=["row_id"]).copy()
-    out["n_secondary_dx_ccs"] = dx["n_secondary_dx_ccs"].to_numpy()
+    out["n_secondary_dx"] = dx["n_secondary_dx"].to_numpy()
     out["elix_pre_index_conditions_count"] = dx["elix_pre_index_conditions_count"].to_numpy()
     out["tobacco"] = np.where(cur, "Current user", np.where(former, "Former user", "Never user"))
     return out

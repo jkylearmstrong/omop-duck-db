@@ -76,7 +76,8 @@ FEATURE_LABELS = {
     "index_los_days": "Index Admission Length of Stay (days)", "los_days": "Index Admission Length of Stay (days)",
     "prior_ip_os_ed_count": "Prior Inpatient / Obs / ED Count", "prior_encounters_all_count": "Prior Encounters (All Types)",
     "prior_ip_count": "Prior Inpatient Stays (12 Months)", "prior_ed_count": "Prior ED Visits (12 Months)", "n_prior_ed": "Prior ED Visits (12 Months)",
-    "prior_ip_los_days": "Prior Inpatient Length of Stay (days)", "n_secondary_dx_ccs": "Number of Secondary Diagnosis CCS Categories",
+    "prior_ip_los_days": "Prior Inpatient Length of Stay (days)", "n_secondary_dx_ccs": "Number of Secondary Diagnosis CCS Categories", "n_secondary_dx": "Secondary Diagnosis Count (Index Stay)",
+    "prior_outpatient_count": "Prior Outpatient Visits (12 Months)",
     "days_since_prior_encounter": "Days Since Prior Encounter", "days_since_prior_ip_ed": "Days Since Prior Inpatient / Obs / ED Encounter",
     "readmission_count_twelve_months": "Prior Readmissions in Past 12 Months",
     "ip_velocity": "Inpatient Visit Velocity", "ed_velocity": "ED Visit Velocity", "utilization_density": "Utilization Density",
@@ -249,9 +250,14 @@ def manuscript_table1(df: pd.DataFrame, *, label_col: str = "readmitted_30d", mi
     ip = _col(m, "prior_ip_os_ed_count")
     allp = _col(m, "prior_encounters_all_count")
     cont("Prior Inpatient / Observation / ED Encounter Count", ip)
-    if ip is not None and allp is not None:
+    if _col(m, "prior_outpatient_count") is not None:  # 0.34.0: outpatient and telehealth visits only
+        cont("Prior Outpatient Visit Count", _col(m, "prior_outpatient_count"))
+    elif ip is not None and allp is not None:
         cont("Prior Outpatient / Other Encounter Count", allp - ip)
-    cont("Secondary Diagnosis Count (CCS Categories)", _col(m, "n_secondary_dx_ccs"))
+    if _col(m, "n_secondary_dx") is not None:  # 0.34.0: distinct diagnosis codes of the index stay, principal left out
+        cont("Secondary Diagnosis Count (Index Stay)", _col(m, "n_secondary_dx"))
+    else:
+        cont("Secondary Diagnosis Count (CCS Categories)", _col(m, "n_secondary_dx_ccs"))
     cont("Index Admission Length of Stay (Days)", _col(m, "index_los_days", "los_days"))
     cont("Days Since Prior Encounter", _col(m, "days_since_prior_encounter"))
     cont("Days Since Prior Inpatient / Observation / ED Encounter", _col(m, "days_since_prior_ip_ed"))
@@ -489,6 +495,7 @@ def validate_manuscript_sheets(sheets: Mapping[str, tuple[str, pd.DataFrame]], *
 # Table 6 increments as the delivered workbook prints them: label -> (increment text, size in the measure's own unit).
 CLINICAL_INCREMENTS: dict[str, tuple[str, float]] = {
     "Prior Inpatient / Obs / ED Count": ("1 stay", 1), "Prior Outpatient / Other Encounter Count": ("10 encounters", 10),
+    "Prior Outpatient Visits (12 Months)": ("10 visits", 10), "Secondary Diagnosis Count (Index Stay)": ("1 diagnosis", 1),
     "Number of Secondary Diagnosis CCS Categories": ("1 category", 1), "Index Admission Length of Stay (days)": ("1 day", 1),
     "Days Since Prior Encounter": ("30 days", 30), "Days Since Prior Inpatient / Obs / ED Encounter": ("30 days", 30),
     "Prior Readmissions in Past 12 Months": ("1 readmission", 1), "Systolic Blood Pressure (mmHg)": ("10 mmHg", 10),
@@ -591,9 +598,14 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     g = "Encounter Information"
     ip, allp = _col(m, "prior_ip_os_ed_count"), _col(m, "prior_encounters_all_count")
     num(g, "Prior Inpatient / Obs / ED Count", ip)
-    if ip is not None and allp is not None:
+    if _col(m, "prior_outpatient_count") is not None:
+        num(g, "Prior Outpatient Visit Count", _col(m, "prior_outpatient_count"))
+    elif ip is not None and allp is not None:
         num(g, "Prior Outpatient / Other Encounter Count", allp - ip)
-    num(g, "Number of Secondary Diagnosis CCS Categories", _col(m, "n_secondary_dx_ccs"))
+    if _col(m, "n_secondary_dx") is not None:
+        num(g, "Secondary Diagnosis Count (Index Stay)", _col(m, "n_secondary_dx"))
+    else:
+        num(g, "Number of Secondary Diagnosis CCS Categories", _col(m, "n_secondary_dx_ccs"))
     num(g, "Index Admission Length of Stay (days)", _col(m, "index_los_days", "los_days"))
     num(g, "Days Since Prior Encounter", _col(m, "days_since_prior_encounter"))
     num(g, "Days Since Prior Inpatient / Obs / ED Encounter", _col(m, "days_since_prior_ip_ed"))

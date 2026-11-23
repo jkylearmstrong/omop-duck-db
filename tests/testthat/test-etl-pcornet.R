@@ -62,7 +62,7 @@ test_that("etl_pcornet handles extended ENC_TYPE and SEX mappings", {
   expect_equal(genders$gender_concept_id, c(8521, 8551, 8551)) # OT -> 8521, UN -> 8551, NI -> 8551
 
   visits <- DBI::dbGetQuery(con, "SELECT visit_source_value, visit_concept_id FROM visit_occurrence ORDER BY visit_source_value")
-  expect_equal(visits$visit_concept_id, c(5083, 581385, 9202)) # TH -> 5083, OS -> 581385 (observation, not inpatient), OT -> 9202
+  expect_equal(visits$visit_concept_id, c(5083, 581385, 0)) # TH -> 5083, OS -> 581385 (observation, not inpatient), OT -> 0 (unknown type, 0.34.0)
 })
 
 test_that("etl_pcornet unpivots vital.csv into measurement with LOINC codes", {

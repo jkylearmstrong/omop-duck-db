@@ -210,3 +210,41 @@ def test_lab_date_and_value_fallbacks(tmp_path):
     assert got["7.5"] == ("2020-01-02", 7.5) and got["8.1"] == ("2020-01-02", 8.1)
     assert got["<0.01"] == ("2020-01-02", 0.01) and got["1,200"] == ("2020-01-02", 1200.0)
     assert got["positive"][1] is None
+
+
+# ------------------------------------------------------------------ secondary diagnoses and prior outpatient visits (Kyle: "do what is correct")
+def test_secondary_diagnoses_and_outpatient_visits():
+    import duckdb
+
+    from omop_etl.benchmark_features import extract_protocol_history_features
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE visit_occurrence (visit_occurrence_id BIGINT, person_id BIGINT, visit_concept_id INT, visit_start_date DATE,"
+                " visit_end_date DATE)")
+    # before the 2020-01-10 admission: outpatient, telehealth, office, an ED visit, an "other" (0) and an observation-room visit
+    con.execute("""INSERT INTO visit_occurrence VALUES (1, 1, 9202, DATE '2019-11-01', DATE '2019-11-01'), (2, 1, 5083, DATE '2019-10-01', NULL),
+        (3, 1, 581477, DATE '2019-09-01', NULL), (4, 1, 9203, DATE '2019-08-01', NULL), (5, 1, 0, DATE '2019-07-01', NULL),
+        (6, 1, 581385, DATE '2019-06-01', NULL)""")
+    con.execute("CREATE TABLE condition_occurrence (person_id BIGINT, condition_concept_id INT, condition_start_date DATE,"
+                " condition_source_value VARCHAR, condition_type_concept_id INT, condition_status_concept_id INT,"
+                " condition_status_source_value VARCHAR, visit_occurrence_id BIGINT)")
+    con.execute("""INSERT INTO condition_occurrence VALUES
+        (1, 201826, DATE '2020-01-10', 'E11.65', 44786627, 0, 'P', 9),     -- principal
+        (1, 201826, DATE '2020-01-11', 'E1165', 0, 0, 'S', 9),             -- same code again, as a secondary: still the principal
+        (1, 316866, DATE '2020-01-10', 'I10', 0, 0, 'S', 9),
+        (1, 316866, DATE '2020-01-12', 'i10', 0, 0, 'S', 9),               -- same code, other case: counted once
+        (1, 4229440, DATE '2020-01-10', 'I50.9', 0, 0, 'S', 9),
+        (1, 4229441, DATE '2020-01-10', 'I50.9', 0, 0, 'S', 9),            -- one code, two standard concepts: counted once
+        (1, 255573, DATE '2020-01-11', NULL, 0, 0, NULL, 9),               -- no source value: its concept
+        (1, 4180628, DATE '2019-05-01', 'N18.3', 0, 0, 'S', 1)""")         # before the stay: not a secondary diagnosis of it
+    con.execute("CREATE TABLE observation (person_id BIGINT, observation_concept_id INT, observation_date DATE)")
+    h = extract_protocol_history_features(con, pd.DataFrame({"row_id": [0], "subject_id": [1], "cohort_start_date": pd.to_datetime(["2020-01-10"]),
+                                                             "cohort_end_date": pd.to_datetime(["2020-01-15"])}))
+    assert h.loc[0, "n_secondary_dx"] == 3            # I10, I50.9 and the uncoded concept
+    assert h.loc[0, "prior_outpatient_count"] == 3    # outpatient, telehealth and office; not ED, "other" or observation
+    assert h.loc[0, "prior_encounters_all_count"] == 6
+    assert "n_secondary_dx_ccs" not in h
+    t1 = mt.manuscript_table1(make_features(n=300, seed=1).assign(n_secondary_dx=2, prior_outpatient_count=4))
+    labels = list(t1.iloc[:, 0].astype(str))
+    assert "Secondary Diagnosis Count (Index Stay)" in labels and "Prior Outpatient Visit Count" in labels
+    assert not [x for x in labels if "CCS" in x or "Outpatient / Other" in x]

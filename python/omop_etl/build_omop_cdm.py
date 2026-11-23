@@ -769,7 +769,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
                 WHEN 'ED' THEN 9203 -- Emergency
                 WHEN 'AV' THEN 9202 -- Outpatient
                 WHEN 'OA' THEN 9202 -- Outpatient
-                WHEN 'OT' THEN 9202 -- Other Ambulatory
+                -- OT (other) and NI / UN fall through to 0: an encounter of unknown type is not an outpatient visit (0.34.0)
                 WHEN 'TH' THEN 5083 -- Telehealth
                 ELSE 0
             END AS visit_concept_id,
