@@ -40,10 +40,10 @@ def _workbook(tmp_path):
 
     def with_f1(df, tables, path, **kw):
         t = dict(tables)
-        t["LOSO_By_Site"] = t["LOSO_By_Site"].assign(f1_050=[0.3141, 0.2987, 0.2899], auroc=[0.7134, 0.7251, 0.6949])
+        t["LOSO_By_Site"] = t["LOSO_By_Site"].assign(f1_050=[0.3141, 0.3001, 0.2899], auroc=[0.7134, 0.7251, 0.6949])
         t["Model_Performance"] = pd.DataFrame({"Model": ["Logistic Regression", "XGBoost"],
                                                "AUC-ROC (95% CI)": ["0.7012 (0.6955–0.7068)", "0.7349 (0.7296–0.7401)"],
-                                               "Sensitivity": [0.6123, 0.6544], "Specificity": [0.6681, 0.6702], "F1": [0.2877, 0.3012],
+                                               "Sensitivity": [0.6001, 0.6544], "Specificity": [0.6001, 0.7001], "F1": [0.2877, 0.3012],
                                                "Brier": [0.2216, 0.2149]})
         return real(df, t, path, **kw)
 
@@ -90,6 +90,11 @@ def test_text_quotes_the_tables_two_decimal_values(tmp_path):
     text = re.sub(r"```.*?```|\$\$.*?\$\$", "", out["markdown"], flags=re.S)
     prose = "\n".join(ln for ln in text.splitlines() if not ln.startswith("|"))
     assert "0.73 (0.73–0.74)" in prose and "0.7349" not in prose
+    rows = [ln for ln in text.splitlines() if ln.startswith("|")]
+    assert any(re.search(r"\|\s*0\.60\s*\|", ln) for ln in rows), "Table 2 sensitivity 0.6001 must print as 0.60"  # trailing zero kept
+    assert any(re.search(r"\|\s*0\.30\s*\|", ln) for ln in rows), "Table 3 F1 0.3001 must print as 0.30"
+    assert any(re.search(r"\|\s*0\.70\s*\|", ln) for ln in rows), "a column of 0.60 and 0.70 must not print as 0.6 and 0.7"
+    assert not any(re.search(r"\|\s*0\.[367]\s*\|", ln) for ln in rows)
     assert not re.findall(r"\b0\.\d{3}\b", prose), re.findall(r".{40}\b0\.\d{3}\b.{10}", prose)[:5]
     ctx = mtx.manuscript_context(wb, run={"n_sites": 3})
     assert ctx["loso"]["auc_mean"] == float(f"{np.mean([0.7134, 0.7251, 0.6949]):.2f}")  # the table's own mean row
@@ -164,3 +169,44 @@ def test_rendered_pdf_keeps_title_references_and_explains_the_random_draw(tmp_pa
     text = " ".join(re.sub(r"\s+", " ", p.extract_text()) for p in PdfReader(str(r["files"]["pdf"])).pages)
     assert "13 patients whose qualifying stays in the window were not in that draw are excluded at the last step" in text
     assert "the 13 patients whose qualifying stays in the window were not in that draw branch off the last arrow" in text
+
+
+def test_metric_cells_keep_trailing_zeros():
+    from omop_etl.manuscript_text import metric_cells
+
+    t = metric_cells(pd.DataFrame({"Held-out site": ["Site A"], "Test patients": [1200], "F1": [0.3], "AUC-ROC (95% CI)": ["0.70 (0.68–0.72)"]}))
+    assert t.iloc[0].tolist() == ["Site A", 1200, "0.30", "0.70 (0.68–0.72)"]
+
+
+# ------------------------------------------------------------------ lab values the converter used to drop (per-site check, Nov 23)
+def test_lab_date_and_value_fallbacks(tmp_path):
+    import duckdb
+
+    from omop_etl import build_schema, etl_pcornet
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "demographic.csv").write_text("PATID,SEX,BIRTH_DATE,RACE,HISPANIC\n100,M,1960-01-01,05,N\n", encoding="utf-8")
+    (src / "encounter.csv").write_text("ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,DISCHARGE_DATE,DISCHARGE_STATUS\nE1,100,IP,2020-01-01,2020-01-03,HO\n",
+                                       encoding="utf-8")
+    rows = ["LAB_RESULT_CM_ID,PATID,ENCOUNTERID,LAB_LOINC,SPECIMEN_DATE,SPECIMEN_TIME,LAB_ORDER_DATE,RESULT_DATE,RESULT_TIME,RESULT_NUM,RAW_RESULT,RESULT_UNIT",
+            "L1,100,E1,2345-7,2020-01-01,08:00,,2020-01-01,09:00,5.4,,mg/dL",       # unchanged
+            "L2,100,E1,6690-2,2020-01-02,07:00,,,,7.5,,10*3/uL",                  # no RESULT_DATE: the specimen date
+            "L3,100,E1,6690-2,,,2020-01-02,,,8.1,,10*3/uL",                       # only the order date
+            "L4,100,E1,10839-9,2020-01-02,,,2020-01-02,,,<0.01,ng/mL",            # value only in RAW_RESULT, with an operator
+            "L5,100,E1,2345-7,2020-01-02,,,2020-01-02,,\"1,200\",,mg/dL",         # thousands separator
+            "L6,100,E1,2345-7,2020-01-02,,,2020-01-02,,,positive,"]               # text stays NULL
+    (src / "lab_result_cm.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    db = str(tmp_path / "s.duckdb")
+    con = duckdb.connect(db)
+    build_schema(con)
+    con.close()
+    etl_pcornet(str(src), db_path=db, site_id=1, site_anon="Site A", site_name="Site A")
+    con = duckdb.connect(db, read_only=True)
+    got = {r[0]: r[1:] for r in con.execute(
+        "SELECT value_source_value, CAST(measurement_date AS VARCHAR), value_as_number FROM measurement ORDER BY measurement_id").fetchall()}
+    con.close()
+    assert got["5.4"] == ("2020-01-01", 5.4)
+    assert got["7.5"] == ("2020-01-02", 7.5) and got["8.1"] == ("2020-01-02", 8.1)
+    assert got["<0.01"] == ("2020-01-02", 0.01) and got["1,200"] == ("2020-01-02", 1200.0)
+    assert got["positive"][1] is None

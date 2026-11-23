@@ -158,8 +158,62 @@ def db_rows(db_dir: Path, sites: Mapping[str, str], start: str, end: str, deadli
     return pd.DataFrame(unmapped), (pd.concat(bounds, ignore_index=True) if bounds else pd.DataFrame())
 
 
+def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, deadline: float) -> pd.DataFrame:
+    """Per site and lab: where the lab's rows are lost on the way to the feature. Rows whose source LOINC is in the lab's concept set
+    (dated in the window, or undated), then the % of them mapped to one of the set's concepts, the % with no date, the % with no
+    number, the % outside the feature's physiologic bounds (after the WBC rescale) and the three most frequent units. A lab that is
+    mostly missing at one site while its LOINC is in the raw file shows here which step drops it (0.34.0, per-site check of Nov 23)."""
+    import duckdb
+
+    from omop_etl.benchmark_features import (BENCHMARK_LAB_CONCEPT_SETS, BENCHMARK_LAB_LOINCS, DEFAULT_BOUNDS, DEFAULT_RESCALE,
+                                             _bounds_frame, _concept_map)
+
+    src = pd.DataFrame([(n, str(c)) for n, cs in BENCHMARK_LAB_LOINCS.items() for c in cs], columns=["name", "loinc"])
+    out = []
+    for site, label in sites.items():
+        if time.time() > deadline:
+            print(f"time limit reached before {label}; stopping the lab funnel", file=sys.stderr)
+            break
+        con = duckdb.connect(str(db_dir / f"omop_{site}.duckdb"), read_only=True)
+        try:
+            cmap = _bounds_frame(_concept_map(con, None, None, BENCHMARK_LAB_CONCEPT_SETS), DEFAULT_BOUNDS, DEFAULT_RESCALE)
+            con.register("_lf_src", src)
+            con.register("_lf_map", cmap)
+            f = con.execute("""
+                WITH r AS (
+                    SELECT s.name, m.measurement_concept_id AS cid, m.measurement_date AS d, m.value_as_number AS x,
+                           m.unit_source_value AS u
+                    FROM measurement m JOIN _lf_src s ON m.measurement_source_value = s.loinc
+                    WHERE m.measurement_date IS NULL OR m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)),
+                b AS (SELECT DISTINCT name, lo, hi, rs_lo, rs_hi, rs_div FROM _lf_map),
+                k AS (SELECT DISTINCT name, concept_id FROM _lf_map)
+                SELECT r.name, count(*) AS source_rows,
+                       round(100.0 * count(k.concept_id) / count(*), 1) AS pct_mapped,
+                       round(100.0 * count(*) FILTER (WHERE r.d IS NULL) / count(*), 1) AS pct_no_date,
+                       round(100.0 * count(*) FILTER (WHERE r.x IS NULL) / count(*), 1) AS pct_no_number,
+                       round(100.0 * count(*) FILTER (WHERE r.x IS NOT NULL AND NOT (
+                           CASE WHEN r.x > b.rs_lo AND r.x <= b.rs_hi THEN r.x / b.rs_div ELSE r.x END BETWEEN b.lo AND b.hi))
+                             / count(*), 1) AS pct_out_of_bounds
+                FROM r LEFT JOIN k ON k.name = r.name AND k.concept_id = r.cid LEFT JOIN b ON b.name = r.name
+                GROUP BY r.name""", [start, end]).df()
+            units = con.execute("""
+                SELECT name, string_agg(u || ' ' || pct || '%', '; ' ORDER BY n DESC) AS top_units FROM (
+                    SELECT s.name, coalesce(m.unit_source_value, '(none)') AS u, count(*) AS n,
+                           CAST(round(100.0 * count(*) / sum(count(*)) OVER (PARTITION BY s.name)) AS INTEGER) AS pct,
+                           row_number() OVER (PARTITION BY s.name ORDER BY count(*) DESC) AS k
+                    FROM measurement m JOIN _lf_src s ON m.measurement_source_value = s.loinc
+                    WHERE m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE) GROUP BY 1, 2) WHERE k <= 3
+                GROUP BY name""", [start, end]).df()
+            f = f.merge(units, on="name", how="left")
+            f["site"] = label
+            out.append(f)
+        finally:
+            con.close()
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
 def flags(feat: pd.DataFrame, cats: pd.DataFrame, att: pd.DataFrame, unm: pd.DataFrame, bnd: pd.DataFrame,
-          pct_gap: float, ratio: float) -> list[dict[str, Any]]:
+          pct_gap: float, ratio: float, funnel: pd.DataFrame | None = None) -> list[dict[str, Any]]:
     """Measures where the sites differ: ranges only, no site label or count."""
     out: list[dict[str, Any]] = []
 
@@ -195,6 +249,11 @@ def flags(feat: pd.DataFrame, cats: pd.DataFrame, att: pd.DataFrame, unm: pd.Dat
     if len(bnd):
         for c, g in bnd.groupby("concept_id"):
             spread("Physiologic bounds", f"concept {c} % out of range", g["pct_out_of_range"])
+    if funnel is not None and len(funnel):
+        for n, g in funnel.groupby("name"):
+            for col, what in (("pct_mapped", "mapped to the set"), ("pct_no_date", "no date"), ("pct_no_number", "no number"),
+                              ("pct_out_of_bounds", "outside bounds")):
+                spread("Lab funnel", f"lab_{n} source rows: % {what}", g[col])
     return out
 
 
@@ -234,7 +293,8 @@ def main(argv: list[str] | None = None) -> int:
     feat, cats, att = feature_rows(frames), category_rows(frames), attrition_rows(a.private_dir, labels)
     sites = {s: l for s, l in labels.items() if (a.private_dir / f"features_{s}.parquet").exists()}
     unm, bnd = (db_rows(a.db_dir, sites, a.start, a.end, t0 + a.max_seconds) if a.db_dir else (pd.DataFrame(), pd.DataFrame()))
-    fl = flags(feat, cats, att, unm, bnd, a.pct_gap, a.ratio)
+    fun = lab_funnel(a.db_dir, sites, a.start, a.end, t0 + a.max_seconds) if a.db_dir else pd.DataFrame()
+    fl = flags(feat, cats, att, unm, bnd, a.pct_gap, a.ratio, fun)
     a.detail.parent.mkdir(parents=True, exist_ok=True)
     a.flags.parent.mkdir(parents=True, exist_ok=True)
     md = [f"# Per-site data quality ({len(frames)} sites, {a.start} to {a.end})", "", "Keep this file with the data: it has per-site counts.", ""]
@@ -257,6 +317,10 @@ def main(argv: list[str] | None = None) -> int:
         md += ["## Unmapped rows (concept_id 0) in the window", "", unm.pipe(_md, index=False), ""]
     if len(bnd):
         md += ["## Measurements outside the physiologic limits (%)", "", _wide(bnd, "concept_id", "pct_out_of_range")]
+    if len(fun):
+        md += ["## Lab funnel: rows with the lab's LOINC, and where they are lost", ""]
+        for col in ("source_rows", "pct_mapped", "pct_no_date", "pct_no_number", "pct_out_of_bounds", "top_units"):
+            md += [f"### {col}", "", _wide(fun, "name", col)]
     md += ["## Flags (measures where the sites differ)", "", pd.DataFrame(fl).pipe(_md, index=False) if fl else "(none)", ""]
     a.detail.write_text("\n".join(md), encoding="utf-8")
     a.flags.write_text(json.dumps({"sites": len(frames), "pct_gap": a.pct_gap, "ratio": a.ratio, "flags": fl}, indent=1), encoding="utf-8")

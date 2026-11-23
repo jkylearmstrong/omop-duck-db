@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 __all__ = ["manuscript_context", "render_manuscript_body", "template_dir", "available_templates", "load_params", "MISSING_MARK"]
@@ -669,6 +670,21 @@ def _caption_with_context(cap: str, context: Mapping[str, Any]) -> str:
     return cap.replace("{shap_n}", f"{shap_n:,}") if shap_n else cap.replace(", {shap_n} Sampled Patients", "")
 
 
+def metric_cells(t: pd.DataFrame, digits: int | None = None) -> pd.DataFrame:
+    """Tables 2 and 3 as printed: every number in a metric column (one that holds a non-whole number) as text with ``digits`` places
+    (default :data:`omop_etl.manuscript_tables.METRIC_DECIMALS`), so 0.6 prints as 0.60. The workbook keeps them as numbers, and
+    Excel reads a number back without its trailing zero, so the printed table cannot rely on the cell. Count columns are left alone."""
+    from omop_etl.manuscript_tables import METRIC_DECIMALS
+
+    d = METRIC_DECIMALS if digits is None else digits
+    out = t.copy().astype(object)
+    for c in out.columns:
+        vals = [v for v in out[c] if isinstance(v, (float, np.floating)) and not pd.isna(v)]
+        if any(not float(v).is_integer() for v in vals):
+            out[c] = [f"{float(v):.{d}f}" if isinstance(v, (float, np.floating)) and not pd.isna(v) else v for v in out[c]]
+    return out
+
+
 def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], images: Sequence[Path], *, workbook: str | Path,
                              run: Mapping[str, Any] | None = None, summary: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None,
                              software_paragraph: str | None = None, version: str | None = None) -> dict[str, Any]:
@@ -686,6 +702,8 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
             cap = re.sub(r"^Table S?\d+:\s*", "", str(title))
             if key == "grid":  # the workbook keeps the unrounded auc_raw / f1_raw tuning selects on; the printed table does not
                 t = t.drop(columns=[c for c in t.columns if str(c).endswith("_raw")])
+            if key in ("performance", "loso"):
+                t = metric_cells(t)
             if key in layout.get("transpose", []):
                 t = transpose_for_print(t)
             tables[key] = (_esc(cap), _table_md(t))

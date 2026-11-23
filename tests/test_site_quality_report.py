@@ -29,9 +29,11 @@ def _run(tmp_path, with_db=True):
         pd.DataFrame({"step_name": ["All", "Follow-up", "Window"], "subjects_retained": [1000, 900 - 300 * (s == "s2"), 600]}).to_csv(
             priv / f"attrition_{s}.csv", index=False)
         con = duckdb.connect(str(db / f"omop_{s}.duckdb"))
-        con.execute("CREATE TABLE measurement AS SELECT * FROM (VALUES (3004249, 8876, 120.0, DATE '2018-01-01', '8480-6'), "
-                    f"({0 if s == 's1' else 3004249}, 8876, {999.0 if s == 's1' else 130.0}, DATE '2018-01-01', 'XYZ')) "
-                    "t(measurement_concept_id, unit_concept_id, value_as_number, measurement_date, measurement_source_value)")
+        wbc = "NULL" if s == "s2" else "7.5"  # one site's WBC rows carry no number: the lab funnel says so
+        con.execute("CREATE TABLE measurement AS SELECT * FROM (VALUES (3004249, 8876, 120.0, DATE '2018-01-01', '8480-6', 'mm[Hg]'), "
+                    f"({0 if s == 's1' else 3004249}, 8876, {999.0 if s == 's1' else 130.0}, DATE '2018-01-01', 'XYZ', 'mm[Hg]'), "
+                    f"(3000905, 0, {wbc}, DATE '2018-01-02', '6690-2', '10*3/uL')) "
+                    "t(measurement_concept_id, unit_concept_id, value_as_number, measurement_date, measurement_source_value, unit_source_value)")
         con.execute("CREATE TABLE drug_exposure AS SELECT * FROM (VALUES (1, DATE '2018-02-01', 'rx1')) t(drug_concept_id, drug_exposure_start_date, drug_source_value)")
         con.execute("CREATE TABLE condition_occurrence AS SELECT * FROM (VALUES (201826, DATE '2018-02-01', 'E11.9')) "
                     "t(condition_concept_id, condition_start_date, condition_source_value)")
@@ -59,3 +61,11 @@ def test_flags_the_site_that_differs_without_naming_it(tmp_path):
 def test_runs_without_the_databases(tmp_path):
     detail, fl = _run(tmp_path, with_db=False)
     assert "## Unmapped rows" not in detail and fl["sites"] == 3
+
+
+def test_lab_funnel_shows_where_a_lab_is_lost(tmp_path):
+    detail, fl = _run(tmp_path)
+    assert "## Lab funnel" in detail and "10*3/uL 100%" in detail
+    hit = [f for f in fl["flags"] if f["measure"] == "lab_wbc source rows: % no number"]
+    assert hit and hit[0]["min"] == 0 and hit[0]["max"] == 100
+    assert not any("Site" in json.dumps(f) for f in fl["flags"])
