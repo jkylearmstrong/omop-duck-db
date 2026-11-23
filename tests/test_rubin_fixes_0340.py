@@ -96,6 +96,8 @@ def test_text_quotes_the_tables_two_decimal_values(tmp_path):
     assert any(re.search(r"\|\s*0\.70\s*\|", ln) for ln in rows), "a column of 0.60 and 0.70 must not print as 0.6 and 0.7"
     assert not any(re.search(r"\|\s*0\.[367]\s*\|", ln) for ln in rows)
     assert not re.findall(r"\b0\.\d{3}\b", prose), re.findall(r".{40}\b0\.\d{3}\b.{10}", prose)[:5]
+    assert not re.findall(r"\b\d+\.\d{2}%", prose), re.findall(r".{40}\b\d+\.\d{2}%", prose)[:5]  # rates as Table 1 prints them, 1 decimal
+    assert not re.findall(r"\b(colour|analys(?:e|ed|ing)|behaviour|favour)", prose, re.I)  # American spelling throughout (C10 review)
     ctx = mtx.manuscript_context(wb, run={"n_sites": 3})
     assert ctx["loso"]["auc_mean"] == float(f"{np.mean([0.7134, 0.7251, 0.6949]):.2f}")  # the table's own mean row
 
