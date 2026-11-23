@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 pytest.importorskip("jinja2")
 
+from omop_etl import manuscript_tables as mt  # noqa: E402
 from omop_etl import manuscript_text as mtx  # noqa: E402
 from omop_etl.manuscript_report import read_workbook_tables  # noqa: E402
 from test_table6_missing_and_compare import _full_workbook  # noqa: E402
@@ -42,7 +43,8 @@ def test_template_selection_follows_the_installed_version():
 def test_numbers_come_from_the_workbook_and_tables_are_numbered_in_reading_order(workbook):
     out = _render(workbook, version="0.32.0")
     md = out["markdown"]
-    assert "AUC-ROC 0.731 (0.728–0.735)" in md or "HistGBM 0.731 (0.728–0.735)" in md
+    two = mt.round_metric_text("0.731 (0.728–0.735)")  # Tables 2 and 3 and the text to 2 decimals since 0.34.0
+    assert f"AUC-ROC {two}" in md or f"HistGBM {two}" in md
     # the workbook's Table 6 (regression) is the fifth table of the text, and its references say so
     assert out["numbers"]["lr"] == "Table 5" and "presented in Table 5" in md and "**Table 5:" in md
     assert out["numbers"]["loso"] == "Table 4" and "(mean AUC-ROC" in md

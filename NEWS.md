@@ -1,3 +1,16 @@
+# omopduckdb 0.34.0
+
+Dr. Rubin's review of C9 (2026-11-23), made the package defaults so every later build carries it, plus Kyle's per-site data-quality report. Version bump 0.33.7 to 0.34.0; manuscript template v0.34.0. Models, tables and figures change in presentation only. A run needs the models again, for the SHAP plot and the rounded tables, but its saved features can be reused.
+
+- **Table 1 to 1 decimal.** Percentages and mean ± SD print with one decimal (`TABLE1_DECIMALS`). The Nov 11 deliverable printed 2.
+- **Tables 2 and 3 to 2 decimals, and the text quotes the same values.** The model metrics of workbook Tables 2 and 5 (printed Tables 2 and 3) are rounded to 2 places (`METRIC_DECIMALS`, `round_metric_text()`), so the AUC-ROC, its CI, sensitivity, specificity, F1 and Brier read the same in the tables, the abstract and the Results. The leave-one-site-out mean in the text is the table's own "Mean" row, not a mean of the rounded site values. The CSV outputs keep full precision.
+- **Figure 2 is a SHAP violin plot.** `plot_shap_beeswarm(kind="violin")` is the default. Each predictor's violin is as tall as the density of its SHAP values and coloured by the mean feature value at each SHAP value, as the shap package's layered violin is. `kind="beeswarm"` keeps the dots. The clinical labels are unchanged, and Section 3.5 describes the violins.
+- **Figure 1's random-draw exclusion is explained.** Section 2.1 and the Figure 1 caption say that the study scores one random draw of a stay per patient, made once and reused in every analysis, and how many patients whose qualifying stays were not in that draw are excluded at the last arrow. The count is read from `<prefix>_CONSORT_Attrition.csv`.
+- **`bmi_age_readmission()`**: readmission by BMI band within each age group, with the share of the age group and the insulin and metformin rates, pooled and with small cells suppressed. It answers Dr. Rubin's obesity-paradox question.
+- **`scripts/site_quality_report.py`**: per-site data quality of a run. It reports every model feature (% missing, % yes or mean ± SD [Q1, Q3]), every Table 1 category, the attrition, and, from the site databases, unmapped rows (concept 0) with their top source codes and measurements outside the physiologic limits. Detail per site stays private. A shareable JSON lists the measures where the sites differ, as ranges only.
+- **`drop_last_lab_values()`** is the step that keeps `lab_*_last` out of the models, now a function with a test. All-empty columns (the ten measures no site extract had) never enter the model matrix.
+- **`manuscript_checks`** drops the page number at the foot of each page, so a phrase that runs onto the next page is read whole.
+
 # omopduckdb 0.33.7
 
 Patch release for Kyle's list for the final draft (C9, 2026-11-23). The cohort, features, models and workbook do not change. Figure 1 is drawn again from a finished run's files, and the manuscript is re-rendered. Version bump 0.33.6 to 0.33.7; the manuscript text template stays v0.33.6.

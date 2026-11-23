@@ -83,15 +83,15 @@ def test_exact_deltas_list_a_ci_bound_change(tmp_path):
 
     ws = openpyxl.load_workbook(GOLDEN)["Table 2 - Model Performance"]
     old = ws["B4"].value
-    assert old == "0.731 (0.728–0.735)"
-    changed = _edit(GOLDEN, tmp_path / "c.xlsx", "Table 2 - Model Performance", "B4", "0.731 (0.728–0.736)")
+    assert old == "0.73 (0.73–0.73)"  # two decimals since 0.34.0
+    changed = _edit(GOLDEN, tmp_path / "c.xlsx", "Table 2 - Model Performance", "B4", "0.73 (0.73–0.731)")
     tol, _ = mt.workbook_deltas(changed, GOLDEN)
     exact, _ = mt.workbook_deltas(changed, GOLDEN, atol=0.0, rtol=0.0, text=True)
     assert tol.empty and len(exact) == 1
     assert exact.loc[0, "delta"] == 0 and exact.loc[0, "max_abs_delta"] == pytest.approx(0.001)
     s = mt.delta_summary(exact)
     assert s.loc[0, "max_abs_delta"] == pytest.approx(0.001)
-    renamed = _edit(GOLDEN, tmp_path / "r.xlsx", "Table 2 - Model Performance", "B4", "0.731 [0.728–0.735]")
+    renamed = _edit(GOLDEN, tmp_path / "r.xlsx", "Table 2 - Model Performance", "B4", "0.73 [0.73–0.73]")
     assert len(mt.workbook_deltas(renamed, GOLDEN, atol=0.0, rtol=0.0, text=True)[0]) == 1
     # the CLI is exact unless --tolerant
     script = ROOT / "scripts" / "compare_study_deltas.py"
@@ -124,15 +124,15 @@ def _shuffle_sites(src: Path, dst: Path) -> Path:
 
 def test_compare_with_delivered_pairs_sites_and_reports_aggregates(tmp_path):
     new = _shuffle_sites(GOLDEN, tmp_path / "new.xlsx")
-    new = _edit(new, new, "Table 2 - Model Performance", "B4", "0.733 (0.730–0.737)")
+    new = _edit(new, new, "Table 2 - Model Performance", "B4", "0.73 (0.73–0.74)")  # two decimals since 0.34.0
     r = compare_with_delivered(new, GOLDEN)
     a = r["answers"]
     assert a["14_site_matching_unambiguous"] and a["4_same_sheets"] and a["7_same_cohort_n"]
     assert a["9_per_sheet"]["Table 5 - Cross-Site LOSO"]["differing_cells"] == 0  # letters differ, numbers paired
-    assert a["9_per_sheet"]["Table 2 - Model Performance"] == {"cells_compared": 10, "differing_cells": 1, "max_abs_auc_change": 0.002}
+    assert a["9_per_sheet"]["Table 2 - Model Performance"] == {"cells_compared": 10, "differing_cells": 1, "max_abs_auc_change": 0.01}
     assert a["8_descriptive_identical"] and a["13_no_direction_or_significance_change"] and a["19_rows_line_up"]
-    assert a["10_table2_auc"]["HistGBM"] == {"delivered": "0.731 (0.728–0.735)", "new": "0.733 (0.730–0.737)"}
-    assert a["11_loso_mean_auc"] == {"delivered": 0.707, "new": 0.707}
+    assert a["10_table2_auc"]["HistGBM"] == {"delivered": "0.73 (0.73–0.73)", "new": "0.73 (0.73–0.74)"}
+    assert a["11_loso_mean_auc"] == {"delivered": 0.71, "new": 0.71}  # the Mean row, two decimals
     import re
 
     assert not re.search(r"Site [A-Z]\b", str(a))  # answers carry no site letters
@@ -185,7 +185,7 @@ def test_compare_with_delivered_files_and_documents(tmp_path):
     import matplotlib.pyplot as plt
 
     old = _full_workbook(tmp_path / "old.xlsx", {"s1": "Site A", "s2": "Site B", "s3": "Site C"})
-    new = _full_workbook(tmp_path / "new.xlsx", {"s1": "Site B", "s2": "Site C", "s3": "Site A"}, auc_hi=0.736)
+    new = _full_workbook(tmp_path / "new.xlsx", {"s1": "Site B", "s2": "Site C", "s3": "Site A"}, auc_hi=0.746)
     # documents: the new run's Table 5 lists its sites in workbook order; the delivered PDF quotes the old CI bound
     docx = tmp_path / "new.docx"
     with zipfile.ZipFile(docx, "w") as z:
@@ -200,7 +200,7 @@ def test_compare_with_delivered_files_and_documents(tmp_path):
         return path
 
     new_pdf = pdf(tmp_path / "new.pdf", "Table 5: LOSO Site B Site C Site A")
-    old_pdf = pdf(tmp_path / "old.pdf", "The best model had an AUC of 0.731 (0.728 to 0.735) in the whole cohort")
+    old_pdf = pdf(tmp_path / "old.pdf", "The best model had an AUC of 0.73 (0.73 to 0.74) in the whole cohort")
     import hashlib
 
     sha = hashlib.sha256(old_pdf.read_bytes()).hexdigest()
