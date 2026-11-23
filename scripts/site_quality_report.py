@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Per-site data-quality report of a study run: every model feature and every Table 1 category, site by site, plus the cohort
+attrition, the outcome mix and (with ``--db-dir``) the unmapped source rows and out-of-range measurements of each site database.
+
+It answers "does one site differ from the others?" for each study input (Dr. Rubin, 2026-11-23: discharge status 44% missing
+against 10% in the legacy table; Kyle's per-site DQD list). Read-only: it reads the run's private per-site files and, with
+``--db-dir``, runs a few GROUP BY queries per site database.
+
+Two outputs, as in ``check_discharge_status.py``:
+
+* ``--detail`` (Markdown, keep it private): one table per domain with a column per site, under the sites' anonymous labels.
+* ``--flags`` (JSON, shareable): the measures where the sites differ by at least ``--pct-gap`` percentage points (shares and
+  missingness) or whose largest site mean is at least ``--ratio`` times the smallest (continuous measures), with the range across
+  sites only: no site label, no count.
+
+Example:
+    python scripts/site_quality_report.py --private-dir <PRIVATE>/run_C8_private --labels <PRIVATE>/labels.json \\
+        --db-dir D:/omop --start 2017-01-01 --end 2022-09-30 \\
+        --detail <PRIVATE>/dq/site_quality.md --flags <PRIVATE>/dq/site_quality_flags.json --max-seconds 1200
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Any, Mapping
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+
+MIN_CELL = 11
+#: measures the report groups by domain (column-name patterns of the benchmark features)
+DOMAINS = [("Outcome and stay mix", r"^(readmitted_30d|index_los_days|prior_ip_count)$"),
+           ("Prior utilization", r"^(prior_|days_since_|readmission_count|n_prior)"),
+           ("Diagnoses and comorbidities", r"^(elix_|charlson_|n_secondary_dx|dx_|ccs_)"),
+           ("Medications", r"^med_"),
+           ("Laboratories", r"^lab_"),
+           ("Vital signs", r"^vital_"),
+           ("Discharge status", r"^disp_"),
+           ("Demographics and social", r"^(age_at_index|female|race_|ethnicity_|hispanic|sdi_|ruca_|tobacco|sdoh_)")]
+
+
+def site_frames(private_dir: Path, labels: Mapping[str, str]) -> dict[str, pd.DataFrame]:
+    """``features_<site>.parquet`` of each labelled site, keyed by the site's anonymous label (sites without a label are skipped)."""
+    out = {}
+    for f in sorted(private_dir.glob("features_*.parquet")):
+        site = f.stem[len("features_"):]
+        if site in labels:
+            out[labels[site]] = pd.read_parquet(f)
+    return dict(sorted(out.items()))
+
+
+def _num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce") if not pd.api.types.is_bool_dtype(s) else s.astype(float)
+
+
+def feature_rows(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    """One row per feature column and site: % missing; for a 0/1 column the % with 1; otherwise mean, SD, median, Q1, Q3."""
+    cols = sorted({c for d in frames.values() for c in d.columns if not str(c).endswith(("_id", "_date", "_datetime")) and c not in ("site_source",)})
+    rows = []
+    for c in cols:
+        for site, d in frames.items():
+            if c not in d:
+                rows.append({"feature": c, "site": site, "present": False})
+                continue
+            v = _num(d[c])
+            n = len(v)
+            nn = v.dropna()
+            r: dict[str, Any] = {"feature": c, "site": site, "present": True, "n": n, "pct_missing": round(100 * (1 - len(nn) / n), 2) if n else None}
+            if len(nn) and set(pd.unique(nn)) <= {0, 1}:
+                r["pct_yes"] = round(100 * float(nn.mean()), 2)
+            elif len(nn):
+                r.update(mean=float(nn.mean()), sd=float(nn.std()) if len(nn) > 1 else None, median=float(nn.median()),
+                         q1=float(nn.quantile(.25)), q3=float(nn.quantile(.75)))
+            rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def category_rows(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    """The Table 1 categories (age, sex, race, ethnicity, SDI, RUCA, discharge status, tobacco, BMI) as % of each site's stays."""
+    from omop_etl.manuscript_tables import manuscript_frame
+
+    rows = []
+    for site, d in frames.items():
+        m = manuscript_frame(d)
+        for col, name in (("m_age", "Age"), ("m_sex", "Sex"), ("m_race", "Race"), ("m_hispanic", "Hispanic"), ("m_sdi", "SDI"),
+                          ("m_ruca", "RUCA"), ("m_disch", "Discharge Status"), ("m_tobacco", "Tobacco"), ("m_bmi", "BMI")):
+            if col not in m:
+                continue
+            vc = m[col].astype(str).value_counts()
+            for lv, k in vc.items():
+                rows.append({"measure": f"{name}: {lv}" if not lv.startswith(name) else lv, "site": site, "n": int(k),
+                             "pct": round(100 * k / len(m), 2)})
+    t = pd.DataFrame(rows)
+    if t.empty:
+        return t
+    # a category a site never uses is 0% there (one site with 100% "Missing / Unknown" must show as 0-100, not 100-100)
+    full = pd.MultiIndex.from_product([t["measure"].unique(), list(frames)], names=["measure", "site"])
+    return t.set_index(["measure", "site"]).reindex(full).fillna({"n": 0, "pct": 0.0}).reset_index()
+
+
+def attrition_rows(private_dir: Path, labels: Mapping[str, str]) -> pd.DataFrame:
+    rows = []
+    for f in sorted(private_dir.glob("attrition_*.csv")):
+        site = f.stem[len("attrition_"):]
+        if site not in labels:
+            continue
+        a = pd.read_csv(f)
+        kept = pd.to_numeric(a["subjects_retained"], errors="coerce")
+        prev = kept.shift(1)
+        for name, k, p in zip(a["step_name"], kept, prev):
+            rows.append({"step": str(name), "site": labels[site], "retained": k,
+                         "pct_excluded": round(100 * (p - k) / p, 2) if pd.notna(p) and p else None})
+    return pd.DataFrame(rows)
+
+
+def db_rows(db_dir: Path, sites: Mapping[str, str], start: str, end: str, deadline: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per site: rows with concept 0 in measurement, drug_exposure and condition_occurrence (dated in the window), with the 10 most
+    frequent unmapped source values; and the share of measurement values outside the bundled physiologic limits per concept."""
+    import duckdb
+
+    from omop_etl.dqd import _sanitize_bundled_limits
+
+    limits = pd.DataFrame(_sanitize_bundled_limits(), columns=["concept_id", "unit_concept_id", "lo", "hi"])
+    unmapped, bounds = [], []
+    for site, label in sites.items():
+        if time.time() > deadline:
+            print(f"time limit reached before {label}; stopping the database part", file=sys.stderr)
+            break
+        con = duckdb.connect(str(db_dir / f"omop_{site}.duckdb"), read_only=True)
+        try:
+            for table, cid, src, date in (("measurement", "measurement_concept_id", "measurement_source_value", "measurement_date"),
+                                          ("drug_exposure", "drug_concept_id", "drug_source_value", "drug_exposure_start_date"),
+                                          ("condition_occurrence", "condition_concept_id", "condition_source_value", "condition_start_date")):
+                tot, zero = con.execute(f"SELECT count(*), count(*) FILTER (WHERE coalesce({cid}, 0) = 0) FROM {table} "
+                                        f"WHERE {date} BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)", [start, end]).fetchone()
+                top = con.execute(f"SELECT {src} AS v, count(*) AS n FROM {table} WHERE coalesce({cid}, 0) = 0 AND {date} "
+                                  f"BETWEEN CAST(? AS DATE) AND CAST(? AS DATE) GROUP BY 1 ORDER BY 2 DESC LIMIT 10", [start, end]).df()
+                unmapped.append({"site": label, "table": table, "rows": int(tot), "pct_concept_0": round(100 * zero / tot, 2) if tot else None,
+                                 "top_unmapped_source_values": "; ".join(f"{v} ({n:,})" for v, n in zip(top["v"], top["n"]))})
+            con.register("_limits", limits)
+            b = con.execute("""SELECT m.measurement_concept_id AS concept_id, count(*) AS n,
+                                      count(*) FILTER (WHERE m.value_as_number < l.lo OR m.value_as_number > l.hi) AS out_of_range
+                               FROM measurement m JOIN _limits l ON m.measurement_concept_id = l.concept_id
+                                    AND (l.unit_concept_id IS NULL OR coalesce(m.unit_concept_id, 0) = l.unit_concept_id)
+                               WHERE m.value_as_number IS NOT NULL AND m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+                               GROUP BY 1""", [start, end]).df()
+            b["site"] = label
+            b["pct_out_of_range"] = (100 * b["out_of_range"] / b["n"]).round(2)
+            bounds.append(b)
+        finally:
+            con.close()
+    return pd.DataFrame(unmapped), (pd.concat(bounds, ignore_index=True) if bounds else pd.DataFrame())
+
+
+def flags(feat: pd.DataFrame, cats: pd.DataFrame, att: pd.DataFrame, unm: pd.DataFrame, bnd: pd.DataFrame,
+          pct_gap: float, ratio: float) -> list[dict[str, Any]]:
+    """Measures where the sites differ: ranges only, no site label or count."""
+    out: list[dict[str, Any]] = []
+
+    def spread(kind: str, name: str, vals: pd.Series, unit: str = "%") -> None:
+        v = pd.to_numeric(vals, errors="coerce").dropna()
+        if len(v) < 2:
+            return
+        lo, hi = float(v.min()), float(v.max())
+        if unit == "%" and hi - lo >= pct_gap:
+            out.append({"domain": kind, "measure": name, "min": round(lo, 1), "max": round(hi, 1), "unit": "%"})
+        elif unit == "mean" and lo > 0 and hi / lo >= ratio:
+            out.append({"domain": kind, "measure": name, "min": round(lo, 2), "max": round(hi, 2), "unit": "site mean"})
+
+    if len(feat):
+        for c, g in feat[feat["present"]].groupby("feature"):
+            dom = next((d for d, pat in DOMAINS if re.search(pat, c)), "Other")
+            spread(dom, f"{c} % missing", g["pct_missing"])
+            if "pct_yes" in g and g["pct_yes"].notna().any():
+                spread(dom, f"{c} % yes", g["pct_yes"])
+            if "mean" in g and g["mean"].notna().any():
+                spread(dom, f"{c} mean", g["mean"], "mean")
+            if (~feat.loc[feat["feature"] == c, "present"]).any():
+                out.append({"domain": dom, "measure": f"{c} absent at some sites", "min": None, "max": None, "unit": ""})
+    if len(cats):
+        for m, g in cats.groupby("measure"):
+            spread("Table 1 categories", m, g["pct"])
+    if len(att):
+        for s, g in att.groupby("step"):
+            spread("Attrition", f"{s} % excluded", g["pct_excluded"])
+    if len(unm):
+        for t, g in unm.groupby("table"):
+            spread("Unmapped rows", f"{t} % concept_id 0", g["pct_concept_0"])
+    if len(bnd):
+        for c, g in bnd.groupby("concept_id"):
+            spread("Physiologic bounds", f"concept {c} % out of range", g["pct_out_of_range"])
+    return out
+
+
+def _md(t: pd.DataFrame, index: bool = True) -> str:
+    """A pipe table without the optional tabulate package."""
+    t = t.reset_index() if index else t
+    cells = [[("" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)) for v in row] for row in t.itertuples(index=False)]
+    head = [str(c) for c in t.columns]
+    return "\n".join(["| " + " | ".join(head) + " |", "|" + "---|" * len(head)] + ["| " + " | ".join(r) + " |" for r in cells]) + "\n"
+
+
+def _wide(df: pd.DataFrame, index: str, value: str) -> str:
+    if df.empty or value not in df:
+        return "(none)\n"
+    return _md(df.pivot_table(index=index, columns="site", values=value, aggfunc="first"))
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument("--private-dir", required=True, type=Path, help="the run's private folder (features_<site>.parquet, attrition_<site>.csv)")
+    p.add_argument("--labels", required=True, type=Path, help="JSON file of site -> anonymous label (the run's private mapping)")
+    p.add_argument("--db-dir", type=Path, help="folder with omop_<site>.duckdb: adds unmapped rows and physiologic bounds per site")
+    p.add_argument("--start", default="2017-01-01")
+    p.add_argument("--end", default="2022-09-30")
+    p.add_argument("--detail", required=True, type=Path, help="per-site tables (keep it private)")
+    p.add_argument("--flags", required=True, type=Path, help="measures where the sites differ, ranges only (shareable)")
+    p.add_argument("--pct-gap", type=float, default=20.0)
+    p.add_argument("--ratio", type=float, default=1.5)
+    p.add_argument("--max-seconds", type=float, default=1200)
+    a = p.parse_args(argv)
+    t0 = time.time()
+    labels = {str(k): str(v) for k, v in json.loads(a.labels.read_text(encoding="utf-8")).items()}
+    frames = site_frames(a.private_dir, labels)
+    if not frames:
+        print("no features_<site>.parquet with a label in --labels", file=sys.stderr)
+        return 1
+    feat, cats, att = feature_rows(frames), category_rows(frames), attrition_rows(a.private_dir, labels)
+    sites = {s: l for s, l in labels.items() if (a.private_dir / f"features_{s}.parquet").exists()}
+    unm, bnd = (db_rows(a.db_dir, sites, a.start, a.end, t0 + a.max_seconds) if a.db_dir else (pd.DataFrame(), pd.DataFrame()))
+    fl = flags(feat, cats, att, unm, bnd, a.pct_gap, a.ratio)
+    a.detail.parent.mkdir(parents=True, exist_ok=True)
+    a.flags.parent.mkdir(parents=True, exist_ok=True)
+    md = [f"# Per-site data quality ({len(frames)} sites, {a.start} to {a.end})", "", "Keep this file with the data: it has per-site counts.", ""]
+    md += ["## Stays per site", "", pd.DataFrame({"site": list(frames), "stays": [len(d) for d in frames.values()]}).pipe(_md, index=False), ""]
+    md += ["## Table 1 categories (% of the site's stays)", "", _wide(cats, "measure", "pct")]
+    md += ["## Attrition (% excluded at each step)", "", _wide(att, "step", "pct_excluded")]
+    for dom, pat in DOMAINS + [("Other", None)]:
+        sub = feat[feat["feature"].map(lambda c: (re.search(pat, c) is not None) if pat else not any(re.search(q, c) for _, q in DOMAINS))]
+        if sub.empty:
+            continue
+        md += [f"## {dom}: % missing", "", _wide(sub, "feature", "pct_missing")]
+        if "pct_yes" in sub and sub["pct_yes"].notna().any():
+            md += [f"## {dom}: % yes (0/1 features)", "", _wide(sub.dropna(subset=["pct_yes"]), "feature", "pct_yes")]
+        if "mean" in sub and sub["mean"].notna().any():
+            s2 = sub.dropna(subset=["mean"]).copy()
+            s2["mean ± SD [Q1, Q3]"] = [f"{m:.2f} ± {sd if sd is not None and not pd.isna(sd) else float('nan'):.2f} [{q1:.2f}, {q3:.2f}]"
+                                        for m, sd, q1, q3 in zip(s2["mean"], s2["sd"], s2["q1"], s2["q3"])]
+            md += [f"## {dom}: mean ± SD [Q1, Q3]", "", _wide(s2, "feature", "mean ± SD [Q1, Q3]")]
+    if len(unm):
+        md += ["## Unmapped rows (concept_id 0) in the window", "", unm.pipe(_md, index=False), ""]
+    if len(bnd):
+        md += ["## Measurements outside the physiologic limits (%)", "", _wide(bnd, "concept_id", "pct_out_of_range")]
+    md += ["## Flags (measures where the sites differ)", "", pd.DataFrame(fl).pipe(_md, index=False) if fl else "(none)", ""]
+    a.detail.write_text("\n".join(md), encoding="utf-8")
+    a.flags.write_text(json.dumps({"sites": len(frames), "pct_gap": a.pct_gap, "ratio": a.ratio, "flags": fl}, indent=1), encoding="utf-8")
+    print(f"{len(fl)} flag(s); done in {time.time() - t0:.0f} s")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -25,7 +25,7 @@ import pandas as pd
 
 from omop_etl.study_report import _newton_logit, export_workbook
 
-__all__ = ["feature_label", "FEATURE_LABELS", "manuscript_frame", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
+__all__ = ["feature_label", "FEATURE_LABELS", "manuscript_frame", "bmi_age_readmission", "round_metric_text", "TABLE1_DECIMALS", "METRIC_DECIMALS", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
            "manuscript_workbook", "compare_workbooks", "workbook_similarity", "workbook_deltas", "delta_summary", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER", "ManuscriptValidationError", "validate_manuscript_sheets"]
 
 EN = "–"
@@ -202,15 +202,31 @@ def _grp(df: pd.DataFrame, label_col: str):
     return [("Whole cohort", np.ones(len(df), bool)), ("Subset with readmission", y == 1), ("Subset without readmission", y == 0)]
 
 
+#: decimal places of the percentages and mean +- SD of Table 1, and of the model metrics of Tables 2 and 5 (printed Tables 2 and 3)
+#: and of the text that quotes them (Dr. Rubin, 2026-11-23; the Nov 11 deliverable printed 2 and 3)
+TABLE1_DECIMALS = 1
+METRIC_DECIMALS = 2
+
+
 def _n_pct(mask: np.ndarray, base: np.ndarray, min_cell: int | None) -> str:
     n, d = int((mask & base).sum()), int(base.sum())
     shown = f"<{min_cell}" if (min_cell and 0 < n < min_cell) else f"{n}"
-    return f"{shown} ({100 * n / d:.2f}%)" if d else ""
+    return f"{shown} ({100 * n / d:.{TABLE1_DECIMALS}f}%)" if d else ""
 
 
 def _ms(v: pd.Series) -> str:
     v = pd.to_numeric(v, errors="coerce").dropna()
-    return f"{v.mean():.2f} {PM} {v.std():.2f}" if len(v) > 1 else ""
+    return f"{v.mean():.{TABLE1_DECIMALS}f} {PM} {v.std():.{TABLE1_DECIMALS}f}" if len(v) > 1 else ""
+
+
+def round_metric_text(v: Any, digits: int = METRIC_DECIMALS) -> Any:
+    """Every decimal number in a metric cell ("0.7312 (0.7254–0.7371)", 0.6381) to ``digits`` places; whole numbers and text
+    are left alone."""
+    if isinstance(v, (float, np.floating)) and not pd.isna(v):
+        return round(float(v), digits)
+    if isinstance(v, str):
+        return re.sub(r"(?<![\d.])\d+\.\d+(?![\d.])", lambda m: f"{float(m.group()):.{digits}f}", v)
+    return v
 
 
 # ------------------------------------------------------------------ Table 1
@@ -264,6 +280,35 @@ def manuscript_table1(df: pd.DataFrame, *, label_col: str = "readmitted_30d", mi
         cont(lab, _col(m, *names))
     out = [{"Feature": lab, **{g: f(mk) for g, mk in groups}} for lab, f in rows]
     return pd.DataFrame(out)
+
+
+# ------------------------------------------------------------------ BMI by age
+def bmi_age_readmission(df: pd.DataFrame, *, label_col: str = "readmitted_30d", min_cell: int | None = 11,
+                        medications: Sequence[str] = ("med_insulins", "med_biguanides")) -> pd.DataFrame:
+    """Readmission by BMI band within each age group (Dr. Rubin, 2026-11-23: is the lower readmission rate with obesity an age
+    effect?). One row per age group and BMI band: ``N``, ``% of age group``, ``30-day readmission (%)`` and, for each column of
+    ``medications`` present, the % of the stays with that medication. Pooled over sites; counts under ``min_cell`` print as
+    "<11" and their rates are left blank."""
+    m = manuscript_frame(df)
+    if "m_age" not in m or "m_bmi" not in m:
+        raise ValueError("bmi_age_readmission needs an age column (age_at_index) and vital_bmi.")
+    y = pd.to_numeric(m[label_col], errors="coerce")
+    meds = [(c, lab) for c, lab in _MEDS if c in medications and c in m]
+    rows = []
+    for age in _AGE:
+        in_age = (m["m_age"] == age).to_numpy()
+        n_age = int(in_age.sum())
+        for band in _BMI:
+            sel = in_age & (m["m_bmi"] == band).to_numpy()
+            n = int(sel.sum())
+            small = bool(min_cell) and 0 < n < min_cell
+            row = {"Age group": age.replace("Age: ", ""), "BMI category": band.replace("BMI: ", ""), "N": f"<{min_cell}" if small else f"{n:,}",
+                   "% of age group": "" if small or not n_age else f"{100 * n / n_age:.1f}",
+                   "30-day readmission (%)": "" if small or not n else f"{100 * float(y[sel].mean()):.1f}"}
+            for c, lab in meds:
+                row[f"{lab.replace('Medication: ', '')} (%)"] = "" if small or not n else f"{100 * float((pd.to_numeric(m.loc[sel, c], errors='coerce') == 1).mean()):.1f}"
+            rows.append(row)
+    return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------------ Table S2
@@ -652,7 +697,10 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
     sheets["Table 1 - Descriptive"] = (f"Table 1: Baseline Descriptive Characteristics at the Randomly Drawn Index Stay (N = {n:,})",
                                       manuscript_table1(df, label_col=label_col, min_cell=min_cell, frame=m))
     if "Model_Performance" in tables:
-        sheets["Table 2 - Model Performance"] = ("Table 2: Primary Benchmark Model Performance (50/50 Balanced Training, F1-Tuned, 5-Fold Grouped CV)", tables["Model_Performance"])
+        perf = tables["Model_Performance"].copy()
+        for c in perf.columns[1:]:
+            perf[c] = perf[c].map(round_metric_text)
+        sheets["Table 2 - Model Performance"] = ("Table 2: Primary Benchmark Model Performance (50/50 Balanced Training, F1-Tuned, 5-Fold Grouped CV)", perf)
     if "Tuning_AUC_vs_F1" in tables:
         sheets["Table 3 - Tuning AUC vs F1"] = ("Table 3: Hyperparameter Selection Comparison: Fixed Benchmark vs. Tuned for AUC-ROC vs. Tuned for F1", tables["Tuning_AUC_vs_F1"])
     if "By_Stay_Type_AUC" in tables:
@@ -667,15 +715,17 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
         t = tables["LOSO_By_Site"]
         base = {"Held-out site": t["site"], "Test patients": t["n"].map("{:,}".format),
                 "Training patients (other systems)": (t["n"].sum() - t["n"]).map("{:,}".format),
-                "AUC-ROC (95% CI)": [f"{a:.3f} ({l:.3f}{EN}{h:.3f})" for a, l, h in zip(t["auroc"], t["auroc_lo"], t["auroc_hi"])]}
+                "AUC-ROC (95% CI)": [f"{a:.{METRIC_DECIMALS}f} ({l:.{METRIC_DECIMALS}f}{EN}{h:.{METRIC_DECIMALS}f})"
+                                     for a, l, h in zip(t["auroc"], t["auroc_lo"], t["auroc_hi"])]}
         if table5 == "manuscript" and "sensitivity_050" in t:
             # F1 at the 0.5 threshold since 0.33.0 (the models are tuned to F1); a results table from an earlier release has only Brier
             first = ("F1", "f1_050") if "f1_050" in t else ("Brier", "brier_uncalibrated")
             cols = [first, ("Sensitivity", "sensitivity_050"), ("Specificity", "specificity_050")]
         else:
             cols = [("Brier", "brier"), ("Top-10% sensitivity", "top10_sensitivity"), ("Top-10% PPV", "top10_ppv")]
-        lo = pd.DataFrame({**base, **{name: t[src].round(3) for name, src in cols}})
-        mean_row = [(f"Mean of {_WORDS.get(len(t), len(t))} sites", None, None, f"{t['auroc'].mean():.3f}")] + [round(float(t[src].mean()), 3) for _, src in cols]
+        lo = pd.DataFrame({**base, **{name: t[src].round(METRIC_DECIMALS) for name, src in cols}})
+        mean_row = ([(f"Mean of {_WORDS.get(len(t), len(t))} sites", None, None, f"{t['auroc'].mean():.{METRIC_DECIMALS}f}")]
+                    + [round(float(t[src].mean()), METRIC_DECIMALS) for _, src in cols])
         lo.loc[len(lo)] = [x for part in mean_row for x in (part if isinstance(part, tuple) else (part,))]
         sheets["Table 5 - Cross-Site LOSO"] = (f"Table 5: Harmonized Leave-One-Site-Out (LOSO) Cross-Site External Validation Across {len(t)} Health Systems", lo)
     sheets["Table 6 - Multivariable LR"] = ("Table 6: Multivariable Logistic Regression Independent Risk Factors for 30-Day Readmission",
