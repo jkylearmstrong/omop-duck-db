@@ -380,8 +380,13 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
         # but missing from the Section 2.2 list, which was read from Table 4 only)
         from omop_etl.manuscript_tables import feature_label
 
-        cols = pd.read_csv(miss).iloc[:, 0].astype(str)
-        model_labs = [feature_label(c) for c in cols if re.fullmatch(r"lab_[a-z0-9_]+", c) and not c.endswith("_last")]
+        mt = pd.read_csv(miss)
+        cols = mt.iloc[:, 0].astype(str)
+        # a column with no values at any site is not a laboratory the models used (0.33.6 listed the ten empty columns here too)
+        empty = set(map(str, summ.get("empty_columns") or []))
+        if "pct_missing" in mt:
+            empty |= set(cols[pd.to_numeric(mt["pct_missing"], errors="coerce") >= 100])
+        model_labs = [feature_label(c) for c in cols if re.fullmatch(r"lab_[a-z0-9_]+", c) and not c.endswith("_last") and c not in empty]
         extra = [x for x in dict.fromkeys(model_labs) if x not in ctx["lr"]["labs"]]
         if extra:
             ctx["lr"]["labs"] = list(ctx["lr"]["labs"]) + extra

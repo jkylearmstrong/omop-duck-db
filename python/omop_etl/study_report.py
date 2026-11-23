@@ -531,7 +531,8 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     ``attrition`` needs ``step_name``, ``subjects_retained`` and ``subjects_dropped`` (the shape of
     :func:`omop_etl.consort.consort_from_counts` / ``pool_consort_tables``, summed over sites); the first row is the source
     population. An optional ``excluded_label`` column replaces the exclusion text of a step (default ``"Excluded: did not meet <step>"``), and an optional
-    ``excluded_shown`` column set to False draws a step without its exclusion arrow.
+    ``excluded_shown`` column set to False draws a step without its exclusion arrow, and steps with ``into_final`` True (the last rows;
+    the random draw of one stay per patient) get no box: their exclusions branch off the arrow into the analytic cohort box.
     ``n`` is the analytic cohort size and ``n_readmitted`` its events. Returns the matplotlib Figure.
 
     Layout (since 0.33.0) follows the usual journal cohort figure (e.g. McCoy et al., JGIM 2017): the boxes form one column joined
@@ -550,6 +551,14 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     steps = [(str(r.step_name), int(r.subjects_retained), int(r.subjects_dropped)) for r in attrition.itertuples()]
     excluded = [str(x) if isinstance(x, str) and x.strip() else None for x in labels]
     shown = [bool(x) for x in attrition["excluded_shown"]] if "excluded_shown" in attrition else [True] * len(attrition)
+    # steps marked into_final (the random draw of one stay per patient) get no box of their own: their exclusions branch off the
+    # down arrow into the analytic cohort box, so the figure has one random-stay box (Kyle, 2026-11-23)
+    final = [bool(x) for x in attrition["into_final"]] if "into_final" in attrition else [False] * len(attrition)
+    if any(final) and not all(final[final.index(True):]):
+        raise ValueError("into_final steps must be the last rows of attrition.")
+    final_notes = [(excluded[i] or f"Excluded: did not meet {steps[i][0]}", steps[i][2]) for i in range(len(steps)) if final[i] and steps[i][2] > 0]
+    keep = [i for i in range(len(steps)) if not final[i]]
+    steps, excluded, shown = [steps[i] for i in keep], [excluded[i] for i in keep], [shown[i] for i in keep]
     # all positions are in inches: the axes fill the figure, x runs 0..W, y runs down from 0 and the height is set at the end
     W = 9.5
     x0, x1 = 0.2, 5.1                  # main column edges
@@ -615,7 +624,14 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
             arrow(cx, bottom, cx, y)   # down arrow from the box above into this one; the exclusion branches off its midpoint
         bottom = box(x0, x1, y, text, h, main)
     text, h = box_text([f"Analytic cohort: {final_box}", f"N = P = {n:,}"], x1 - x0, main)
-    y = bottom - min_gap
+    gap = min_gap
+    if final_notes:
+        note = "\n".join(line for label, k in final_notes for line in wrap(label, W - branch_x - 0.15, excl) + [f"P = {k:,} patients"])
+        gap = max(min_gap, measure(note, excl)[1] + 0.18)
+        mid = bottom - gap / 2
+        arrow(cx, mid, branch_x - 0.08, mid)
+        ax.text(branch_x, mid, note, ha="left", va="center", **excl)
+    y = bottom - gap
     arrow(cx, bottom, cx, y)
     final_bottom = box(x0, x1, y, text, h, main)
     lx, rx = (x0 + cx - 0.1) / 2, (cx + 0.1 + x1) / 2
@@ -990,7 +1006,7 @@ def build_study_tables(df: pd.DataFrame, out_dir: str | Path, *, prefix: str = "
         tables["Logistic_Regression"] = logistic_regression_table(X.drop(columns=[c for c in lr_drop_cols if c in X.columns]), y)
         tables["Missingness"] = missingness_table(df, site_col=site_col, label_col=label_col, min_cell=min_cell)
     if attrition is not None:
-        tables["CONSORT_Attrition"] = attrition.drop(columns=["excluded_label", "excluded_shown"], errors="ignore").reset_index(drop=True)
+        tables["CONSORT_Attrition"] = attrition.drop(columns=["excluded_label", "excluded_shown", "into_final"], errors="ignore").reset_index(drop=True)
     for k, v in (extra_tables or {}).items():
         tables[k] = v
     if los_col in df and site_col in df:

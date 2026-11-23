@@ -1,3 +1,12 @@
+# omopduckdb 0.33.7
+
+Patch release for Kyle's list for the final draft (C9, 2026-11-23). The cohort, features, models and workbook do not change. Figure 1 is drawn again from a finished run's files, and the manuscript is re-rendered. Version bump 0.33.6 to 0.33.7; the manuscript text template stays v0.33.6.
+
+- **Figure 1 has one random-stay box.** 0.33.5 drew the study's random draw of one stay per patient as a box of its own ("Randomly selected qualifying stay per patient") between the grant window and the analytic cohort, so the figure had two random-stay boxes and the patients outside the draw disappeared without an arrow. The grant protocol window box now leads straight into "Analytic cohort: one randomly drawn stay per patient". The patients whose qualifying stay is not in the study's draw branch off that down arrow ("Excluded: qualifying stay not in the study's original random draw"), so every count adds up and every exclusion sits on a down arrow. `figure1_attrition()` marks that step with `into_final`, and `plot_cohort_flowchart()` draws no box for it. A run without a pinned list ends at the window step as before.
+- **`redraw_cohort_flowchart(run_dir)`** draws Figure 1 again from `<prefix>_CONSORT_Attrition.csv` and the N row of `<prefix>_Table1.csv`, with no data access. It brings an older run's figure up to date before a re-render.
+- **Section 2.2 lab list.** 0.33.6 read "the laboratories the models used" from the missingness table, which also lists columns with no values at any site. Those are now left out, so the ten empty source columns are named only in the sentence that says they are empty.
+- **`omop_etl.manuscript_checks`** turns Kyle's text checks of a rendered PDF into a function and a command (`python -m omop_etl.manuscript_checks Study_Manuscript.pdf`). It checks the title on page 1; no "pinned"; no `_last` lab or "(last value)"; seven reference rows in Table 4; F1 and no Brier in Table 3; References ending on the last page; each empty source column named once; and no column names in the text. It ignores line breaks inside phrases ("heart\nrate"). `tests/test_manuscript_fixes_0337.py` runs it on a rendered manuscript and checks that it catches each problem.
+
 # omopduckdb 0.33.6
 
 Patch release from a page-by-page audit of the run C8 manuscript (2026-11-22), before the draft goes to Dr. Rubin. The cohort, features, models and workbook do not change; only the printed manuscript does, so a run can be re-rendered from its saved outputs. Version bump 0.33.5 to 0.33.6; manuscript template v0.33.6.
