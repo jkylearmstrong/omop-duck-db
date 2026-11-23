@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 from omop_etl.concept_sets import CONCEPT_SET_VERSION, LEGACY_CONCEPT_SETS  # noqa: E402
 
@@ -436,8 +436,7 @@ def figure1_attrition(attrition: pd.DataFrame, start: str, end: str) -> pd.DataF
     """The steps Figure 1 draws, summed over sites: every eligibility rule, then the grant protocol window (index admission from
     ``start`` to ``end``, one stay per patient) and, with pinned stays, the pinned list, so the figure ends at the analysed cohort.
     Returns ``step_name``, ``subjects_retained``, ``subjects_dropped``, ``excluded_label`` (the text of the exclusion arrow) and
-    ``excluded_shown`` (False for the pinned-list step, which the figure labels "Randomly selected qualifying stay per patient" and draws
-    without an exclusion arrow)."""
+    ``excluded_shown`` and ``into_final`` (True for the random-draw step, :func:`mark_random_draw`)."""
     from omop_etl.manuscript_text import _date_text
 
     first = attrition.groupby("step_name", sort=False)["subjects_retained"].sum().rename("subjects_retained").reset_index()
@@ -446,12 +445,52 @@ def figure1_attrition(attrition: pd.DataFrame, start: str, end: str) -> pd.DataF
     win = first["step_name"].astype(str).str.startswith("Index admission ")
     first.loc[win, "excluded_label"] = "Excluded: no qualifying index admission in the grant protocol window"
     first.loc[win, "step_name"] = f"Grant protocol window: index admission {_date_text(start)} to {_date_text(end)}"
-    # the pinned list is the study's own random draw of one qualifying stay per patient: the figure names the step for what it is and
-    # draws no exclusion arrow for it (Kyle, 2026-11-22: "pinned list" is internal wording); the run record keeps the step's counts
-    pin = first["step_name"].astype(str).str.startswith("Stay selected for the patient")
-    first["excluded_shown"] = ~pin
-    first.loc[pin, "step_name"] = "Randomly selected qualifying stay per patient"
-    return first
+    # the pinned list is the study's own random draw of one qualifying stay per patient. Since 0.33.7 the figure draws no box for it: the
+    # grant window box leads straight into the analytic cohort box, and the patients whose qualifying stay is not in the draw branch off
+    # that last down arrow (Kyle, 2026-11-23: one random-stay box, no "pinned" anywhere); the run record keeps the step's counts
+    return mark_random_draw(first)
+
+
+RANDOM_DRAW_STEP = "Randomly selected qualifying stay per patient"
+RANDOM_DRAW_EXCLUDED = "Excluded: qualifying stay not in the study's original random draw"
+
+
+def mark_random_draw(steps: pd.DataFrame) -> pd.DataFrame:
+    """Marks the random-draw step of a Figure 1 attrition table (named "Stay selected for the patient ..." by the run, or
+    :data:`RANDOM_DRAW_STEP` in a saved ``<prefix>_CONSORT_Attrition.csv``): it gets the name :data:`RANDOM_DRAW_STEP`, the exclusion text
+    :data:`RANDOM_DRAW_EXCLUDED` and ``into_final=True``, so :func:`omop_etl.study_report.plot_cohort_flowchart` draws no box for it and
+    shows its excluded patients on the arrow into the analytic cohort box."""
+    out = steps.copy()
+    name = out["step_name"].astype(str)
+    pin = name.str.startswith("Stay selected for the patient") | (name == RANDOM_DRAW_STEP)
+    if "excluded_label" not in out:
+        out["excluded_label"] = None
+    out["excluded_label"] = out["excluded_label"].astype(object)
+    out.loc[pin, "step_name"] = RANDOM_DRAW_STEP
+    out.loc[pin, "excluded_label"] = RANDOM_DRAW_EXCLUDED
+    out["excluded_shown"] = True
+    out["into_final"] = pin.to_numpy()
+    return out
+
+
+def redraw_cohort_flowchart(run_dir: str | Path, *, prefix: str = "Study", path: str | Path | None = None, label_col: str = "readmitted_30d") -> Path:
+    """Draws Figure 1 again from a finished run's shareable outputs, with no data access: the pooled steps in
+    ``<prefix>_CONSORT_Attrition.csv`` and the cohort and readmission counts in the "N" row of ``<prefix>_Table1.csv``. Writes
+    ``<prefix>_Figure1_Cohort_Flowchart.png`` in ``run_dir`` (or ``path``) and returns its path. Use it to bring an older run's figure up to
+    the current layout before re-rendering its manuscript."""
+    from omop_etl.study_report import plot_cohort_flowchart
+
+    run_dir = Path(run_dir)
+    steps = pd.read_csv(run_dir / f"{prefix}_CONSORT_Attrition.csv")
+    t1 = pd.read_csv(run_dir / f"{prefix}_Table1.csv", dtype=str)
+    row = t1[t1["Variable"].astype(str) == "N"].iloc[0]
+    n, events = int(float(row["Overall"])), int(float(row[f"{label_col}=1"]))
+    out = Path(path) if path is not None else run_dir / f"{prefix}_Figure1_Cohort_Flowchart.png"
+    win = steps["step_name"].astype(str).str.startswith("Grant protocol window")
+    steps["excluded_label"] = None
+    steps.loc[win, "excluded_label"] = "Excluded: no qualifying index admission in the grant protocol window"
+    plot_cohort_flowchart(mark_random_draw(steps), n, events, path=out)
+    return out
 
 
 def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:

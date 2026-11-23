@@ -64,19 +64,16 @@ def _attrition() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_figure1_names_the_random_stay_and_draws_no_pinned_list_arrow():
+def test_figure1_has_no_pinned_list_wording():
+    """0.33.5 named the step "Randomly selected qualifying stay per patient"; since 0.33.7 it has no box at all (test_manuscript_fixes_0337)."""
     pytest.importorskip("matplotlib")
     from omop_etl.study_report import flowchart_overlaps, plot_cohort_flowchart
 
     f = figure1_attrition(_attrition(), "2017-01-01", "2022-09-30")
-    assert f["step_name"].iloc[-1] == "Randomly selected qualifying stay per patient"
-    assert list(f["excluded_shown"]) == [True, True, True, False]
     assert int(f["subjects_retained"].iloc[-1]) == 87 and int(f["subjects_dropped"].iloc[-1]) == 3  # the record keeps the counts
     fig = plot_cohort_flowchart(f, 87, 9)
     texts = [" ".join(t.get_text().split()) for t in fig.axes[0].texts]
     assert not any("pinned" in t.lower() for t in texts)
-    assert any(t.startswith("Randomly selected qualifying stay per patient") for t in texts)
-    assert not any(t.startswith("Excluded") and "P = 3 patients" in t for t in texts)
     assert any(t.startswith("Excluded: no qualifying index admission in the grant protocol window") for t in texts)
     assert flowchart_overlaps(fig) == []
 
