@@ -341,6 +341,8 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     ctx["random_draw"] = _random_draw(wb, prefix)
     if run_rec.get("random_draw_redrawn"):  # patients whose stay in the reused draw is no longer eligible, given another eligible stay
         ctx["random_draw"]["redrawn"] = int(run_rec["random_draw_redrawn"])
+    # how a stay with no BMI recorded during the stay was filled (0.34.1); a run record without "bmi_fill" gets its profile's default
+    ctx["bmi_fill"] = run_rec.get("bmi_fill") or ("derive_lookback" if run_rec.get("profile", "ederri") in ("ederri", "both") else "derive")
     if ctx["cohort"].get("contrast"):
         ctx["table1_contrast"] = " and ".join(ctx["cohort"].pop("contrast"))
     window = run_rec.get("window")
@@ -666,8 +668,10 @@ def _caption_with_context(cap: str, context: Mapping[str, Any]) -> str:
     words_ = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     cap = cap.replace("{nsites_word}", words_.get(n, str(n)) if n else "").replace("  ", " ")
     k = (context.get("random_draw") or {}).get("excluded")
-    cap = cap.replace("{draw_note}", f" The study scores the stays of one random draw, made once and reused in every analysis; the {k:,} patients whose "
-                                     "qualifying stays in the window were not in that draw branch off the last arrow." if k else "")
+    cap = cap.replace("{draw_note}", (f" The study scores the stays of one random draw, made once and reused in every analysis; the {k:,} "
+                                      + ("patient whose qualifying stays in the window were not in that draw branches" if k == 1 else
+                                         "patients whose qualifying stays in the window were not in that draw branch")
+                                      + " off the last arrow.") if k else "")
     shap_n = (context.get("shap") or {}).get("n_sample")
     return cap.replace("{shap_n}", f"{shap_n:,}") if shap_n else cap.replace(", {shap_n} Sampled Patients", "")
 

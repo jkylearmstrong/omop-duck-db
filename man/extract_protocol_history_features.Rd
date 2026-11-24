@@ -22,7 +22,7 @@ One row per cohort row, in cohort order: \code{prior_encounters_all_count}, \cod
 9203 and observation 581385 visits; also the custom concept 2000000048), \code{days_since_prior_encounter}, \code{days_since_prior_ip_ed} (\code{lookback_days} when there is none),
 \code{readmission_count_twelve_months}, \code{n_secondary_dx_ccs} (distinct condition concepts from admission to discharge),
 \code{elix_pre_index_conditions_count} (distinct condition concepts before the admission, all history) and \code{tobacco}
-(\code{"Current user"}, \code{"Former user"} or \code{"Never user"} from tobacco observation concepts and ICD F17 / Z72.0 / 305.1 / Z87.891 /
+(\code{"Current user"}, \code{"Former user"}, \code{"Never user"} or, with no status, \code{"Missing / Unknown"} (0.34.1), from tobacco observation concepts, the PCORnet VITAL smoking status (43054909) and ICD F17 / Z72.0 / 305.1 / Z87.891 /
 V15.82). Visits are counted in \verb{[admission - lookback_days, admission)}; diagnoses and observations up to the discharge date.
 Same as Python \code{omop_etl.extract_protocol_history_features}.
 }

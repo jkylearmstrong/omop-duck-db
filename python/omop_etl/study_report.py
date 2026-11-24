@@ -50,6 +50,11 @@ DEFAULT_ID_COLUMNS = (
 )
 
 
+def _patients(k: int) -> str:
+    """"patient" for a count of 1, else "patients" (Figure 1 printed "1 patients")."""
+    return "patient" if int(k) == 1 else "patients"
+
+
 def _sk():
     try:
         import sklearn  # noqa: F401
@@ -611,11 +616,11 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     bottom = y
     for i, (name, kept, dropped) in enumerate(steps):
         dropped = dropped if shown[i] else 0
-        text, h = box_text([first_box if i == 0 else name, f"P = {kept:,} patients"], x1 - x0, main)
+        text, h = box_text([first_box if i == 0 else name, f"P = {kept:,} {_patients(kept)}"], x1 - x0, main)
         if i > 0:
             gap = min_gap
             if dropped:
-                note = "\n".join(wrap(excluded[i] or f"Excluded: did not meet {name}", W - branch_x - 0.15, excl) + [f"P = {dropped:,} patients"])
+                note = "\n".join(wrap(excluded[i] or f"Excluded: did not meet {name}", W - branch_x - 0.15, excl) + [f"P = {dropped:,} {_patients(dropped)}"])
                 gap = max(min_gap, measure(note, excl)[1] + 0.18)
                 mid = bottom - gap / 2
                 arrow(cx, mid, branch_x - 0.08, mid)
@@ -626,7 +631,7 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     text, h = box_text([f"Analytic cohort: {final_box}", f"N = P = {n:,}"], x1 - x0, main)
     gap = min_gap
     if final_notes:
-        note = "\n".join(line for label, k in final_notes for line in wrap(label, W - branch_x - 0.15, excl) + [f"P = {k:,} patients"])
+        note = "\n".join(line for label, k in final_notes for line in wrap(label, W - branch_x - 0.15, excl) + [f"P = {k:,} {_patients(k)}"])
         gap = max(min_gap, measure(note, excl)[1] + 0.18)
         mid = bottom - gap / 2
         arrow(cx, mid, branch_x - 0.08, mid)
