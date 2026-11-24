@@ -840,7 +840,11 @@ def backfill_drug_concepts(con):
     # relationship ('RxNorm has ing', 'Has ingredient', 'Brand name of', 'Tradename of'), whatever the relationship's validity
     # (a deprecated concept keeps retired links), and for a deprecated ingredient a standard ingredient of the same name. Only a
     # valid standard Ingredient counts, and only when there is exactly one, so a combination product stays as it is.
-    has_ds = con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'drug_strength' LIMIT 1").fetchone()
+    try:  # the unqualified name must resolve (a drug_strength in another attached catalog does not count)
+        con.execute("SELECT 1 FROM drug_strength LIMIT 0")
+        has_ds = True
+    except duckdb.Error:
+        has_ds = False
     ds_sql = "UNION SELECT r.src, ds.ingredient_concept_id FROM rel r JOIN drug_strength ds ON ds.drug_concept_id = r.cid" if has_ds else ""
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _ding AS
         WITH s AS (SELECT DISTINCT src FROM ({nonstd})),
