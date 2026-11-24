@@ -167,3 +167,32 @@ def test_tobacco_is_the_latest_status_up_to_discharge():
                            "cohort_end_date": pd.to_datetime(["2020-01-15"] * 5)})
     assert extract_protocol_history_features(c, cohort)["tobacco"].tolist() == [
         "Former user", "Current user", "Current user", "Never user", "Missing / Unknown"]
+
+
+def test_deprecated_and_brand_name_drugs_take_their_single_ingredient():
+    """C16 audit: the rows left were deprecated RxNorm drugs and Brand Name concepts with no 'Maps to'."""
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE concept AS SELECT * FROM (VALUES
+        (1, 'Lantus', 'RxNorm', 'Brand Name', NULL, NULL, 'x'),
+        (2, 'Janumet', 'RxNorm', 'Brand Name', NULL, NULL, 'x'),
+        (3, 'insulin glargine 100 UNT/ML [Lantus]', 'RxNorm', 'Branded Drug', NULL, 'D', 'x'),
+        (4, 'insulin glargine 100 UNT/ML', 'RxNorm', 'Clinical Drug', NULL, 'D', 'x'),
+        (5, 'Metformin', 'RxNorm', 'Ingredient', NULL, 'D', 'x'),
+        (6, 'retired, no links', 'RxNorm', 'Clinical Drug', NULL, 'D', 'x'),
+        (100, 'insulin glargine', 'RxNorm', 'Ingredient', 'S', NULL, 'x'),
+        (101, 'metformin', 'RxNorm', 'Ingredient', 'S', NULL, 'x'),
+        (102, 'sitagliptin', 'RxNorm', 'Ingredient', 'S', NULL, 'x'))
+        t(concept_id, concept_name, vocabulary_id, concept_class_id, standard_concept, invalid_reason, concept_code)""")
+    con.execute("""CREATE TABLE concept_relationship AS SELECT * FROM (VALUES
+        (999, 100, 'Maps to', NULL),
+        (1, 100, 'Brand name of', NULL), (2, 101, 'Brand name of', NULL), (2, 102, 'Brand name of', NULL),
+        (3, 4, 'Tradename of', 'D'))
+        t(concept_id_1, concept_id_2, relationship_id, invalid_reason)""")
+    con.execute("CREATE TABLE drug_strength AS SELECT 4 AS drug_concept_id, 100 AS ingredient_concept_id")
+    con.execute("""CREATE TABLE drug_exposure AS SELECT * FROM (VALUES (1, 1, 0, 'a'), (2, 2, 0, 'b'), (3, 3, 0, 'c'), (4, 5, 0, 'd'),
+        (5, 6, 0, 'e')) t(drug_exposure_id, drug_concept_id, drug_source_concept_id, drug_source_value)""")
+    got = backfill_drug_concepts(con)
+    rows = dict(con.execute("SELECT drug_exposure_id, drug_concept_id FROM drug_exposure").fetchall())
+    assert rows == {1: 100, 2: 2, 3: 100, 4: 101, 5: 6}   # brand, deprecated branded drug via its clinical drug, deprecated ingredient by name
+    assert got["by_maps_to"] == 0 and got["by_ingredient"] == 3 and got["non_standard_after"] == 2
+    assert con.execute("SELECT drug_source_concept_id FROM drug_exposure WHERE drug_exposure_id = 3").fetchone()[0] == 3
