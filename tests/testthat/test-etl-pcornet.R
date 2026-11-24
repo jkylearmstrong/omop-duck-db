@@ -316,3 +316,30 @@ test_that("diagnosis codes without dots or with the wrong DX_TYPE still map (0.3
   expect_equal(got$c, c(201826, 201826, 201826, 201826, 0))
   expect_equal(got$s, c(45576876, 45576876, 45576876, 44821787, 0))
 })
+
+test_that("an unknown DX_TYPE uses the ICD revision of the diagnosis date, and a valid concept wins (0.34.1)", {
+  source_dir <- tempfile()
+  dir.create(source_dir)
+  writeLines("PATID,SEX,BIRTH_DATE,RACE,HISPANIC\np1,F,1960-01-01,05,N\n", file.path(source_dir, "demographic.csv"))
+  writeLines(paste0("DIAGNOSISID,PATID,DX_TYPE,DX,DX_DATE,ADMIT_DATE,PDX,PROVIDERID,ENCOUNTERID\n",
+                    "d1,p1,NI,E11.9,2018-01-01,2018-01-01,P,,e1\nd2,p1,,E8809,2014-01-01,2014-01-01,S,,e1\n",
+                    "d3,p1,OT,E8809,2018-01-01,2018-01-01,S,,e1\nd4,p1,10,I10,2018-01-01,2018-01-01,S,,e1\n"),
+             file.path(source_dir, "diagnosis.csv"))
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit(unlink(db_path))
+  build_schema(db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path)
+  DBI::dbExecute(con, "INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept,
+                       concept_code, valid_start_date, valid_end_date, invalid_reason) VALUES
+    (45576876, 'Type 2 diabetes', 'Condition', 'ICD10CM', 'code', NULL, 'E11.9', DATE '1970-01-01', DATE '2099-12-31', NULL),
+    (35206882, 'Plasma-protein disorder', 'Condition', 'ICD10CM', 'code', NULL, 'E88.09', DATE '1970-01-01', DATE '2099-12-31', NULL),
+    (44834000, 'Fall on stairs', 'Condition', 'ICD9CM', 'code', NULL, 'E880.9', DATE '1970-01-01', DATE '2099-12-31', NULL),
+    (100, 'deprecated twin', 'Condition', 'ICD10CM', 'code', NULL, 'I10', DATE '1970-01-01', DATE '2015-12-31', 'D'),
+    (320128, 'Essential hypertension', 'Condition', 'ICD10CM', 'code', NULL, 'I10.', DATE '1970-01-01', DATE '2099-12-31', NULL)")
+  DBI::dbDisconnect(con, shutdown = TRUE)
+  etl_pcornet(source_dir = source_dir, db_path = db_path)
+  con <- DBI::dbConnect(duckdb::duckdb(), dbdir = db_path, read_only = TRUE)
+  on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+  got <- DBI::dbGetQuery(con, "SELECT condition_source_concept_id AS s FROM condition_occurrence ORDER BY condition_occurrence_id")
+  expect_equal(got$s, c(45576876, 44834000, 35206882, 320128))
+})

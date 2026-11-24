@@ -769,26 +769,29 @@ def backfill_discharge_status(con, supplemental_csv=None, *, remap=True):
 
     ``supplemental_csv``: a PCORnet-style file with ENCOUNTERID and DISCHARGE_STATUS (other columns ignored). Its status replaces
     ``discharged_to_source_value`` of the visit whose ``visit_source_value`` is that ENCOUNTERID, where the supplemental status
-    is informative and the visit's is not (NI, UN, blank or NULL). An ENCOUNTERID listed more than once is skipped.
-    ``remap``: then sets ``discharged_to_concept_id`` of every visit from its source value with :func:`discharge_status_case`.
+    is informative and the visit's is not (NI, UN, blank or NULL); both ids are compared trimmed. An ENCOUNTERID listed more than
+    once with different statuses is skipped.
+    ``remap``: then sets ``discharged_to_concept_id`` of every visit from its source value with :func:`discharge_status_case`. A
+    source value the mapping does not know (it gives 0) leaves a concept already set alone, so a valid concept is never zeroed.
     Returns ``{"visits": n, "source_filled": n, "concept_changed": n}``. The connection must be writable; work on a copy."""
     bad = ", ".join(f"'{x}'" for x in UNINFORMATIVE_DISCHARGE_STATUS)
     out = {"visits": int(con.execute("SELECT count(*) FROM visit_occurrence").fetchone()[0]), "source_filled": 0, "concept_changed": 0}
     if supplemental_csv is not None:
         con.execute(f"""CREATE OR REPLACE TEMP TABLE _supp_dis AS
-            SELECT CAST(ENCOUNTERID AS VARCHAR) AS eid, max(UPPER(TRIM(DISCHARGE_STATUS))) AS status
+            SELECT TRIM(CAST(ENCOUNTERID AS VARCHAR)) AS eid, max(UPPER(TRIM(DISCHARGE_STATUS))) AS status
             FROM read_csv_auto({sql_path_literal(os.fspath(supplemental_csv))}, all_varchar = true, header = true)
             WHERE UPPER(TRIM(coalesce(DISCHARGE_STATUS, ''))) NOT IN ({bad})
             GROUP BY 1 HAVING count(DISTINCT UPPER(TRIM(DISCHARGE_STATUS))) = 1""")
-        cond = (f"v.visit_source_value = s.eid AND UPPER(TRIM(coalesce(v.discharged_to_source_value, ''))) IN ({bad})")
+        cond = (f"TRIM(v.visit_source_value) = s.eid AND UPPER(TRIM(coalesce(v.discharged_to_source_value, ''))) IN ({bad})")
         out["source_filled"] = int(con.execute(f"SELECT count(*) FROM visit_occurrence v JOIN _supp_dis s ON {cond}").fetchone()[0])
         con.execute(f"UPDATE visit_occurrence v SET discharged_to_source_value = s.status FROM _supp_dis s WHERE {cond}")
         con.execute("DROP TABLE _supp_dis")
     if remap:
         new = discharge_status_case("discharged_to_source_value")
-        out["concept_changed"] = int(con.execute(
-            f"SELECT count(*) FROM visit_occurrence WHERE coalesce(discharged_to_concept_id, -1) <> {new}").fetchone()[0])
-        con.execute(f"UPDATE visit_occurrence SET discharged_to_concept_id = {new} WHERE coalesce(discharged_to_concept_id, -1) <> {new}")
+        # a source value the mapping does not know (NULL, NI, a local label) never replaces a concept that is already set
+        where = f"coalesce(discharged_to_concept_id, -1) <> {new} AND ({new} <> 0 OR discharged_to_concept_id IS NULL)"
+        out["concept_changed"] = int(con.execute(f"SELECT count(*) FROM visit_occurrence WHERE {where}").fetchone()[0])
+        con.execute(f"UPDATE visit_occurrence SET discharged_to_concept_id = {new} WHERE {where}")
     return out
 
 
@@ -797,11 +800,13 @@ def backfill_drug_concepts(con):
     """Maps unmapped drug rows (``drug_concept_id`` 0 or NULL) from their ``drug_source_value`` (0.34.1; run C10 found a site with
     a fifth of its drug rows unmapped, their source values plain ingredient names such as "insulin lispro", and another with raw NDC codes).
 
-    In order: an NDC (11 digits once everything else is removed, or a hyphenated 10-digit form padded to 11) through the vocabulary's NDC 'Maps to'; else the exact name
+    In order: an NDC (11 digits once everything else is removed, or a hyphenated 10-digit form padded to 11) through the vocabulary's NDC 'Maps to';
+    else an RxNorm code (an RXCUI of up to 8 digits; the C10 site-quality report listed many unmapped rows of this form): the RxNorm / RxNorm
+    Extension concept of that code if it is standard, else its 'Maps to'; else the exact name
     (trimmed, any case) of a standard RxNorm / RxNorm Extension concept, an Ingredient preferred, then the single concept of that name.
     The medication features roll concepts up through concept_ancestor, so an ingredient is enough. Needs the vocabulary on the
     connection (attach the central vocabulary first) and a writable connection; work on a copy. Returns
-    ``{"unmapped_before": n, "by_ndc": n, "by_name": n}`` (row counts)."""
+    ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n}`` (row counts)."""
     before = int(con.execute("SELECT count(*) FROM drug_exposure WHERE coalesce(drug_concept_id, 0) = 0").fetchone()[0])
     con.execute("""CREATE OR REPLACE TEMP TABLE _dsv AS
         SELECT DISTINCT drug_source_value AS sv, lower(trim(drug_source_value)) AS nm,
@@ -819,17 +824,26 @@ def backfill_drug_concepts(con):
             FROM _dsv d JOIN concept c ON c.vocabulary_id = 'NDC' AND c.concept_code = d.digits AND length(d.digits) = 11
             JOIN concept_relationship cr ON cr.concept_id_1 = c.concept_id AND cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
             GROUP BY d.sv),
+        rx AS (  -- an RxNorm code (RXCUI, up to 8 digits; an NDC has 10 or 11): the concept itself if standard, else its 'Maps to'
+            SELECT d.sv, min(coalesce(CASE WHEN c.standard_concept = 'S' AND c.invalid_reason IS NULL THEN c.concept_id END, cr.concept_id_2)) AS cid,
+                   count(DISTINCT coalesce(CASE WHEN c.standard_concept = 'S' AND c.invalid_reason IS NULL THEN c.concept_id END, cr.concept_id_2)) AS k,
+                   'rxnorm' AS how
+            FROM _dsv d JOIN concept c ON c.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND c.concept_code = trim(d.sv)
+            LEFT JOIN concept_relationship cr ON cr.concept_id_1 = c.concept_id AND cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
+            WHERE regexp_matches(trim(d.sv), '^[0-9]{1,8}$') AND d.sv NOT IN (SELECT sv FROM ndc WHERE k = 1)
+            GROUP BY d.sv),
         nm AS (
             SELECT d.sv, c.concept_id, c.concept_class_id
             FROM _dsv d JOIN concept c ON lower(c.concept_name) = d.nm AND c.vocabulary_id IN ('RxNorm', 'RxNorm Extension')
              AND c.standard_concept = 'S' AND c.invalid_reason IS NULL
-            WHERE d.sv NOT IN (SELECT sv FROM ndc WHERE k = 1)),
+            WHERE d.sv NOT IN (SELECT sv FROM ndc WHERE k = 1) AND d.sv NOT IN (SELECT sv FROM rx WHERE k = 1 AND cid IS NOT NULL)),
         byname AS (
             SELECT sv, CASE WHEN count(*) FILTER (WHERE concept_class_id = 'Ingredient') = 1
                             THEN min(concept_id) FILTER (WHERE concept_class_id = 'Ingredient')
                             WHEN count(*) = 1 THEN min(concept_id) END AS cid, 'name' AS how
             FROM nm GROUP BY sv)
         SELECT sv, cid, how FROM ndc WHERE k = 1
+        UNION ALL SELECT sv, cid, how FROM rx WHERE k = 1 AND cid IS NOT NULL
         UNION ALL SELECT sv, cid, how FROM byname WHERE cid IS NOT NULL""")
     counts = dict(con.execute("""SELECT m.how, count(*) FROM drug_exposure x JOIN _dmap m ON x.drug_source_value = m.sv
                                  WHERE coalesce(x.drug_concept_id, 0) = 0 GROUP BY 1""").fetchall())
@@ -837,7 +851,8 @@ def backfill_drug_concepts(con):
                    WHERE drug_exposure.drug_source_value = m.sv AND coalesce(drug_exposure.drug_concept_id, 0) = 0""")
     con.execute("DROP TABLE _dsv")
     con.execute("DROP TABLE _dmap")
-    return {"unmapped_before": before, "by_ndc": int(counts.get("ndc", 0)), "by_name": int(counts.get("name", 0))}
+    return {"unmapped_before": before, "by_ndc": int(counts.get("ndc", 0)), "by_rxnorm": int(counts.get("rxnorm", 0)),
+            "by_name": int(counts.get("name", 0))}
 
 
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
@@ -937,7 +952,9 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
     con.execute("""CREATE OR REPLACE TEMP TABLE _dx_codes AS
         SELECT vocabulary_id, k, concept_id, standard_concept FROM (
             SELECT vocabulary_id, replace(upper(concept_code), '.', '') AS k, concept_id, standard_concept,
-                   row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '') ORDER BY concept_id) AS rn
+                   -- one concept per code without dots: a valid one before a deprecated one, then the lowest id
+                   row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '')
+                                      ORDER BY (invalid_reason IS NULL) DESC, concept_id) AS rn
             FROM concept WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM', 'SNOMED')) WHERE rn = 1""")
     run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", f"""
         INSERT INTO condition_occurrence
@@ -965,9 +982,12 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
             src.PDX AS condition_status_source_value
         FROM (
             SELECT *,
-                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id,
+                -- an unknown DX_TYPE (missing, NI, UN, OT): the ICD revision in use on the diagnosis date (ICD-10-CM from 2015-10-01), then the other
+                CASE UPPER(trim(coalesce(DX_TYPE, ''))) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED'
+                     ELSE CASE WHEN parse_omop_date(COALESCE(DX_DATE, ADMIT_DATE)) < DATE '2015-10-01' THEN 'ICD9CM' ELSE 'ICD10CM' END END AS dx_vocabulary_id,
                 replace(upper(trim(DX)), '.', '') AS dx_key,
-                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD10CM' WHEN '10' THEN 'ICD9CM' ELSE NULL END AS dx_other_vocabulary_id
+                CASE UPPER(trim(coalesce(DX_TYPE, ''))) WHEN '09' THEN 'ICD10CM' WHEN '10' THEN 'ICD9CM' WHEN 'SM' THEN NULL
+                     ELSE CASE WHEN parse_omop_date(COALESCE(DX_DATE, ADMIT_DATE)) < DATE '2015-10-01' THEN 'ICD10CM' ELSE 'ICD9CM' END END AS dx_other_vocabulary_id
             FROM _temp_diagnosis
         ) src
         LEFT JOIN person p

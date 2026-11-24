@@ -674,9 +674,11 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
 
   DBI::dbExecute(con, "CREATE OR REPLACE TEMP TABLE _dx_codes AS
     SELECT vocabulary_id, k, concept_id, standard_concept FROM (
-      SELECT vocabulary_id, replace(upper(concept_code), '.', '') AS k, concept_id, standard_concept,
-             row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '') ORDER BY concept_id) AS rn
-      FROM concept WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM', 'SNOMED')) WHERE rn = 1")
+        SELECT vocabulary_id, replace(upper(concept_code), '.', '') AS k, concept_id, standard_concept,
+               -- one concept per code without dots: a valid one before a deprecated one, then the lowest id
+               row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '')
+                                  ORDER BY (invalid_reason IS NULL) DESC, concept_id) AS rn
+        FROM concept WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM', 'SNOMED')) WHERE rn = 1")
   run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", sprintf("
     INSERT INTO condition_occurrence
     SELECT
@@ -703,9 +705,12 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         src.PDX AS condition_status_source_value
     FROM (
         SELECT *,
-            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id,
+            -- an unknown DX_TYPE (missing, NI, UN, OT): the ICD revision in use on the diagnosis date (ICD-10-CM from 2015-10-01), then the other
+            CASE UPPER(trim(coalesce(DX_TYPE, ''))) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED'
+                 ELSE CASE WHEN parse_omop_date(COALESCE(DX_DATE, ADMIT_DATE)) < DATE '2015-10-01' THEN 'ICD9CM' ELSE 'ICD10CM' END END AS dx_vocabulary_id,
             replace(upper(trim(DX)), '.', '') AS dx_key,
-            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD10CM' WHEN '10' THEN 'ICD9CM' ELSE NULL END AS dx_other_vocabulary_id
+            CASE UPPER(trim(coalesce(DX_TYPE, ''))) WHEN '09' THEN 'ICD10CM' WHEN '10' THEN 'ICD9CM' WHEN 'SM' THEN NULL
+                 ELSE CASE WHEN parse_omop_date(COALESCE(DX_DATE, ADMIT_DATE)) < DATE '2015-10-01' THEN 'ICD10CM' ELSE 'ICD9CM' END END AS dx_other_vocabulary_id
         FROM _temp_diagnosis
     ) src
     LEFT JOIN person p

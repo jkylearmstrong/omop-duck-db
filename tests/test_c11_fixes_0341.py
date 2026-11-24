@@ -128,3 +128,71 @@ def test_methods_say_how_many_patients_were_redrawn(tmp_path):
     assert "pinned" not in text.lower()
     none = mtx.full_manuscript_markdown(tabs, [], workbook=wb, run=run, summary={"n_features": 95}, version="0.34.1")
     assert "no longer met the criteria" not in none["markdown"]
+
+
+# ------------------------------------------------------------------ review of PR 103 (Kyle, 2026-11-24)
+def test_discharge_remap_never_zeroes_a_concept_and_trims_the_join(tmp_path):
+    from omop_etl.build_omop_cdm import backfill_discharge_status
+
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE visit_occurrence AS SELECT * FROM (VALUES
+        (1, 'E1 ', 'NI', 0), (2, 'E2', NULL, 8536), (3, 'E3', 'LOCAL HOME', 8536), (4, 'E4', 'A', 8536), (5, 'E5', NULL, NULL))
+        t(visit_occurrence_id, visit_source_value, discharged_to_source_value, discharged_to_concept_id)""")
+    supp = tmp_path / "supp.csv"
+    supp.write_text("ENCOUNTERID,DISCHARGE_STATUS\n E1,SN\n", encoding="utf-8")
+    got = backfill_discharge_status(con, supp)
+    rows = dict(con.execute("SELECT visit_occurrence_id, discharged_to_concept_id FROM visit_occurrence").fetchall())
+    assert rows == {1: 8863,      # ids matched after trimming, then remapped
+                    2: 8536,      # no source value: the concept already set is kept, not zeroed
+                    3: 8536,      # a local label the mapping does not know: kept
+                    4: 4161979,   # a known code still corrects a wrong concept (PCORnet A = against medical advice)
+                    5: 0}         # NULL becomes 0
+    assert got == {"visits": 5, "source_filled": 1, "concept_changed": 3}
+
+
+def test_drug_backfill_maps_rxnorm_codes():
+    from omop_etl.build_omop_cdm import backfill_drug_concepts
+
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE concept AS SELECT * FROM (VALUES
+        (19078461, 'metformin 500 MG Oral Tablet', 'RxNorm', 'Clinical Drug', 'S', '861007', NULL),
+        (40000002, 'old insulin product', 'RxNorm', 'Branded Drug', NULL, '1242215', 'U'),
+        (1567198, 'insulin lispro', 'RxNorm', 'Ingredient', 'S', '86009', NULL))
+        t(concept_id, concept_name, vocabulary_id, concept_class_id, standard_concept, concept_code, invalid_reason)""")
+    con.execute("CREATE TABLE concept_relationship AS SELECT 40000002 AS concept_id_1, 1567198 AS concept_id_2, "
+                "'Maps to' AS relationship_id, NULL AS invalid_reason")
+    con.execute("""CREATE TABLE drug_exposure AS SELECT * FROM (VALUES
+        (1, 0, '861007'), (2, 0, ' 1242215'), (3, 0, '9999999'), (4, 0, '00054418125'))
+        t(drug_exposure_id, drug_concept_id, drug_source_value)""")
+    got = backfill_drug_concepts(con)
+    ids = dict(con.execute("SELECT drug_exposure_id, drug_concept_id FROM drug_exposure").fetchall())
+    assert ids == {1: 19078461, 2: 1567198, 3: 0, 4: 0}  # standard code as is; non-standard through 'Maps to'; an NDC is not read as RxNorm
+    assert got == {"unmapped_before": 4, "by_ndc": 0, "by_rxnorm": 2, "by_name": 0}
+
+
+def test_diagnosis_with_unknown_dx_type_and_a_deprecated_twin(tmp_path):
+    from omop_etl import build_omop_cdm as b
+
+    con = duckdb.connect()
+    b.build_schema(con)
+    b.load_macros(con)
+    con.execute("""INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code,
+                   valid_start_date, valid_end_date, invalid_reason) VALUES
+        (45576876, 'Type 2 diabetes', 'Condition', 'ICD10CM', '4-char billing code', NULL, 'E11.9', DATE '1970-01-01', DATE '2099-12-31', NULL),
+        (35206882, 'Other disorders of plasma-protein metabolism', 'Condition', 'ICD10CM', 'billing code', NULL, 'E88.09', DATE '1970-01-01', DATE '2099-12-31', NULL),
+        (44834000, 'Accidental fall on stairs', 'Condition', 'ICD9CM', 'billing code', NULL, 'E880.9', DATE '1970-01-01', DATE '2099-12-31', NULL),
+        (100, 'deprecated twin', 'Condition', 'ICD10CM', 'billing code', NULL, 'I10', DATE '1970-01-01', DATE '2015-12-31', 'D'),
+        (320128, 'Essential hypertension', 'Condition', 'ICD10CM', 'billing code', NULL, 'I10.', DATE '1970-01-01', DATE '2099-12-31', NULL),
+        (201826, 'Type 2 diabetes mellitus', 'Condition', 'SNOMED', 'Clinical Finding', 'S', '44054006', DATE '1970-01-01', DATE '2099-12-31', NULL)""")
+    con.execute("""INSERT INTO concept_relationship (concept_id_1, concept_id_2, relationship_id, valid_start_date, valid_end_date)
+                   VALUES (45576876, 201826, 'Maps to', DATE '1970-01-01', DATE '2099-12-31')""")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "diagnosis.csv").write_text("DIAGNOSISID,PATID,DX_TYPE,DX,DX_DATE,ADMIT_DATE,PDX,PROVIDERID,ENCOUNTERID\n"
+                                       "d1,p1,NI,E11.9,2018-01-01,2018-01-01,P,,e1\n"   # unknown type, ICD-10 era
+                                       "d2,p1,,E8809,2014-01-01,2014-01-01,S,,e1\n"     # blank type, ICD-9 era: ICD-9 wins over ICD-10 E88.09
+                                       "d3,p1,OT,E8809,2018-01-01,2018-01-01,S,,e1\n"   # same code in the ICD-10 era
+                                       "d4,p1,10,I10,2018-01-01,2018-01-01,S,,e1\n", encoding="utf-8")  # valid concept before the deprecated one
+    b.load_condition_occurrence(con, str(src))
+    got = con.execute("SELECT condition_source_value, condition_source_concept_id FROM condition_occurrence ORDER BY condition_occurrence_id").fetchall()
+    assert got == [("E11.9", 45576876), ("E8809", 44834000), ("E8809", 35206882), ("I10", 320128)]
