@@ -863,7 +863,9 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
     * ``n_secondary_dx`` - secondary diagnoses of the index stay (0.34.0): distinct diagnosis codes as recorded (ICD-9-CM /
       ICD-10-CM source value, dots and case ignored; the standard concept when there is none) dated from admission to discharge,
       leaving out the code(s) of the principal diagnosis (PCORnet PDX = "P", or a primary condition type / status concept), even
-      when the same code is also recorded as a secondary diagnosis. Until 0.33.7 the
+      when the same code is also recorded as a secondary diagnosis. When the cohort has ``visit_occurrence_id``, only diagnoses
+      on the index visit count, and a diagnosis with no visit id counts by its date (0.34.2; before, a diagnosis of another
+      visit dated inside the stay counted too: 1 to 9% of the counted codes per site in the C15 close-out). Until 0.33.7 the
       column was ``n_secondary_dx_ccs`` and counted distinct standard concepts with the principal diagnosis, so one ICD code that
       maps to two SNOMED concepts counted twice;
     * ``elix_pre_index_conditions_count`` - distinct condition concepts dated before the admission (all history);
@@ -875,7 +877,13 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
     if lookback_days < 0:
         raise ValueError("lookback_days must be non-negative.")
     lb = int(lookback_days)
-    con.register("_bf_ph", cohort[["row_id", "subject_id", "cohort_start_date", "cohort_end_date"]])
+    by_visit = "visit_occurrence_id" in cohort and "visit_occurrence_id" in {
+        r[0].lower() for r in con.execute("DESCRIBE condition_occurrence").fetchall()}
+    keep = ["row_id", "subject_id", "cohort_start_date", "cohort_end_date"] + (["visit_occurrence_id"] if by_visit else [])
+    # 0.34.2 (Kyle, after the C15 close-out): a diagnosis on another visit dated inside the stay is not the index stay's
+    in_stay = "co.condition_start_date >= CAST(c.cohort_start_date AS DATE)" + (
+        " AND (co.visit_occurrence_id IS NULL OR co.visit_occurrence_id = c.visit_occurrence_id)" if by_visit else "")
+    con.register("_bf_ph", cohort[keep])
     try:
         util = con.execute(f"""
             SELECT c.row_id,
@@ -895,9 +903,8 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
         principal = _principal_sql(con)
         dx = con.execute(f"""
             SELECT c.row_id,
-                   COUNT(DISTINCT CASE WHEN co.condition_start_date >= CAST(c.cohort_start_date AS DATE) THEN {_DX_CODE_SQL} END)
-                   - COUNT(DISTINCT CASE WHEN co.condition_start_date >= CAST(c.cohort_start_date AS DATE) AND {principal}
-                                         THEN {_DX_CODE_SQL} END) AS n_secondary_dx,
+                   COUNT(DISTINCT CASE WHEN {in_stay} THEN {_DX_CODE_SQL} END)
+                   - COUNT(DISTINCT CASE WHEN {in_stay} AND {principal} THEN {_DX_CODE_SQL} END) AS n_secondary_dx,
                    COUNT(DISTINCT CASE WHEN co.condition_start_date < CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END)
                        AS elix_pre_index_conditions_count,
                    MAX(CASE WHEN {_TOB_DX} LIKE 'F17%' OR {_TOB_DX} LIKE 'Z720%' OR {_TOB_DX} LIKE '3051%' THEN 1 ELSE 0 END) AS tob_cur_dx,

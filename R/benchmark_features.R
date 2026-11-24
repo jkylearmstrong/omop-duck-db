@@ -220,7 +220,8 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
 #' 9203 and observation 581385 visits; also the custom concept 2000000048), `days_since_prior_encounter`, `days_since_prior_ip_ed` (`lookback_days` when there is none),
 #' `readmission_count_twelve_months`, `prior_outpatient_count` (outpatient 9202 / 581477 and telehealth 5083 visits, since 0.34.0),
 #' `n_secondary_dx` (secondary diagnoses of the index stay since 0.34.0: distinct diagnosis codes as recorded, dots and case ignored,
-#' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`),
+#' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`; since 0.34.2 only
+#' diagnoses on the index visit count when the cohort has `visit_occurrence_id`, and one with no visit id counts by date),
 #' `elix_pre_index_conditions_count` (distinct condition concepts before the admission, all history) and `tobacco`
 #' (`"Current user"`, `"Former user"`, `"Never user"` or, with no status, `"Missing / Unknown"` (0.34.1), from tobacco observation
 #' concepts, the PCORnet VITAL smoking status (43054909) and ICD F17 / Z72.0 / 305.1 / Z87.891 /
@@ -236,7 +237,10 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
 extract_protocol_history_features <- function(con, cohort, lookback_days = 365) {
   if (lookback_days < 0) stop("lookback_days must be non-negative.", call. = FALSE)
   lb <- as.integer(lookback_days)
-  duckdb::duckdb_register(con, "_bf_ph", cohort[, c("row_id", "subject_id", "cohort_start_date", "cohort_end_date")])
+  co_cols <- tolower(DBI::dbGetQuery(con, "DESCRIBE condition_occurrence")$column_name)
+  by_visit <- "visit_occurrence_id" %in% names(cohort) && "visit_occurrence_id" %in% co_cols
+  keep <- c("row_id", "subject_id", "cohort_start_date", "cohort_end_date", if (by_visit) "visit_occurrence_id")
+  duckdb::duckdb_register(con, "_bf_ph", cohort[, keep, drop = FALSE])
   on.exit(duckdb::duckdb_unregister(con, "_bf_ph"), add = TRUE)
   util <- DBI::dbGetQuery(con, sprintf("
     SELECT c.row_id,
@@ -253,13 +257,14 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
          AND pv.visit_start_date < CAST(c.cohort_start_date AS DATE)
          AND pv.visit_start_date >= CAST(c.cohort_start_date AS DATE) - %1$d
     GROUP BY c.row_id, c.cohort_start_date ORDER BY c.row_id", lb))
-  co_cols <- tolower(DBI::dbGetQuery(con, "DESCRIBE condition_occurrence")$column_name)
   ids <- "44786627, 44786628, 32902"  # primary condition (the PCORnet ETL's PDX = 'P'), first position, primary diagnosis
   parts <- sprintf("coalesce(co.%s, 0) IN (%s)", intersect(c("condition_type_concept_id", "condition_status_concept_id"), co_cols), ids)
   if ("condition_status_source_value" %in% co_cols) parts <- c(parts, "upper(coalesce(co.condition_status_source_value, '')) = 'P'")
   principal <- paste0("(", paste(if (length(parts)) parts else "FALSE", collapse = " OR "), ")")
   code <- "coalesce(nullif(upper(replace(trim(co.condition_source_value), '.', '')), ''), 'concept:' || CAST(co.condition_concept_id AS VARCHAR))"
   in_stay <- "co.condition_start_date >= CAST(c.cohort_start_date AS DATE)"
+  # 0.34.2: only diagnoses on the index visit count (no visit id: by date), as in Python
+  if (by_visit) in_stay <- paste(in_stay, "AND (co.visit_occurrence_id IS NULL OR co.visit_occurrence_id = c.visit_occurrence_id)")
   tdx <- "upper(replace(trim(co.condition_source_value), '.', ''))"  # tobacco ICD codes with or without dots (0.34.1)
   dx <- DBI::dbGetQuery(con, paste0("
     SELECT c.row_id,

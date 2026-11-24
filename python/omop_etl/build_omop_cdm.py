@@ -806,7 +806,28 @@ def backfill_drug_concepts(con):
     (trimmed, any case) of a standard RxNorm / RxNorm Extension concept, an Ingredient preferred, then the single concept of that name.
     The medication features roll concepts up through concept_ancestor, so an ingredient is enough. Needs the vocabulary on the
     connection (attach the central vocabulary first) and a writable connection; work on a copy. Returns
-    ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n}`` (row counts)."""
+    ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n, "non_standard_before": n, "by_maps_to": n}`` (row counts).
+
+    First (0.34.2; the C15 close-out found 4 to 17% of drug rows per site on a non-standard or deprecated concept, which the
+    medication classes cannot roll up through concept_ancestor): a row whose ``drug_concept_id`` is not a valid standard concept
+    takes that concept's 'Maps to' target when there is exactly one valid standard target. The old concept is kept in
+    ``drug_source_concept_id`` when that column is empty. Rows with no target or several are left as they are."""
+    nonstd = """SELECT x.drug_concept_id AS src FROM drug_exposure x JOIN concept c ON c.concept_id = x.drug_concept_id
+                WHERE coalesce(x.drug_concept_id, 0) <> 0 AND (c.standard_concept IS DISTINCT FROM 'S' OR c.invalid_reason IS NOT NULL)"""
+    non_standard_before = int(con.execute(f"SELECT count(*) FROM ({nonstd})").fetchone()[0])
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE _dstd AS
+        SELECT cr.concept_id_1 AS src, min(cr.concept_id_2) AS cid
+        FROM (SELECT DISTINCT src FROM ({nonstd})) s
+        JOIN concept_relationship cr ON cr.concept_id_1 = s.src AND cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
+        JOIN concept t ON t.concept_id = cr.concept_id_2 AND t.standard_concept = 'S' AND t.invalid_reason IS NULL
+        GROUP BY 1 HAVING count(DISTINCT cr.concept_id_2) = 1""")
+    by_maps_to = int(con.execute("SELECT count(*) FROM drug_exposure x JOIN _dstd m ON x.drug_concept_id = m.src").fetchone()[0])
+    cols = {r[0] for r in con.execute("DESCRIBE drug_exposure").fetchall()}
+    if "drug_source_concept_id" in cols:
+        con.execute("""UPDATE drug_exposure SET drug_source_concept_id = drug_concept_id FROM _dstd m
+                       WHERE drug_exposure.drug_concept_id = m.src AND coalesce(drug_exposure.drug_source_concept_id, 0) = 0""")
+    con.execute("UPDATE drug_exposure SET drug_concept_id = m.cid FROM _dstd m WHERE drug_exposure.drug_concept_id = m.src")
+    con.execute("DROP TABLE _dstd")
     before = int(con.execute("SELECT count(*) FROM drug_exposure WHERE coalesce(drug_concept_id, 0) = 0").fetchone()[0])
     con.execute("""CREATE OR REPLACE TEMP TABLE _dsv AS
         SELECT DISTINCT drug_source_value AS sv, lower(trim(drug_source_value)) AS nm,
@@ -852,7 +873,7 @@ def backfill_drug_concepts(con):
     con.execute("DROP TABLE _dsv")
     con.execute("DROP TABLE _dmap")
     return {"unmapped_before": before, "by_ndc": int(counts.get("ndc", 0)), "by_rxnorm": int(counts.get("rxnorm", 0)),
-            "by_name": int(counts.get("name", 0))}
+            "by_name": int(counts.get("name", 0)), "non_standard_before": non_standard_before, "by_maps_to": by_maps_to}
 
 
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):

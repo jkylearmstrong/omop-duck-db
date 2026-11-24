@@ -1,3 +1,10 @@
+# omopduckdb 0.34.2
+
+Two fixes from the run C15 close-out checks (2026-11-24). Version bump 0.34.1 to 0.34.2. The manuscript template stays v0.34.1: its wording ("codes recorded during the index stay", "rolling branded and clinical drugs up to their ingredients") already describes the corrected behaviour. Both changes need the features extracted again.
+
+- **`n_secondary_dx` counts the index visit only (Kyle's choice).** When the cohort has `visit_occurrence_id`, a diagnosis dated inside the stay but recorded on another visit (an outpatient, ED or observation encounter, or another inpatient visit) no longer counts. A diagnosis with no visit id still counts by its date. In the C15 close-out, 1 to 9% of the counted codes per site sat on another visit, and the site means would fall by 0.0 to 0.8. A cohort without `visit_occurrence_id` keeps the date rule. Python and R.
+- **`backfill_drug_concepts()` remaps non-standard drug concepts.** A drug row whose `drug_concept_id` is not a valid standard concept (non-standard, or deprecated / upgraded) now takes that concept's 'Maps to' target when there is exactly one valid standard target; the old concept goes into `drug_source_concept_id` when that is empty. The medication classes roll drug concepts up through `concept_ancestor`, which holds standard concepts only, so these rows were missed: 4 to 17% of drug rows per site in the C15 close-out, built by a builder that kept the source concept. Rows with no target or several are left as they are. The result has two new counts, `non_standard_before` and `by_maps_to`. The step runs before the existing concept-0 fill.
+
 # omopduckdb 0.34.1
 
 Fixes from run C10 and Kyle's review of the legacy per-site notebooks (2026-11-24). Version bump 0.34.0 to 0.34.1; manuscript template v0.34.1 (one added sentence in Section 2.1). Nothing changes for a database built by this package's converter except the diagnosis lookup; the two backfill helpers repair databases built another way.
