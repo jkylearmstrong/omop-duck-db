@@ -242,7 +242,7 @@ def extract_velocity_features(
     readmit_gap_days: int = 30,
     ip_concepts=(9201, 262),
     ed_concepts=(9203,),
-    os_concepts=(9202, 581385),
+    os_concepts=(581385,),
     concepts: dict[str, Any] | None = None,
     extra_features: pd.DataFrame | None = None,
     cohort_id: int | None = None,

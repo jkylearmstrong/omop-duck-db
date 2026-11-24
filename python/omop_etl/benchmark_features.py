@@ -826,7 +826,7 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
     observations dated up to the discharge date.
 
     * ``prior_encounters_all_count`` - all prior visits; ``prior_ip_os_ed_count`` - prior inpatient (9201, 262), ED (9203) and
-      concept 2000000048 visits; ``prior_outpatient_count`` - prior outpatient (9202, 581477) and telehealth (5083) visits only
+      observation (581385; 0.34.1, before only the custom concept 2000000048) visits; ``prior_outpatient_count`` - prior outpatient (9202, 581477) and telehealth (5083) visits only
       (0.34.0; "all minus inpatient / ED" also counted visits of unknown or other type);
     * ``days_since_prior_encounter`` / ``days_since_prior_ip_ed`` - days from the latest such prior visit to the admission
       (``lookback_days`` when there is none; ED/inpatient visits only for the second);
@@ -849,7 +849,7 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
         util = con.execute(f"""
             SELECT c.row_id,
                    COUNT(pv.visit_occurrence_id) AS prior_encounters_all_count,
-                   COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
+                   COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 581385, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
                    COUNT(CASE WHEN pv.visit_concept_id IN ({_OUTPATIENT_SQL}) THEN 1 END) AS prior_outpatient_count,
                    COALESCE(date_diff('day', MAX(pv.visit_start_date), CAST(c.cohort_start_date AS DATE)), {lb}) AS days_since_prior_encounter,
                    COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262) THEN pv.visit_start_date END),

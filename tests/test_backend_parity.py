@@ -69,7 +69,7 @@ def _cdm():
     visit(BEYOND_DOUBLE, 9201, "2018-06-01", "2018-06-05")
     visit(BEYOND_DOUBLE, 9201, "2018-06-20", "2018-06-25")  # readmission 15 days after discharge
     visit(BEYOND_DOUBLE, 9203, "2018-09-01", "2018-09-01")
-    visit(BEYOND_DOUBLE, 9202, "2018-12-01", "2018-12-01")
+    visit(BEYOND_DOUBLE, 581385, "2018-12-01", "2018-12-01")  # observation stay
     visit(BEYOND_DOUBLE, 9202, "2017-01-01", "2017-01-01")  # outside the 365-day look-back
     visit(BEYOND_DOUBLE, 9201, "2019-03-01", "2019-03-04")  # on the index date: not prior
     # 2: gestational diabetes only (and a descendant of it): excluded concept set, an id beyond int32

@@ -16,12 +16,14 @@ import pandas as pd
 
 __all__ = ["DEFAULT_VISIT_CONCEPT_GROUPS", "extract_prior_utilization"]
 
-# 9201 inpatient, 9203 emergency room, 9202 outpatient, 581385 observation (the "os" group), 262 emergency room + inpatient.
+# 9201 inpatient, 9203 emergency room, 581385 observation (the "os" group), 262 emergency room + inpatient.
+# Outpatient visits (9202) are counted by prior_outpatient_count, not in "os": an outpatient visit is not an observation stay,
+# and multi-day outpatient records would inflate prior_os_los_days (decision 2026-11-24).
 # 262 (PCORnet EI, relabelled IP by the legacy study) counts as inpatient only, never as an ED visit.
 DEFAULT_VISIT_CONCEPT_GROUPS: dict[str, tuple[int, ...]] = {
     "ip": (9201, 262),
     "ed": (9203,),
-    "os": (9202, 581385),
+    "os": (581385,),
 }
 
 _GROUP_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")

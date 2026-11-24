@@ -212,7 +212,7 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
 #' The eDERRI protocol's history columns
 #'
 #' One row per cohort row, in cohort order: `prior_encounters_all_count`, `prior_ip_os_ed_count` (inpatient 9201 / 262, ED
-#' 9203 and 2000000048 visits), `days_since_prior_encounter`, `days_since_prior_ip_ed` (`lookback_days` when there is none),
+#' 9203 and observation 581385 visits; also the custom concept 2000000048), `days_since_prior_encounter`, `days_since_prior_ip_ed` (`lookback_days` when there is none),
 #' `readmission_count_twelve_months`, `prior_outpatient_count` (outpatient 9202 / 581477 and telehealth 5083 visits, since 0.34.0),
 #' `n_secondary_dx` (secondary diagnoses of the index stay since 0.34.0: distinct diagnosis codes as recorded, dots and case ignored,
 #' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`),
@@ -235,7 +235,7 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
   util <- DBI::dbGetQuery(con, sprintf("
     SELECT c.row_id,
            COUNT(pv.visit_occurrence_id) AS prior_encounters_all_count,
-           COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
+           COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 581385, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
            COUNT(CASE WHEN pv.visit_concept_id IN (9202, 581477, 5083) THEN 1 END) AS prior_outpatient_count,
            COALESCE(date_diff('day', MAX(pv.visit_start_date), CAST(c.cohort_start_date AS DATE)), %1$d) AS days_since_prior_encounter,
            COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262) THEN pv.visit_start_date END),

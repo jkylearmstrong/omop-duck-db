@@ -99,13 +99,13 @@ def cdm():
     build_schema(con)
     for pid in (1, 2, 3):
         _person(con, pid)
-    # patient 1: 4 prior IP (one a 30-day readmission), 1 prior ED, 1 prior outpatient; emergency index
+    # patient 1: 4 prior IP (one a 30-day readmission), 1 prior ED, 1 prior observation stay; emergency index
     _visit(con, 1, 1, 9201, "2019-09-01", "2019-09-05")
     _visit(con, 2, 1, 9201, "2019-09-20", "2019-09-22")
     _visit(con, 3, 1, 9201, "2020-02-01", "2020-02-03")
     _visit(con, 4, 1, 9201, "2020-03-20", "2020-03-25")
     _visit(con, 5, 1, 9203, "2020-02-10", "2020-02-10")
-    _visit(con, 6, 1, 9202, "2020-03-01", "2020-03-01")
+    _visit(con, 6, 1, 581385, "2020-03-01", "2020-03-01")
     _visit(con, 7, 1, 9203, "2020-04-10", "2020-04-12")           # index
     _visit(con, 8, 2, 9201, "2020-04-10", "2020-04-12")           # patient 2: no prior visits
     _visit(con, 9, 3, 9201, "2020-04-10", "2020-04-20")           # patient 3: index + a later visit that must not leak

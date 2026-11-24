@@ -35,7 +35,7 @@ test_that("extract_velocity_features: raw inputs, engineered values, sentinel, n
   v <- function(id, p, c, s, e) DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id) VALUES (%d,%d,%d,DATE '%s',DATE '%s',32827)", id, p, c, s, e))
   v(1, 1, 9201, "2019-09-01", "2019-09-05"); v(2, 1, 9201, "2019-09-20", "2019-09-22")
   v(3, 1, 9201, "2020-02-01", "2020-02-03"); v(4, 1, 9201, "2020-03-20", "2020-03-25")
-  v(5, 1, 9203, "2020-02-10", "2020-02-10"); v(6, 1, 9202, "2020-03-01", "2020-03-01")
+  v(5, 1, 9203, "2020-02-10", "2020-02-10"); v(6, 1, 581385, "2020-03-01", "2020-03-01")
   v(7, 1, 9203, "2020-04-10", "2020-04-12"); v(8, 2, 9201, "2020-04-10", "2020-04-12")
   v(9, 3, 9201, "2020-04-10", "2020-04-20"); v(10, 3, 9201, "2020-05-01", "2020-05-02")
   DBI::dbExecute(con, "CREATE TABLE coh AS SELECT person_id AS subject_id, visit_start_date AS cohort_start_date, visit_end_date AS cohort_end_date FROM visit_occurrence WHERE visit_occurrence_id IN (7,8,9)")
