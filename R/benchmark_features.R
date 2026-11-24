@@ -153,10 +153,66 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
   as.data.frame(out, stringsAsFactors = FALSE, check.names = FALSE)
 }
 
+# Body height / weight concepts used to compute a BMI (see `bmi_fill` of extract_benchmark_features()).
+.BMI_HEIGHT_CONCEPTS <- c(3036277L, 3023540L)
+.BMI_WEIGHT_CONCEPTS <- c(3025315L, 3013762L)
+
+# Fills a missing in-stay BMI: from the stay's mean height and weight, then (derive_lookback) the latest BMI recorded in the
+# lookback_days before admission, then one from the latest height and weight there. Heights / weights without a unit are read as
+# inches / pounds (PCORnet VITAL), a height of 100 or more as centimetres. Returns list(value = , counts = ).
+.bf_fill_bmi <- function(con, cohort, bmi_ids, measured, mode, lookback_days, bnd) {
+  lo <- if (length(bnd) >= 1 && !is.na(bnd[1])) bnd[1] else -1e300
+  hi <- if (length(bnd) >= 2 && !is.na(bnd[2])) bnd[2] else 1e300
+  ids <- function(x) if (length(x)) paste(as.integer(x), collapse = ", ") else "NULL"
+  cols <- DBI::dbGetQuery(con, "SELECT column_name FROM information_schema.columns WHERE table_name = 'measurement'")$column_name
+  unit <- if ("unit_concept_id" %in% cols) "m.unit_concept_id" else "CAST(NULL AS INTEGER)"
+  hts <- ids(.BMI_HEIGHT_CONCEPTS); wts <- ids(.BMI_WEIGHT_CONCEPTS)
+  duckdb::duckdb_register(con, "_bmi_c", cohort[, c("row_id", "subject_id", "cohort_start_date", "cohort_end_date")])
+  on.exit(duckdb::duckdb_unregister(con, "_bmi_c"), add = TRUE)
+  got <- DBI::dbGetQuery(con, sprintf("
+    WITH m AS (
+      SELECT c.row_id, COALESCE(m.measurement_datetime, CAST(m.measurement_date AS TIMESTAMP)) AS ts, m.measurement_id AS mid,
+             CAST(m.measurement_date AS DATE) >= CAST(c.cohort_start_date AS DATE) AS in_stay,
+             CASE WHEN m.measurement_concept_id IN (%1$s) THEN 'h' WHEN m.measurement_concept_id IN (%2$s) THEN 'w' ELSE 'b' END AS kind,
+             CASE WHEN m.measurement_concept_id IN (%1$s) THEN
+                       CASE WHEN %3$s = 8582 OR (COALESCE(%3$s, 0) <> 9330 AND m.value_as_number >= 100)
+                            THEN m.value_as_number / 100.0 ELSE m.value_as_number * 0.0254 END
+                  WHEN m.measurement_concept_id IN (%2$s) THEN
+                       CASE WHEN %3$s = 9529 THEN m.value_as_number ELSE m.value_as_number * 0.45359237 END
+                  ELSE m.value_as_number END AS v
+      FROM _bmi_c c
+      JOIN measurement m ON m.person_id = c.subject_id
+           AND m.measurement_date >= CAST(c.cohort_start_date AS DATE) - %4$d
+           AND m.measurement_date <= CAST(c.cohort_end_date AS DATE)
+      WHERE m.value_as_number > 0 AND m.measurement_concept_id IN (%1$s, %2$s, %5$s)
+    ), m2 AS (
+      SELECT * FROM m WHERE (kind = 'h' AND v BETWEEN 0.9 AND 2.5) OR (kind = 'w' AND v BETWEEN 20 AND 400)
+                         OR (kind = 'b' AND v BETWEEN %6$.17g AND %7$.17g)
+    )
+    SELECT row_id,
+           avg(v) FILTER (WHERE in_stay AND kind = 'w') / (avg(v) FILTER (WHERE in_stay AND kind = 'h') ^ 2) AS stay_derived,
+           arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'b') AS prior_bmi,
+           arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'w')
+             / (arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'h') ^ 2) AS prior_derived
+    FROM m2 GROUP BY row_id", hts, wts, unit, if (mode == "derive_lookback") as.integer(lookback_days) else 0L, ids(bmi_ids), lo, hi))
+  idx <- match(seq_along(measured) - 1L, got$row_id)
+  steps <- c(derived_in_stay = "stay_derived")
+  if (mode == "derive_lookback") steps <- c(steps, recorded_prior = "prior_bmi", derived_prior = "prior_derived")
+  counts <- list()
+  for (lbl in names(steps)) {
+    cand <- round(as.numeric(got[[steps[[lbl]]]][idx]), 2)
+    cand[!is.na(cand) & (cand < lo | cand > hi)] <- NA
+    fill <- is.na(measured) & !is.na(cand)
+    measured[fill] <- cand[fill]
+    counts[[lbl]] <- sum(fill)
+  }
+  list(value = measured, counts = counts)
+}
+
 #' The eDERRI protocol's history columns
 #'
 #' One row per cohort row, in cohort order: `prior_encounters_all_count`, `prior_ip_os_ed_count` (inpatient 9201 / 262, ED
-#' 9203 and 2000000048 visits), `days_since_prior_encounter`, `days_since_prior_ip_ed` (`lookback_days` when there is none),
+#' 9203 and observation 581385 visits; also the custom concept 2000000048), `days_since_prior_encounter`, `days_since_prior_ip_ed` (`lookback_days` when there is none),
 #' `readmission_count_twelve_months`, `prior_outpatient_count` (outpatient 9202 / 581477 and telehealth 5083 visits, since 0.34.0),
 #' `n_secondary_dx` (secondary diagnoses of the index stay since 0.34.0: distinct diagnosis codes as recorded, dots and case ignored,
 #' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`),
@@ -179,7 +235,7 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
   util <- DBI::dbGetQuery(con, sprintf("
     SELECT c.row_id,
            COUNT(pv.visit_occurrence_id) AS prior_encounters_all_count,
-           COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
+           COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 581385, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
            COUNT(CASE WHEN pv.visit_concept_id IN (9202, 581477, 5083) THEN 1 END) AS prior_outpatient_count,
            COALESCE(date_diff('day', MAX(pv.visit_start_date), CAST(c.cohort_start_date AS DATE)), %1$d) AS days_since_prior_encounter,
            COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262) THEN pv.visit_start_date END),
@@ -294,6 +350,11 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
 #' @param impute `NULL`, `"median"` or `"mean"`: fill missing vital / lab values. Statistics come from this table unless `impute_values`
 #'   (named numeric) is given; fit them on the training sites (`attr(, "imputation_values")`) and pass them to other tables.
 #' @param impute_values named numeric vector of frozen fill values.
+#' @param bmi_fill how a stay with no in-stay BMI gets one (`vital_bmi`): `"derive"` from the stay's mean height and weight,
+#'   `"derive_lookback"` also the latest BMI recorded in the `bmi_lookback_days` before admission, then one from the latest height and
+#'   weight there, `"none"` leaves it missing. Default `NULL`: `"derive_lookback"` for `profile = "ederri"` / `"both"`, else `"derive"`.
+#'   `attr(, "bmi_filled")` counts the stays each step filled.
+#' @param bmi_lookback_days window before admission for `bmi_fill = "derive_lookback"` (default 365).
 #' @return A data frame in cohort order; `attr(, "feature_groups")` lists the columns per group and `attr(, "skipped")` the
 #'   features that could not be built.
 #' @export
@@ -308,7 +369,7 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
                                        medication_set = NULL, include_protocol_history = NULL,
                                        ruca_crosswalk = NULL, sdi_table = NULL, sdi_cut_points = NULL,
                                        disposition_map = NULL, sdoh_fallback = "indicator", address_table = "auto", address_tie_break = "deterministic", address_undated = "last", impute = NULL,
-                                       impute_values = NULL) {
+                                       impute_values = NULL, bmi_fill = NULL, bmi_lookback_days = 365) {
   if (lookback_days < 0 || lab_lookback_days < 0) stop("lookback_days and lab_lookback_days must be non-negative.", call. = FALSE)
   if (!is.null(profile) && !profile %in% c("ederri", "both")) stop("profile must be 'ederri', 'both' or NULL.", call. = FALSE)
   prof <- if (is.null(profile)) "none" else profile
@@ -322,6 +383,10 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
     stop("elixhauser_lookback_days must be non-negative or NULL.", call. = FALSE)
   }
   if (is.null(include_protocol_history)) include_protocol_history <- prof %in% c("ederri", "both")
+  if (is.null(bmi_fill)) bmi_fill <- if (prof %in% c("ederri", "both")) "derive_lookback" else "derive"
+  if (!bmi_fill %in% c("derive", "derive_lookback", "none")) stop("bmi_fill must be 'derive', 'derive_lookback' or 'none'.", call. = FALSE)
+  if (bmi_lookback_days < 0) stop("bmi_lookback_days must be non-negative.", call. = FALSE)
+  bmi_filled <- list()
   if (is.character(bounds)) {
     if (!identical(bounds, "default")) stop("bounds must be 'default', a named list(name = c(min, max)) or NULL.", call. = FALSE)
     bounds <- DEFAULT_BOUNDS
@@ -419,7 +484,14 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
     stats <- .bf_measurement_stats(con, cohort, vmap, lab_lookback_days, bounds, rescale)
     present <- intersect(names(vl), unique(vmap$name))
     skipped <- c(skipped, paste0("vital_", setdiff(names(vl), present)))
-    add("vitals", .bf_wide(stats, "vital_", present, n, with_last = FALSE))
+    vit <- .bf_wide(stats, "vital_", present, n, with_last = FALSE)
+    if (bmi_fill != "none" && "vital_bmi" %in% names(vit)) {
+      filled <- .bf_fill_bmi(con, cohort, vmap$concept_id[vmap$name == "bmi"], vit$vital_bmi, bmi_fill, bmi_lookback_days,
+                             if (is.null(bounds)) NULL else bounds[["bmi"]])
+      vit$vital_bmi <- filled$value
+      bmi_filled <- filled$counts
+    }
+    add("vitals", vit)
   }
   if (include_labs) {
     ll <- if (!is.null(lab_loincs)) lab_loincs else BENCHMARK_LAB_LOINCS
@@ -509,5 +581,6 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
   attr(out, "skipped") <- skipped
   attr(out, "key_columns") <- keys
   attr(out, "imputation_values") <- imputation
+  attr(out, "bmi_filled") <- bmi_filled
   out
 }

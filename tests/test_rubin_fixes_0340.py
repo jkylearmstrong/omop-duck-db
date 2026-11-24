@@ -320,3 +320,86 @@ def test_lab_funnel_reads_a_central_vocabulary(tmp_path):
     f = sq.lab_funnel(tmp_path, {"s1": "Site A"}, "2017-01-01", "2022-09-30", time.time() + 60).set_index("name")
     assert f.loc["troponin_i", "pct_mapped"] == 100.0 and f.loc["troponin_i", "concept_rows"] == 1
     assert f.loc["wbc", "pct_mapped"] == 100.0
+
+
+def test_backfill_discharge_status_from_a_supplemental_file(tmp_path):
+    """C10 (Nov 24): one site's ENCOUNTER extract is all NI while a separate discharge file holds the codes; the site's builder
+    also mapped only 'A' and 'E'. The backfill fills uninformative source values from the file and remaps every concept."""
+    duckdb = pytest.importorskip("duckdb")
+    from omop_etl.build_omop_cdm import backfill_discharge_status, discharge_status_case
+
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE visit_occurrence AS SELECT * FROM (VALUES
+        (1, 'E1', 'NI', 0), (2, 'E2', 'NI', 0), (3, 'E3', 'HO', 0), (4, 'E4', 'EX', 0), (5, 'E5', 'UN', 0), (6, 'E6', NULL, 0))
+        t(visit_occurrence_id, visit_source_value, discharged_to_source_value, discharged_to_concept_id)""")
+    supp = tmp_path / "supplemental_encounter.csv"
+    supp.write_text("ENCOUNTERID,ADMIT_DATE,DISCHARGE_DATE,ENC_TYPE,DISCHARGE_DISPOSITION,DISCHARGE_STATUS\n"
+                    "E1,2018-01-01,2018-01-03,IP,A,SN\nE2,2018-02-01,2018-02-03,IP,A,NI\nE3,2018-03-01,2018-03-03,IP,A,HH\n"
+                    "E5,2018-05-01,2018-05-02,IP,A,HO\nE5,2018-05-01,2018-05-02,IP,A,HH\nE6,2018-06-01,2018-06-02,IP,E,EX\n", encoding="utf-8")
+    got = backfill_discharge_status(con, supp)
+    rows = dict((r[0], r[1:]) for r in con.execute(
+        "SELECT visit_source_value, discharged_to_source_value, discharged_to_concept_id FROM visit_occurrence").fetchall())
+    assert rows["E1"] == ("SN", 8863)      # filled from the file
+    assert rows["E2"] == ("NI", 0)         # the file has no code either
+    assert rows["E3"] == ("HO", 8536)      # an informative code is kept
+    assert rows["E4"] == ("EX", 4216643)   # not in the file: remapped from its own code
+    assert rows["E5"] == ("UN", 0)         # two different codes in the file: skipped
+    assert rows["E6"] == ("EX", 4216643)   # NULL is filled
+    assert got == {"visits": 6, "source_filled": 2, "concept_changed": 4}
+    assert "WHEN UPPER(TRIM(x)) IN ('HH') THEN 32215" in discharge_status_case("x")
+
+
+def test_backfill_drug_concepts_by_ndc_and_ingredient_name():
+    duckdb = pytest.importorskip("duckdb")
+    from omop_etl.build_omop_cdm import backfill_drug_concepts
+
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE concept AS SELECT * FROM (VALUES
+        (1567198, 'Insulin Lispro', 'RxNorm', 'Ingredient', 'S', '86009', NULL),
+        (1567199, 'insulin lispro', 'RxNorm', 'Clinical Drug Comp', 'S', '86010', NULL),
+        (1307046, 'metoprolol', 'RxNorm', 'Ingredient', 'S', '6918', NULL),
+        (40000001, 'Dexamethasone 4 MG Oral Tablet', 'RxNorm', 'Clinical Drug', 'S', '197577', NULL),
+        (45000001, 'DEXAMETHASONE 4MG TAB', 'NDC', 'NDC', NULL, '00054418125', NULL))
+        t(concept_id, concept_name, vocabulary_id, concept_class_id, standard_concept, concept_code, invalid_reason)""")
+    con.execute("CREATE TABLE concept_relationship AS SELECT 45000001 AS concept_id_1, 40000001 AS concept_id_2, "
+                "'Maps to' AS relationship_id, NULL AS invalid_reason")
+    con.execute("""CREATE TABLE drug_exposure AS SELECT * FROM (VALUES
+        (1, 0, 'insulin lispro'), (2, 0, ' METOPROLOL '), (3, 0, '0054-4181-25'), (4, NULL, 'insulin lispro'),
+        (5, 0, 'no such drug'), (6, 999, 'metoprolol'))
+        t(drug_exposure_id, drug_concept_id, drug_source_value)""")
+    got = backfill_drug_concepts(con)
+    ids = dict(con.execute("SELECT drug_exposure_id, drug_concept_id FROM drug_exposure").fetchall())
+    assert ids == {1: 1567198, 2: 1307046, 3: 40000001, 4: 1567198, 5: 0, 6: 999}  # ingredient preferred; mapped rows untouched
+    assert got == {"unmapped_before": 5, "by_ndc": 1, "by_rxnorm": 0, "by_name": 3}
+
+
+def test_diagnosis_codes_without_dots_and_with_the_wrong_dx_type_still_map(tmp_path):
+    """A site's DX_TYPE was found unreliable (legacy notebook) and codes can come without their dots: the converter looks the code
+    up without dots, and under the other ICD revision when the declared one has no such code."""
+    duckdb = pytest.importorskip("duckdb")
+    from omop_etl import build_omop_cdm as b
+
+    con = duckdb.connect()
+    b.build_schema(con)
+    b.load_macros(con)
+    con.execute("""INSERT INTO concept (concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code,
+                   valid_start_date, valid_end_date) VALUES
+        (45576876, 'Type 2 diabetes', 'Condition', 'ICD10CM', '4-char billing code', NULL, 'E11.9', DATE '1970-01-01', DATE '2099-12-31'),
+        (44821787, 'Diabetes ICD9', 'Condition', 'ICD9CM', '5-dig billing code', NULL, '250.00', DATE '1970-01-01', DATE '2099-12-31'),
+        (201826, 'Type 2 diabetes mellitus', 'Condition', 'SNOMED', 'Clinical Finding', 'S', '44054006', DATE '1970-01-01', DATE '2099-12-31')""")
+    con.execute("""INSERT INTO concept_relationship (concept_id_1, concept_id_2, relationship_id, valid_start_date, valid_end_date)
+                   VALUES (45576876, 201826, 'Maps to', DATE '1970-01-01', DATE '2099-12-31'),
+                          (44821787, 201826, 'Maps to', DATE '1970-01-01', DATE '2099-12-31')""")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "diagnosis.csv").write_text("DIAGNOSISID,PATID,DX_TYPE,DX,DX_DATE,ADMIT_DATE,PDX,PROVIDERID,ENCOUNTERID\n"
+                                       "d1,p1,10,E11.9,2018-01-01,2018-01-01,P,,e1\n"   # as declared
+                                       "d2,p1,10,E119,2018-01-01,2018-01-01,S,,e1\n"    # no dot
+                                       "d3,p1,09,E119,2018-01-01,2018-01-01,S,,e1\n"    # declared ICD-9, really ICD-10
+                                       "d4,p1,10,25000,2018-01-01,2018-01-01,S,,e1\n"   # declared ICD-10, really ICD-9
+                                       "d5,p1,10,ZZZ,2018-01-01,2018-01-01,S,,e1\n", encoding="utf-8")
+    b.load_condition_occurrence(con, str(src))
+    got = con.execute("SELECT condition_source_value, condition_concept_id, condition_source_concept_id FROM condition_occurrence "
+                      "ORDER BY condition_occurrence_id").fetchall()
+    assert got == [("E11.9", 201826, 45576876), ("E119", 201826, 45576876), ("E119", 201826, 45576876),
+                   ("25000", 201826, 44821787), ("ZZZ", 0, 0)]

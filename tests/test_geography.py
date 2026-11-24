@@ -364,13 +364,15 @@ def test_prior_utilization_counts_ei_as_inpatient_only_and_observation_as_prior_
 
     row = extract_prior_utilization(_prior_visits_cdm()).iloc[0]
     assert (row.prior_ip_count, row.prior_ed_count) == (2, 1)           # EI + IP are inpatient; only the true ED visit is ED
-    assert row.prior_os_count == 2                                      # observation (581385) is counted with outpatient
+    assert row.prior_os_count == 1                                      # observation (581385) only; outpatient (9202) is not an "os" stay
     v = extract_velocity_features(_prior_visits_cdm(), engineer=False).iloc[0]
     assert (v.prior_ip_count, v.prior_ed_count) == (2, 1)
-    assert v.prior_ip_os_ed_count == 5                                  # EI, ED, observation, outpatient, IP: each visit once
-    # the outpatient visit (9202) is a choice of the study: leave it out and only the observation stay is the "os" part
-    narrow = extract_velocity_features(_prior_visits_cdm(), engineer=False, os_concepts=(581385,)).iloc[0]
-    assert narrow.prior_ip_os_ed_count == 4
+    assert v.prior_ip_os_ed_count == 4                                  # EI, ED, observation, IP: each visit once; not outpatient
+    # counting outpatient visits too is still possible
+    wide = extract_velocity_features(_prior_visits_cdm(), engineer=False, os_concepts=(9202, 581385)).iloc[0]
+    assert wide.prior_ip_os_ed_count == 5
+    wide_u = extract_prior_utilization(_prior_visits_cdm(), visit_concept_groups={"ip": (9201, 262), "ed": (9203,), "os": (9202, 581385)}).iloc[0]
+    assert wide_u.prior_os_count == 2
 
 
 def test_address_repair_leaves_parquet_sources_alone(tmp_path):

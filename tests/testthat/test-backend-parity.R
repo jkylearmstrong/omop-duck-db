@@ -34,7 +34,7 @@ parity_cdm <- function() {
   visit(beyond_double, 9201, "2018-06-01", "2018-06-05")
   visit(beyond_double, 9201, "2018-06-20", "2018-06-25")
   visit(beyond_double, 9203, "2018-09-01", "2018-09-01")
-  visit(beyond_double, 9202, "2018-12-01", "2018-12-01")
+  visit(beyond_double, 581385, "2018-12-01", "2018-12-01")
   visit(beyond_double, 9202, "2017-01-01", "2017-01-01")
   visit(beyond_double, 9201, "2019-03-01", "2019-03-04")
   person(beyond_int32, 8532, 1990, 8516)

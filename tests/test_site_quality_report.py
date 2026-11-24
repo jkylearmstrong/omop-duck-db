@@ -69,3 +69,13 @@ def test_lab_funnel_shows_where_a_lab_is_lost(tmp_path):
     hit = [f for f in fl["flags"] if f["measure"] == "lab_wbc source rows: % no number"]
     assert hit and hit[0]["min"] == 0 and hit[0]["max"] == 100
     assert not any("Site" in json.dumps(f) for f in fl["flags"])
+
+
+def test_text_columns_are_not_counted_as_missing_and_every_site_stays_in_the_tables():
+    """C10 DQD: text columns (ruca_category, tobacco, ...) printed as 100% missing, and a site with no value for a measure
+    dropped out of the wide tables."""
+    fr = sq.feature_rows({"Site A": pd.DataFrame({"ruca_category": ["Urban", None, "Rural", "Urban"], "x": [1.0, 2.0, None, 4.0]}),
+                          "Site B": pd.DataFrame({"ruca_category": ["Urban"] * 4, "x": [None] * 4})}).set_index(["feature", "site"])
+    assert fr.loc[("ruca_category", "Site A"), "pct_missing"] == 25.0 and fr.loc[("ruca_category", "Site B"), "pct_missing"] == 0.0
+    wide = sq._wide(pd.DataFrame({"name": ["wbc", "wbc"], "site": ["Site A", "Site B"], "pct_mapped": [100.0, None]}), "name", "pct_mapped")
+    assert "Site B" in wide

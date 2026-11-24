@@ -10,6 +10,7 @@ A named list of integer vectors (\code{ip}, \code{ed}, \code{os}).
 DEFAULT_VISIT_CONCEPT_GROUPS
 }
 \description{
-9201 inpatient, 9203 emergency room, 9202 outpatient, 581385 observation (the "os" group), 262 emergency room + inpatient.
+9201 inpatient, 9203 emergency room, 581385 observation (the "os" group), 262 emergency room + inpatient.
+Outpatient visits (9202) are counted by \code{prior_outpatient_count}, not in \code{os}.
 262 (PCORnet EI, relabelled IP by the legacy study) counts as inpatient only, never as an ED visit.
 }

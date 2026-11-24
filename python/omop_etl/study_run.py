@@ -16,9 +16,10 @@ import shutil
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "drop_last_lab_values", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "drop_last_lab_values", "drop_duplicate_predictors", "DUPLICATE_PREDICTORS", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 from omop_etl.concept_sets import CONCEPT_SET_VERSION, LEGACY_CONCEPT_SETS  # noqa: E402
 
@@ -57,6 +58,11 @@ STUDY_DECISIONS: dict[str, dict[str, Any]] = {
                         "about": "The latest in-stay laboratory values (lab_<name>_last) as model features. 'drop' (both presets since 0.33.5): every model "
                                  "uses the index-stay mean of each laboratory only, as the Methods, Table 1 and Table 4 describe; 'keep' also offers the "
                                  "last value to the models. The saved features keep both, so features can be reused either way."},
+    "ineligible_draw": {"options": ("redraw", "exclude"),
+                        "about": "A patient whose stay in the pinned draw is not eligible in this data (for example a discharge status corrected to a "
+                                 "transfer or death) but who has other eligible stays: 'redraw' (both presets since 0.34.1, Kyle: the draw samples "
+                                 "eligible stays only) gives the patient one of those stays at random (seeded by random_state); 'exclude' leaves the "
+                                 "patient out at the random-draw step, as 0.34.0 did."},
 }
 STUDY_PRESETS: dict[str, dict[str, Any]] = {
     # The package follows the Nov 11 deliverable except where it was wrong (Kyle, 2026-11-17): hierarchy-based concept sets, a
@@ -65,13 +71,16 @@ STUDY_PRESETS: dict[str, dict[str, Any]] = {
     # came from an operator-precedence slip in the study pipeline).
     "package": {"consort_final_steps": True, "address_undated": "last", "address_tie_break": "first_listed", "sdi_missing_term": True, "table5": "manuscript",
                 "attrition_mode": "full_history", "table6_increments": "clinical", "age_method": "completed_years",
-                "concept_sets": "bundled", "table6_missing": "indicator", "last_lab_values": "drop"},
+                "concept_sets": "bundled", "table6_missing": "indicator", "last_lab_values": "drop",
+                "ineligible_draw": "redraw"},
     "delivered_2026_11_11": {"consort_final_steps": False, "address_undated": "first", "address_tie_break": "first_listed", "sdi_missing_term": False, "table5": "manuscript", "attrition_mode": "full_history",
                              "table6_increments": "clinical", "age_method": "completed_years",
                              # pinned: a rerun on a later release must not mix feature-definition changes into the comparison with Nov 11
                              "concept_sets": LEGACY_CONCEPT_SETS, "table6_missing": "median",
                              # Kyle, 2026-11-22: the manuscript describes index-stay mean labs only, so the models use only those
-                             "last_lab_values": "drop"},
+                             "last_lab_values": "drop",
+                             # Kyle, 2026-11-24: sample from eligible stays only (the delivered draw predates the discharge-status repair)
+                             "ineligible_draw": "redraw"},
 }
 
 
@@ -220,12 +229,18 @@ PROTOCOL_COHORT_PARAMS: dict[str, Any] = dict(
     transfer_discharge_concept_ids=[8717], exclude_metformin_only_prediabetes_pcos=True)
 
 
-def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on: str = "visit_occurrence_id", strict: bool = True) -> pd.DataFrame:
+def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on: str = "visit_occurrence_id", strict: bool = True,
+              redraw: bool = False, random_state: int = 42, patients: Sequence[Any] | None = None) -> pd.DataFrame:
     """Keeps the cohort rows whose ``on`` value is listed in ``selection`` (a DataFrame or a CSV path), to reproduce a previous
     stay-per-patient draw exactly. Build the cohort with ``sample_stay_rule="all"`` so every candidate stay is present.
 
     ``strict=True`` raises if a selected stay is not in the cohort (a different cohort definition, window or data cut); ``False`` keeps
-    what is found. Raises if the selection lists a patient more than once."""
+    what is found. Raises if the selection lists a patient more than once.
+
+    ``redraw=True``: a patient of the selection whose selected stay is not among the cohort rows (it is no longer eligible) but who has
+    other cohort stays gets one of them drawn at random, seeded by ``random_state``, so the result samples eligible stays only. The
+    selection's patients are ``patients`` (ids), else its ``subject_id`` / ``person_id`` column; a patient outside the selection is not
+    added. The draw does not depend on row order. ``attrs["redrawn"]`` is the number of patients drawn this way."""
     sel = pd.read_csv(selection) if isinstance(selection, (str, Path)) else selection
     if on not in sel:
         raise ValueError(f"the selection needs a {on!r} column.")
@@ -239,12 +254,31 @@ def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on:
     pid = "subject_id" if "subject_id" in out else ("person_id" if "person_id" in out else None)
     if pid and out[pid].duplicated().any():
         raise ValueError("the selection yields more than one stay for some patients.")
-    return out.reset_index(drop=True)
+    n_redrawn = 0
+    if redraw:
+        if pid is None:
+            raise ValueError("redraw needs a subject_id or person_id column in the cohort.")
+        if patients is None:
+            col = next((c for c in ("subject_id", "person_id") if c in sel), None)
+            if col is None:
+                raise ValueError("redraw needs the selection's patients: pass patients= or a subject_id / person_id column.")
+            patients = sel[col].dropna().tolist()
+        listed = {int(x) for x in patients}
+        rest = cohort[cohort[pid].astype("int64").isin(listed) & ~cohort[pid].isin(set(out[pid]))]
+        if len(rest):
+            rest = rest.sort_values([pid, on], kind="mergesort")
+            key = np.random.default_rng(random_state).random(len(rest))
+            pick = rest.assign(_k=key).sort_values([pid, "_k"], kind="mergesort").drop_duplicates(pid).drop(columns="_k")
+            n_redrawn = len(pick)
+            out = pd.concat([out, pick]).sort_index(kind="mergesort")
+    out = out.reset_index(drop=True)
+    out.attrs["redrawn"] = n_redrawn
+    return out
 
 
 def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mapping[str, Any], profile: str | None, pinned: pd.DataFrame | None,
                 ruca: Any, sdi: Any, cuts: Sequence[float] | None, address_table: str | None, transfer_source_values: Sequence[str],
-                feature_kwargs: Mapping[str, Any], work: Path, attrition_mode: str = "windowed"):
+                feature_kwargs: Mapping[str, Any], work: Path, attrition_mode: str = "windowed", redraw: bool = False, random_state: int = 42):
     """One site's pooled-ready frame, its attrition and ``meta`` (feature groups, skipped features, the address source used,
     pinned-list coverage). Data gaps it can see are raised as :class:`omop_etl.data_gaps.DataGapWarning` for run_study to judge."""
     import warnings
@@ -302,14 +336,23 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
             raise ValueError("attrition_mode must be 'windowed' or 'full_history'.")
         if pinned is not None:
             from_site = pinned[pinned["site_source"] == site] if "site_source" in pinned else pinned
-            cohort = pin_stays(cohort, from_site, strict=False)
+            patients = None
+            if redraw:  # the patients of the listed stays, so a patient outside the draw is never added
+                ids = from_site["visit_occurrence_id"].dropna().astype("int64").tolist() if "visit_occurrence_id" in from_site else []
+                patients = [r[0] for r in con.execute("SELECT DISTINCT person_id FROM visit_occurrence WHERE visit_occurrence_id IN "
+                                                      "(SELECT unnest(?::BIGINT[]))", [ids]).fetchall()] if ids else []
+            cohort = pin_stays(cohort, from_site, strict=False, redraw=redraw, random_state=random_state, patients=patients)
+            redrawn = int(cohort.attrs.get("redrawn", 0))
+            cohort.attrs = {}
+            meta["redrawn"] = redrawn  # pooled for the text; the per-site value stays in the private metadata
             listed = int(from_site["visit_occurrence_id"].nunique()) if "visit_occurrence_id" in from_site else 0
-            meta["pinned_found_share"] = round(len(cohort) / listed, 4) if listed else None
+            meta["pinned_found_share"] = round((len(cohort) - redrawn) / listed, 4) if listed else None
             if not listed:
                 warnings.warn(DataGapWarning("the pinned stay list has no stay for this site", "pinned"), stacklevel=2)
-            elif len(cohort) < listed:
-                warnings.warn(DataGapWarning(f"{1 - len(cohort) / listed:.2%} of the pinned stays for this site are not in the cohort "
-                                             "(different cohort definition, window or data cut); they were dropped", "pinned"), stacklevel=2)
+            elif len(cohort) - redrawn < listed:
+                warnings.warn(DataGapWarning(f"{1 - (len(cohort) - redrawn) / listed:.2%} of the pinned stays for this site are not in the cohort "
+                                             "(different cohort definition, window or data cut); "
+                                             + ("their patients were given another eligible stay at random" if redraw else "they were dropped"), "pinned"), stacklevel=2)
             att = pd.concat([att, pd.DataFrame([{"step_name": "Stay selected for the patient (pinned list)", "subjects_retained": len(cohort), "site": site}])], ignore_index=True)
         path = work / f"cohort_{site}.parquet"
         cohort.to_parquet(path)
@@ -323,6 +366,8 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         if feats.attrs.get("address_table"):
             meta["address_table"] = feats.attrs["address_table"]
         meta["geography"] = feats.attrs.get("geography")
+        meta["bmi_filled_share"] = ({k: round(v / len(feats), 4) for k, v in (feats.attrs.get("bmi_filled") or {}).items()}
+                                    if len(feats) else None)  # shares, not counts: the per-site metadata stays shareable
     finally:
         con.close()
     df = cohort.merge(feats, on="visit_occurrence_id", suffixes=("", "_f"))
@@ -499,6 +544,19 @@ def drop_last_lab_values(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=[c for c in df.columns if re.fullmatch(r"lab_.+_last", str(c))])
 
 
+# a predictor that repeats another one (same value in every row, or the same quantity capped differently) -> the column it repeats;
+# both in the model split one effect between two coefficients and list the same thing twice among the predictors
+DUPLICATE_PREDICTORS: dict[str, str] = {"los_days": "index_los_days", "days_since_last_encounter": "days_since_prior_encounter"}
+
+
+def drop_duplicate_predictors(df: pd.DataFrame, duplicates: Mapping[str, str] | None = None) -> pd.DataFrame:
+    """The feature table without the columns of :data:`DUPLICATE_PREDICTORS` whose counterpart is present (``los_days`` repeats
+    ``index_los_days``; ``days_since_last_encounter`` is ``days_since_prior_encounter`` capped differently). A column whose counterpart
+    is absent is kept."""
+    dup = DUPLICATE_PREDICTORS if duplicates is None else duplicates
+    return df.drop(columns=[c for c, keep in dup.items() if c in df.columns and keep in df.columns])
+
+
 def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
     """Pools the site frames in an order that depends only on the data: sites by their key (``site_source``), then rows by person and
     stay. The cross-validation folds and the upsampled training rows are drawn by row position, so before this the model tables changed
@@ -522,6 +580,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               min_cell: int | None = 11, attrition_mode: str | None = None, table5: str | None = None, sdi_missing_term: bool | None = None,
               address_tie_break: str | None = None, address_undated: str | None = None, table6_increments: str | None = None, consort_final_steps: bool | None = None,
               age_method: str | None = None, concept_sets: str | None = None, table6_missing: str | None = None, last_lab_values: str | None = None,
+              ineligible_draw: str | None = None,
               sheet_site_labels: Mapping[str, Mapping[str, str]] | None = None, preset: str = "package",
               private_dir: str | Path | None = None, document: bool = True, document_formats: Sequence[str] = ("docx", "pdf"),
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
@@ -574,7 +633,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     dec = resolve_decisions(preset, attrition_mode=attrition_mode, table5=table5, sdi_missing_term=sdi_missing_term,
                             address_tie_break=address_tie_break, address_undated=address_undated, table6_increments=table6_increments,
                             consort_final_steps=consort_final_steps, age_method=age_method, concept_sets=concept_sets,
-                            table6_missing=table6_missing, last_lab_values=last_lab_values)
+                            table6_missing=table6_missing, last_lab_values=last_lab_values,
+                            ineligible_draw=ineligible_draw)
     attrition_mode, table5, sdi_missing_term, address_tie_break = (dec["attrition_mode"], dec["table5"], dec["sdi_missing_term"], dec["address_tie_break"])
     undated = dec["address_undated"]
     c_params = dict(cohort_params or PROTOCOL_COHORT_PARAMS)
@@ -631,6 +691,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                       "sdi": (_file_fingerprint(sdi_table) or {}).get("sha256", None if sdi_table is None else "in memory"),
                                       "sdi_cut_points": list(sdi_cut_points or ()), "transfer_source_values": list(transfer_source_values),
                                       "pinned": None if pinned is None else pd.util.hash_pandas_object(pinned, index=False).sum().item(),
+                                      **({"ineligible_draw": dec["ineligible_draw"]} if pinned is not None and dec["ineligible_draw"] != "exclude" else {}),
                                       "feature_kwargs": feature_kwargs or {}}, default=str, sort_keys=True))
 
     def _write_gaps() -> None:
@@ -662,6 +723,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     timings: dict[str, float] = {}
     frames, atts = [], []
     qualifying_stays: dict[str, int | None] = {}
+    redrawn_total = 0
     for site in sites:
         t_site = time.time()
         f = priv / f"features_{site}.parquet"
@@ -689,6 +751,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                 geography[labels[site]] = {k: v for k, v in meta["geography"].items() if k != "address_table"}
             _gate(_with_coverage(saved, df, meta, labels[site], data_gap_threshold))
             qualifying_stays[labels[site]] = meta.get("qualifying_stays")
+            redrawn_total += int(meta.get("redrawn") or 0)
             frames.append(df)
             atts.append(pd.read_csv(a))
             continue
@@ -697,7 +760,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             df, att, meta = _site_frame(db, site, start=start, end=end, params=c_params, profile=profile, pinned=pinned,
                                         ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
                                         transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=priv,
-                                        attrition_mode=attrition_mode)
+                                        attrition_mode=attrition_mode, redraw=dec["ineligible_draw"] == "redraw", random_state=random_state)
         df["site_anon"] = labels.get(site, site)
         raised = _caught_findings(caught, labels[site], scrub)
         address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
@@ -710,6 +773,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             geography[labels[site]] = {k: v for k, v in meta["geography"].items() if k != "address_table"}
         _gate(_with_coverage(raised, df, meta, labels[site], data_gap_threshold))
         qualifying_stays[labels[site]] = meta.get("qualifying_stays")
+        redrawn_total += int(meta.get("redrawn") or 0)
         frames.append(df)
         atts.append(att)
         timings[f"site_{labels.get(site, site)}"] = round(time.time() - t_site, 1)  # keyed by the anonymous letter: the run record is shareable and must not name sites
@@ -718,7 +782,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         assess(findings, allow)  # raises with every site's gaps at once
         return {"data_checks": findings, "address_table": address_used, "share_missing_by_group": coverage, "geography": geography,
                 "private_dir": priv, "checked_only": True}
-    pooled = _canonical_order(frames)
+    pooled = drop_duplicate_predictors(_canonical_order(frames))
     if dec["last_lab_values"] == "drop":  # the models see the index-stay mean of each laboratory only (Methods 2.2, Tables 1 and 4)
         pooled = drop_last_lab_values(pooled)
     attrition = pd.concat(atts, ignore_index=True)
@@ -770,7 +834,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                        software_versions=run_environment(), profile=manuscript_profile, params=manuscript_params,
                                        run={"n_sites": len(labels), "window": [start, end], "decisions": dec, "bootstraps": n_bootstraps,
                                             "random_state": random_state, "preset": preset, "environment": run_environment(),
-                                            "cohort_params": c_params, "qualifying_stays": n_qualifying},
+                                            "cohort_params": c_params, "qualifying_stays": n_qualifying,
+                                            **({"random_draw_redrawn": redrawn_total} if pinned is not None else {})},
                                        summary=res.get("summary"))
         staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
@@ -806,6 +871,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     label_mode = ("explicit" if isinstance(site_labels_arg, Mapping) else "file" if isinstance(site_labels_arg, (str, Path)) and
                   str(site_labels_arg) not in ("random", "ordered") else str(site_labels_arg or "ordered"))
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
+                                                     **({"random_draw_redrawn": redrawn_total} if pinned is not None else {}),
                                                        "n": int(len(pooled)), "qualifying_stays": n_qualifying, "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
                                                        "cohort_params": json.loads(json.dumps(c_params, default=str)),
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},

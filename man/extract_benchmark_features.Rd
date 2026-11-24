@@ -41,7 +41,9 @@ extract_benchmark_features(
   address_tie_break = "deterministic",
   address_undated = "last",
   impute = NULL,
-  impute_values = NULL
+  impute_values = NULL,
+  bmi_fill = NULL,
+  bmi_lookback_days = 365
 )
 }
 \arguments{
@@ -111,6 +113,13 @@ example a study's own \code{ederri_address_history}); \code{NULL} for \code{pers
 (named numeric) is given; fit them on the training sites (\code{attr(, "imputation_values")}) and pass them to other tables.}
 
 \item{impute_values}{named numeric vector of frozen fill values.}
+
+\item{bmi_fill}{how a stay with no in-stay BMI gets one (\code{vital_bmi}): \code{"derive"} from the stay's mean height and weight,
+\code{"derive_lookback"} also the latest BMI recorded in the \code{bmi_lookback_days} before admission, then one from the latest height and
+weight there, \code{"none"} leaves it missing. Default \code{NULL}: \code{"derive_lookback"} for \code{profile = "ederri"} / \code{"both"}, else \code{"derive"}.
+\code{attr(, "bmi_filled")} counts the stays each step filled.}
+
+\item{bmi_lookback_days}{window before admission for \code{bmi_fill = "derive_lookback"} (default 365).}
 }
 \value{
 A data frame in cohort order; \code{attr(, "feature_groups")} lists the columns per group and \code{attr(, "skipped")} the

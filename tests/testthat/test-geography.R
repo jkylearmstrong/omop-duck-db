@@ -199,11 +199,11 @@ test_that("prior utilization counts EI (262) as inpatient only and observation a
     DBI::dbExecute(con, sprintf("INSERT INTO visit_occurrence (visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, visit_type_concept_id) VALUES (%d, 1, %d, DATE '%s', DATE '%s', 0)", x[[1]], x[[2]], x[[3]], x[[3]]))
   }
   u <- extract_prior_utilization(con)
-  expect_equal(c(u$prior_ip_count, u$prior_ed_count, u$prior_os_count), c(2, 1, 2))
+  expect_equal(c(u$prior_ip_count, u$prior_ed_count, u$prior_os_count), c(2, 1, 1))
   w <- extract_velocity_features(con, engineer = FALSE)
-  expect_equal(c(w$prior_ip_count, w$prior_ed_count, w$prior_ip_os_ed_count), c(2, 1, 5))
-  # the outpatient visit (9202) is a choice of the study: leave it out and only the observation stay is the "os" part
-  expect_equal(extract_velocity_features(con, engineer = FALSE, os_concepts = 581385L)$prior_ip_os_ed_count, 4)
+  expect_equal(c(w$prior_ip_count, w$prior_ed_count, w$prior_ip_os_ed_count), c(2, 1, 4))
+  # counting outpatient visits (9202) too is still possible
+  expect_equal(extract_velocity_features(con, engineer = FALSE, os_concepts = c(9202L, 581385L))$prior_ip_os_ed_count, 5)
 })
 
 geo_measurement_cdm <- function(env = parent.frame()) {

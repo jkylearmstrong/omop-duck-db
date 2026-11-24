@@ -19,7 +19,7 @@ A data frame with one row per cohort row.
 }
 \description{
 One row per cohort row, in cohort order: \code{prior_encounters_all_count}, \code{prior_ip_os_ed_count} (inpatient 9201 / 262, ED
-9203 and 2000000048 visits), \code{days_since_prior_encounter}, \code{days_since_prior_ip_ed} (\code{lookback_days} when there is none),
+9203 and observation 581385 visits; also the custom concept 2000000048), \code{days_since_prior_encounter}, \code{days_since_prior_ip_ed} (\code{lookback_days} when there is none),
 \code{readmission_count_twelve_months}, \code{n_secondary_dx_ccs} (distinct condition concepts from admission to discharge),
 \code{elix_pre_index_conditions_count} (distinct condition concepts before the admission, all history) and \code{tobacco}
 (\code{"Current user"}, \code{"Former user"} or \code{"Never user"} from tobacco observation concepts and ICD F17 / Z72.0 / 305.1 / Z87.891 /
