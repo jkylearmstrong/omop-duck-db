@@ -1,3 +1,12 @@
+# omopduckdb 0.34.1
+
+Fixes from run C10 and Kyle's review of the legacy per-site notebooks (2026-11-24). Version bump 0.34.0 to 0.34.1; the manuscript template stays v0.34.0. Nothing changes for a database built by this package's converter except the diagnosis lookup; the two backfill helpers repair databases built another way.
+
+- **`backfill_discharge_status(con, supplemental_csv=None)`** repairs the discharge status of an existing CDM database. A supplemental PCORnet-style file (ENCOUNTERID, DISCHARGE_STATUS) fills the visits whose status is NI, UN, blank or NULL. Every visit's `discharged_to_concept_id` is then set from its source value with the converter's own mapping (`discharge_status_case()`, `PCORNET_DISCHARGE_STATUS_CONCEPTS`). Run C10 found one site whose encounter extract is all NI while the legacy pipeline joined a separate discharge file, and site databases whose builder mapped only "A" and "E", so `discharged_to_concept_id` was 0 for every stay at every site. The features read the source value and were right, but the cohort's in-hospital-death and transfer exclusions read the concept.
+- **`backfill_drug_concepts(con)`** maps unmapped drug rows from their source value: an NDC (11 digits, or a hyphenated 10-digit form padded) through the vocabulary's 'Maps to', else the exact name of a standard RxNorm concept, an ingredient preferred. C10 found a site with a fifth of its drug rows unmapped, their source values plain ingredient names such as "insulin lispro".
+- **Diagnosis codes are looked up without their dots, and under the other ICD revision when DX_TYPE names the wrong one** (Python and R converters). A legacy notebook warned that one site's DX_TYPE is unreliable.
+- **`site_quality_report.py`**: text columns (`ruca_category`, `tobacco`, ...) are reported by their missing share instead of printing 100% missing, and a site with no value for a measure keeps its column in the wide tables (the C10 lab funnel showed 4 of 5 sites).
+
 # omopduckdb 0.34.0
 
 Dr. Rubin's review of C9 (2026-11-23), made the package defaults so every later build carries it, plus Kyle's per-site data-quality report. Version bump 0.33.7 to 0.34.0; manuscript template v0.34.0. Models, tables and figures change in presentation only. A run needs the models again, for the SHAP plot and the rounded tables. The features must be extracted again, for the new secondary-diagnosis and outpatient columns, and the site databases rebuilt for the converter's lab and encounter-type fixes to apply.

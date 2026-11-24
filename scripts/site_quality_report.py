@@ -69,7 +69,15 @@ def feature_rows(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
             if c not in d:
                 rows.append({"feature": c, "site": site, "present": False})
                 continue
-            v = _num(d[c])
+            raw = d[c]
+            if not (pd.api.types.is_numeric_dtype(raw) or pd.api.types.is_bool_dtype(raw)):
+                # a text column (ruca_category, tobacco, site_anon, ...): % missing only, never coerced to numbers (C10 printed
+                # every text column as 100% missing)
+                n = len(raw)
+                miss = raw.isna() | raw.astype(str).str.strip().isin(["", "nan", "None"])
+                rows.append({"feature": c, "site": site, "present": True, "n": n, "pct_missing": round(100 * float(miss.mean()), 2) if n else None})
+                continue
+            v = _num(raw)
             n = len(v)
             nn = v.dropna()
             r: dict[str, Any] = {"feature": c, "site": site, "present": True, "n": n, "pct_missing": round(100 * (1 - len(nn) / n), 2) if n else None}
@@ -227,6 +235,8 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
                     GROUP BY 1, 2) WHERE k <= 3
                 GROUP BY name""", [start, end]).df()
             f = f.merge(units, on="name", how="outer").merge(mapped, on="name", how="outer").merge(other, on="name", how="left")
+            # every lab gets a row at every site, so a site with no rows for a lab shows 0 instead of dropping out of the tables
+            f = pd.DataFrame({"name": sorted(BENCHMARK_LAB_LOINCS)}).merge(f, on="name", how="left")
             f["source_rows"] = f["source_rows"].fillna(0).astype(int)
             f["concept_rows"] = f["concept_rows"].fillna(0).astype(int)
             f["site"] = label
@@ -292,7 +302,7 @@ def _md(t: pd.DataFrame, index: bool = True) -> str:
 def _wide(df: pd.DataFrame, index: str, value: str) -> str:
     if df.empty or value not in df:
         return "(none)\n"
-    return _md(df.pivot_table(index=index, columns="site", values=value, aggfunc="first"))
+    return _md(df.pivot_table(index=index, columns="site", values=value, aggfunc="first", dropna=False))
 
 
 def main(argv: list[str] | None = None) -> int:

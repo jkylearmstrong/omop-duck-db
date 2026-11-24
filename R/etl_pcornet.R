@@ -672,6 +672,11 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
 
+  DBI::dbExecute(con, "CREATE OR REPLACE TEMP TABLE _dx_codes AS
+    SELECT vocabulary_id, k, concept_id, standard_concept FROM (
+      SELECT vocabulary_id, replace(upper(concept_code), '.', '') AS k, concept_id, standard_concept,
+             row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '') ORDER BY concept_id) AS rn
+      FROM concept WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM', 'SNOMED')) WHERE rn = 1")
   run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", sprintf("
     INSERT INTO condition_occurrence
     SELECT
@@ -680,7 +685,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         COALESCE(
             stcm.target_concept_id,
             cr.concept_id_2,
-            CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+            CASE WHEN COALESCE(c1.standard_concept, c2.standard_concept) = 'S' THEN COALESCE(c1.concept_id, c2.concept_id) ELSE 0 END,
             0
         ) AS condition_concept_id,
         parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)) AS condition_start_date,
@@ -694,11 +699,13 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
         NULL AS visit_detail_id,
         src.DX AS condition_source_value,
-        COALESCE(c.concept_id, 0) AS condition_source_concept_id,
+        COALESCE(c1.concept_id, c2.concept_id, 0) AS condition_source_concept_id,
         src.PDX AS condition_status_source_value
     FROM (
         SELECT *,
-            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id
+            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id,
+            replace(upper(trim(DX)), '.', '') AS dx_key,
+            CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD10CM' WHEN '10' THEN 'ICD9CM' ELSE NULL END AS dx_other_vocabulary_id
         FROM _temp_diagnosis
     ) src
     LEFT JOIN person p
@@ -707,16 +714,21 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
       ON pr.provider_source_value = src.PROVIDERID
     LEFT JOIN visit_occurrence vo
       ON vo.visit_source_value = src.ENCOUNTERID
-    LEFT JOIN concept c
-      ON c.vocabulary_id = src.dx_vocabulary_id
-     AND c.concept_code = src.DX
+    -- the code is looked up without its dots, and under the other ICD revision when DX_TYPE names the wrong one (a site's
+    -- DX_TYPE was found unreliable, 0.34.1)
+    LEFT JOIN _dx_codes c1
+      ON c1.vocabulary_id = src.dx_vocabulary_id
+     AND c1.k = src.dx_key
+    LEFT JOIN _dx_codes c2
+      ON c2.vocabulary_id = src.dx_other_vocabulary_id
+     AND c2.k = src.dx_key
     LEFT JOIN (
         SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
         FROM concept_relationship
         WHERE relationship_id = 'Maps to'
         GROUP BY concept_id_1
     ) cr
-      ON cr.concept_id_1 = c.concept_id
+      ON cr.concept_id_1 = COALESCE(c1.concept_id, c2.concept_id)
     LEFT JOIN (
         SELECT source_vocabulary_id, source_code, MIN(target_concept_id) AS target_concept_id
         FROM source_to_concept_map
@@ -730,6 +742,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DIAGNOSISID) = 1;
   ", patid_expr, .TYPE_CONCEPT_PRIMARY_DX, patid_expr, .today_iso()))
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_diagnosis;")
+  DBI::dbExecute(con, "DROP TABLE IF EXISTS _dx_codes;")
 }
 
 .load_procedure_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {

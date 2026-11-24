@@ -738,6 +738,108 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
     con.execute("DROP VIEW IF EXISTS _temp_address_history;")
 
 
+#: PCORnet ENCOUNTER.DISCHARGE_STATUS -> OMOP discharged_to_concept_id (0.34.1: shared by the converter and
+#: :func:`backfill_discharge_status`). NI, UN, OT, blank and any other code map to 0; the source value is kept as written.
+PCORNET_DISCHARGE_STATUS_CONCEPTS: tuple[tuple[tuple[str, ...], int], ...] = (
+    (("E", "EX", "EXPIRED", "DIED", "DECEASED"), 4216643),  # Expired
+    (("AM", "AMA"), 32216),  # Left against medical advice or discontinued care (UB04 Pt dis status 07)
+    (("HS", "HOSPICE"), 8546),  # Hospice (PCORnet HS)
+    (("SN", "SNF"), 8863),  # Skilled Nursing Facility
+    (("NH",), 8676),  # Nursing Facility
+    (("HH",), 32215),  # UB04 06: home care of organized home health service
+    (("RH",), 32228),  # UB04 62: inpatient rehabilitation facility
+    (("IP",), 8717),  # Other acute inpatient hospital (transfer)
+    (("HO", "HOME", "ROUTINE"), 8536),  # Home / self care (PCORnet HO)
+    (("A",), 4161979),  # Discharged alive (PCORnet A: disposition unspecified, not home)
+)
+#: DISCHARGE_STATUS values that carry no discharge status (the backfill replaces them; the features count them as missing).
+UNINFORMATIVE_DISCHARGE_STATUS = ("", "NI", "UN", "NULL")
+
+
+def discharge_status_case(expr):
+    """SQL CASE mapping a PCORnet DISCHARGE_STATUS expression to its discharged_to_concept_id (0 when unmapped)."""
+    whens = " ".join("WHEN UPPER(TRIM({e})) IN ({v}) THEN {c}".format(e=expr, v=", ".join(f"'{x}'" for x in codes), c=cid)
+                     for codes, cid in PCORNET_DISCHARGE_STATUS_CONCEPTS)
+    return f"CASE {whens} ELSE 0 END"
+
+
+def backfill_discharge_status(con, supplemental_csv=None, *, remap=True):
+    """Repairs the discharge status of an existing CDM database (0.34.1; run C10 found a site whose ENCOUNTER extract is all NI
+    while a separate discharge file holds the codes, and a builder that mapped only 'A' and 'E').
+
+    ``supplemental_csv``: a PCORnet-style file with ENCOUNTERID and DISCHARGE_STATUS (other columns ignored). Its status replaces
+    ``discharged_to_source_value`` of the visit whose ``visit_source_value`` is that ENCOUNTERID, where the supplemental status
+    is informative and the visit's is not (NI, UN, blank or NULL). An ENCOUNTERID listed more than once is skipped.
+    ``remap``: then sets ``discharged_to_concept_id`` of every visit from its source value with :func:`discharge_status_case`.
+    Returns ``{"visits": n, "source_filled": n, "concept_changed": n}``. The connection must be writable; work on a copy."""
+    bad = ", ".join(f"'{x}'" for x in UNINFORMATIVE_DISCHARGE_STATUS)
+    out = {"visits": int(con.execute("SELECT count(*) FROM visit_occurrence").fetchone()[0]), "source_filled": 0, "concept_changed": 0}
+    if supplemental_csv is not None:
+        con.execute(f"""CREATE OR REPLACE TEMP TABLE _supp_dis AS
+            SELECT CAST(ENCOUNTERID AS VARCHAR) AS eid, max(UPPER(TRIM(DISCHARGE_STATUS))) AS status
+            FROM read_csv_auto({sql_path_literal(os.fspath(supplemental_csv))}, all_varchar = true, header = true)
+            WHERE UPPER(TRIM(coalesce(DISCHARGE_STATUS, ''))) NOT IN ({bad})
+            GROUP BY 1 HAVING count(DISTINCT UPPER(TRIM(DISCHARGE_STATUS))) = 1""")
+        cond = (f"v.visit_source_value = s.eid AND UPPER(TRIM(coalesce(v.discharged_to_source_value, ''))) IN ({bad})")
+        out["source_filled"] = int(con.execute(f"SELECT count(*) FROM visit_occurrence v JOIN _supp_dis s ON {cond}").fetchone()[0])
+        con.execute(f"UPDATE visit_occurrence v SET discharged_to_source_value = s.status FROM _supp_dis s WHERE {cond}")
+        con.execute("DROP TABLE _supp_dis")
+    if remap:
+        new = discharge_status_case("discharged_to_source_value")
+        out["concept_changed"] = int(con.execute(
+            f"SELECT count(*) FROM visit_occurrence WHERE coalesce(discharged_to_concept_id, -1) <> {new}").fetchone()[0])
+        con.execute(f"UPDATE visit_occurrence SET discharged_to_concept_id = {new} WHERE coalesce(discharged_to_concept_id, -1) <> {new}")
+    return out
+
+
+
+def backfill_drug_concepts(con):
+    """Maps unmapped drug rows (``drug_concept_id`` 0 or NULL) from their ``drug_source_value`` (0.34.1; run C10 found a site with
+    a fifth of its drug rows unmapped, their source values plain ingredient names such as "insulin lispro", and another with raw NDC codes).
+
+    In order: an NDC (11 digits once everything else is removed, or a hyphenated 10-digit form padded to 11) through the vocabulary's NDC 'Maps to'; else the exact name
+    (trimmed, any case) of a standard RxNorm / RxNorm Extension concept, an Ingredient preferred, then the single concept of that name.
+    The medication features roll concepts up through concept_ancestor, so an ingredient is enough. Needs the vocabulary on the
+    connection (attach the central vocabulary first) and a writable connection; work on a copy. Returns
+    ``{"unmapped_before": n, "by_ndc": n, "by_name": n}`` (row counts)."""
+    before = int(con.execute("SELECT count(*) FROM drug_exposure WHERE coalesce(drug_concept_id, 0) = 0").fetchone()[0])
+    con.execute("""CREATE OR REPLACE TEMP TABLE _dsv AS
+        SELECT DISTINCT drug_source_value AS sv, lower(trim(drug_source_value)) AS nm,
+               CASE  -- a 10-digit NDC in its 4-4-2, 5-3-2 or 5-4-1 form is padded to the 11-digit 5-4-2 code
+                   WHEN regexp_matches(trim(drug_source_value), '^[0-9]{4}-[0-9]{4}-[0-9]{2}$') THEN '0' || replace(trim(drug_source_value), '-', '')
+                   WHEN regexp_matches(trim(drug_source_value), '^[0-9]{5}-[0-9]{3}-[0-9]{2}$')
+                       THEN split_part(trim(drug_source_value), '-', 1) || '0' || split_part(trim(drug_source_value), '-', 2) || split_part(trim(drug_source_value), '-', 3)
+                   WHEN regexp_matches(trim(drug_source_value), '^[0-9]{5}-[0-9]{4}-[0-9]$')
+                       THEN split_part(trim(drug_source_value), '-', 1) || split_part(trim(drug_source_value), '-', 2) || '0' || split_part(trim(drug_source_value), '-', 3)
+                   ELSE regexp_replace(drug_source_value, '[^0-9]', '', 'g') END AS digits
+        FROM drug_exposure WHERE coalesce(drug_concept_id, 0) = 0 AND drug_source_value IS NOT NULL""")
+    con.execute("""CREATE OR REPLACE TEMP TABLE _dmap AS
+        WITH ndc AS (
+            SELECT d.sv, min(cr.concept_id_2) AS cid, count(DISTINCT cr.concept_id_2) AS k, 'ndc' AS how
+            FROM _dsv d JOIN concept c ON c.vocabulary_id = 'NDC' AND c.concept_code = d.digits AND length(d.digits) = 11
+            JOIN concept_relationship cr ON cr.concept_id_1 = c.concept_id AND cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
+            GROUP BY d.sv),
+        nm AS (
+            SELECT d.sv, c.concept_id, c.concept_class_id
+            FROM _dsv d JOIN concept c ON lower(c.concept_name) = d.nm AND c.vocabulary_id IN ('RxNorm', 'RxNorm Extension')
+             AND c.standard_concept = 'S' AND c.invalid_reason IS NULL
+            WHERE d.sv NOT IN (SELECT sv FROM ndc WHERE k = 1)),
+        byname AS (
+            SELECT sv, CASE WHEN count(*) FILTER (WHERE concept_class_id = 'Ingredient') = 1
+                            THEN min(concept_id) FILTER (WHERE concept_class_id = 'Ingredient')
+                            WHEN count(*) = 1 THEN min(concept_id) END AS cid, 'name' AS how
+            FROM nm GROUP BY sv)
+        SELECT sv, cid, how FROM ndc WHERE k = 1
+        UNION ALL SELECT sv, cid, how FROM byname WHERE cid IS NOT NULL""")
+    counts = dict(con.execute("""SELECT m.how, count(*) FROM drug_exposure x JOIN _dmap m ON x.drug_source_value = m.sv
+                                 WHERE coalesce(x.drug_concept_id, 0) = 0 GROUP BY 1""").fetchall())
+    con.execute("""UPDATE drug_exposure SET drug_concept_id = m.cid FROM _dmap m
+                   WHERE drug_exposure.drug_source_value = m.sv AND coalesce(drug_exposure.drug_concept_id, 0) = 0""")
+    con.execute("DROP TABLE _dsv")
+    con.execute("DROP TABLE _dmap")
+    return {"unmapped_before": before, "by_ndc": int(counts.get("ndc", 0)), "by_name": int(counts.get("name", 0))}
+
+
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "encounter")
     if path is None:
@@ -784,19 +886,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
             0 AS visit_source_concept_id,
             0 AS admitted_from_concept_id,
             NULL AS admitted_from_source_value,
-            CASE 
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('E', 'EX', 'EXPIRED', 'DIED', 'DECEASED') THEN 4216643 -- Expired
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('AM', 'AMA') THEN 32216 -- Left against medical advice or discontinued care (UB04 Pt dis status 07)
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HS', 'HOSPICE') THEN 8546 -- Hospice (PCORnet HS)
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('SN', 'SNF') THEN 8863 -- Skilled Nursing Facility
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('NH') THEN 8676 -- Nursing Facility
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HH') THEN 32215 -- UB04 06: home care of organized home health service
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('RH') THEN 32228 -- UB04 62: inpatient rehabilitation facility
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('IP') THEN 8717 -- Other acute inpatient hospital (transfer)
-                WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('HO', 'HOME', 'ROUTINE') THEN 8536 -- Home / self care (PCORnet HO)
-            WHEN UPPER(TRIM(src.DISCHARGE_STATUS)) IN ('A') THEN 4161979 -- Discharged alive (PCORnet A: disposition unspecified, not home)
-                ELSE 0
-            END AS discharged_to_concept_id,
+            {discharge_status_case('src.DISCHARGE_STATUS')} AS discharged_to_concept_id,
             src.DISCHARGE_STATUS AS discharged_to_source_value,
             NULL AS preceding_visit_occurrence_id
         FROM _temp_encounter src
@@ -844,6 +934,11 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
 
     patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
 
+    con.execute("""CREATE OR REPLACE TEMP TABLE _dx_codes AS
+        SELECT vocabulary_id, k, concept_id, standard_concept FROM (
+            SELECT vocabulary_id, replace(upper(concept_code), '.', '') AS k, concept_id, standard_concept,
+                   row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '') ORDER BY concept_id) AS rn
+            FROM concept WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM', 'SNOMED')) WHERE rn = 1""")
     run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", f"""
         INSERT INTO condition_occurrence
         SELECT
@@ -852,7 +947,7 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
             COALESCE(
                 stcm.target_concept_id,
                 cr.concept_id_2,
-                CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
+                CASE WHEN COALESCE(c1.standard_concept, c2.standard_concept) = 'S' THEN COALESCE(c1.concept_id, c2.concept_id) ELSE 0 END,
                 0
             ) AS condition_concept_id,
             parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)) AS condition_start_date,
@@ -866,11 +961,13 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
             COALESCE(vo.visit_occurrence_id, pcornet_id(src.ENCOUNTERID)) AS visit_occurrence_id,
             NULL AS visit_detail_id,
             src.DX AS condition_source_value,
-            COALESCE(c.concept_id, 0) AS condition_source_concept_id,
+            COALESCE(c1.concept_id, c2.concept_id, 0) AS condition_source_concept_id,
             src.PDX AS condition_status_source_value
         FROM (
             SELECT *,
-                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id
+                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD9CM' WHEN '10' THEN 'ICD10CM' WHEN 'SM' THEN 'SNOMED' ELSE NULL END AS dx_vocabulary_id,
+                replace(upper(trim(DX)), '.', '') AS dx_key,
+                CASE UPPER(DX_TYPE) WHEN '09' THEN 'ICD10CM' WHEN '10' THEN 'ICD9CM' ELSE NULL END AS dx_other_vocabulary_id
             FROM _temp_diagnosis
         ) src
         LEFT JOIN person p
@@ -879,16 +976,21 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
           ON pr.provider_source_value = src.PROVIDERID
         LEFT JOIN visit_occurrence vo
           ON vo.visit_source_value = src.ENCOUNTERID
-        LEFT JOIN concept c
-          ON c.vocabulary_id = src.dx_vocabulary_id
-         AND c.concept_code = src.DX
+        -- the code is looked up without its dots, and under the other ICD revision when DX_TYPE names the wrong one (a site's
+        -- DX_TYPE was found unreliable, 0.34.1)
+        LEFT JOIN _dx_codes c1
+          ON c1.vocabulary_id = src.dx_vocabulary_id
+         AND c1.k = src.dx_key
+        LEFT JOIN _dx_codes c2
+          ON c2.vocabulary_id = src.dx_other_vocabulary_id
+         AND c2.k = src.dx_key
         LEFT JOIN (
             SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
             FROM concept_relationship
             WHERE relationship_id = 'Maps to'
             GROUP BY concept_id_1
         ) cr
-          ON cr.concept_id_1 = c.concept_id
+          ON cr.concept_id_1 = COALESCE(c1.concept_id, c2.concept_id)
         LEFT JOIN (
             SELECT source_vocabulary_id, source_code, MIN(target_concept_id) AS target_concept_id
             FROM source_to_concept_map
@@ -902,6 +1004,7 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DIAGNOSISID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_diagnosis;")
+    con.execute("DROP TABLE IF EXISTS _dx_codes;")
 
 
 def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
