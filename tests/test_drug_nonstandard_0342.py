@@ -87,6 +87,12 @@ def test_stays_still_in_hospital_are_excluded():
     out = define_study_cohort(cdm(), still_in_hospital_status="SH", **kw)
     assert sorted(out["subject_id"]) == [1, 3]                                           # a NULL status is kept
     assert "Discharged (not still in hospital)" in cohort_attrition(out).step_name.tolist()
+    import pytest
+
+    bare = cdm()
+    bare.execute("ALTER TABLE visit_occurrence DROP COLUMN discharged_to_source_value")
+    with pytest.warns(UserWarning, match="no discharged_to_source_value"):
+        assert sorted(define_study_cohort(bare, still_in_hospital_status=["SH"], **kw)["subject_id"]) == [1, 2, 3]
 
 
 def test_protocol_and_ederri_cohort_exclude_still_in_hospital():

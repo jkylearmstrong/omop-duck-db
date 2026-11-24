@@ -55,4 +55,7 @@ test_that("stays still in hospital (PCORnet SH) are excluded when asked, and by 
   expect_equal(sort(run()$subject_id), 1:3)
   expect_equal(sort(run(still_in_hospital_status = "SH")$subject_id), c(1L, 3L))
   expect_equal(formals(build_ederri_diabetes_cohort)$still_in_hospital_status, "SH")
+  DBI::dbExecute(con, "ALTER TABLE visit_occurrence DROP COLUMN discharged_to_source_value")
+  expect_warning(out <- run(still_in_hospital_status = "SH"), "no discharged_to_source_value")
+  expect_equal(sort(out$subject_id), 1:3)
 })
