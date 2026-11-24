@@ -651,7 +651,7 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
 
     patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
 
-    run_insert(con, "LOCATION (from LDS_ADDRESS_HISTORY)", """
+    run_insert(con, "LOCATION (from LDS_ADDRESS_HISTORY)", f"""
         INSERT INTO location (
             location_id,
             address_1,
@@ -672,7 +672,7 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
             NULL AS address_2,
             ADDRESS_CITY AS city,
             UPPER(ADDRESS_STATE) AS state,
-            COALESCE(ADDRESS_ZIP9, ADDRESS_ZIP5) AS zip,
+            {ZIP5_SQL.replace('src.', '')} AS zip,  -- 5 digits, leading zeros restored (0.34.2; was the raw ZIP9 or ZIP5)
             NULL AS county,
             COALESCE(ADDRESS_ZIP5, '') || ', ' || COALESCE(ADDRESS_STATE, '') AS location_source_value,
             4330426 AS country_concept_id,
@@ -806,7 +806,66 @@ def backfill_drug_concepts(con):
     (trimmed, any case) of a standard RxNorm / RxNorm Extension concept, an Ingredient preferred, then the single concept of that name.
     The medication features roll concepts up through concept_ancestor, so an ingredient is enough. Needs the vocabulary on the
     connection (attach the central vocabulary first) and a writable connection; work on a copy. Returns
-    ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n}`` (row counts)."""
+    ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n, "non_standard_before": n, "by_maps_to": n,
+    "by_ingredient": n, "non_standard_after": n}`` (row counts). Raises ``ValueError`` when ``concept_relationship`` has no 'Maps to' row (vocabulary not attached).
+
+    First (0.34.2; the C15 close-out found 4 to 17% of drug rows per site on a non-standard or deprecated concept, which the
+    medication classes cannot roll up through concept_ancestor): a row whose ``drug_concept_id`` is not a valid standard concept
+    takes that concept's 'Maps to' target when there is exactly one valid standard target; failing that (deprecated RxNorm drugs,
+    Brand Name concepts), its single standard RxNorm Ingredient (``by_ingredient``). The old concept is kept in
+    ``drug_source_concept_id`` when that column is empty. Rows with no target or several are left as they are."""
+    nonstd = """SELECT x.drug_concept_id AS src FROM drug_exposure x JOIN concept c ON c.concept_id = x.drug_concept_id
+                WHERE coalesce(x.drug_concept_id, 0) <> 0 AND (c.standard_concept IS DISTINCT FROM 'S' OR c.invalid_reason IS NOT NULL)"""
+    non_standard_before = int(con.execute(f"SELECT count(*) FROM ({nonstd})").fetchone()[0])
+    has_maps_to = con.execute("SELECT 1 FROM concept_relationship WHERE relationship_id = 'Maps to' LIMIT 1").fetchone()
+    if not has_maps_to:  # C16: the remap matched nothing at any site; an empty or site-local concept_relationship must not pass silently
+        raise ValueError("backfill_drug_concepts: concept_relationship holds no 'Maps to' rows; attach the central vocabulary "
+                         "(attach_central_vocabulary) so that concept and concept_relationship resolve to it.")
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE _dstd AS
+        SELECT cr.concept_id_1 AS src, min(cr.concept_id_2) AS cid
+        FROM (SELECT DISTINCT src FROM ({nonstd})) s
+        JOIN concept_relationship cr ON cr.concept_id_1 = s.src AND cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
+        JOIN concept t ON t.concept_id = cr.concept_id_2 AND t.standard_concept = 'S' AND t.invalid_reason IS NULL
+        GROUP BY 1 HAVING count(DISTINCT cr.concept_id_2) = 1""")
+    by_maps_to = int(con.execute("SELECT count(*) FROM drug_exposure x JOIN _dstd m ON x.drug_concept_id = m.src").fetchone()[0])
+    cols = {r[0] for r in con.execute("DESCRIBE drug_exposure").fetchall()}
+    if "drug_source_concept_id" in cols:
+        con.execute("""UPDATE drug_exposure SET drug_source_concept_id = drug_concept_id FROM _dstd m
+                       WHERE drug_exposure.drug_concept_id = m.src AND coalesce(drug_exposure.drug_source_concept_id, 0) = 0""")
+    con.execute("UPDATE drug_exposure SET drug_concept_id = m.cid FROM _dstd m WHERE drug_exposure.drug_concept_id = m.src")
+    con.execute("DROP TABLE _dstd")
+    # Then (C16 audit: the rows left were deprecated RxNorm drugs and valid Brand Name concepts, none with a 'Maps to'): the
+    # single standard RxNorm ingredient of the concept. Ingredients come from the concept itself, its clinical drug ('Tradename of'),
+    # its unquantified form ('Quantified form of') or its pack contents ('Consists of'), through drug_strength or an ingredient
+    # relationship ('RxNorm has ing', 'Has ingredient', 'Brand name of', 'Tradename of'), whatever the relationship's validity
+    # (a deprecated concept keeps retired links), and for a deprecated ingredient a standard ingredient of the same name. Only a
+    # valid standard Ingredient counts, and only when there is exactly one, so a combination product stays as it is.
+    try:  # the unqualified name must resolve (a drug_strength in another attached catalog does not count)
+        con.execute("SELECT 1 FROM drug_strength LIMIT 0")
+        has_ds = True
+    except duckdb.Error:
+        has_ds = False
+    ds_sql = "UNION SELECT r.src, ds.ingredient_concept_id FROM rel r JOIN drug_strength ds ON ds.drug_concept_id = r.cid" if has_ds else ""
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE _ding AS
+        WITH s AS (SELECT DISTINCT src FROM ({nonstd})),
+        rel AS (SELECT src, src AS cid FROM s
+                UNION SELECT s.src, cr.concept_id_2 FROM s JOIN concept_relationship cr ON cr.concept_id_1 = s.src
+                      AND cr.relationship_id IN ('Tradename of', 'Quantified form of', 'Consists of')),
+        cand AS (SELECT r.src, cr.concept_id_2 AS ing FROM rel r JOIN concept_relationship cr ON cr.concept_id_1 = r.cid
+                      AND cr.relationship_id IN ('RxNorm has ing', 'Has ingredient', 'Brand name of', 'Tradename of')
+                 {ds_sql}
+                 UNION SELECT s.src, t.concept_id FROM s JOIN concept c ON c.concept_id = s.src AND c.concept_class_id = 'Ingredient'
+                       JOIN concept t ON lower(t.concept_name) = lower(c.concept_name) AND t.concept_id <> c.concept_id)
+        SELECT cand.src, min(t.concept_id) AS cid FROM cand
+        JOIN concept t ON t.concept_id = cand.ing AND t.concept_class_id = 'Ingredient' AND t.vocabulary_id IN ('RxNorm', 'RxNorm Extension')
+         AND t.standard_concept = 'S' AND t.invalid_reason IS NULL
+        GROUP BY 1 HAVING count(DISTINCT t.concept_id) = 1""")
+    by_ingredient = int(con.execute("SELECT count(*) FROM drug_exposure x JOIN _ding m ON x.drug_concept_id = m.src").fetchone()[0])
+    if "drug_source_concept_id" in cols:
+        con.execute("""UPDATE drug_exposure SET drug_source_concept_id = drug_concept_id FROM _ding m
+                       WHERE drug_exposure.drug_concept_id = m.src AND coalesce(drug_exposure.drug_source_concept_id, 0) = 0""")
+    con.execute("UPDATE drug_exposure SET drug_concept_id = m.cid FROM _ding m WHERE drug_exposure.drug_concept_id = m.src")
+    con.execute("DROP TABLE _ding")
     before = int(con.execute("SELECT count(*) FROM drug_exposure WHERE coalesce(drug_concept_id, 0) = 0").fetchone()[0])
     con.execute("""CREATE OR REPLACE TEMP TABLE _dsv AS
         SELECT DISTINCT drug_source_value AS sv, lower(trim(drug_source_value)) AS nm,
@@ -851,8 +910,10 @@ def backfill_drug_concepts(con):
                    WHERE drug_exposure.drug_source_value = m.sv AND coalesce(drug_exposure.drug_concept_id, 0) = 0""")
     con.execute("DROP TABLE _dsv")
     con.execute("DROP TABLE _dmap")
+    non_standard_after = int(con.execute(f"SELECT count(*) FROM ({nonstd})").fetchone()[0])
     return {"unmapped_before": before, "by_ndc": int(counts.get("ndc", 0)), "by_rxnorm": int(counts.get("rxnorm", 0)),
-            "by_name": int(counts.get("name", 0))}
+            "by_name": int(counts.get("name", 0)), "non_standard_before": non_standard_before, "by_maps_to": by_maps_to,
+            "by_ingredient": by_ingredient, "non_standard_after": non_standard_after}
 
 
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):

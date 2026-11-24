@@ -573,6 +573,7 @@ class _StudySpec:
     death_ids: tuple[int, ...] = (4216643,)
     death_sources: tuple[str, ...] = ("death_table",)
     transfer_ids: tuple[int, ...] = ()
+    still_in_hospital: tuple[str, ...] = ()  # discharge source values meaning "still in hospital" (PCORnet SH); excluded
     window_days: int | None = 30
     gap_days: int = 0
     verified: bool = True
@@ -886,6 +887,11 @@ def _study_conditions(spec: _StudySpec) -> list[tuple[str, str]]:
         conds.append((
             "Not transferred to another acute-care hospital",
             f"COALESCE(v.discharged_to_concept_id, 0) NOT IN ({_int_list(spec.transfer_ids)})",
+        ))
+    if spec.still_in_hospital:
+        conds.append((
+            "Discharged (not still in hospital)",
+            f"UPPER(TRIM(COALESCE(v.discharged_to_source_value, ''))) NOT IN ({', '.join(_sql_str(x) for x in spec.still_in_hospital)})",
         ))
     if spec.metformin_only_pcos:
         conds.append((
@@ -1420,6 +1426,8 @@ def _describe_study(spec: _StudySpec) -> str:
     bits.append("exclude in-hospital death" if spec.exclude_death else "in-hospital death retained")
     if spec.transfer_ids:
         bits.append("exclude acute-care transfers")
+    if spec.still_in_hospital:
+        bits.append("exclude stays still in hospital")
     bits.append(f"outcome {spec.label}")
     if spec.window_days is not None and spec.outcome != "in_hospital":
         bits.append(f"window ({spec.gap_days}, {spec.window_days}] d")
@@ -1468,6 +1476,7 @@ def define_study_cohort(
     death_discharge_concept_ids: int | Sequence[int] | None = None,
     death_sources: str | Sequence[str] | None = None,
     transfer_discharge_concept_ids: int | Sequence[int] | None = None,
+    still_in_hospital_status: str | Sequence[str] | None = None,
     followup_evidence: str | Sequence[str] | None = None,
     age_method: str = "completed_years",
     cohort_definition_id: int = 1,
@@ -1567,6 +1576,11 @@ def define_study_cohort(
         excluded (replication rule A6: only death and acute transfer are ineligible, AMA is kept). Default none, so
         existing attrition tables do not change; the PCORnet ETL writes ``8717`` for a transfer (``DISCHARGE_STATUS``
         'IP'). Adds the attrition step "Not transferred to another acute-care hospital".
+    still_in_hospital_status : str or sequence, optional
+        Discharge source values (``discharged_to_source_value``, case and spaces ignored) meaning the patient was still in hospital
+        when the data were extracted (PCORnet DISCHARGE_STATUS ``"SH"``); those index stays have no discharge and are excluded
+        (0.34.2; the legacy notebooks dropped SH with IP and EX). Default none. Adds the attrition step "Discharged (not still in
+        hospital)". A database without ``discharged_to_source_value`` skips the step with a warning.
     diabetes_drug_rule : {"names", "atc_a10", "rxnorm_cuis"}, default "names"
         Medication arm of ``require_diabetes``. ``names`` (default, unchanged) matches ten drug names in
         ``drug_source_value``. ``atc_a10`` matches ``drug_concept_id`` that descends from ATC A10 in ``concept_ancestor``
@@ -1830,11 +1844,20 @@ def define_study_cohort(
                          f"{exclude_metformin_only_prediabetes_pcos!r}.")
     drug_ancestors, drug_ca = _resolve_diabetes_drug_rule(con, diabetes_drug_rule, diabetes_rxnorm_cuis, schema)
 
+    sih: tuple[str, ...] = ()
+    if still_in_hospital_status:
+        sih = tuple(str(x).strip().upper() for x in ([still_in_hospital_status] if isinstance(still_in_hospital_status, str)
+                                                    else still_in_hospital_status) if str(x).strip())
+        vcols = {r[0].lower() for r in con.execute(f"DESCRIBE {'visit_occurrence' if schema is None else _quote_ident_path(schema, 'schema', 2) + '.visit_occurrence'}").fetchall()}
+        if sih and "discharged_to_source_value" not in vcols:
+            warnings.warn("still_in_hospital_status is set but visit_occurrence has no discharged_to_source_value; the step is skipped.",
+                          UserWarning, stacklevel=2)
+            sih = ()
     spec = _StudySpec(
         cohort_id=cohort_id, outcome=outcome, label=label, schema=schema, visit_ids=visit_ids,
         outcome_visit_ids=outcome_ids, study_start=study_start, study_end=study_end, min_age=min_age_n,
         age_method=method, min_los_days=min_los, washin_days=washin_n, exclude_death=exclude,
-        death_ids=tuple(death_ids), death_sources=tuple(sources), transfer_ids=tuple(transfer_ids), window_days=window, gap_days=gap_n,
+        death_ids=tuple(death_ids), death_sources=tuple(sources), transfer_ids=tuple(transfer_ids), still_in_hospital=sih, window_days=window, gap_days=gap_n,
         verified=verified, evidence=tuple(evidence), rule=rule, seed=seed_n,
         require_diabetes=bool(require_diabetes), diabetes_drug_rule=diabetes_drug_rule,
         diabetes_drug_ancestors=drug_ancestors, concept_ancestor_ref=drug_ca, metformin_only_pcos=mf_pcos,
@@ -1916,6 +1939,7 @@ def define_study_cohort(
         "death_discharge_concept_ids": list(death_ids),
         "death_sources": list(sources),
         "transfer_discharge_concept_ids": list(transfer_ids),
+        "still_in_hospital_status": list(sih),
         "diabetes_drug_rule": diabetes_drug_rule,
         "exclude_metformin_only_prediabetes_pcos": mf_pcos,
         "followup_evidence": list(evidence),
@@ -2899,6 +2923,7 @@ def build_ederri_diabetes_cohort(
     followup_days: int | None = None,
     require_verified_followup: bool = False,
     transfer_discharge_concept_ids: int | Sequence[int] = (8717,),
+    still_in_hospital_status: str | Sequence[str] | None = ("SH",),
     diabetes_drug_rule: str = "names",
     diabetes_rxnorm_cuis: Sequence[str | int] | str | os.PathLike | None = None,
     exclude_metformin_only_prediabetes_pcos: bool | str = False,
@@ -2910,7 +2935,8 @@ def build_ederri_diabetes_cohort(
     :func:`define_study_cohort`.
 
     Stays discharged to another acute-care hospital (``transfer_discharge_concept_ids``, default 8717) are excluded;
-    AMA discharges are kept. Pass ``()`` to keep transfers.
+    AMA discharges are kept. Pass ``()`` to keep transfers. Stays still in hospital at extraction (``still_in_hospital_status``,
+    PCORnet "SH", 0.34.2) are excluded; pass ``None`` to keep them.
 
     Phenotype:
       Adult (>=18y) inpatient stays with length of stay >= 1 day, >=365 days wash-in,
@@ -2931,6 +2957,7 @@ def build_ederri_diabetes_cohort(
         followup_days=followup_days,
         require_verified_followup=require_verified_followup,
         transfer_discharge_concept_ids=transfer_discharge_concept_ids,
+        still_in_hospital_status=still_in_hospital_status,
         diabetes_drug_rule=diabetes_drug_rule,
         diabetes_rxnorm_cuis=diabetes_rxnorm_cuis,
         exclude_metformin_only_prediabetes_pcos=exclude_metformin_only_prediabetes_pcos,

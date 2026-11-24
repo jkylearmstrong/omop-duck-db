@@ -30,7 +30,8 @@ def _section(text: str, start: str, ends: Sequence[str]) -> str:
 
 
 def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequence[str] = EMPTY_SOURCE_TERMS,
-                       n_reference_rows: int = len(MULTILEVEL_FEATURES), last_reference: str = "Yuan") -> list[dict[str, Any]]:
+                       n_reference_rows: int = len(MULTILEVEL_FEATURES), last_reference: str = "Yuan",
+                       footer_gap: float = 14.0) -> list[dict[str, Any]]:
     """Checks the text of a rendered manuscript: ``[{"check", "ok", "detail"}]``, one per check.
 
     1. page 1 starts with ``title`` (line breaks ignored);
@@ -40,7 +41,9 @@ def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequ
     5. Table 3 (leave-one-site-out) reports F1 and not Brier;
     6. the last page ends the References with ``last_reference``;
     7. each of ``empty_terms`` appears exactly once (the Section 2.2 sentence on the empty source columns);
-    8. no snake_case column name (``lab_...``, ``vital_...``, ``elix_...``) in the text."""
+    8. no snake_case column name (``lab_...``, ``vital_...``, ``elix_...``) in the text;
+    9. no collapsed bullet (".- ", a list item run into the sentence before it; C15);
+    10. no text within ``footer_gap`` points above a page's number (a caption pushed into the footer; C17 Figure 1)."""
     from pypdf import PdfReader
 
     # the page number printed at the foot of each page is dropped, so a phrase that runs onto the next page reads as one ("heart 2 rate")
@@ -70,7 +73,33 @@ def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequ
         ", ".join(f"{k} {v}" for k, v in counts.items() if v != 1))
     snake = sorted(set(re.findall(r"\b(?:lab|vital|elix|charlson|sdoh|dx|enc)_[a-z0-9_]+\b", flat)))
     add("no snake_case column names", not snake, ", ".join(snake[:10]))
+    bullets = re.findall(r".{0,30}\.- .{0,30}", flat)
+    add("no collapsed bullets", not bullets, "; ".join(bullets[:3]))
+    crowded = _footer_collisions(pdf, footer_gap)
+    add("nothing runs into the page number", not crowded, ", ".join(f"page {p}" for p in crowded[:10]))
     return out
+
+
+def _footer_collisions(pdf: str | Path, gap: float) -> list[int]:
+    """Pages where a line of text sits less than ``gap`` points above the page number (the lowest run that is only a number)."""
+    from pypdf import PdfReader
+
+    bad = []
+    for i, page in enumerate(PdfReader(str(pdf)).pages, start=1):
+        runs: list[tuple[str, float]] = []
+
+        def visit(text, cm, tm, *_):
+            if text and text.strip():
+                runs.append((text.strip(), cm[5] + tm[5] * cm[3] if cm else tm[5]))
+
+        page.extract_text(visitor_text=visit)
+        numbers = [y for t, y in runs if re.fullmatch(r"\d{1,3}", t)]
+        if not numbers:
+            continue
+        foot = min(numbers)
+        if any(foot <= y < foot + gap for t, y in runs if not (re.fullmatch(r"\d{1,3}", t) and y == foot)):
+            bad.append(i)
+    return bad
 
 
 def main(argv: Sequence[str] | None = None) -> int:

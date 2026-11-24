@@ -22,6 +22,7 @@ define_study_cohort(
   require_verified_followup = TRUE,
   death_discharge_concept_ids = NULL,
   transfer_discharge_concept_ids = NULL,
+  still_in_hospital_status = NULL,
   death_sources = NULL,
   followup_evidence = NULL,
   age_method = "completed_years",
@@ -107,6 +108,10 @@ medical advice' (now 32216), so on such databases consider passing \code{4216643
 hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
 tables do not change; the PCORnet ETL writes \code{8717} for a transfer (\code{DISCHARGE_STATUS} 'IP'). Adds the attrition
 step "Not transferred to another acute-care hospital". \code{integer(0)} keeps transfers.}
+
+\item{still_in_hospital_status}{Discharge source values (\code{discharged_to_source_value}, case and spaces ignored) meaning the
+patient was still in hospital at extraction (PCORnet DISCHARGE_STATUS \code{"SH"}); those index stays have no discharge and are
+excluded (0.34.2). Default none. Adds the attrition step "Discharged (not still in hospital)".}
 
 \item{death_sources}{Where a patient's death date comes from: \code{"death_table"} and/or
 \code{"discharge_disposition"} (the end date of any visit discharged to a death concept). Default \code{"death_table"}

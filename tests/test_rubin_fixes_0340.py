@@ -370,7 +370,7 @@ def test_backfill_drug_concepts_by_ndc_and_ingredient_name():
     got = backfill_drug_concepts(con)
     ids = dict(con.execute("SELECT drug_exposure_id, drug_concept_id FROM drug_exposure").fetchall())
     assert ids == {1: 1567198, 2: 1307046, 3: 40000001, 4: 1567198, 5: 0, 6: 999}  # ingredient preferred; mapped rows untouched
-    assert got == {"unmapped_before": 5, "by_ndc": 1, "by_rxnorm": 0, "by_name": 3}
+    assert got == {"unmapped_before": 5, "by_ndc": 1, "by_rxnorm": 0, "by_name": 3, "non_standard_before": 0, "by_maps_to": 0, "by_ingredient": 0, "non_standard_after": 0}
 
 
 def test_diagnosis_codes_without_dots_and_with_the_wrong_dx_type_still_map(tmp_path):

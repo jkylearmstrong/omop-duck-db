@@ -220,9 +220,11 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
 #' 9203 and observation 581385 visits; also the custom concept 2000000048), `days_since_prior_encounter`, `days_since_prior_ip_ed` (`lookback_days` when there is none),
 #' `readmission_count_twelve_months`, `prior_outpatient_count` (outpatient 9202 / 581477 and telehealth 5083 visits, since 0.34.0),
 #' `n_secondary_dx` (secondary diagnoses of the index stay since 0.34.0: distinct diagnosis codes as recorded, dots and case ignored,
-#' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`),
+#' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`; since 0.34.2 only
+#' diagnoses on the index visit count when the cohort has `visit_occurrence_id`, and one with no visit id counts by date),
 #' `elix_pre_index_conditions_count` (distinct condition concepts before the admission, all history) and `tobacco`
-#' (`"Current user"`, `"Former user"`, `"Never user"` or, with no status, `"Missing / Unknown"` (0.34.1), from tobacco observation
+#' (`"Current user"`, `"Former user"`, `"Never user"` or, with no status, `"Missing / Unknown"` (0.34.1); since 0.34.2 the level of
+#' the latest tobacco record on or before discharge, a same-day tie going to the higher level; from tobacco observation
 #' concepts, the PCORnet VITAL smoking status (43054909) and ICD F17 / Z72.0 / 305.1 / Z87.891 /
 #' V15.82). Visits are counted in `[admission - lookback_days, admission)`; diagnoses and observations up to the discharge date.
 #' Same as Python `omop_etl.extract_protocol_history_features`.
@@ -236,7 +238,10 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
 extract_protocol_history_features <- function(con, cohort, lookback_days = 365) {
   if (lookback_days < 0) stop("lookback_days must be non-negative.", call. = FALSE)
   lb <- as.integer(lookback_days)
-  duckdb::duckdb_register(con, "_bf_ph", cohort[, c("row_id", "subject_id", "cohort_start_date", "cohort_end_date")])
+  co_cols <- tolower(DBI::dbGetQuery(con, "DESCRIBE condition_occurrence")$column_name)
+  by_visit <- "visit_occurrence_id" %in% names(cohort) && "visit_occurrence_id" %in% co_cols
+  keep <- c("row_id", "subject_id", "cohort_start_date", "cohort_end_date", if (by_visit) "visit_occurrence_id")
+  duckdb::duckdb_register(con, "_bf_ph", cohort[, keep, drop = FALSE])
   on.exit(duckdb::duckdb_unregister(con, "_bf_ph"), add = TRUE)
   util <- DBI::dbGetQuery(con, sprintf("
     SELECT c.row_id,
@@ -253,21 +258,22 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
          AND pv.visit_start_date < CAST(c.cohort_start_date AS DATE)
          AND pv.visit_start_date >= CAST(c.cohort_start_date AS DATE) - %1$d
     GROUP BY c.row_id, c.cohort_start_date ORDER BY c.row_id", lb))
-  co_cols <- tolower(DBI::dbGetQuery(con, "DESCRIBE condition_occurrence")$column_name)
   ids <- "44786627, 44786628, 32902"  # primary condition (the PCORnet ETL's PDX = 'P'), first position, primary diagnosis
   parts <- sprintf("coalesce(co.%s, 0) IN (%s)", intersect(c("condition_type_concept_id", "condition_status_concept_id"), co_cols), ids)
   if ("condition_status_source_value" %in% co_cols) parts <- c(parts, "upper(coalesce(co.condition_status_source_value, '')) = 'P'")
   principal <- paste0("(", paste(if (length(parts)) parts else "FALSE", collapse = " OR "), ")")
   code <- "coalesce(nullif(upper(replace(trim(co.condition_source_value), '.', '')), ''), 'concept:' || CAST(co.condition_concept_id AS VARCHAR))"
   in_stay <- "co.condition_start_date >= CAST(c.cohort_start_date AS DATE)"
+  # 0.34.2: only diagnoses on the index visit count (no visit id: by date), as in Python
+  if (by_visit) in_stay <- paste(in_stay, "AND (co.visit_occurrence_id IS NULL OR co.visit_occurrence_id = c.visit_occurrence_id)")
   tdx <- "upper(replace(trim(co.condition_source_value), '.', ''))"  # tobacco ICD codes with or without dots (0.34.1)
   dx <- DBI::dbGetQuery(con, paste0("
     SELECT c.row_id,
            COUNT(DISTINCT CASE WHEN ", in_stay, " THEN ", code, " END)
            - COUNT(DISTINCT CASE WHEN ", in_stay, " AND ", principal, " THEN ", code, " END) AS n_secondary_dx,
            COUNT(DISTINCT CASE WHEN co.condition_start_date < CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END) AS elix_pre_index_conditions_count,
-           MAX(CASE WHEN ", tdx, " LIKE 'F17%' OR ", tdx, " LIKE 'Z720%' OR ", tdx, " LIKE '3051%' THEN 1 ELSE 0 END) AS tob_cur_dx,
-           MAX(CASE WHEN ", tdx, " LIKE 'Z87891%' OR ", tdx, " LIKE 'V1582%' THEN 1 ELSE 0 END) AS tob_former_dx
+           MAX(CASE WHEN ", tdx, " LIKE 'F17%' OR ", tdx, " LIKE 'Z720%' OR ", tdx, " LIKE '3051%' THEN co.condition_start_date END) AS tob_cur_dx,
+           MAX(CASE WHEN ", tdx, " LIKE 'Z87891%' OR ", tdx, " LIKE 'V1582%' THEN co.condition_start_date END) AS tob_former_dx
     FROM _bf_ph c
     LEFT JOIN condition_occurrence co ON co.person_id = c.subject_id
          AND co.condition_start_date <= CAST(c.cohort_end_date AS DATE)
@@ -275,18 +281,24 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
   ocols <- tolower(DBI::dbGetQuery(con, "DESCRIBE observation")$column_name)
   obs <- DBI::dbGetQuery(con, paste0("
     SELECT c.row_id,
-           MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) OR ", .bf_smoking_is(.SMOKING_CURRENT, ocols), " THEN 1 ELSE 0 END) AS tob_cur_obs,
-           MAX(CASE WHEN o.observation_concept_id = 4310280 OR ", .bf_smoking_is(.SMOKING_FORMER, ocols), " THEN 1 ELSE 0 END) AS tob_former_obs,
-           MAX(CASE WHEN o.observation_concept_id IN (4144272, 4052039) OR ", .bf_smoking_is(.SMOKING_NEVER, ocols), " THEN 1 ELSE 0 END) AS tob_never_obs
+           MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) OR ", .bf_smoking_is(.SMOKING_CURRENT, ocols), " THEN o.observation_date END) AS tob_cur_obs,
+           MAX(CASE WHEN o.observation_concept_id = 4310280 OR ", .bf_smoking_is(.SMOKING_FORMER, ocols), " THEN o.observation_date END) AS tob_former_obs,
+           MAX(CASE WHEN o.observation_concept_id IN (4144272, 4052039) OR ", .bf_smoking_is(.SMOKING_NEVER, ocols), " THEN o.observation_date END) AS tob_never_obs
     FROM _bf_ph c
     LEFT JOIN observation o ON o.person_id = c.subject_id AND o.observation_date <= CAST(c.cohort_end_date AS DATE)
     GROUP BY c.row_id ORDER BY c.row_id"))
-  cur <- dx$tob_cur_dx == 1 | obs$tob_cur_obs == 1
-  former <- dx$tob_former_dx == 1 | obs$tob_former_obs == 1
+  # 0.34.2 (Kyle): the level of the latest tobacco record on or before discharge; a same-day tie goes to the higher level
+  num <- function(x) as.numeric(as.Date(x))
+  pmax_na <- function(a, b) suppressWarnings(ifelse(is.na(a), b, ifelse(is.na(b), a, pmax(a, b))))
+  cur_d <- pmax_na(num(dx$tob_cur_dx), num(obs$tob_cur_obs))
+  for_d <- pmax_na(num(dx$tob_former_dx), num(obs$tob_former_obs))
+  nev_d <- num(obs$tob_never_obs)
+  latest <- pmax_na(pmax_na(cur_d, for_d), nev_d)
+  hit <- function(x) !is.na(latest) & !is.na(x) & x == latest
   out <- util[, setdiff(names(util), "row_id"), drop = FALSE]
   out$n_secondary_dx <- dx$n_secondary_dx
   out$elix_pre_index_conditions_count <- dx$elix_pre_index_conditions_count
-  out$tobacco <- ifelse(cur, "Current user", ifelse(former, "Former user", ifelse(obs$tob_never_obs == 1, "Never user", "Missing / Unknown")))
+  out$tobacco <- ifelse(hit(cur_d), "Current user", ifelse(hit(for_d), "Former user", ifelse(hit(nev_d), "Never user", "Missing / Unknown")))
   out
 }
 

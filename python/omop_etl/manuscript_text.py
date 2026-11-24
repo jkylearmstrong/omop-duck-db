@@ -625,12 +625,12 @@ def render_manuscript_body(context: Mapping[str, Any], *, tables: Mapping[str, s
             table_md[k] = f"```{{=typst}}\n#block(breakable: false)[\n```\n\n{table_md[k]}\n\n```{{=typst}}\n]\n```"
     figure_md = {}
     for k, v in figures.items():
-        cap, file = v if isinstance(v, tuple) else ("", v)
+        cap, file, width = (tuple(v) + ("100%",))[:3] if isinstance(v, tuple) else ("", v, "100%")
         cap = _caption_with_context(cap, context)
         text = f"{numbers.get(k, 'Figure')}: {cap}" if cap else numbers.get(k, "Figure")
         alt = text.replace('"', "")
         # Quarto numbers a figure with an id itself ("Figure 1:"), in document order, which is the layout's order
-        figure_md[k] = f'![{cap}]({file}){{#fig-{k} fig-alt="{alt}" width="100%"}}'
+        figure_md[k] = f'![{cap}]({file}){{#fig-{k} fig-alt="{alt}" width="{width}"}}'
     md = tpl.render(**context, ref=ref, table_md=table_md, figure_md=figure_md)
     # Pandoc needs a blank line before a heading and around a figure, or it reads them as paragraph text
     md = re.sub(r"(?m)^(?!\n)(.+)\n(#{1,6} )", r"\1\n\n\2", md)
@@ -691,6 +691,27 @@ def metric_cells(t: pd.DataFrame, digits: int | None = None) -> pd.DataFrame:
     return out
 
 
+FIGURE_MAX_HEIGHT_IN = 7.2  # with 1-inch margins a letter page has 9 in; the rest is for the caption (C17: a 12-step Figure 1 ran into the page number)
+TEXT_WIDTH_IN = 6.5
+
+
+def figure_width(path: str | Path, *, max_height_in: float = FIGURE_MAX_HEIGHT_IN, text_width_in: float = TEXT_WIDTH_IN) -> str:
+    """The printed width of a PNG figure, as a percentage of the text width: 100% unless the figure would then be taller than
+    ``max_height_in``, in which case it is narrowed so that its height is ``max_height_in``. Anything that is not a readable PNG
+    keeps 100%."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+        if head[:8] != b"\x89PNG\r\n\x1a\n":
+            return "100%"
+        w, h = int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+    except OSError:
+        return "100%"
+    if w <= 0 or h <= 0 or text_width_in * h / w <= max_height_in:
+        return "100%"
+    return f"{int(100 * max_height_in * w / (text_width_in * h))}%"
+
+
 def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], images: Sequence[Path], *, workbook: str | Path,
                              run: Mapping[str, Any] | None = None, summary: Mapping[str, Any] | None = None, params: Mapping[str, Any] | None = None,
                              software_paragraph: str | None = None, version: str | None = None) -> dict[str, Any]:
@@ -718,7 +739,7 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
         for mark in marks:
             hit = next((p for p in images if mark.lower() in Path(p).name.lower()), None)
             if hit is not None:
-                figures[key] = (_FIGURE_CAPTIONS[key], Path(hit).name)
+                figures[key] = (_FIGURE_CAPTIONS[key], Path(hit).name, figure_width(hit))
                 break
     ctx = manuscript_context(workbook, run=run or {}, summary=summary or {}, params=params or {})
     if software_paragraph:

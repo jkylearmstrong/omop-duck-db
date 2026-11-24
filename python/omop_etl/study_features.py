@@ -93,7 +93,11 @@ class StudyContext:
             z = self.zip5()[["person_id", "stay_id", "zip5"]].copy()
             z["zip3"] = z["zip5"].str[:3]
             if z["zip3"].isna().any() and _has_table(self.con, "location") and _has_table(self.con, "person"):
-                raw = self.con.execute("""SELECT p.person_id, nullif(regexp_extract(CAST(l.zip AS VARCHAR), '(\\d{3})', 1), '') AS z3
+                from omop_etl.geography import zip5_sql
+
+                z3 = ("CASE WHEN regexp_matches(TRIM(CAST(l.zip AS VARCHAR)), '^[0-9]{3}$') THEN TRIM(CAST(l.zip AS VARCHAR)) "
+                      f"ELSE substr({zip5_sql('l.zip')}, 1, 3) END")   # a ZIP3 as stored, else the first 3 digits of the ZIP
+                raw = self.con.execute(f"""SELECT p.person_id, {z3} AS z3
                                           FROM person p JOIN location l ON l.location_id = p.location_id""").df()
                 z = z.merge(raw.drop_duplicates("person_id"), on="person_id", how="left")
                 z["zip3"] = z["zip3"].fillna(z["z3"])
@@ -348,7 +352,7 @@ class FeatureSet:
 # ---------------------------------------------------------------------------------------------------------------------
 # Built-in features
 # ---------------------------------------------------------------------------------------------------------------------
-def ruca_feature(crosswalk: Any, *, name: str = "ruca", code_99_missing: bool = False) -> StudyFeature:
+def ruca_feature(crosswalk: Any, *, name: str = "ruca", code_99_missing: bool = True) -> StudyFeature:
     """USDA RUCA of the residence ZIP at admission: ``ruca_code`` (primary code 1-10) and ``ruca_group`` (1 metropolitan,
     2 micropolitan, 3 small town / rural, as in :func:`omop_etl.geography.ruca_category`). Same ids as
     :data:`omop_etl.geography.GEOGRAPHY_CONCEPT_IDS`, so it interoperates with ``write_geography_measurements``."""

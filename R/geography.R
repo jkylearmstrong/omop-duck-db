@@ -11,15 +11,15 @@
 #' Address rule (reference study): the address whose period contains the admission date; else the latest that started
 #' before it; else the earliest that started after it. Addresses with a ZIP beat those without; ties go to
 #' `preferred = 'Y'`, then the nearest start date. RUCA: primary code 1 = Metropolitan, 2 = Micropolitan, 3+ = Small Town
-#' / Rural (USDA 99 "not coded" lands in Small Town / Rural as in the reference; `code_99_missing = TRUE` treats it as
-#' unknown).
+#' / Rural. USDA 99 ("not coded": unpopulated tracts, PO-box ZIPs) is "RUCA: Missing / Unknown" since 0.34.2; the reference
+#' put it in Small Town / Rural, which `code_99_missing = FALSE` restores.
 #'
 #' @name geography
 #' @param code Primary RUCA code (numeric or string such as `"4.2"`).
 #' @param code_99_missing Logical; treat RUCA 99 as unknown.
 #' @return `ruca_category()`: a character vector of categories.
 #' @export
-ruca_category <- function(code, code_99_missing = FALSE) {
+ruca_category <- function(code, code_99_missing = TRUE) {
   p <- suppressWarnings(as.integer(floor(as.numeric(as.character(code)))))
   out <- rep("RUCA: Small Town / Rural (3+)", length(p))
   out[!is.na(p) & p == 1L] <- "RUCA: Metropolitan (1.0)"
@@ -175,8 +175,8 @@ resolve_address_table <- function(con, address_table = "auto") {
          "); pass address_table = the one the study uses.", call. = FALSE)
   }
   has_zip <- .geo_has_table(con, "person") && .geo_has_table(con, "location") && tryCatch(
-    nrow(DBI::dbGetQuery(con, "SELECT 1 FROM person p JOIN location l ON l.location_id = p.location_id
-                               WHERE regexp_matches(CAST(l.zip AS VARCHAR), '\\d{5}') LIMIT 1")) > 0, error = function(e) FALSE)
+    nrow(DBI::dbGetQuery(con, paste0("SELECT 1 FROM person p JOIN location l ON l.location_id = p.location_id
+                               WHERE ", .zip5_sql("l.zip"), " IS NOT NULL LIMIT 1"))) > 0, error = function(e) FALSE)
   if (has_zip) return(NULL)
   stop("address_table = 'auto' found no dated address table and person.location_id holds no ZIP, so every stay would have no ",
        "SDI / RUCA. Looked at: ", .geo_describe_candidates(cands), ". Pass address_table = the table that holds person_id, zip5, ",
@@ -187,6 +187,16 @@ resolve_address_table <- function(con, address_table = "auto") {
 .geo_undated <- c("last", "first")
 
 # One address row per stay (person_id, stay_id, zip5, rule), chosen by the reference rule. `stays` has person_id, stay_id, admit_date.
+# A stored ZIP text as its 5-digit ZIP, or NULL (0.34.2; same rule as Python geography.zip5_sql): the first five digits of a
+# 5- or 9-digit ZIP; a 4-digit ZIP or an 8-digit ZIP+4 that lost its leading zero is padded ("8101" -> "08101"). A 3-digit
+# value (a ZIP3 in a de-identified extract) is left to the ZIP3 fallback.
+.zip5_sql <- function(expr) {
+  t <- sprintf("NULLIF(TRIM(CAST(%s AS VARCHAR)), '')", expr)
+  sprintf(paste0("CASE WHEN regexp_matches(%1$s, '^[0-9]{5}([^0-9]|$)') OR regexp_matches(%1$s, '^[0-9]{9}$') THEN substr(%1$s, 1, 5) ",
+                 "WHEN regexp_matches(%1$s, '^[0-9]{4}$') THEN lpad(%1$s, 5, '0') ",
+                 "WHEN regexp_matches(%1$s, '^[0-9]{8}$') THEN substr(lpad(%1$s, 9, '0'), 1, 5) END"), t)
+}
+
 # Addresses that tie on every rule key are resolved by `tie_break` (same four options as the Python package).
 .geo_index_addresses <- function(con, stays, tbl, tie_break = "deterministic", undated = "last") {
   tie_break <- match.arg(tie_break, .geo_tie_breaks)
@@ -194,11 +204,11 @@ resolve_address_table <- function(con, address_table = "auto") {
   duckdb::duckdb_register(con, "_geo_stays", stays)
   on.exit(duckdb::duckdb_unregister(con, "_geo_stays"), add = TRUE)
   if (is.null(tbl)) {
-    DBI::dbGetQuery(con, "
+    DBI::dbGetQuery(con, paste0("
       SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE 'person_location' END AS rule
-      FROM (SELECT s.person_id, s.stay_id, nullif(regexp_extract(CAST(l.zip AS VARCHAR), '(\\d{5})', 1), '') AS zip5
+      FROM (SELECT s.person_id, s.stay_id, ", .zip5_sql("l.zip"), " AS zip5
             FROM _geo_stays s LEFT JOIN person p ON p.person_id = s.person_id
-            LEFT JOIN location l ON l.location_id = p.location_id)")
+            LEFT JOIN location l ON l.location_id = p.location_id)"))
   } else {
     listed <- if ("location_id" %in% DBI::dbListFields(con, tbl)) "a.location_id" else "a.rowid"
     undated_dist <- if (undated == "last") "1000000" else "-1000000"
@@ -210,13 +220,13 @@ resolve_address_table <- function(con, address_table = "auto") {
                  st DESC NULLS LAST", undated_dist)
     head <- sprintf("
       WITH m AS (
-        SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, %s AS listed, a.address_start AS st, a.preferred, (a.zip5 IS NULL) AS nozip,
+        SELECT s.person_id, s.stay_id, s.admit_date, %1$s AS zip5, %2$s AS listed, a.address_start AS st, a.preferred, (%1$s IS NULL) AS nozip,
                (a.address_start IS NULL OR a.address_start <= s.admit_date) AS started,
                (a.address_end IS NULL OR a.address_end >= s.admit_date) AS ongoing
-        FROM _geo_stays s LEFT JOIN %s a ON a.person_id = s.person_id
+        FROM _geo_stays s LEFT JOIN %3$s a ON a.person_id = s.person_id
       ), r AS (
         SELECT *, CASE WHEN started AND ongoing THEN 'in_effect' WHEN started THEN 'latest_before' ELSE 'earliest_after' END AS rule0 FROM m
-      )", listed, tbl)
+      )", .zip5_sql("a.zip5"), listed, tbl)
     if (tie_break == "ambiguous_missing") {
       DBI::dbGetQuery(con, paste0(head, ", k AS (SELECT *, RANK() OVER (PARTITION BY stay_id ORDER BY ", keys, ") AS rk FROM r)
         SELECT person_id, stay_id,
@@ -251,7 +261,7 @@ resolve_address_table <- function(con, address_table = "auto") {
 #'   sdi_score, sdi_quintile`, with the cut points used in `attr(, "sdi_cut_points")`.
 #' @export
 derive_geography_features <- function(con, ruca_crosswalk, sdi_table, sdi_cut_points = NULL, stays = NULL,
-                                      address_table = "auto", fit_cut_points = FALSE, code_99_missing = FALSE,
+                                      address_table = "auto", fit_cut_points = FALSE, code_99_missing = TRUE,
                                       tie_break = "deterministic", undated = "last") {
   if (is.null(sdi_cut_points) && !isTRUE(fit_cut_points)) {
     stop("sdi_cut_points is required: SDI quintiles must use the training cohort's fixed cut points, not quantiles of the ",

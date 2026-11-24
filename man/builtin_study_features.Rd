@@ -9,7 +9,7 @@
 \alias{custom_feature}
 \title{Built-in study-design features}
 \usage{
-ruca_feature(crosswalk, name = "ruca", code_99_missing = FALSE)
+ruca_feature(crosswalk, name = "ruca", code_99_missing = TRUE)
 
 sdi_feature(table, cut_points = NULL, name = "sdi")
 

@@ -11,7 +11,7 @@
 \alias{derive_geography_features}
 \title{Area-level geography features (RUCA, SDI) for model replication}
 \usage{
-ruca_category(code, code_99_missing = FALSE)
+ruca_category(code, code_99_missing = TRUE)
 
 validate_sdi_cut_points(cut_points)
 
@@ -31,7 +31,7 @@ derive_geography_features(
   stays = NULL,
   address_table = "auto",
   fit_cut_points = FALSE,
-  code_99_missing = FALSE,
+  code_99_missing = TRUE,
   tie_break = "deterministic",
   undated = "last"
 )
@@ -94,6 +94,6 @@ fitted cuts are returned in \code{attr(result, "sdi_cut_points")}).
 Address rule (reference study): the address whose period contains the admission date; else the latest that started
 before it; else the earliest that started after it. Addresses with a ZIP beat those without; ties go to
 \code{preferred = 'Y'}, then the nearest start date. RUCA: primary code 1 = Metropolitan, 2 = Micropolitan, 3+ = Small Town
-/ Rural (USDA 99 "not coded" lands in Small Town / Rural as in the reference; \code{code_99_missing = TRUE} treats it as
-unknown).
+/ Rural. USDA 99 ("not coded": unpopulated tracts, PO-box ZIPs) is "RUCA: Missing / Unknown" since 0.34.2; the reference
+put it in Small Town / Rural, which \code{code_99_missing = FALSE} restores.
 }
