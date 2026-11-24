@@ -107,14 +107,18 @@ def load_known_source_gaps(spec: Any) -> dict[str, str]:
             if key.strip():
                 out[key.strip()] = why.strip()
         return out
-    if isinstance(spec, str):
-        raise ValueError(f"known source gaps file {spec!r} does not exist")
+    if isinstance(spec, (str, Path)):
+        raise ValueError(f"known source gaps file {str(spec)!r} does not exist")
     return {str(k).strip(): "" for k in spec if str(k).strip()}
 
 
 def _known_match(f: Mapping[str, Any], known: Mapping[str, str], site_keys: Mapping[str, str]) -> str | None:
-    """The key of ``known`` that covers finding ``f`` (``site_keys``: anonymous label -> site name), or None."""
-    names = [n for n in (f.get("column"), f.get("group"), f.get("check")) if n]
+    """The key of ``known`` that covers finding ``f`` (``site_keys``: anonymous label -> site name), or None. A finding of an ETL
+    check (an unmapped or unread input, :data:`_ETL_CHECKS`) is covered only by a key naming that check, never by a column or group
+    key: listing ``lab_potassium`` as a source gap must not hide potassium rows that exist but were not mapped."""
+    names = ([f.get("check")] if f.get("check") in _ETL_CHECKS else
+             [n for n in (f.get("column"), f.get("group"), f.get("check")) if n])
+    names = [n for n in names if n]
     site = site_keys.get(str(f.get("site")), None)
     for key in known:
         scope, _, item = key.rpartition(":")

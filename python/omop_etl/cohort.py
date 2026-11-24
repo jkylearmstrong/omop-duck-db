@@ -1616,7 +1616,10 @@ def define_study_cohort(
         rule). An integer first merges the index and outcome visit types of a person into episodes (:func:`episode_view_sql`):
         ``0`` joins overlapping stays and a stay starting on the discharge day of the one before, ``k`` also those starting up
         to ``k`` days later. Every rule (length of stay, death and transfer at discharge, the outcome) then applies to the
-        episode, which keeps its first stay's ``visit_occurrence_id``. The CDM is not changed (a temporary view).
+        episode, which keeps its first stay's ``visit_occurrence_id``. The CDM is not changed (a temporary view). Features
+        extracted afterwards read the unmerged ``visit_occurrence`` and join diagnoses by that first stay's id, so the discharge
+        status and the visit-linked diagnosis counts describe the first stay, not the episode: use it for the cohort and outcome
+        counts, not as a feature table.
     death_sources : {"death_table", "discharge_disposition"} or sequence, optional
         Where a patient's death date comes from: the ``death`` table and / or the end date of any visit
         discharged to a death concept. Default: ``death_table`` only for readmission / cohort-only, both for
@@ -1994,11 +1997,12 @@ def episode_view_sql(con, visit_table: str, visit_concept_ids: Sequence[int], me
         o AS (SELECT person_id, visit_occurrence_id, visit_start_date, visit_end_date,
                      max(visit_end_date) OVER (PARTITION BY person_id ORDER BY {order}
                                                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS _prev_end FROM m),
-        g AS (SELECT *, sum(CASE WHEN _prev_end IS NULL OR visit_start_date > _prev_end + {k} THEN 1 ELSE 0 END)
+        g AS (SELECT *, sum(CASE WHEN _prev_end IS NULL OR CAST(visit_start_date AS DATE) > CAST(_prev_end AS DATE) + {k} THEN 1 ELSE 0 END)
                         OVER (PARTITION BY person_id ORDER BY {order} ROWS UNBOUNDED PRECEDING) AS _ep FROM o),
         e AS (SELECT person_id, _ep, min(visit_start_date) AS _s, max(visit_end_date) AS _e,
                      arg_min(visit_occurrence_id, struct_pack(a := visit_start_date, b := visit_end_date, c := visit_occurrence_id)) AS _first,
-                     arg_max(visit_occurrence_id, struct_pack(a := visit_end_date, b := visit_start_date, c := visit_occurrence_id)) AS _last
+                     arg_max(visit_occurrence_id, struct_pack(n := visit_end_date IS NOT NULL, a := visit_end_date, b := visit_start_date,
+                                                               c := visit_occurrence_id)) AS _last
               FROM g GROUP BY person_id, _ep)
         SELECT f.* REPLACE ({", ".join(rep)})
         FROM e JOIN m f ON f.visit_occurrence_id = e._first JOIN m l ON l.visit_occurrence_id = e._last

@@ -997,10 +997,11 @@ def backfill_condition_concepts(con, *, add_rows=True):
                 JOIN (SELECT r.rid, r.src, unnest(m.tgts[2:]) AS tgt FROM _cbf_rows r JOIN _cbf_map m USING (src)) e ON e.rid = x.rowid""")
             out["rows_added"] = n_extra
     out["by_maps_to"] = int(con.execute("SELECT count(*) FROM _cbf_rows r JOIN _cbf_map m USING (src)").fetchone()[0])
-    if "condition_source_concept_id" in cols:
-        con.execute("""UPDATE condition_occurrence SET condition_source_concept_id = r.src FROM _cbf_rows r JOIN _cbf_map m USING (src)
-                       WHERE condition_occurrence.rowid = r.rid AND coalesce(condition_occurrence.condition_source_concept_id, 0) = 0""")
-    con.execute("""UPDATE condition_occurrence SET condition_concept_id = m.tgts[1] FROM _cbf_rows r JOIN _cbf_map m USING (src)
+    # one UPDATE: DuckDB rewrites a row whose indexed column changes as delete + insert, which gives it a new rowid, so a second
+    # UPDATE keyed on the saved rowid would miss it (review of PR 107)
+    src_set = (", condition_source_concept_id = coalesce(nullif(condition_occurrence.condition_source_concept_id, 0), r.src)"
+               if "condition_source_concept_id" in cols else "")
+    con.execute(f"""UPDATE condition_occurrence SET condition_concept_id = m.tgts[1]{src_set} FROM _cbf_rows r JOIN _cbf_map m USING (src)
                    WHERE condition_occurrence.rowid = r.rid""")
     out["non_standard_after"] = int(con.execute(f"""SELECT count(*) FROM condition_occurrence x
         LEFT JOIN concept c ON c.concept_id = x.condition_concept_id WHERE {bad}""").fetchone()[0])

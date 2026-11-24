@@ -612,11 +612,11 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
     o AS (SELECT person_id, visit_occurrence_id, visit_start_date, visit_end_date,
                  max(visit_end_date) OVER (PARTITION BY person_id ORDER BY ", ord, "
                                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS _prev_end FROM m),
-    g AS (SELECT *, sum(CASE WHEN _prev_end IS NULL OR visit_start_date > _prev_end + ", k, " THEN 1 ELSE 0 END)
+    g AS (SELECT *, sum(CASE WHEN _prev_end IS NULL OR CAST(visit_start_date AS DATE) > CAST(_prev_end AS DATE) + ", k, " THEN 1 ELSE 0 END)
                     OVER (PARTITION BY person_id ORDER BY ", ord, " ROWS UNBOUNDED PRECEDING) AS _ep FROM o),
     e AS (SELECT person_id, _ep, min(visit_start_date) AS _s, max(visit_end_date) AS _e,
                  arg_min(visit_occurrence_id, struct_pack(a := visit_start_date, b := visit_end_date, c := visit_occurrence_id)) AS _first,
-                 arg_max(visit_occurrence_id, struct_pack(a := visit_end_date, b := visit_start_date, c := visit_occurrence_id)) AS _last
+                 arg_max(visit_occurrence_id, struct_pack(n := visit_end_date IS NOT NULL, a := visit_end_date, b := visit_start_date, c := visit_occurrence_id)) AS _last
           FROM g GROUP BY person_id, _ep)
     SELECT f.* REPLACE (", paste(rep, collapse = ", "), ")
     FROM e JOIN m f ON f.visit_occurrence_id = e._first JOIN m l ON l.visit_occurrence_id = e._last
@@ -1507,6 +1507,8 @@ remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_r
 #'   legacy rule). An integer first merges the index and outcome visit types of a person into episodes: `0` joins overlapping
 #'   stays and a stay starting on the discharge day of the one before, `k` also those starting up to `k` days later. Every rule
 #'   then applies to the episode, which keeps its first stay's `visit_occurrence_id`. The CDM is not changed (a temporary view).
+#'   Features extracted afterwards read the unmerged `visit_occurrence`, so the discharge status and the visit-linked diagnosis
+#'   counts describe the first stay, not the episode: use it for the cohort and outcome counts, not as a feature table.
 #' @param sampling_rule `"random"` (default), `"first"` or `"last"`: which eligible stay represents a patient --
 #'   the stay minimising `hash(visit_occurrence_id, random_state)` (ties by id), the earliest start, or the latest
 #'   start.

@@ -175,7 +175,8 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
     import duckdb
 
     from omop_etl.benchmark_features import (BENCHMARK_LAB_CONCEPT_SETS, BENCHMARK_LAB_LOINCS, DEFAULT_BOUNDS, DEFAULT_RESCALE,
-                                             _bounds_frame, _concept_map, _ensure_vocabulary)
+                                             DEFAULT_UNIT_CONVERSIONS, _UNIT_NORM_SQL, _bounds_frame, _concept_map, _conversion_frame,
+                                             _ensure_vocabulary)
 
     src = pd.DataFrame([(n, str(c)) for n, cs in BENCHMARK_LAB_LOINCS.items() for c in cs], columns=["name", "loinc"])
     out = []
@@ -193,11 +194,18 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
             cmap = _bounds_frame(_concept_map(con, None, None, BENCHMARK_LAB_CONCEPT_SETS), DEFAULT_BOUNDS, DEFAULT_RESCALE)
             con.register("_lf_src", src)
             con.register("_lf_map", cmap)
-            f = con.execute("""
+            con.register("_lf_conv", _conversion_frame(DEFAULT_UNIT_CONVERSIONS))
+            mcols = {r[0].lower() for r in con.execute("DESCRIBE measurement").fetchall()}
+            uid = "m.unit_concept_id" if "unit_concept_id" in mcols else "CAST(NULL AS INTEGER)"
+            utxt = _UNIT_NORM_SQL if "unit_source_value" in mcols else "CAST(NULL AS VARCHAR)"
+            # the bounds are checked after the package's SI-unit conversions, as feature extraction does (review of PR 107)
+            f = con.execute(f"""
                 WITH r AS (
-                    SELECT s.name, m.measurement_concept_id AS cid, m.measurement_date AS d, m.value_as_number AS x,
+                    SELECT s.name, m.measurement_concept_id AS cid, m.measurement_date AS d, m.value_as_number * coalesce(cv.factor, 1.0) AS x,
                            m.unit_source_value AS u
                     FROM measurement m JOIN _lf_src s ON m.measurement_source_value = s.loinc
+                    LEFT JOIN _lf_conv cv ON cv.name = s.name AND (cv.unit_concept_id = {uid}
+                         OR (coalesce({uid}, 0) = 0 AND cv.unit_text = {utxt}))
                     WHERE m.measurement_date IS NULL OR m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)),
                 b AS (SELECT DISTINCT name, lo, hi, rs_lo, rs_hi, rs_div FROM _lf_map),
                 k AS (SELECT DISTINCT name, concept_id FROM _lf_map)
@@ -419,6 +427,9 @@ def flags(feat: pd.DataFrame, cats: pd.DataFrame, att: pd.DataFrame, unm: pd.Dat
         from omop_etl.data_gaps import _known_match
 
         for f in out:
+            if f.get("cause") == "source gap (confirmed)":  # a lab funnel cause, which also honours site-scoped keys
+                f["expected"] = True
+                continue
             m = re.match(r"((?:lab|vital|med|elix|disp|ederri)_[a-z0-9_]+)", str(f.get("measure", "")))
             if m and _known_match({"column": m.group(1), "site": None}, {k: v for k, v in known.items() if ":" not in k}, {}) is not None:
                 f["expected"] = True

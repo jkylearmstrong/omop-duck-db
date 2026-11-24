@@ -220,6 +220,16 @@ def test_run_study_sensitivity_cap_and_known_gaps(tmp_path, monkeypatch):
     r2 = run_study(db, out, sites=keys, n_bootstraps=3, loso=False, figures=False, profile=None, document=False,
                    observation_period_cap="2023-12-31", sensitivity=True, sensitivity_seeds=[1, 2], reuse_features=True)
     assert len(r2["data"]) == len(r["data"])
+    # features saved under older default feature rules (0.34.2: no feature_rules, no unit_converted) are not reused silently
+    for s in keys:
+        mp = Path(str(out) + "_private") / f"features_{s}.meta.json"
+        meta = json.loads(mp.read_text(encoding="utf-8"))
+        meta["settings"].pop("feature_rules")
+        meta.pop("unit_converted", None)
+        mp.write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(Exception, match="feature_rules"):
+        run_study(db, out, sites=keys, n_bootstraps=3, loso=False, figures=False, profile=None, document=False,
+                  observation_period_cap="2023-12-31", sensitivity=True, sensitivity_seeds=[1, 2], reuse_features=True)
 
 
 def test_known_source_gaps_and_intentional_exclusions():
@@ -309,3 +319,63 @@ def test_site_report_readmission_rule_units_and_causes(tmp_path):
     assert any(f["domain"] == "Readmission rule" for f in fl) and any(f["domain"] == "Lab units" for f in fl)
     assert measures["lab_potassium: source gap (confirmed)"].get("expected") is True
     assert "Site" not in json.dumps(fl)
+
+
+def test_pr107_review_fixes(tmp_path):
+    """PR 107 review: indexed backfill, NULL-end episodes, Path spec, ETL checks not masked, hemoglobin = hematocrit / 3, seed Brier."""
+    from omop_etl.build_omop_cdm import backfill_condition_concepts
+    from omop_etl.cohort import episode_view_sql
+    from omop_etl.data_gaps import classify_findings, load_known_source_gaps
+    from omop_etl.study_run import drop_duplicate_predictors, hemoglobin_is_hematocrit
+
+    # one UPDATE: an index on the source concept column must not make the concept update miss the row
+    con = duckdb.connect()
+    con.execute("CREATE TABLE concept AS SELECT * FROM (VALUES (45591027, 'E11.9', 'ICD10CM', 'Condition', NULL, 'E11.9', NULL), "
+                "(4193704, 'T2DM', 'SNOMED', 'Condition', 'S', '313436004', NULL)) "
+                "t(concept_id, concept_name, vocabulary_id, domain_id, standard_concept, concept_code, invalid_reason)")
+    con.execute("CREATE TABLE concept_relationship AS SELECT * FROM (VALUES (45591027, 4193704, 'Maps to', NULL)) "
+                "t(concept_id_1, concept_id_2, relationship_id, invalid_reason)")
+    con.execute("CREATE TABLE condition_occurrence AS SELECT * FROM (VALUES (1, 1, 0, DATE '2020-01-01', 'E11.9', 0)) "
+                "t(condition_occurrence_id, person_id, condition_concept_id, condition_start_date, condition_source_value, condition_source_concept_id)")
+    con.execute("CREATE INDEX ix_src ON condition_occurrence (condition_source_concept_id)")
+    got = backfill_condition_concepts(con)
+    assert con.execute("SELECT condition_concept_id, condition_source_concept_id FROM condition_occurrence").fetchall() == [(4193704, 45591027)]
+    assert got["non_standard_after"] == 0
+
+    # an open stay (no end date) merged into an episode does not become its "last" stay
+    v = duckdb.connect()
+    v.execute("""CREATE TABLE visit_occurrence AS SELECT * FROM (VALUES
+        (10, 1, 9201, TIMESTAMP '2020-01-01', TIMESTAMP '2020-01-05', 8536, 'HO'),
+        (11, 1, 9201, TIMESTAMP '2020-01-03', NULL, 0, 'SH'))
+        t(visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date, discharged_to_concept_id, discharged_to_source_value)""")
+    ep = v.execute(episode_view_sql(v, "visit_occurrence", [9201], 0)).df()
+    assert len(ep) == 1 and ep["discharged_to_source_value"].item() == "HO" and ep["visit_occurrence_id"].item() == 10
+
+    with pytest.raises(ValueError, match="does not exist"):
+        load_known_source_gaps(tmp_path / "missing.txt")
+    f = classify_findings([{"site": "Site A", "check": "concept_set_coverage", "column": "lab_potassium"},
+                           {"site": "Site A", "check": "column_missing", "column": "lab_potassium"}], {"lab_potassium": ""}, {})
+    assert [x["cause"] for x in f] == ["etl_mapping", "source_gap"]
+
+    d = pd.DataFrame({"lab_hematocrit": [30.0, 36.0, None], "lab_hemoglobin": [10.0, 12.0, None], "lab_hematocrit_last": [30.0, 33.0, None]})
+    assert hemoglobin_is_hematocrit(d)
+    assert list(drop_duplicate_predictors(d).columns) == ["lab_hemoglobin"]
+    d.loc[1, "lab_hemoglobin"] = 11.0      # one measured hemoglobin: two predictors
+    assert not hemoglobin_is_hematocrit(d) and "lab_hematocrit" in drop_duplicate_predictors(d)
+
+
+def test_stay_sensitivity_brier_and_no_seeds():
+    pytest.importorskip("sklearn")
+    import numpy as np
+
+    from omop_etl.study_report import stay_sensitivity
+
+    rng = np.random.default_rng(0)
+    n = 300
+    d = pd.DataFrame({"site_source": "s1", "person_id": rng.integers(0, 120, n), "visit_occurrence_id": np.arange(n),
+                      "x": rng.normal(size=n)})
+    d["readmitted_30d"] = (d["x"] + rng.normal(size=n) > 1).astype(int)
+    tab, summ = stay_sensitivity(d, [1, 2], n_splits=3)
+    assert tab["Brier"].notna().all()
+    tab0, summ0 = stay_sensitivity(d, [], n_splits=3)
+    assert len(tab0) == 1 and summ0["seed_auc_range"] is None

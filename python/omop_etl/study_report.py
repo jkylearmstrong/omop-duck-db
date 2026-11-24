@@ -357,10 +357,10 @@ def seed_sensitivity(all_stays: pd.DataFrame, seeds: Sequence[int], *, model_fac
                      n_splits: int = 5, random_state: int = 42) -> pd.DataFrame:
     """OOF AUC-ROC of one model on the cohort drawn with each seed: how much the random-stay choice matters.
 
-    Returns ``Seed, Stays (= patients), Readmit rate, <model> AUC`` (one row per seed)."""
+    Returns ``Seed, Stays (= patients), Readmit rate, <model> AUC, Brier`` (one row per seed)."""
     _sk()
     from sklearn.ensemble import HistGradientBoostingClassifier
-    from sklearn.metrics import roc_auc_score
+    from sklearn.metrics import brier_score_loss, roc_auc_score
 
     factory = model_factory or (lambda: HistGradientBoostingClassifier(max_iter=100, max_depth=6, l2_regularization=1.0, random_state=random_state))
     rows = []
@@ -369,8 +369,8 @@ def seed_sensitivity(all_stays: pd.DataFrame, seeds: Sequence[int], *, model_fac
         X, y = prepare_model_matrix(pick, label_col=label_col)
         p = oof_predictions(factory, X, y, balanced=balanced, n_splits=n_splits, random_state=random_state)
         rows.append({"Seed": int(s), "Stays (= patients)": int(len(y)), "Readmit rate": round(float(y.mean()), 4),
-                     f"{model_name} AUC": round(float(roc_auc_score(y, p)), 4)})
-    return pd.DataFrame(rows)
+                     f"{model_name} AUC": round(float(roc_auc_score(y, p)), 4), "Brier": round(float(brier_score_loss(y, p)), 4)})
+    return pd.DataFrame(rows, columns=["Seed", "Stays (= patients)", "Readmit rate", f"{model_name} AUC", "Brier"])
 
 
 def _count_word(n: int) -> str:
@@ -395,6 +395,7 @@ def stay_sensitivity(all_stays: pd.DataFrame, seeds: Sequence[int] = tuple(range
 
     factory = model_factory or (lambda: HistGradientBoostingClassifier(max_iter=100, max_depth=6, l2_regularization=1.0, random_state=random_state))
     seeds = [int(x) for x in seeds]
+    col = f"{model_name} AUC"
     tab = seed_sensitivity(all_stays, seeds, model_factory=factory, model_name=model_name, label_col=label_col, site_col=site_col,
                            person_col=person_col, visit_col=visit_col, n_splits=n_splits, random_state=random_state)
     d = all_stays.sort_values([site_col, person_col, visit_col], kind="mergesort").reset_index(drop=True)
@@ -402,8 +403,8 @@ def stay_sensitivity(all_stays: pd.DataFrame, seeds: Sequence[int] = tuple(range
     X, y = prepare_model_matrix(d, label_col=label_col)
     p = oof_predictions(factory, X, y, balanced=True, groups=groups, n_splits=n_splits, random_state=random_state)
     auc_all, brier_all, prev = float(roc_auc_score(y, p)), float(brier_score_loss(y, p)), float(y.mean())
-    col = f"{model_name} AUC"
-    tab = pd.concat([tab.rename(columns={"Stays (= patients)": "Stays"}).assign(Analysis=lambda t: "Random draw, seed " + t["Seed"].astype(str)),
+    tab = pd.concat([tab.rename(columns={"Stays (= patients)": "Stays"}).assign(Analysis=lambda t: "Random draw, seed " + t["Seed"].astype(str))
+                     if len(tab) else pd.DataFrame(columns=["Analysis", "Seed", "Stays", "Readmit rate", col, "Brier"]),
                      pd.DataFrame([{"Analysis": "All eligible stays (patient-grouped folds)", "Seed": None, "Stays": int(len(y)),
                                     "Readmit rate": round(prev, 4), col: round(auc_all, 4), "Brier": round(brier_all, 4)}])],
                     ignore_index=True)[["Analysis", "Seed", "Stays", "Readmit rate", col, "Brier"]]

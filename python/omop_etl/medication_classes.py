@@ -235,9 +235,9 @@ def audit_combination_products(
 
 
 #: Relationships from a drug concept to a concept that may name its ingredients (a branded drug to its clinical drug, a quantified
-#: drug to its unquantified form, a pack to its contents), and from there to an ingredient. Retired links count: a deprecated drug
+#: drug to its unquantified form, a pack to its contents ('Contains'), a precise ingredient to its ingredient ('Form of')), and from there to an ingredient. Retired links count: a deprecated drug
 #: keeps them (0.34.2 ``backfill_drug_concepts`` uses the same chain).
-_DRUG_HOP_RELATIONSHIPS = ("Tradename of", "Quantified form of", "Consists of", "Has quantified form")
+_DRUG_HOP_RELATIONSHIPS = ("Tradename of", "Quantified form of", "Consists of", "Has quantified form", "Contains", "Form of")
 _DRUG_INGREDIENT_RELATIONSHIPS = ("RxNorm has ing", "Has ingredient", "Brand name of", "Tradename of")
 
 
@@ -587,7 +587,7 @@ def extract_medication_classes(
                             "DELETE FROM _med_drug_targets WHERE drug_concept_id IN (SELECT ca.descendant_concept_id FROM "
                             "(SELECT DISTINCT drug_concept_id AS descendant_concept_id FROM _med_drug_targets) ca "
                             f"JOIN {concept} c ON c.concept_id = ca.descendant_concept_id WHERE ({' OR '.join(ex_cond_parts)}))")
-                    combo2 = ", CASE WHEN t.n_targets > 1 THEN 1 ELSE 0 END AS is_combination" if filter_combo else ""
+                    combo2 = ", GREATEST(m.is_combination, CASE WHEN t.n_targets > 1 THEN 1 ELSE 0 END) AS is_combination" if filter_combo else ""
                     extra = db_con.execute(
                         f"SELECT DISTINCT v._row, m.drug_class{combo2}{type_sel} FROM _med_cohort v "
                         "JOIN drug_exposure de ON de.person_id = v.person_id "

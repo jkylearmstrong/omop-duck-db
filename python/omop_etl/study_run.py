@@ -10,6 +10,8 @@ one. Site databases are read-only. ``scripts/reproduce_study.py`` is the command
 
 from __future__ import annotations
 
+import contextlib
+
 import json
 import re
 import shutil
@@ -19,9 +21,14 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "drop_last_lab_values", "drop_duplicate_predictors", "DUPLICATE_PREDICTORS", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "drop_last_lab_values", "drop_duplicate_predictors", "hemoglobin_is_hematocrit", "DUPLICATE_PREDICTORS", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 from omop_etl.concept_sets import CONCEPT_SET_VERSION, LEGACY_CONCEPT_SETS  # noqa: E402
+
+#: Version of the package's default feature rules, saved with every site's features. Bumped when a default changes what the same
+#: database gives (0.35.0: combination drugs count for each ingredient's class, SI-unit labs are converted), so --reuse-features
+#: refuses features saved under older rules (stale_features) instead of reusing them silently.
+FEATURE_RULES_VERSION = "0.35.0"
 
 # Every choice that moves the published numbers, with the options and what each does. Nothing is hard-wired: each can be set on
 # run_study (or on reproduce_study.py) and the values used are written to <prefix>_run.json.
@@ -276,6 +283,26 @@ def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on:
     return out
 
 
+def _implied_feature_rules(meta: Mapping[str, Any]) -> dict[str, str]:
+    """Features saved by the first 0.35.0 build (before ``feature_rules`` was recorded) already used the 0.35.0 rules: their metadata
+    has ``unit_converted``, which 0.34.2 and earlier never wrote."""
+    if "feature_rules" not in meta.get("settings", {}) and "unit_converted" in meta:
+        return {"feature_rules": "0.35.0"}
+    return {}
+
+
+@contextlib.contextmanager
+def _period_end_check_reported():
+    """Silences define_study_cohort()'s own observation-period-end warning: _site_frame() has already reported the spike as an
+    ``observation_period`` finding (or capped the periods, which piles them on the cap date on purpose), so the library warning
+    would only repeat it as an unexplained ``warning`` (C18 review)."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r".* observation periods end on ", category=UserWarning)
+        yield
+
+
 def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mapping[str, Any], profile: str | None, pinned: pd.DataFrame | None,
                 ruca: Any, sdi: Any, cuts: Sequence[float] | None, address_table: str | None, transfer_source_values: Sequence[str],
                 feature_kwargs: Mapping[str, Any], work: Path, attrition_mode: str = "windowed", redraw: bool = False, random_state: int = 42,
@@ -314,8 +341,10 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
                                      "FROM observation_period").fetchone()
             meta["observation_period_cap"] = {"cap": observation_period_cap, "share_shortened": round(short / tot, 4) if tot else None,
                                               "spike_before_cap": bool(raw.get("flagged"))}
-            con.execute("CREATE OR REPLACE TEMP VIEW observation_period AS SELECT * REPLACE (least(observation_period_end_date, "
-                        f"DATE '{observation_period_cap}') AS observation_period_end_date) FROM site_db.main.observation_period "
+            # CASE, not least(): least() ignores NULL and would give an open period the cap as its end date
+            con.execute("CREATE OR REPLACE TEMP VIEW observation_period AS SELECT * REPLACE (CASE WHEN observation_period_end_date > "
+                        f"DATE '{observation_period_cap}' THEN DATE '{observation_period_cap}' ELSE observation_period_end_date END "
+                        "AS observation_period_end_date) FROM site_db.main.observation_period "
                         f"WHERE observation_period_start_date <= DATE '{observation_period_cap}'")
         _check_coverage_of_window(con, start, end, params, spike=observation_period_cap is None)
         if ruca is not None and sdi is not None:
@@ -328,18 +357,21 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
                 address_table = None
             meta["address_table"] = address_table or PERSON_LOCATION
         rule = {"sample_stay_rule": "all"} if pinned is not None else {"sample_stay_rule": "random"}
-        cohort = define_study_cohort(con, materialise=False, min_admit_date=start, max_admit_date=end, **rule, **dict(params))
+        with _period_end_check_reported():
+            cohort = define_study_cohort(con, materialise=False, min_admit_date=start, max_admit_date=end, **rule, **dict(params))
         att = pd.DataFrame(cohort.attrs.get("attrition"))
         att["site"] = site
         cohort.attrs = {}
         every = None
         if all_stays:  # every eligible stay in the window: the pinned path already built them, the random path builds them once more
-            every = cohort.copy() if pinned is not None else define_study_cohort(con, materialise=False, min_admit_date=start, max_admit_date=end,
-                                                                                 sample_stay_rule="all", attrition=False, **dict(params))
+            with _period_end_check_reported():
+                every = cohort.copy() if pinned is not None else define_study_cohort(con, materialise=False, min_admit_date=start, max_admit_date=end,
+                                                                                     sample_stay_rule="all", attrition=False, **dict(params))
             every.attrs = {}
         if attrition_mode == "full_history":
             # the manuscript's CONSORT: every rule over the whole history, then the study window and the one stay per patient last
-            full = define_study_cohort(con, materialise=False, sample_stay_rule="all", **dict(params))
+            with _period_end_check_reported():
+                full = define_study_cohort(con, materialise=False, sample_stay_rule="all", **dict(params))
             att = pd.DataFrame(full.attrs.get("attrition"))
             att["site"] = site
             n_final = int(cohort["subject_id"].nunique()) if "subject_id" in cohort else len(cohort)
@@ -596,7 +628,23 @@ def drop_duplicate_predictors(df: pd.DataFrame, duplicates: Mapping[str, str] | 
     ``index_los_days``; ``days_since_last_encounter`` is ``days_since_prior_encounter`` capped differently). A column whose counterpart
     is absent is kept."""
     dup = DUPLICATE_PREDICTORS if duplicates is None else duplicates
-    return df.drop(columns=[c for c, keep in dup.items() if c in df.columns and keep in df.columns])
+    drop = [c for c, keep in dup.items() if c in df.columns and keep in df.columns]
+    if hemoglobin_is_hematocrit(df):  # hemoglobin was filled from hematocrit / 3 for every stay: one feature, kept as hemoglobin (Kyle, C18)
+        drop += [c for c in ("lab_hematocrit", "lab_hematocrit_last") if c in df.columns]
+    return df.drop(columns=drop)
+
+
+def hemoglobin_is_hematocrit(df: pd.DataFrame) -> bool:
+    """True when ``lab_hemoglobin`` is ``lab_hematocrit / 3`` in every stay that has either (no measured hemoglobin at all, so the
+    eDERRI fill made it a rescaled copy of hematocrit; run C18 found this at every site). Then the two are one predictor."""
+    if "lab_hemoglobin" not in df.columns or "lab_hematocrit" not in df.columns:
+        return False
+    hgb = pd.to_numeric(df["lab_hemoglobin"], errors="coerce")
+    hct = pd.to_numeric(df["lab_hematocrit"], errors="coerce")
+    if not hct.notna().any() or (hgb.notna() != hct.notna()).any():
+        return False
+    both = hgb.notna()
+    return bool(np.allclose(hgb[both].to_numpy(float), hct[both].to_numpy(float) / 3.0, rtol=1e-9, atol=1e-9))
 
 
 def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -763,6 +811,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                       "pinned": None if pinned is None else pd.util.hash_pandas_object(pinned, index=False).sum().item(),
                                       **({"ineligible_draw": dec["ineligible_draw"]} if pinned is not None and dec["ineligible_draw"] != "exclude" else {}),
                                       **({"observation_period_cap": observation_period_cap} if observation_period_cap is not None else {}),
+                                      "feature_rules": FEATURE_RULES_VERSION,
                                       "feature_kwargs": feature_kwargs or {}}, default=str, sort_keys=True))
 
     def _write_gaps() -> None:
@@ -772,6 +821,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
 
     def _gate(new: list[dict[str, Any]]) -> None:
         classify_findings(new, known_gaps, site_keys)
+        for f_ in new:  # the reason comes from the private known-gaps file and may name a site: it stays out of the shareable record
+            f_.pop("known_reason", None)
         findings.extend(new)
         try:
             assess(new, allow)
@@ -781,9 +832,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                 raise
 
     if compare_to is not None and preset == "package":
-        findings.append({"site": "-", "check": "preset", "severity": "warning",
+        findings.extend(classify_findings([{"site": "-", "check": "preset", "severity": "warning", "cause": "intentional",
                          "message": "--compare-to with the default preset 'package': a workbook delivered under another preset (such as "
-                                    "delivered_2026_11_11) differs in its decisions too, so not every difference is a data difference"})
+                                    "delivered_2026_11_11) differs in its decisions too, so not every difference is a data difference"}]))
 
     if pinned is not None and "site_source" in pinned:
         stray = sorted(set(pinned["site_source"].dropna().astype(str)) - set(map(str, sites)))
@@ -816,8 +867,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             if "settings" not in meta:
                 saved.append({"site": labels[site], "check": "stale_features", "severity": "warning",
                               "message": "reused features were saved before 0.29.0: the settings they were built with are unknown"})
-            elif meta["settings"] != settings:
-                diff = sorted(k for k in set(settings) | set(meta["settings"]) if settings.get(k) != meta["settings"].get(k))
+            elif {**meta["settings"], **_implied_feature_rules(meta)} != settings:
+                saved_settings = {**meta["settings"], **_implied_feature_rules(meta)}
+                diff = sorted(k for k in set(settings) | set(saved_settings) if settings.get(k) != saved_settings.get(k))
                 saved.append({"site": labels[site], "check": "stale_features", "severity": "error",
                               "message": f"reused features were built with different settings ({', '.join(diff)}); rerun without --reuse-features"})
             address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
@@ -882,7 +934,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         assess(findings, allow)  # raises with every site's gaps at once
         return {"data_checks": findings, "address_table": address_used, "share_missing_by_group": coverage, "geography": geography,
                 "private_dir": priv, "checked_only": True}
-    pooled = drop_duplicate_predictors(_canonical_order(frames))
+    pooled = _canonical_order(frames)
+    hgb_from_hct = hemoglobin_is_hematocrit(pooled)
+    pooled = drop_duplicate_predictors(pooled)
     if dec["last_lab_values"] == "drop":  # the models see the index-stay mean of each laboratory only (Methods 2.2, Tables 1 and 4)
         pooled = drop_last_lab_values(pooled)
     attrition = pd.concat(atts, ignore_index=True)
@@ -914,6 +968,11 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         if dec["last_lab_values"] == "drop":
             every_pooled = drop_last_lab_values(every_pooled)
         every_pooled = every_pooled[[c for c in pooled.columns if c in every_pooled.columns]]   # the primary models' columns
+        if {"site_source", "person_id"} <= set(every_pooled.columns) and {"site_source", "person_id"} <= set(pooled.columns):
+            # the primary cohort's patients only: a patient left out of the primary draw (outside a pinned draw) is not in the
+            # sensitivity analyses either, so each seed draw has exactly the primary N (C18 had one stay more)
+            keys_ = pd.MultiIndex.from_frame(pooled[["site_source", "person_id"]].astype(str))
+            every_pooled = every_pooled[pd.MultiIndex.from_frame(every_pooled[["site_source", "person_id"]].astype(str)).isin(keys_)]
         sens_tab, sens_summary = stay_sensitivity(every_pooled, sensitivity_seeds, random_state=random_state)
         sens_tab.to_csv(out / f"{prefix}_Sensitivity.csv", index=False)
         res["files"].append(str(out / f"{prefix}_Sensitivity.csv"))
@@ -992,6 +1051,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                                           if observation_period_cap is not None else {}),
                                                        "unit_converted": dict(sorted(unit_converted.items())),
                                                        "medication_combination_share": dict(sorted(combination_share.items())),
+                                                       "hemoglobin_from_hematocrit": hgb_from_hct,
                                                        "n": int(len(pooled)), "qualifying_stays": n_qualifying, "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
                                                        "cohort_params": json.loads(json.dumps(c_params, default=str)),
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},

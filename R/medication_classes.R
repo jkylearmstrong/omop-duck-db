@@ -52,7 +52,7 @@ DEFAULT_DISPENSED_TYPE_CONCEPT_IDS <- c(38000175L, 32823L)
 
 # Relationships from a drug concept to a concept that may name its ingredients, and from there to an ingredient (retired links
 # count: a deprecated drug keeps them). Mirror of omop_etl.medication_classes._nonstandard_drug_targets_sql.
-.MED_HOP_RELATIONSHIPS <- c("Tradename of", "Quantified form of", "Consists of", "Has quantified form")
+.MED_HOP_RELATIONSHIPS <- c("Tradename of", "Quantified form of", "Consists of", "Has quantified form", "Contains", "Form of")
 .MED_INGREDIENT_RELATIONSHIPS <- c("RxNorm has ing", "Has ingredient", "Brand name of", "Tradename of")
 
 #' @keywords internal
@@ -517,7 +517,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
             "(SELECT DISTINCT drug_concept_id AS descendant_concept_id FROM _med_drug_targets) ca ",
             "JOIN %s c ON c.concept_id = ca.descendant_concept_id WHERE (%s))"), concept, paste(ex_cond_parts, collapse = " OR ")))
         }
-        combo2 <- if (filter_combo) ", CASE WHEN t.n_targets > 1 THEN 1 ELSE 0 END AS is_combination" else ""
+        combo2 <- if (filter_combo) ", GREATEST(m.is_combination, CASE WHEN t.n_targets > 1 THEN 1 ELSE 0 END) AS is_combination" else ""
         extra <- DBI::dbGetQuery(db_con, paste0(
           "SELECT DISTINCT v.row_id, m.drug_class", combo2, type_sel, " FROM _med_cohort v ",
           "JOIN drug_exposure de ON de.person_id = v.person_id ",
