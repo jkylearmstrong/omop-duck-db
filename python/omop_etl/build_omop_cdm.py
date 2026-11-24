@@ -806,7 +806,8 @@ def backfill_drug_concepts(con):
     (trimmed, any case) of a standard RxNorm / RxNorm Extension concept, an Ingredient preferred, then the single concept of that name.
     The medication features roll concepts up through concept_ancestor, so an ingredient is enough. Needs the vocabulary on the
     connection (attach the central vocabulary first) and a writable connection; work on a copy. Returns
-    ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n, "non_standard_before": n, "by_maps_to": n}`` (row counts).
+    ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n, "non_standard_before": n, "by_maps_to": n,
+    "non_standard_after": n}`` (row counts). Raises ``ValueError`` when ``concept_relationship`` has no 'Maps to' row (vocabulary not attached).
 
     First (0.34.2; the C15 close-out found 4 to 17% of drug rows per site on a non-standard or deprecated concept, which the
     medication classes cannot roll up through concept_ancestor): a row whose ``drug_concept_id`` is not a valid standard concept
@@ -815,6 +816,10 @@ def backfill_drug_concepts(con):
     nonstd = """SELECT x.drug_concept_id AS src FROM drug_exposure x JOIN concept c ON c.concept_id = x.drug_concept_id
                 WHERE coalesce(x.drug_concept_id, 0) <> 0 AND (c.standard_concept IS DISTINCT FROM 'S' OR c.invalid_reason IS NOT NULL)"""
     non_standard_before = int(con.execute(f"SELECT count(*) FROM ({nonstd})").fetchone()[0])
+    has_maps_to = con.execute("SELECT 1 FROM concept_relationship WHERE relationship_id = 'Maps to' LIMIT 1").fetchone()
+    if not has_maps_to:  # C16: the remap matched nothing at any site; an empty or site-local concept_relationship must not pass silently
+        raise ValueError("backfill_drug_concepts: concept_relationship holds no 'Maps to' rows; attach the central vocabulary "
+                         "(attach_central_vocabulary) so that concept and concept_relationship resolve to it.")
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _dstd AS
         SELECT cr.concept_id_1 AS src, min(cr.concept_id_2) AS cid
         FROM (SELECT DISTINCT src FROM ({nonstd})) s
@@ -872,8 +877,10 @@ def backfill_drug_concepts(con):
                    WHERE drug_exposure.drug_source_value = m.sv AND coalesce(drug_exposure.drug_concept_id, 0) = 0""")
     con.execute("DROP TABLE _dsv")
     con.execute("DROP TABLE _dmap")
+    non_standard_after = int(con.execute(f"SELECT count(*) FROM ({nonstd})").fetchone()[0])
     return {"unmapped_before": before, "by_ndc": int(counts.get("ndc", 0)), "by_rxnorm": int(counts.get("rxnorm", 0)),
-            "by_name": int(counts.get("name", 0)), "non_standard_before": non_standard_before, "by_maps_to": by_maps_to}
+            "by_name": int(counts.get("name", 0)), "non_standard_before": non_standard_before, "by_maps_to": by_maps_to,
+            "non_standard_after": non_standard_after}
 
 
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):

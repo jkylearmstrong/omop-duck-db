@@ -191,7 +191,7 @@ def test_drug_backfill_maps_rxnorm_codes():
     got = backfill_drug_concepts(con)
     ids = dict(con.execute("SELECT drug_exposure_id, drug_concept_id FROM drug_exposure").fetchall())
     assert ids == {1: 19078461, 2: 1567198, 3: 0, 4: 0}  # standard code as is; non-standard through 'Maps to'; an NDC is not read as RxNorm
-    assert got == {"unmapped_before": 4, "by_ndc": 0, "by_rxnorm": 2, "by_name": 0, "non_standard_before": 0, "by_maps_to": 0}
+    assert got == {"unmapped_before": 4, "by_ndc": 0, "by_rxnorm": 2, "by_name": 0, "non_standard_before": 0, "by_maps_to": 0, "non_standard_after": 0}
 
 
 def test_diagnosis_with_unknown_dx_type_and_a_deprecated_twin(tmp_path):

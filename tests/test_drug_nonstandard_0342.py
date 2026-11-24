@@ -40,6 +40,20 @@ def test_non_standard_drug_concepts_follow_maps_to():
     assert rows == {1: (19078461, 45000001), 2: (1567198, 40000002), 3: (45000003, 0), 4: (45000004, 0), 5: (19078461, 0),
                     6: (19078461, 555)}   # an existing source concept is kept
     assert got["non_standard_before"] == 5 and got["by_maps_to"] == 3 and got["unmapped_before"] == 0
+    assert got["non_standard_after"] == 2   # the two rows with no single valid target
+
+
+def test_drug_remap_refuses_a_vocabulary_without_maps_to():
+    """C16: with an empty (site-local) concept_relationship the remap matched nothing and said nothing; it now stops."""
+    import pytest
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE concept AS SELECT 40000002 AS concept_id, NULL AS standard_concept, 'U' AS invalid_reason")
+    con.execute("CREATE TABLE concept_relationship (concept_id_1 INTEGER, concept_id_2 INTEGER, relationship_id VARCHAR, invalid_reason VARCHAR)")
+    con.execute("CREATE TABLE drug_exposure AS SELECT 1 AS drug_exposure_id, 40000002 AS drug_concept_id, 'y' AS drug_source_value")
+    with pytest.raises(ValueError, match="no 'Maps to' rows"):
+        backfill_drug_concepts(con)
+    assert con.execute("SELECT drug_concept_id FROM drug_exposure").fetchone()[0] == 40000002
 
 
 def test_n_secondary_dx_counts_the_index_visit_only():
