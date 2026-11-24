@@ -290,6 +290,72 @@ def _measurement_stats(con, cohort: pd.DataFrame, cmap: pd.DataFrame, pre_days: 
         con.unregister("_bf_map")
 
 
+#: Body height and body weight concepts used to compute a BMI where none was recorded (LOINC 8302-2 / 3137-5 height,
+#: 29463-7 / 3141-9 weight). Units: cm (8582) or inch (9330) for height, kg (9529) or pound (8739) for weight; a value without a
+#: unit is read as inches / pounds (the PCORnet VITAL convention), except a height of 100 or more, which can only be centimetres.
+BMI_HEIGHT_CONCEPTS: tuple[int, ...] = (3036277, 3023540)
+BMI_WEIGHT_CONCEPTS: tuple[int, ...] = (3025315, 3013762)
+BMI_FILL_OPTIONS = ("derive", "derive_lookback", "none")
+
+
+def _fill_bmi(con, cohort: pd.DataFrame, bmi_ids: Sequence[int], measured: pd.Series, *, mode: str, lookback_days: int,
+              bounds: Sequence[float | None] | None) -> tuple[pd.Series, dict[str, int]]:
+    """Fills a missing in-stay BMI, in order: (1) BMI computed from the stay's mean height and weight, then, with
+    ``mode="derive_lookback"``, (2) the latest BMI recorded in the ``lookback_days`` before the admission, (3) BMI from the latest
+    height and weight in that window. Every value must lie within ``bounds``. Returns the filled series (by ``row_id``) and the
+    number of stays filled by each step."""
+    lo, hi = (bounds or (None, None))
+    lo, hi = (-1e300 if lo is None else float(lo)), (1e300 if hi is None else float(hi))
+    con.register("_bmi_c", cohort[["row_id", "subject_id", "cohort_start_date", "cohort_end_date"]])
+    ids = lambda xs: ", ".join(str(int(x)) for x in xs) or "NULL"  # noqa: E731
+    cols = {r[0] for r in con.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'measurement'").fetchall()}
+    unit = "m.unit_concept_id" if "unit_concept_id" in cols else "CAST(NULL AS INTEGER)"
+    try:
+        got = con.execute(f"""
+            WITH m AS (
+                SELECT c.row_id, m.measurement_date AS d, COALESCE(m.measurement_datetime, CAST(m.measurement_date AS TIMESTAMP)) AS ts,
+                       m.measurement_id AS mid,
+                       CAST(m.measurement_date AS DATE) >= CAST(c.cohort_start_date AS DATE) AS in_stay,
+                       CASE WHEN m.measurement_concept_id IN ({ids(BMI_HEIGHT_CONCEPTS)}) THEN 'h'
+                            WHEN m.measurement_concept_id IN ({ids(BMI_WEIGHT_CONCEPTS)}) THEN 'w' ELSE 'b' END AS kind,
+                       CASE WHEN m.measurement_concept_id IN ({ids(BMI_HEIGHT_CONCEPTS)}) THEN
+                                 CASE WHEN {unit} = 8582 OR (COALESCE({unit}, 0) <> 9330 AND m.value_as_number >= 100)
+                                      THEN m.value_as_number / 100.0 ELSE m.value_as_number * 0.0254 END
+                            WHEN m.measurement_concept_id IN ({ids(BMI_WEIGHT_CONCEPTS)}) THEN
+                                 CASE WHEN {unit} = 9529 THEN m.value_as_number ELSE m.value_as_number * 0.45359237 END
+                            ELSE m.value_as_number END AS v
+                FROM _bmi_c c
+                JOIN measurement m ON m.person_id = c.subject_id
+                     AND m.measurement_date >= CAST(c.cohort_start_date AS DATE) - {int(lookback_days) if mode == "derive_lookback" else 0}
+                     AND m.measurement_date <= CAST(c.cohort_end_date AS DATE)
+                WHERE m.value_as_number > 0
+                  AND m.measurement_concept_id IN ({ids([*BMI_HEIGHT_CONCEPTS, *BMI_WEIGHT_CONCEPTS, *bmi_ids])})
+            ), m2 AS (  -- plausible heights (0.9 to 2.5 m) and weights (20 to 400 kg) only
+                SELECT * FROM m WHERE (kind = 'h' AND v BETWEEN 0.9 AND 2.5) OR (kind = 'w' AND v BETWEEN 20 AND 400)
+                                   OR (kind = 'b' AND v BETWEEN {lo} AND {hi})
+            )
+            SELECT row_id,
+                   avg(v) FILTER (WHERE in_stay AND kind = 'w') / (avg(v) FILTER (WHERE in_stay AND kind = 'h') ^ 2) AS stay_derived,
+                   arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'b') AS prior_bmi,
+                   arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'w')
+                     / (arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'h') ^ 2) AS prior_derived
+            FROM m2 GROUP BY row_id
+        """).df().set_index("row_id")
+    finally:
+        con.unregister("_bmi_c")
+    ok = lambda x: x.where((x >= lo) & (x <= hi))  # noqa: E731
+    out, counts = measured.copy(), {}
+    steps = [("derived_in_stay", "stay_derived")]
+    if mode == "derive_lookback":
+        steps += [("recorded_prior", "prior_bmi"), ("derived_prior", "prior_derived")]
+    for label, col in steps:
+        cand = ok(got[col].reindex(out.index).astype(float)).round(2) if col in got else pd.Series(np.nan, index=out.index)
+        fill = out.isna() & cand.notna()
+        out[fill] = cand[fill]
+        counts[label] = int(fill.sum())
+    return out, counts
+
+
 def _wide(stats: pd.DataFrame, prefix: str, names: Sequence[str], n_rows: int, with_last: bool) -> pd.DataFrame:
     out = pd.DataFrame({"row_id": np.arange(n_rows, dtype="int64")}).set_index("row_id")
     for name in names:
@@ -379,6 +445,8 @@ def extract_benchmark_features(
     vocabulary_db: str | os.PathLike | None = "auto",
     feature_set: Any = None,
     feature_fit: bool | Sequence[str] = False,
+    bmi_fill: str | None = None,
+    bmi_lookback_days: int = 365,
 ) -> pd.DataFrame:
     """Leakage-free modelling table, one row per cohort row, in cohort order.
 
@@ -425,6 +493,15 @@ def extract_benchmark_features(
         Index-admission mean ``vital_<name>`` / ``lab_<name>`` **and** the latest in-stay value ``lab_<name>_last`` over
         ``[admission - lab_lookback_days, discharge]``. LOINC codes are resolved through ``concept``; pass
         ``lab_concept_ids`` / ``vital_concept_ids`` ``{name: [concept_id]}`` for databases without the vocabulary.
+    bmi_fill : {"derive", "derive_lookback", "none"} or None
+        How a stay with no BMI recorded during the stay gets one (``vital_bmi``): ``"derive"`` computes it from the stay's mean
+        height and weight (kg / m^2; :data:`BMI_HEIGHT_CONCEPTS`, :data:`BMI_WEIGHT_CONCEPTS`); ``"derive_lookback"`` also takes,
+        where that finds none, the latest BMI recorded in the ``bmi_lookback_days`` before the admission, then one computed from the
+        latest height and weight in that window; ``"none"`` leaves it missing. Default: ``"derive_lookback"`` with
+        ``profile="ederri"`` or ``"both"`` (as the legacy study pipeline did), else ``"derive"``. ``attrs["bmi_filled"]`` counts the
+        stays each step filled.
+    bmi_lookback_days : int, default 365
+        Window before the admission used by ``bmi_fill="derive_lookback"``.
     derive_labs : bool, default True
         Adds ``lab_egfr`` (CKD-EPI 2021) and fills ``lab_anion_gap`` (Na - Cl - HCO3) where no anion gap was measured, each for the
         mean and ``_last``.
@@ -487,6 +564,13 @@ def extract_benchmark_features(
         medication_window = "pre_discharge" if medication_set == "ederri" else "pre_admission"
     if hematocrit_fallback is None:
         hematocrit_fallback = profile == "ederri"
+    if bmi_fill is None:
+        bmi_fill = "derive_lookback" if profile in ("ederri", "both") else "derive"
+    if bmi_fill not in BMI_FILL_OPTIONS:
+        raise ValueError(f"bmi_fill must be one of {BMI_FILL_OPTIONS}, got {bmi_fill!r}.")
+    if bmi_lookback_days < 0:
+        raise ValueError("bmi_lookback_days must be non-negative.")
+    bmi_filled: dict[str, int] = {}
     if elixhauser_code_table is None:
         elixhauser_code_table = {"ederri": "ederri", "both": "both"}.get(profile, "quan")
     if elixhauser_code_table not in ("quan", "ederri", "both"):
@@ -608,7 +692,12 @@ def extract_benchmark_features(
         stats = _measurement_stats(con, cohort, vmap, lab_lookback_days, bounds, rescale)
         names = list(vital_loincs or BENCHMARK_VITAL_LOINCS)
         skipped += [f"vital_{x}" for x in names if x not in set(vmap["name"])]
-        add("vitals", _wide(stats, "vital_", [x for x in names if x in set(vmap["name"])], n, with_last=False).drop(columns=["row_id"]))
+        vit = _wide(stats, "vital_", [x for x in names if x in set(vmap["name"])], n, with_last=False)
+        if bmi_fill != "none" and "vital_bmi" in vit:
+            bmi_bounds = (bounds or {}).get("bmi") if bounds is not None else None
+            vit["vital_bmi"], bmi_filled = _fill_bmi(con, cohort, vmap.loc[vmap["name"] == "bmi", "concept_id"].tolist(), vit["vital_bmi"],
+                                                     mode=bmi_fill, lookback_days=bmi_lookback_days, bounds=bmi_bounds)
+        add("vitals", vit.drop(columns=["row_id"]))
     if include_labs:
         loincs = dict(lab_loincs or BENCHMARK_LAB_LOINCS)
         lab_sets = None if lab_loincs else BENCHMARK_LAB_CONCEPT_SETS
@@ -723,6 +812,7 @@ def extract_benchmark_features(
     out.attrs["skipped"] = skipped
     out.attrs["key_columns"] = keys
     out.attrs["imputation_values"] = imputation
+    out.attrs["bmi_filled"] = bmi_filled
     out.attrs["address_table"] = address_used
     out.attrs["geography"] = geography
     return out

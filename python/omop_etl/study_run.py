@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "drop_last_lab_values", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "drop_last_lab_values", "drop_duplicate_predictors", "DUPLICATE_PREDICTORS", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 from omop_etl.concept_sets import CONCEPT_SET_VERSION, LEGACY_CONCEPT_SETS  # noqa: E402
 
@@ -323,6 +323,8 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         if feats.attrs.get("address_table"):
             meta["address_table"] = feats.attrs["address_table"]
         meta["geography"] = feats.attrs.get("geography")
+        meta["bmi_filled_share"] = ({k: round(v / len(feats), 4) for k, v in (feats.attrs.get("bmi_filled") or {}).items()}
+                                    if len(feats) else None)  # shares, not counts: the per-site metadata stays shareable
     finally:
         con.close()
     df = cohort.merge(feats, on="visit_occurrence_id", suffixes=("", "_f"))
@@ -497,6 +499,19 @@ def drop_last_lab_values(df: pd.DataFrame) -> pd.DataFrame:
     """The feature table without the latest in-stay lab values (``lab_<name>_last``): the models see each laboratory's index-stay
     mean only (decision ``last_lab_values="drop"``)."""
     return df.drop(columns=[c for c in df.columns if re.fullmatch(r"lab_.+_last", str(c))])
+
+
+# a predictor that repeats another one (same value in every row, or the same quantity capped differently) -> the column it repeats;
+# both in the model split one effect between two coefficients and list the same thing twice among the predictors
+DUPLICATE_PREDICTORS: dict[str, str] = {"los_days": "index_los_days", "days_since_last_encounter": "days_since_prior_encounter"}
+
+
+def drop_duplicate_predictors(df: pd.DataFrame, duplicates: Mapping[str, str] | None = None) -> pd.DataFrame:
+    """The feature table without the columns of :data:`DUPLICATE_PREDICTORS` whose counterpart is present (``los_days`` repeats
+    ``index_los_days``; ``days_since_last_encounter`` is ``days_since_prior_encounter`` capped differently). A column whose counterpart
+    is absent is kept."""
+    dup = DUPLICATE_PREDICTORS if duplicates is None else duplicates
+    return df.drop(columns=[c for c, keep in dup.items() if c in df.columns and keep in df.columns])
 
 
 def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
@@ -718,7 +733,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         assess(findings, allow)  # raises with every site's gaps at once
         return {"data_checks": findings, "address_table": address_used, "share_missing_by_group": coverage, "geography": geography,
                 "private_dir": priv, "checked_only": True}
-    pooled = _canonical_order(frames)
+    pooled = drop_duplicate_predictors(_canonical_order(frames))
     if dec["last_lab_values"] == "drop":  # the models see the index-stay mean of each laboratory only (Methods 2.2, Tables 1 and 4)
         pooled = drop_last_lab_values(pooled)
     attrition = pd.concat(atts, ignore_index=True)
