@@ -196,3 +196,53 @@ def test_deprecated_and_brand_name_drugs_take_their_single_ingredient():
     assert rows == {1: 100, 2: 2, 3: 100, 4: 101, 5: 6}   # brand, deprecated branded drug via its clinical drug, deprecated ingredient by name
     assert got["by_maps_to"] == 0 and got["by_ingredient"] == 3 and got["non_standard_after"] == 2
     assert con.execute("SELECT drug_source_concept_id FROM drug_exposure WHERE drug_exposure_id = 3").fetchone()[0] == 3
+
+
+def test_tall_figure_is_narrowed_to_fit_the_page(tmp_path):
+    """C17: a 12-step Figure 1 at full width ran its caption into the page number."""
+    from omop_etl.manuscript_text import FIGURE_MAX_HEIGHT_IN, TEXT_WIDTH_IN, figure_width
+
+    def png(name, w, h):
+        p = tmp_path / name
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + w.to_bytes(4, "big") + h.to_bytes(4, "big") + b"\x00" * 5)
+        return p
+
+    assert figure_width(png("wide.png", 2000, 1000)) == "100%"
+    tall = figure_width(png("tall.png", 1900, 2340))
+    assert tall.endswith("%") and int(tall[:-1]) < 100
+    assert int(tall[:-1]) / 100 * TEXT_WIDTH_IN * 2340 / 1900 <= FIGURE_MAX_HEIGHT_IN
+    assert figure_width(tmp_path / "missing.png") == "100%"
+
+
+def _positioned_pdf(path, runs):
+    """One page with each (text, y) run in Helvetica 11 at x 40."""
+    body = " ".join(f"BT /F1 11 Tf 40 {y} Td ({t}) Tj ET" for t, y in runs)
+    objs = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [5 0 R] /Count 1 >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", f"<< /Length {len(body)} >>\nstream\n{body}\nendstream",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 3 0 R >> >> >>"]
+    out, offs = b"%PDF-1.4\n", []
+    for i, o in enumerate(objs, start=1):
+        offs.append(len(out))
+        out += f"{i} 0 obj\n{o}\nendobj\n".encode("latin-1")
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode() + b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    path.write_bytes(out)
+    return path
+
+
+def test_manuscript_checks_catch_collapsed_bullets_and_a_caption_in_the_footer(tmp_path):
+    """C15 ('.- ' bullets) and C17 (Figure 1 caption on the page number) slips."""
+    import pytest
+
+    pytest.importorskip("pypdf")
+    from omop_etl.manuscript_checks import final_draft_checks
+
+    def failed(runs):
+        return {x["check"] for x in final_draft_checks(_positioned_pdf(tmp_path / "p.pdf", runs)) if not x["ok"]}
+
+    assert {"no collapsed bullets", "nothing runs into the page number"} & failed(
+        [("Vital signs: BMI.- Laboratory measures", 700), ("branches off the last arrow.", 40), ("4", 36)]) == {
+        "no collapsed bullets", "nothing runs into the page number"}
+    assert not {"no collapsed bullets", "nothing runs into the page number"} & failed(
+        [("- Vital signs: BMI.", 700), ("branches off the last arrow.", 72), ("4", 36)])

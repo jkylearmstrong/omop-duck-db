@@ -185,7 +185,7 @@ def test_final_draft_checks_pass_on_a_rendered_manuscript(tmp_path):
     assert r["missing"] == [], r["note"]
     res = final_draft_checks(r["files"]["pdf"])
     assert [x for x in res if not x["ok"]] == [], res
-    assert len(res) == 8
+    assert len(res) == 10
 
 
 def test_final_draft_checks_catch_each_problem(tmp_path):
