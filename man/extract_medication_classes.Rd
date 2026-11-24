@@ -32,6 +32,7 @@ extract_medication_classes(
   offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
   anchor = NULL,
   drug_type_concept_ids = NULL,
+  combination_ingredients = TRUE,
   return_audit = FALSE,
   ...
 )
@@ -93,6 +94,14 @@ columns like \code{source_value} / \code{drug_class}). Combined with inline \cod
 \item{anchor}{Alias for \code{offset_anchor}.}
 
 \item{drug_type_concept_ids}{Optional vector of concept IDs to restrict drug exposure type concepts.}
+
+\item{combination_ingredients}{Standard strategy (default \code{TRUE}, 0.35.0): a drug row whose \code{drug_concept_id} is not a valid
+standard concept (a deprecated RxNorm drug, a Brand Name, a combination product no single ingredient could replace) has no
+place in \code{concept_ancestor}, so it used to count for no class. It now counts for the class of each of its valid standard
+RxNorm ingredients (\code{drug_strength} and the ingredient relationships, retired links included), of the valid standard drugs
+met on the way and of its valid 'Maps to' targets: a combination product counts for every class of its ingredients.
+\code{drug_exposure} is not changed. \code{FALSE} restores the earlier behaviour. \code{attr(result, "combination_flags")} counts the
+(row, class) flags only this rule set.}
 
 \item{return_audit}{Also return \code{\link[=audit_medication_strategies]{audit_medication_strategies()}} output (needs \code{strategy = "both"}).}
 

@@ -36,7 +36,7 @@ import pandas as pd
 
 __all__ = [
     "prepare_model_matrix", "classification_metrics", "bootstrap_ci", "oof_predictions", "default_model_grid",
-    "tune_models", "stay_type_auc", "random_stay_draw", "seed_sensitivity", "los_by_site", "index_stay_dates",
+    "tune_models", "stay_type_auc", "random_stay_draw", "seed_sensitivity", "stay_sensitivity", "los_by_site", "index_stay_dates",
     "export_workbook", "build_study_tables", "DEFAULT_ID_COLUMNS", "plot_cohort_flowchart", "explain_models", "shap_ranking",
     "plot_shap_beeswarm", "plot_shap_panels", "table_one", "logistic_regression_table", "missingness_table", "LR_DROP_COLUMNS", "study_folds", "balanced_training_indices",
     "performance_from_predictions",
@@ -371,6 +371,51 @@ def seed_sensitivity(all_stays: pd.DataFrame, seeds: Sequence[int], *, model_fac
         rows.append({"Seed": int(s), "Stays (= patients)": int(len(y)), "Readmit rate": round(float(y.mean()), 4),
                      f"{model_name} AUC": round(float(roc_auc_score(y, p)), 4)})
     return pd.DataFrame(rows)
+
+
+def _count_word(n: int) -> str:
+    words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+    return words[n] if 0 <= n <= 10 else str(n)
+
+
+def stay_sensitivity(all_stays: pd.DataFrame, seeds: Sequence[int] = tuple(range(1, 11)), *, model_name: str = "HistGBM",
+                     model_factory: Callable[[], Any] | None = None, label_col: str = "readmitted_30d", site_col: str = "site_source",
+                     person_col: str = "person_id", visit_col: str = "visit_occurrence_id", n_splits: int = 5,
+                     random_state: int = 42) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """The two sensitivity analyses of the random-stay design (0.35.0, issue 106; the Nov 11 deliverable reported both):
+    (i) the one-stay-per-patient draw repeated with each of ``seeds`` (:func:`seed_sensitivity`), and (ii) every eligible stay
+    scored, with a patient's stays kept in one fold (patient-grouped cross-validation, 50/50 balanced training as the primary
+    models). ``all_stays`` holds every eligible stay with its features and ``label_col``.
+
+    Returns ``(table, summary)``: one row per seed plus an "All eligible stays" row (stays, readmission rate, AUC-ROC, Brier), and
+    the values the manuscript template prints under ``sensitivity`` (no per-site value)."""
+    _sk()
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.metrics import brier_score_loss, roc_auc_score
+
+    factory = model_factory or (lambda: HistGradientBoostingClassifier(max_iter=100, max_depth=6, l2_regularization=1.0, random_state=random_state))
+    seeds = [int(x) for x in seeds]
+    tab = seed_sensitivity(all_stays, seeds, model_factory=factory, model_name=model_name, label_col=label_col, site_col=site_col,
+                           person_col=person_col, visit_col=visit_col, n_splits=n_splits, random_state=random_state)
+    d = all_stays.sort_values([site_col, person_col, visit_col], kind="mergesort").reset_index(drop=True)
+    groups, _ = pd.factorize(d[site_col].astype(str) + ":" + d[person_col].astype(str))
+    X, y = prepare_model_matrix(d, label_col=label_col)
+    p = oof_predictions(factory, X, y, balanced=True, groups=groups, n_splits=n_splits, random_state=random_state)
+    auc_all, brier_all, prev = float(roc_auc_score(y, p)), float(brier_score_loss(y, p)), float(y.mean())
+    col = f"{model_name} AUC"
+    tab = pd.concat([tab.rename(columns={"Stays (= patients)": "Stays"}).assign(Analysis=lambda t: "Random draw, seed " + t["Seed"].astype(str)),
+                     pd.DataFrame([{"Analysis": "All eligible stays (patient-grouped folds)", "Seed": None, "Stays": int(len(y)),
+                                    "Readmit rate": round(prev, 4), col: round(auc_all, 4), "Brier": round(brier_all, 4)}])],
+                    ignore_index=True)[["Analysis", "Seed", "Stays", "Readmit rate", col, "Brier"]]
+    aucs = tab.loc[tab["Seed"].notna(), col].astype(float)
+    summary = {"model": model_name, "seeds": seeds, "n_seeds": len(seeds), "n_seeds_word": _count_word(len(seeds)),
+               "n_further_seeds_word": _count_word(len(seeds)),
+               "seed_auc_range": [round(float(aucs.min()), 4), round(float(aucs.max()), 4)] if len(aucs) else None,
+               "all_stays_n": int(len(y)), "all_stays_patients": int(groups.max() + 1) if len(groups) else 0,
+               "all_stays_prevalence": round(prev, 4), "all_stays_rate_pct": round(100 * prev, 2),
+               "all_stays_auc": round(auc_all, 4), "all_stays_auc_text": f"an AUC-ROC of {auc_all:.2f} ({model_name})",
+               "all_stays_brier": round(brier_all, 4), "all_stays_brier_text": f"{brier_all:.2f} ({model_name})"}
+    return tab, summary
 
 
 # ------------------------------------------------------------------ descriptive tables

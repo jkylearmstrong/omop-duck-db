@@ -50,6 +50,34 @@ DEFAULT_BOUNDS <- list(
 #' @export
 DEFAULT_RESCALE <- list(wbc = c(200, 200000, 1000))
 
+#' @rdname DEFAULT_BOUNDS
+#' @details `DEFAULT_UNIT_CONVERSIONS` (0.35.0) is `list(name = list(list(unit_concept_ids, unit_texts, factor)))`: a lab value whose
+#'   `unit_concept_id` is one of the UCUM ids (8753 mmol/L, 8749 umol/L, 8636 g/L), or whose `unit_concept_id` is empty and whose
+#'   `unit_source_value` (lower case, no spaces, the micro sign read as "u") is one of the texts, is multiplied by `factor` before the bounds:
+#'   glucose and BUN mmol/L, creatinine umol/L, albumin and hemoglobin g/L, to mg/dL or g/dL.
+#' @export
+DEFAULT_UNIT_CONVERSIONS <- list(
+  glucose = list(list(unit_concept_ids = 8753L, unit_texts = "mmol/l", factor = 18.016)),
+  bun = list(list(unit_concept_ids = 8753L, unit_texts = "mmol/l", factor = 2.801)),
+  creatinine = list(list(unit_concept_ids = 8749L, unit_texts = c("umol/l", "micromol/l", "mcmol/l"), factor = 1 / 88.42)),
+  albumin = list(list(unit_concept_ids = 8636L, unit_texts = "g/l", factor = 0.1)),
+  hemoglobin = list(list(unit_concept_ids = 8636L, unit_texts = "g/l", factor = 0.1)))
+
+.bf_norm_unit <- function(x) gsub("\u03bc", "u", gsub("\u00b5", "u", gsub(" ", "", tolower(trimws(x)), fixed = TRUE)))
+
+.bf_conversion_frame <- function(conversions) {
+  rows <- list()
+  for (nm in names(conversions)) for (r in conversions[[nm]]) {
+    ids <- as.integer(r$unit_concept_ids %||% r[[1]])
+    txt <- as.character(r$unit_texts %||% r[[2]])
+    f <- as.numeric(r$factor %||% r[[3]])
+    if (length(ids)) rows[[length(rows) + 1L]] <- data.frame(name = nm, unit_concept_id = ids, unit_text = NA_character_, factor = f)
+    if (length(txt)) rows[[length(rows) + 1L]] <- data.frame(name = nm, unit_concept_id = NA_integer_, unit_text = .bf_norm_unit(txt), factor = f)
+  }
+  if (!length(rows)) return(data.frame(name = character(), unit_concept_id = integer(), unit_text = character(), factor = numeric()))
+  do.call(rbind, rows)
+}
+
 #' Medication classes of the eDERRI protocol
 #'
 #' The ATC class concepts behind the protocol's `med_<name>` flags. They differ from `DEFAULT_MEDICATION_CONCEPTS`
@@ -116,30 +144,49 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
   cmap
 }
 
-.bf_measurement_stats <- function(con, cohort, cmap, pre_days, bounds = NULL, rescale = NULL) {
-  if (!nrow(cmap)) return(data.frame(row_id = integer(), name = character(), mean = numeric(), last = numeric(), n = integer()))
+.bf_measurement_stats <- function(con, cohort, cmap, pre_days, bounds = NULL, rescale = NULL, conversions = NULL) {
+  if (!nrow(cmap)) return(data.frame(row_id = integer(), name = character(), mean = numeric(), last = numeric(), n = integer(),
+                                     n_converted = integer()))
+  conv <- .bf_conversion_frame(conversions[intersect(names(conversions), unique(cmap$name))])
+  conv_join <- ""
+  factor <- "1.0"
+  if (nrow(conv)) {
+    cols <- tolower(DBI::dbGetQuery(con, "DESCRIBE SELECT * FROM measurement LIMIT 0")$column_name)
+    if (any(c("unit_concept_id", "unit_source_value") %in% cols)) {
+      uid <- if ("unit_concept_id" %in% cols) "m.unit_concept_id" else "CAST(NULL AS BIGINT)"
+      utext <- if ("unit_source_value" %in% cols) {
+        "replace(replace(replace(lower(trim(m.unit_source_value)), ' ', ''), '\u00b5', 'u'), '\u03bc', 'u')"
+      } else "CAST(NULL AS VARCHAR)"
+      conv_join <- sprintf("LEFT JOIN _bf_conv cv ON cv.name = f.name AND (cv.unit_concept_id = %s OR (coalesce(%s, 0) = 0 AND cv.unit_text = %s))",
+                           uid, uid, utext)
+      factor <- "coalesce(cv.factor, 1.0)"
+      duckdb::duckdb_register(con, "_bf_conv", conv)
+      on.exit(duckdb::duckdb_unregister(con, "_bf_conv"), add = TRUE)
+    }
+  }
   duckdb::duckdb_register(con, "_bf_c", cohort[, c("row_id", "subject_id", "cohort_start_date", "cohort_end_date")])
   duckdb::duckdb_register(con, "_bf_map", .bf_bounds_frame(cmap, bounds, rescale))
   on.exit({ duckdb::duckdb_unregister(con, "_bf_c"); duckdb::duckdb_unregister(con, "_bf_map") }, add = TRUE)
   DBI::dbGetQuery(con, sprintf("
     SELECT t.row_id, t.name, avg(t.v) AS mean,
            arg_max(t.v, struct_pack(t := t.ts, id := t.mid)) AS last,
-           count(*) AS n
+           count(*) AS n, count(*) FILTER (WHERE t.conv_f <> 1.0) AS n_converted
     FROM (
       SELECT c.row_id, f.name, m.measurement_id AS mid,
              COALESCE(m.measurement_datetime, CAST(m.measurement_date AS TIMESTAMP)) AS ts,
-             CASE WHEN m.value_as_number > f.rs_lo AND m.value_as_number <= f.rs_hi
-                  THEN m.value_as_number / f.rs_div ELSE m.value_as_number END AS v,
-             f.lo AS lo, f.hi AS hi
+             CASE WHEN m.value_as_number * %s > f.rs_lo AND m.value_as_number * %s <= f.rs_hi
+                  THEN m.value_as_number * %s / f.rs_div ELSE m.value_as_number * %s END AS v,
+             %s AS conv_f, f.lo AS lo, f.hi AS hi
       FROM _bf_c c
       JOIN measurement m ON m.person_id = c.subject_id
            AND m.measurement_date >= CAST(c.cohort_start_date AS DATE) - %d
            AND m.measurement_date <= CAST(c.cohort_end_date AS DATE)
       JOIN _bf_map f ON f.concept_id = m.measurement_concept_id
+      %s
       WHERE m.value_as_number IS NOT NULL
     ) t
     WHERE t.v BETWEEN t.lo AND t.hi
-    GROUP BY t.row_id, t.name", as.integer(pre_days)))
+    GROUP BY t.row_id, t.name", factor, factor, factor, factor, factor, as.integer(pre_days), conv_join))
 }
 
 .bf_wide <- function(stats, prefix, names_, n_rows, with_last) {
@@ -386,6 +433,9 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
 #'   weight there, `"none"` leaves it missing. Default `NULL`: `"derive_lookback"` for `profile = "ederri"` / `"both"`, else `"derive"`.
 #'   `attr(, "bmi_filled")` counts the stays each step filled.
 #' @param bmi_lookback_days window before admission for `bmi_fill = "derive_lookback"` (default 365).
+#' @param unit_conversions `"default"` ([DEFAULT_UNIT_CONVERSIONS]: glucose and BUN mmol/L, creatinine umol/L, albumin and hemoglobin
+#'   g/L to mg/dL or g/dL, applied to each lab value before the bounds), a list in the same layout replacing the rules of the names
+#'   it lists, or `NULL` for none. `attr(, "unit_converted")` gives the share of each lab's kept values that were converted.
 #' @return A data frame in cohort order; `attr(, "feature_groups")` lists the columns per group and `attr(, "skipped")` the
 #'   features that could not be built.
 #' @export
@@ -400,7 +450,8 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
                                        medication_set = NULL, include_protocol_history = NULL,
                                        ruca_crosswalk = NULL, sdi_table = NULL, sdi_cut_points = NULL,
                                        disposition_map = NULL, sdoh_fallback = "indicator", address_table = "auto", address_tie_break = "deterministic", address_undated = "last", impute = NULL,
-                                       impute_values = NULL, bmi_fill = NULL, bmi_lookback_days = 365) {
+                                       impute_values = NULL, bmi_fill = NULL, bmi_lookback_days = 365,
+                                       unit_conversions = "default") {
   if (lookback_days < 0 || lab_lookback_days < 0) stop("lookback_days and lab_lookback_days must be non-negative.", call. = FALSE)
   if (!is.null(profile) && !profile %in% c("ederri", "both")) stop("profile must be 'ederri', 'both' or NULL.", call. = FALSE)
   prof <- if (is.null(profile)) "none" else profile
@@ -425,6 +476,13 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
     bounds <- utils::modifyList(DEFAULT_BOUNDS, lapply(bounds, as.numeric))
   }
   rescale <- if (!is.null(bounds)) DEFAULT_RESCALE else NULL
+  if (is.character(unit_conversions)) {
+    if (!identical(unit_conversions, "default")) stop("unit_conversions must be 'default', a named list or NULL.", call. = FALSE)
+    unit_conversions <- DEFAULT_UNIT_CONVERSIONS
+  } else if (!is.null(unit_conversions)) {
+    unit_conversions <- utils::modifyList(DEFAULT_UNIT_CONVERSIONS, unit_conversions)
+  }
+  unit_converted <- list()
   cohort <- .bf_cohort(con, cohort_table, cohort_id)
   n <- nrow(cohort)
   out <- data.frame(person_id = cohort$subject_id)
@@ -529,7 +587,12 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
     lab_sets <- if (is.null(lab_loincs)) load_concept_sets("labs") else lapply(Filter(length, ll), concept_set_from_codes)
     lmap <- .bf_concept_map(con, ll, lab_concept_ids, lab_sets)
     .cs_check_lab_coverage(con, lab_sets[setdiff(names(lab_sets), names(lab_concept_ids))], cohort, lab_lookback_days)
-    stats <- .bf_measurement_stats(con, cohort, lmap, lab_lookback_days, bounds, rescale)
+    stats <- .bf_measurement_stats(con, cohort, lmap, lab_lookback_days, bounds, rescale, unit_conversions)
+    if (nrow(stats) && sum(stats$n_converted) > 0) {
+      tot <- stats::aggregate(cbind(n, n_converted) ~ name, data = stats, FUN = sum)
+      tot <- tot[tot$n_converted > 0, , drop = FALSE]
+      unit_converted <- stats::setNames(as.list(round(tot$n_converted / tot$n, 4)), tot$name)
+    }
     present <- intersect(names(ll), unique(lmap$name))
     skipped <- c(skipped, paste0("lab_", setdiff(names(ll), present)))
     labs <- .bf_wide(stats, "lab_", present, n, with_last = TRUE)
@@ -613,5 +676,6 @@ extract_benchmark_features <- function(con, cohort_table = "cohort", cohort_id =
   attr(out, "key_columns") <- keys
   attr(out, "imputation_values") <- imputation
   attr(out, "bmi_filled") <- bmi_filled
+  attr(out, "unit_converted") <- unit_converted
   out
 }

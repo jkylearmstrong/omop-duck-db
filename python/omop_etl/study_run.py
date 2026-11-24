@@ -278,9 +278,13 @@ def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on:
 
 def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mapping[str, Any], profile: str | None, pinned: pd.DataFrame | None,
                 ruca: Any, sdi: Any, cuts: Sequence[float] | None, address_table: str | None, transfer_source_values: Sequence[str],
-                feature_kwargs: Mapping[str, Any], work: Path, attrition_mode: str = "windowed", redraw: bool = False, random_state: int = 42):
+                feature_kwargs: Mapping[str, Any], work: Path, attrition_mode: str = "windowed", redraw: bool = False, random_state: int = 42,
+                observation_period_cap: str | None = None, all_stays: bool = False):
     """One site's pooled-ready frame, its attrition and ``meta`` (feature groups, skipped features, the address source used,
-    pinned-list coverage). Data gaps it can see are raised as :class:`omop_etl.data_gaps.DataGapWarning` for run_study to judge."""
+    pinned-list coverage). Data gaps it can see are raised as :class:`omop_etl.data_gaps.DataGapWarning` for run_study to judge.
+    ``observation_period_cap``: observation periods are read through a temporary view that ends them at this date (the database
+    is not changed). ``all_stays``: the features are extracted for every eligible stay in the window, and ``meta["all_stays_frame"]``
+    holds them (the sensitivity analyses); the primary frame is the same subset of rows as without it."""
     import warnings
 
     import duckdb
@@ -302,7 +306,18 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
             con.execute(f"ATTACH '{vocab.as_posix()}' AS central_vocab (READ_ONLY);")
             con.execute("CREATE OR REPLACE TEMP VIEW concept_ancestor AS SELECT * FROM central_vocab.main.concept_ancestor")
         meta: dict[str, Any] = {"address_table": None}
-        _check_coverage_of_window(con, start, end, params)
+        if observation_period_cap is not None:
+            from omop_etl.cohort import check_observation_period_ends
+
+            raw = check_observation_period_ends(con, warn=False)
+            tot, short = con.execute(f"SELECT count(*), count(*) FILTER (WHERE observation_period_end_date > DATE '{observation_period_cap}') "
+                                     "FROM observation_period").fetchone()
+            meta["observation_period_cap"] = {"cap": observation_period_cap, "share_shortened": round(short / tot, 4) if tot else None,
+                                              "spike_before_cap": bool(raw.get("flagged"))}
+            con.execute("CREATE OR REPLACE TEMP VIEW observation_period AS SELECT * REPLACE (least(observation_period_end_date, "
+                        f"DATE '{observation_period_cap}') AS observation_period_end_date) FROM site_db.main.observation_period "
+                        f"WHERE observation_period_start_date <= DATE '{observation_period_cap}'")
+        _check_coverage_of_window(con, start, end, params, spike=observation_period_cap is None)
         if ruca is not None and sdi is not None:
             # before the (slow) cohort build, so a missing address table fails in seconds, not after the whole site
             from omop_etl.geography import PERSON_LOCATION, resolve_address_table
@@ -317,6 +332,11 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         att = pd.DataFrame(cohort.attrs.get("attrition"))
         att["site"] = site
         cohort.attrs = {}
+        every = None
+        if all_stays:  # every eligible stay in the window: the pinned path already built them, the random path builds them once more
+            every = cohort.copy() if pinned is not None else define_study_cohort(con, materialise=False, min_admit_date=start, max_admit_date=end,
+                                                                                 sample_stay_rule="all", attrition=False, **dict(params))
+            every.attrs = {}
         if attrition_mode == "full_history":
             # the manuscript's CONSORT: every rule over the whole history, then the study window and the one stay per patient last
             full = define_study_cohort(con, materialise=False, sample_stay_rule="all", **dict(params))
@@ -356,7 +376,12 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
             att = pd.concat([att, pd.DataFrame([{"step_name": "Stay selected for the patient (pinned list)", "subjects_retained": len(cohort), "site": site}])], ignore_index=True)
         path = work / f"cohort_{site}.parquet"
         cohort.to_parquet(path)
-        con.execute(f"CREATE OR REPLACE TEMP VIEW cohort_t AS SELECT * FROM read_parquet('{path.as_posix()}')")
+        if every is not None:  # features once, for every eligible stay; the primary rows are picked out of them below
+            path_all = work / f"cohort_all_{site}.parquet"
+            every.to_parquet(path_all)
+            con.execute(f"CREATE OR REPLACE TEMP VIEW cohort_t AS SELECT * FROM read_parquet('{path_all.as_posix()}')")
+        else:
+            con.execute(f"CREATE OR REPLACE TEMP VIEW cohort_t AS SELECT * FROM read_parquet('{path.as_posix()}')")
         kw: dict[str, Any] = dict(feature_kwargs)
         if ruca is not None and sdi is not None:
             kw.update(include_sdoh=True, ruca_crosswalk=str(ruca), sdi_table=str(sdi), sdi_cut_points=list(cuts or ()), address_table=address_table)
@@ -368,22 +393,30 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         meta["geography"] = feats.attrs.get("geography")
         meta["bmi_filled_share"] = ({k: round(v / len(feats), 4) for k, v in (feats.attrs.get("bmi_filled") or {}).items()}
                                     if len(feats) else None)  # shares, not counts: the per-site metadata stays shareable
+        meta["unit_converted"] = feats.attrs.get("unit_converted") or {}   # shares of each lab's values converted from SI units
     finally:
         con.close()
-    df = cohort.merge(feats, on="visit_occurrence_id", suffixes=("", "_f"))
-    df = df.drop(columns=[c for c in df.columns if c.endswith("_f")])
-    df["readmitted_30d"] = df["outcome_flag"].astype(int)
-    df["site_source"] = site
-    df["admit_date"] = pd.to_datetime(df["cohort_start_date"])
-    df["discharge_date"] = pd.to_datetime(df["cohort_end_date"])
-    df["index_los_days"] = (df["discharge_date"] - df["admit_date"]).dt.days
-    df["person_id"] = df["subject_id"]
+
+    def _frame(c: pd.DataFrame) -> pd.DataFrame:
+        d = c.merge(feats, on="visit_occurrence_id", suffixes=("", "_f"))
+        d = d.drop(columns=[x for x in d.columns if x.endswith("_f")])
+        d["readmitted_30d"] = d["outcome_flag"].astype(int)
+        d["site_source"] = site
+        d["admit_date"] = pd.to_datetime(d["cohort_start_date"])
+        d["discharge_date"] = pd.to_datetime(d["cohort_end_date"])
+        d["index_los_days"] = (d["discharge_date"] - d["admit_date"]).dt.days
+        d["person_id"] = d["subject_id"]
+        return d
+
+    df = _frame(cohort)
+    if every is not None:
+        meta["all_stays_frame"] = _frame(every)
     return df, att, meta
 
 
-def _check_coverage_of_window(con: Any, start: str, end: str, params: Mapping[str, Any], slack_days: int = 90) -> None:
-    """Gap warnings when a site's stays do not cover the study window, or its observation periods pile up on the build date. Reports
-    day counts and shares, never dates (a site's data end could identify it)."""
+def _check_coverage_of_window(con: Any, start: str, end: str, params: Mapping[str, Any], slack_days: int = 90, spike: bool = True) -> None:
+    """Gap warnings when a site's stays do not cover the study window, or (``spike``) its observation periods pile up on the build
+    date. Reports day counts and shares, never dates (a site's data end could identify it)."""
     import warnings
 
     import duckdb
@@ -407,6 +440,8 @@ def _check_coverage_of_window(con: Any, start: str, end: str, params: Mapping[st
                                      "admissions and their readmissions are missing", "window"), stacklevel=2)
     if late_start > slack_days:
         warnings.warn(DataGapWarning(f"the site's inpatient stays begin {late_start} days after the study window starts", "window"), stacklevel=2)
+    if not spike:  # the periods are capped at a data cutoff (run_study observation_period_cap): a pile on the cap is intended
+        return
     try:
         op = check_observation_period_ends(con, warn=False)
     except Exception:  # pragma: no cover - the check itself never raises; a broken table is reported by the cohort build
@@ -435,12 +470,17 @@ def _caught_findings(caught: Sequence[Any], label: str, scrub: Mapping[str, str]
     """The gap warnings raised while one site was built (errors) and the other warnings the library printed (warnings)."""
     import warnings
 
-    from omop_etl.data_gaps import DataGapWarning, mask_counts, sanitize
+    from omop_etl.data_gaps import ConceptSetExclusionWarning, DataGapWarning, mask_counts, sanitize
 
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for w in caught:
         msg = sanitize(str(w.message), scrub)
+        if isinstance(w.message, ConceptSetExclusionWarning):
+            # an intentional concept-set exclusion: listed once per study by run_study, not once per site (0.35.0)
+            out.append({"site": label, "check": "concept_set_exclusion", "severity": "info", "column": w.message.column,
+                        "codes": list(w.message.codes), "message": mask_counts(msg)})
+            continue
         if not isinstance(w.message, DataGapWarning):
             # library warnings were not written for a shareable record and can carry row counts ("33 of 61,204 periods"):
             # the run record keeps their wording, not their numbers
@@ -586,7 +626,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
               document_title: str | None = None, document_author: str = "", site_names: Sequence[str] | str | Path | None = None,
               privacy_check: bool = True, document_cache_dir: str | Path | None = None, allow_data_gaps: Sequence[str] = (),
               data_gap_threshold: float = 0.95, run_args: Mapping[str, Any] | None = None, check_only: bool = False,
-              manuscript_profile: str | None = None, manuscript_params: Mapping[str, Any] | str | Path | None = None) -> dict[str, Any]:
+              manuscript_profile: str | None = None, manuscript_params: Mapping[str, Any] | str | Path | None = None,
+              known_source_gaps: Mapping[str, str] | Sequence[str] | str | Path | None = None, observation_period_cap: str | None = None,
+              sensitivity: bool = False, sensitivity_seeds: Sequence[int] = tuple(range(1, 11))) -> dict[str, Any]:
     """Runs the whole study; returns ``{"data": pooled DataFrame, "tables": {...}, "workbook": Path, "files": [...], "comparison": (summary, differences) | None}``.
 
     ``db_dir`` holds ``omop_<site>.duckdb`` per site (and, optionally, ``central_vocabulary.duckdb``). ``site_labels`` maps site to the
@@ -626,7 +668,19 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     with the address table used per site. ``check_only=True`` builds every site, collects every finding (no fail-fast), writes
     ``<prefix>_data_gaps.json`` and stops before any modelling: it raises ``DataGapError`` listing every gap of every site, or returns
     ``{"data_checks": [...], ...}`` when there is none. ``run_args`` (the command line) and the ``sites`` order are written only to
-    ``<prefix>_run_private.json`` in ``private_dir``: together with real names they would reveal which label is which site."""
+    ``<prefix>_run_private.json`` in ``private_dir``: together with real names they would reveal which label is which site.
+    **Expected and unexpected findings (0.35.0).** Every finding gets a ``cause`` (:data:`omop_etl.data_gaps.GAP_CAUSES`):
+    ``source_gap`` when ``known_source_gaps`` lists it (a file or mapping of the study team's confirmed source-extract gaps, see
+    :func:`omop_etl.data_gaps.load_known_source_gaps`; such a gap never fails the run), ``intentional`` for a concept set that leaves
+    codes out on purpose (listed once per study, not once per site), ``etl_mapping`` for rows that were not mapped or read, and
+    ``unexplained`` for the rest. The run record counts them by cause.
+    ``observation_period_cap`` (ISO date): observation periods are read as ending no later than this date (a temporary view; the
+    databases are not changed), as :func:`omop_etl.build_omop_cdm.cap_observation_period` would write them, so the end-date spike of
+    periods filled with the build date needs no manual repair. It must be at least the study end plus the follow-up window.
+    ``sensitivity=True`` also extracts the features of every eligible stay in the window (``features_all_<site>.parquet`` in
+    ``private_dir``) and runs :func:`omop_etl.study_report.stay_sensitivity`: the random draw repeated with each of
+    ``sensitivity_seeds`` and every eligible stay scored with patient-grouped folds. The results go to ``<prefix>_Sensitivity.csv``,
+    to ``sensitivity`` in the run record and to the manuscript's sensitivity paragraphs. The primary analysis does not change."""
     from omop_etl.manuscript_tables import compare_workbooks, manuscript_workbook
     from omop_etl.study_report import build_study_tables
 
@@ -660,10 +714,22 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     import time
     import warnings
 
-    from omop_etl.data_gaps import DataGapError, assess, group_missing_shares, sanitize
+    from omop_etl.data_gaps import GAP_CAUSES, DataGapError, assess, group_missing_shares, sanitize
 
     allow = [str(x) for x in (allow_data_gaps or ())]
     assess([], allow)  # unknown names are refused before any site is built
+    from omop_etl.data_gaps import classify_findings, collapse_concept_set_exclusions, load_known_source_gaps
+
+    known_gaps = load_known_source_gaps(known_source_gaps)
+    site_keys = {labels[s_]: s_ for s_ in sites}
+    if observation_period_cap is not None:
+        from omop_etl.build_omop_cdm import _iso_date
+
+        observation_period_cap = _iso_date(observation_period_cap, "observation_period_cap")
+        need = pd.Timestamp(end) + pd.Timedelta(days=int(c_params.get("followup_days") or 30))
+        if pd.Timestamp(observation_period_cap) < need:
+            raise ValueError(f"observation_period_cap ({observation_period_cap}) is before the study end plus the follow-up window "
+                             f"({need.date()}): the last stays would lose their follow-up.")
     findings: list[dict[str, Any]] = []
     address_used: dict[str, Any] = {}
     coverage: dict[str, dict[str, float]] = {}
@@ -694,6 +760,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                       "sdi_cut_points": list(sdi_cut_points or ()), "transfer_source_values": list(transfer_source_values),
                                       "pinned": None if pinned is None else pd.util.hash_pandas_object(pinned, index=False).sum().item(),
                                       **({"ineligible_draw": dec["ineligible_draw"]} if pinned is not None and dec["ineligible_draw"] != "exclude" else {}),
+                                      **({"observation_period_cap": observation_period_cap} if observation_period_cap is not None else {}),
                                       "feature_kwargs": feature_kwargs or {}}, default=str, sort_keys=True))
 
     def _write_gaps() -> None:
@@ -702,6 +769,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                                                indent=1, default=str), encoding="utf-8")
 
     def _gate(new: list[dict[str, Any]]) -> None:
+        classify_findings(new, known_gaps, site_keys)
         findings.extend(new)
         try:
             assess(new, allow)
@@ -723,7 +791,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
 
     t_start = time.time()
     timings: dict[str, float] = {}
-    frames, atts = [], []
+    frames, atts, all_frames = [], [], []
+    op_capped: dict[str, Any] = {}
+    unit_converted: dict[str, Any] = {}
     qualifying_stays: dict[str, int | None] = {}
     redrawn_total = 0
     for site in sites:
@@ -754,6 +824,16 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             _gate(_with_coverage(saved, df, meta, labels[site], data_gap_threshold))
             qualifying_stays[labels[site]] = meta.get("qualifying_stays")
             redrawn_total += int(meta.get("redrawn") or 0)
+            if meta.get("observation_period_cap"):
+                op_capped[labels[site]] = meta["observation_period_cap"]
+            if meta.get("unit_converted"):
+                unit_converted[labels[site]] = meta["unit_converted"]
+            if sensitivity:
+                fa = priv / f"features_all_{site}.parquet"
+                if not fa.exists():
+                    raise ValueError(f"sensitivity=True with reuse_features=True needs the saved all-stays features of every site "
+                                     f"({labels[site]} has none): rerun once without reuse_features.")
+                all_frames.append(pd.read_parquet(fa).assign(site_anon=labels[site]))
             frames.append(df)
             atts.append(pd.read_csv(a))
             continue
@@ -762,8 +842,18 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             df, att, meta = _site_frame(db, site, start=start, end=end, params=c_params, profile=profile, pinned=pinned,
                                         ruca=ruca_crosswalk, sdi=sdi_table, cuts=sdi_cut_points, address_table=address_table,
                                         transfer_source_values=transfer_source_values, feature_kwargs={"address_tie_break": address_tie_break, "address_undated": undated, **dict(feature_kwargs or {})}, work=priv,
-                                        attrition_mode=attrition_mode, redraw=dec["ineligible_draw"] == "redraw", random_state=random_state)
+                                        attrition_mode=attrition_mode, redraw=dec["ineligible_draw"] == "redraw", random_state=random_state,
+                                        observation_period_cap=observation_period_cap, all_stays=sensitivity)
         df["site_anon"] = labels.get(site, site)
+        every = meta.pop("all_stays_frame", None)
+        if every is not None:
+            every["site_anon"] = labels.get(site, site)
+            every.to_parquet(priv / f"features_all_{site}.parquet")
+            all_frames.append(every)
+        if meta.get("observation_period_cap"):
+            op_capped[labels[site]] = meta["observation_period_cap"]
+        if meta.get("unit_converted"):
+            unit_converted[labels[site]] = meta["unit_converted"]
         raised = _caught_findings(caught, labels[site], scrub)
         address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
         df.to_parquet(f)
@@ -779,6 +869,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         frames.append(df)
         atts.append(att)
         timings[f"site_{labels.get(site, site)}"] = round(time.time() - t_site, 1)  # keyed by the anonymous letter: the run record is shareable and must not name sites
+    findings[:] = collapse_concept_set_exclusions(findings)   # an intentional concept-set exclusion is listed once per study
     if check_only:
         _write_gaps()
         assess(findings, allow)  # raises with every site's gaps at once
@@ -807,6 +898,19 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                              table5=table5, sdi_missing_term=sdi_missing_term,
                              table6_increments=dec["table6_increments"], table6_missing=dec["table6_missing"], sheet_site_labels=sheet_site_labels,
                              check_bootstrap_intervals=n_bootstraps >= 50)  # fewer draws: a smoke run, its percentile CIs are not meaningful
+    sens_summary = None
+    if sensitivity:
+        from omop_etl.study_report import stay_sensitivity
+
+        t_sens = time.time()
+        every_pooled = drop_duplicate_predictors(_canonical_order(all_frames))
+        if dec["last_lab_values"] == "drop":
+            every_pooled = drop_last_lab_values(every_pooled)
+        every_pooled = every_pooled[[c for c in pooled.columns if c in every_pooled.columns]]   # the primary models' columns
+        sens_tab, sens_summary = stay_sensitivity(every_pooled, sensitivity_seeds, random_state=random_state)
+        sens_tab.to_csv(out / f"{prefix}_Sensitivity.csv", index=False)
+        res["files"].append(str(out / f"{prefix}_Sensitivity.csv"))
+        timings["sensitivity"] = round(time.time() - t_sens, 1)
     comparison = None
     if compare_to is not None:
         summary, diffs = compare_workbooks(wb["path"], compare_to)
@@ -837,7 +941,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                        run={"n_sites": len(labels), "window": [start, end], "decisions": dec, "bootstraps": n_bootstraps,
                                             "random_state": random_state, "preset": preset, "environment": run_environment(),
                                             "cohort_params": c_params, "qualifying_stays": n_qualifying,
-                                            **({"random_draw_redrawn": redrawn_total} if pinned is not None else {}), "bmi_fill": bmi_fill_used},
+                                            **({"random_draw_redrawn": redrawn_total} if pinned is not None else {}), "bmi_fill": bmi_fill_used,
+                                            **({"sensitivity": sens_summary} if sens_summary else {})},
                                        summary=res.get("summary"))
         staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
@@ -875,6 +980,10 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
                                                      **({"random_draw_redrawn": redrawn_total} if pinned is not None else {}),
                                                        "bmi_fill": bmi_fill_used,
+                                                       **({"sensitivity": sens_summary} if sens_summary else {}),
+                                                       **({"observation_period_cap": {"cap": observation_period_cap, "by_site": dict(sorted(op_capped.items()))}}
+                                                          if observation_period_cap is not None else {}),
+                                                       "unit_converted": dict(sorted(unit_converted.items())),
                                                        "n": int(len(pooled)), "qualifying_stays": n_qualifying, "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
                                                        "cohort_params": json.loads(json.dumps(c_params, default=str)),
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},
@@ -887,7 +996,10 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                                                        "share_missing_by_group": dict(sorted(coverage.items())),
                                                                        "geography": dict(sorted(geography.items())),
                                                                        "n_errors_allowed": sum(1 for x in findings if x.get("severity") == "error"),
-                                                                       "n_warnings": sum(1 for x in findings if x.get("severity") == "warning")},
+                                                                       "n_warnings": sum(1 for x in findings if x.get("severity") == "warning"),
+                                                                       "by_cause": {c: sum(1 for x in findings if x.get("cause") == c) for c in GAP_CAUSES},
+                                                                       "n_unexpected": sum(1 for x in findings if not x.get("expected")),
+                                                                       "known_source_gaps": len(known_gaps)},
                                                        "document": doc_record, "privacy_check": privacy, "environment": run_environment()}, indent=1, default=str), encoding="utf-8")
     # what only the operating site may see: the --sites order and the command line (with real names they reveal the labels)
     (priv / f"{prefix}_run_private.json").write_text(json.dumps({"sites": list(sites), "label_seed": label_seed, "address_table_by_site":

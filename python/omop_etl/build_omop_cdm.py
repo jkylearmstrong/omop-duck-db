@@ -916,6 +916,99 @@ def backfill_drug_concepts(con):
             "by_ingredient": by_ingredient, "non_standard_after": non_standard_after}
 
 
+def backfill_condition_concepts(con, *, add_rows=True):
+    """Maps condition rows that are not on a valid standard concept, as :func:`backfill_drug_concepts` does for drugs (0.35.0,
+    issue 106: 2 to 4% of condition rows per site sat on a non-standard concept; Elixhauser and ``n_secondary_dx`` read the ICD
+    source codes, but concept sets, ``elix_pre_index_conditions_count`` and PLP read ``condition_concept_id``).
+
+    For a row whose ``condition_concept_id`` is 0, NULL, non-standard or deprecated, the source concept is its
+    ``condition_source_concept_id``, else its non-zero ``condition_concept_id``, else its ``condition_source_value`` looked up as an
+    ICD-10-CM / ICD-9-CM code without dots (ICD-10-CM first from 2015-10-01, as the PCORnet converter does). The targets are the
+    source concept's valid 'Maps to' targets, and those of the concept that replaces it when it is deprecated ('Concept replaced by'),
+    kept only when they are valid standard concepts of the Condition domain. One target: the row takes it. Several (OMOP maps a
+    code to every concept it names, such as a diabetes code with a complication): the row takes the first and, with ``add_rows=True``
+    (the OMOP convention), a copy of the row is added for each other one (new ``condition_occurrence_id`` above the current maximum).
+    A target in another domain (an observation, a procedure) is never written into condition_occurrence; such rows are left as
+    they are and counted. The source concept is kept in ``condition_source_concept_id`` when that is empty. Needs the vocabulary
+    on the connection (attach the central vocabulary first) and a writable connection; work on a copy.
+
+    Returns ``{"non_standard_before": n, "by_maps_to": n, "rows_added": n, "other_domain": n, "no_target": n,
+    "non_standard_after": n}`` (row counts). Raises ``ValueError`` when ``concept_relationship`` has no 'Maps to' row."""
+    if not con.execute("SELECT 1 FROM concept_relationship WHERE relationship_id = 'Maps to' LIMIT 1").fetchone():
+        raise ValueError("backfill_condition_concepts: concept_relationship holds no 'Maps to' rows; attach the central vocabulary "
+                         "(attach_central_vocabulary) so that concept and concept_relationship resolve to it.")
+    cols = {r[0].lower() for r in con.execute("DESCRIBE condition_occurrence").fetchall()}
+    ccols = {r[0].lower() for r in con.execute("DESCRIBE concept").fetchall()}
+    src_cid = "nullif(x.condition_source_concept_id, 0)" if "condition_source_concept_id" in cols else "NULL"
+    sv = "x.condition_source_value" if "condition_source_value" in cols else "CAST(NULL AS VARCHAR)"
+    dom = "AND t.domain_id = 'Condition'" if "domain_id" in ccols else ""
+    bad = """(coalesce(x.condition_concept_id, 0) = 0 OR c.concept_id IS NULL OR c.standard_concept IS DISTINCT FROM 'S'
+              OR c.invalid_reason IS NOT NULL)"""
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE _cbf_rows AS
+        SELECT x.rowid AS rid, x.condition_concept_id AS old_cid,
+               coalesce({src_cid}, nullif(x.condition_concept_id, 0)) AS src, {sv} AS sv,
+               replace(upper(trim({sv})), '.', '') AS k, CAST(x.condition_start_date AS DATE) AS d
+        FROM condition_occurrence x LEFT JOIN concept c ON c.concept_id = x.condition_concept_id
+        WHERE {bad}""")
+    before = int(con.execute("SELECT count(*) FROM _cbf_rows").fetchone()[0])
+    out = {"non_standard_before": before, "by_maps_to": 0, "rows_added": 0, "other_domain": 0, "no_target": 0, "non_standard_after": before}
+    if not before:
+        con.execute("DROP TABLE _cbf_rows")
+        return out
+    # a row with no source concept: its source value as an ICD code without dots, the revision in use on the date first
+    con.execute("""CREATE OR REPLACE TEMP TABLE _cbf_codes AS
+        SELECT vocabulary_id, k, concept_id FROM (
+            SELECT vocabulary_id, replace(upper(concept_code), '.', '') AS k, concept_id,
+                   row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '')
+                                      ORDER BY (invalid_reason IS NULL) DESC, concept_id) AS rn
+            FROM concept WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM')) WHERE rn = 1""")
+    con.execute("""UPDATE _cbf_rows r SET src = coalesce(
+            (SELECT c.concept_id FROM _cbf_codes c WHERE c.k = r.k
+               AND c.vocabulary_id = CASE WHEN r.d < DATE '2015-10-01' THEN 'ICD9CM' ELSE 'ICD10CM' END),
+            (SELECT c.concept_id FROM _cbf_codes c WHERE c.k = r.k
+               AND c.vocabulary_id = CASE WHEN r.d < DATE '2015-10-01' THEN 'ICD10CM' ELSE 'ICD9CM' END))
+        WHERE r.src IS NULL AND r.k IS NOT NULL AND r.k <> ''""")
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE _cbf_targets AS
+        WITH s AS (SELECT DISTINCT src FROM _cbf_rows WHERE src IS NOT NULL),
+        via AS (SELECT src, src AS cid FROM s
+                UNION SELECT s.src, cr.concept_id_2 FROM s JOIN concept_relationship cr ON cr.concept_id_1 = s.src
+                      AND cr.relationship_id = 'Concept replaced by'),
+        cand AS (SELECT v.src, cr.concept_id_2 AS tgt FROM via v JOIN concept_relationship cr ON cr.concept_id_1 = v.cid
+                      AND cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
+                 UNION SELECT v.src, v.cid FROM via v WHERE v.cid <> v.src)
+        SELECT cand.src, t.concept_id AS tgt, (TRUE {dom}) AS in_domain FROM cand
+        JOIN concept t ON t.concept_id = cand.tgt AND t.standard_concept = 'S' AND t.invalid_reason IS NULL""")
+    con.execute("""CREATE OR REPLACE TEMP TABLE _cbf_map AS
+        SELECT src, list(tgt ORDER BY tgt) AS tgts FROM (SELECT DISTINCT src, tgt FROM _cbf_targets WHERE in_domain) GROUP BY src""")
+    out["other_domain"] = int(con.execute("""SELECT count(*) FROM _cbf_rows r WHERE r.src IN (SELECT src FROM _cbf_targets)
+                                             AND r.src NOT IN (SELECT src FROM _cbf_map)""").fetchone()[0])
+    out["no_target"] = int(con.execute("SELECT count(*) FROM _cbf_rows r WHERE r.src IS NULL OR r.src NOT IN (SELECT src FROM _cbf_targets)").fetchone()[0])
+    if add_rows:
+        n_extra = int(con.execute("SELECT coalesce(sum(len(m.tgts) - 1), 0) FROM _cbf_rows r JOIN _cbf_map m USING (src)").fetchone()[0])
+        if n_extra:
+            names = [r[0] for r in con.execute("DESCRIBE condition_occurrence").fetchall()]
+            sel = ", ".join(
+                "(SELECT coalesce(max(condition_occurrence_id), 0) FROM condition_occurrence) + row_number() OVER (ORDER BY x.rowid, e.tgt)"
+                if n.lower() == "condition_occurrence_id" else "e.tgt" if n.lower() == "condition_concept_id"
+                else "coalesce(nullif(x.condition_source_concept_id, 0), e.src)" if n.lower() == "condition_source_concept_id"
+                else f'x."{n}"' for n in names)
+            con.execute(f"""INSERT INTO condition_occurrence
+                SELECT {sel} FROM condition_occurrence x
+                JOIN (SELECT r.rid, r.src, unnest(m.tgts[2:]) AS tgt FROM _cbf_rows r JOIN _cbf_map m USING (src)) e ON e.rid = x.rowid""")
+            out["rows_added"] = n_extra
+    out["by_maps_to"] = int(con.execute("SELECT count(*) FROM _cbf_rows r JOIN _cbf_map m USING (src)").fetchone()[0])
+    if "condition_source_concept_id" in cols:
+        con.execute("""UPDATE condition_occurrence SET condition_source_concept_id = r.src FROM _cbf_rows r JOIN _cbf_map m USING (src)
+                       WHERE condition_occurrence.rowid = r.rid AND coalesce(condition_occurrence.condition_source_concept_id, 0) = 0""")
+    con.execute("""UPDATE condition_occurrence SET condition_concept_id = m.tgts[1] FROM _cbf_rows r JOIN _cbf_map m USING (src)
+                   WHERE condition_occurrence.rowid = r.rid""")
+    out["non_standard_after"] = int(con.execute(f"""SELECT count(*) FROM condition_occurrence x
+        LEFT JOIN concept c ON c.concept_id = x.condition_concept_id WHERE {bad}""").fetchone()[0])
+    for t in ("_cbf_rows", "_cbf_codes", "_cbf_targets", "_cbf_map"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+    return out
+
+
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "encounter")
     if path is None:

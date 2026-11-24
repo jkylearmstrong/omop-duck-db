@@ -234,6 +234,56 @@ def audit_combination_products(
     }
 
 
+#: Relationships from a drug concept to a concept that may name its ingredients (a branded drug to its clinical drug, a quantified
+#: drug to its unquantified form, a pack to its contents), and from there to an ingredient. Retired links count: a deprecated drug
+#: keeps them (0.34.2 ``backfill_drug_concepts`` uses the same chain).
+_DRUG_HOP_RELATIONSHIPS = ("Tradename of", "Quantified form of", "Consists of", "Has quantified form")
+_DRUG_INGREDIENT_RELATIONSHIPS = ("RxNorm has ing", "Has ingredient", "Brand name of", "Tradename of")
+
+
+def _nonstandard_drug_targets_sql(drugs_sql: str, concept: str, cr: str, ds: str | None) -> str:
+    """SQL with ``(drug_concept_id, target_concept_id, n_targets)`` (``n_targets``: its number of ingredients): for each drug concept of ``drugs_sql`` (one column ``drug_concept_id``) that
+    is not a valid standard concept, its valid standard 'Maps to' targets and **every** valid standard RxNorm / RxNorm Extension
+    ingredient (through ``drug_strength`` and the ingredient relationships, two hops away at most) and the valid standard drugs
+    met on the way (a deprecated branded drug's clinical drug). A combination product thus
+    names each of its ingredients, so the class roll-up can credit every class of its ingredients (0.35.0, issue 106)."""
+    hop = ", ".join(_q(r) for r in _DRUG_HOP_RELATIONSHIPS)
+    ing = ", ".join(_q(r) for r in _DRUG_INGREDIENT_RELATIONSHIPS)
+    ds_sql = f"UNION SELECT r.src, d.ingredient_concept_id FROM rel r JOIN {ds} d ON d.drug_concept_id = r.cid" if ds else ""
+    return f"""
+        WITH s AS (SELECT DISTINCT x.drug_concept_id AS src FROM ({drugs_sql}) x
+                   LEFT JOIN {concept} c ON c.concept_id = x.drug_concept_id
+                   WHERE coalesce(x.drug_concept_id, 0) <> 0
+                     AND (c.concept_id IS NULL OR c.standard_concept IS DISTINCT FROM 'S' OR c.invalid_reason IS NOT NULL)),
+        rel1 AS (SELECT src, src AS cid FROM s
+                 UNION SELECT s.src, r.concept_id_2 FROM s JOIN {cr} r ON r.concept_id_1 = s.src AND r.relationship_id IN ({hop})),
+        rel AS (SELECT src, cid FROM rel1
+                UNION SELECT r1.src, r.concept_id_2 FROM rel1 r1 JOIN {cr} r ON r.concept_id_1 = r1.cid AND r.relationship_id IN ({hop})),
+        cand AS (SELECT r.src, x.concept_id_2 AS tgt FROM rel r JOIN {cr} x ON x.concept_id_1 = r.cid AND x.relationship_id IN ({ing})
+                 {ds_sql}
+                 UNION SELECT s.src, t.concept_id FROM s JOIN {concept} c ON c.concept_id = s.src AND c.concept_class_id = 'Ingredient'
+                       JOIN {concept} t ON lower(t.concept_name) = lower(c.concept_name) AND t.concept_id <> c.concept_id),
+        ingr AS (SELECT DISTINCT cand.src, t.concept_id AS tgt FROM cand
+                 JOIN {concept} t ON t.concept_id = cand.tgt AND t.concept_class_id = 'Ingredient'
+                  AND t.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND t.standard_concept = 'S' AND t.invalid_reason IS NULL),
+        hops AS (SELECT DISTINCT r.src, t.concept_id AS tgt FROM rel r
+                 JOIN {concept} t ON t.concept_id = r.cid AND r.cid <> r.src AND t.vocabulary_id IN ('RxNorm', 'RxNorm Extension')
+                  AND t.standard_concept = 'S' AND t.invalid_reason IS NULL),
+        maps AS (SELECT DISTINCT s.src, r.concept_id_2 AS tgt FROM s
+                 JOIN {cr} r ON r.concept_id_1 = s.src AND r.relationship_id = 'Maps to' AND r.invalid_reason IS NULL
+                 JOIN {concept} t ON t.concept_id = r.concept_id_2 AND t.standard_concept = 'S' AND t.invalid_reason IS NULL)
+        SELECT src AS drug_concept_id, tgt AS target_concept_id,
+               count(*) FILTER (WHERE kind = 'ingredient') OVER (PARTITION BY src) AS n_targets FROM (
+            SELECT src, tgt, 'ingredient' AS kind FROM ingr UNION SELECT src, tgt, 'drug' FROM hops UNION SELECT src, tgt, 'drug' FROM maps)"""
+
+
+def _optional_table(con, name: str, vocab_schema: str | None) -> str | None:
+    try:
+        return _resolve_table(con, name, vocab_schema)
+    except ValueError:
+        return None
+
+
 def extract_medication_classes(
     db_con,
     cohort_table: str,
@@ -264,6 +314,7 @@ def extract_medication_classes(
     offset_anchor: str = "visit_start_date",
     anchor: str | None = None,
     drug_type_concept_ids: Sequence[int] | None = None,
+    combination_ingredients: bool = True,
     **audit_kwargs,
 ):
     """Flag medication-class exposure for each cohort row by source crosswalk, OMOP hierarchy, or both.
@@ -291,6 +342,13 @@ def extract_medication_classes(
         offset_anchor: Milestone date to anchor windows to ('visit_start_date' | 'visit_end_date' | 'index_date').
         anchor: Alias for offset_anchor.
         drug_type_concept_ids: Optional sequence of drug_type_concept_id values to filter exposures by.
+        combination_ingredients: Standard strategy (default True, 0.35.0): a drug row whose ``drug_concept_id`` is not a valid
+            standard concept (a deprecated RxNorm drug, a Brand Name, a combination product that no single ingredient could
+            replace) has no place in ``concept_ancestor``, so it used to count for no class. It now counts for the class of each of
+            its valid standard RxNorm ingredients (``drug_strength`` and the ingredient relationships, retired links included) and
+            of its valid 'Maps to' targets: a combination product counts for every class of its ingredients, as a standard
+            combination drug already does through ``concept_ancestor``. ``drug_exposure`` is not changed. False restores the
+            earlier behaviour. ``attrs["combination_flags"]`` counts the (row, class) flags only this rule set.
         on_unresolved: How to handle unresolvable ATC codes / concepts with no descendants (``'ignore'``,
             ``'warn'``, or ``'raise'``).
         exclude_forms: Dosage form strings or concept IDs to exclude (e.g. ``['Ophthalmic', 'Topical']``).
@@ -375,6 +433,7 @@ def extract_medication_classes(
         drug_type_clause = f"AND de.drug_type_concept_id IN ({dt_ids})"
 
     db_con.register("_med_cohort_df", base[["_row", "person_id", "index_date"] + (["end_date"] if ecol else [])])
+    combination_flags = 0
     flags: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
     flags_plain: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
     flags_combo: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
@@ -511,6 +570,31 @@ def extract_medication_classes(
                 "JOIN drug_exposure de ON de.person_id = v.person_id "
                 "JOIN _med_class_concepts m ON m.concept_id = de.drug_concept_id "
                 f"WHERE TRUE {lo} {hi} {route_clause} {drug_type_clause}").fetchall()
+            if combination_ingredients:
+                # non-standard drug concepts (no concept_ancestor rows): credit the classes of their ingredients (issue 106)
+                cr_tbl = _optional_table(db_con, "concept_relationship", v_schema)
+                concept_cols = {d[0].lower() for d in db_con.execute(f"SELECT * FROM {concept} LIMIT 0").description}
+                if cr_tbl is not None and {"standard_concept", "invalid_reason", "vocabulary_id"} <= concept_cols:
+                    ds_tbl = _optional_table(db_con, "drug_strength", v_schema)
+                    drugs = ("SELECT DISTINCT de.drug_concept_id FROM drug_exposure de "
+                             "WHERE de.person_id IN (SELECT person_id FROM _med_cohort)")
+                    db_con.execute("CREATE OR REPLACE TEMPORARY TABLE _med_drug_targets AS "
+                                   + _nonstandard_drug_targets_sql(drugs, concept, cr_tbl, ds_tbl))
+                    tmp_tables.append("_med_drug_targets")
+                    if ex_cond_parts:  # the dose-form exclusions apply to the exposure's own concept too
+                        db_con.execute(
+                            "DELETE FROM _med_drug_targets WHERE drug_concept_id IN (SELECT ca.descendant_concept_id FROM "
+                            "(SELECT DISTINCT drug_concept_id AS descendant_concept_id FROM _med_drug_targets) ca "
+                            f"JOIN {concept} c ON c.concept_id = ca.descendant_concept_id WHERE ({' OR '.join(ex_cond_parts)}))")
+                    combo2 = ", CASE WHEN t.n_targets > 1 THEN 1 ELSE 0 END AS is_combination" if filter_combo else ""
+                    extra = db_con.execute(
+                        f"SELECT DISTINCT v._row, m.drug_class{combo2}{type_sel} FROM _med_cohort v "
+                        "JOIN drug_exposure de ON de.person_id = v.person_id "
+                        "JOIN _med_drug_targets t ON t.drug_concept_id = de.drug_concept_id "
+                        "JOIN _med_class_concepts m ON m.concept_id = t.target_concept_id "
+                        f"WHERE TRUE {lo} {hi} {route_clause} {drug_type_clause}").fetchall()
+                    combination_flags = len({(h[0], h[1]) for h in extra} - {(h[0], h[1]) for h in hits})
+                    hits = list(hits) + list(extra)
             for hit in hits:
                 row, cls = hit[0], hit[1]
                 flags["standard"].setdefault(cls, set()).add(row)
@@ -636,6 +720,7 @@ def extract_medication_classes(
             t_rows = set(flags_by_type["source"].get((cls, type_id), ())) | set(flags_by_type["standard"].get((cls, type_id), ()))
             result[f"{cls}_type_{type_id}"] = np.isin(rows_index, list(t_rows)).astype(int)
 
+    result.attrs["combination_flags"] = int(combination_flags)
     if return_audit:
         return result, audit_medication_strategies(result, classes=list(specs), **audit_kwargs)
     return result

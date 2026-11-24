@@ -80,6 +80,18 @@ def main(argv=None) -> int:
                    help="full (default): the manuscript text from the package's versioned template; tables_only: every table under its sheet name")
     p.add_argument("--manuscript-params", type=Path, default=None,
                    help="JSON or YAML file with the study team's title, authors and review-board statement (kept outside the package)")
+    p.add_argument("--known-source-gaps", metavar="FILE",
+                   help="the study team's confirmed source-extract gaps (JSON {key: reason} or text, one key per line, '# reason' after it; a "
+                        "key is a feature column, group or check, or <site>:<key> for one site; keep the file private). Listed gaps are "
+                        "reported as expected and never fail the run")
+    p.add_argument("--observation-period-cap", metavar="DATE",
+                   help="read observation periods as ending no later than this date (a temporary view, the databases are not changed), "
+                        "instead of repairing the end-date spike by hand; at least the study end plus the follow-up window")
+    p.add_argument("--sensitivity", action="store_true",
+                   help="also run the sensitivity analyses: the random draw repeated with --sensitivity-seeds and every eligible stay "
+                        "(patient-grouped folds); extracts the features of every eligible stay, so the run takes longer")
+    p.add_argument("--sensitivity-seeds", nargs="+", type=int, default=list(range(1, 11)), metavar="SEED",
+                   help="seeds of the repeated random draws (default 1 to 10)")
     p.add_argument("--list-decisions", action="store_true", help="print every decision, its options and the presets, then exit")
     a = p.parse_args(argv)
     if a.list_decisions:
@@ -112,6 +124,8 @@ def main(argv=None) -> int:
                       private_dir=a.private_dir, document=not a.no_document, document_formats=a.document_formats, document_title=a.doc_title,
                       document_author=a.doc_author, site_names=names, privacy_check=not a.no_privacy_check,
                       document_cache_dir=a.quarto_cache_dir, allow_data_gaps=a.allow_data_gaps, data_gap_threshold=a.data_gap_threshold, check_only=a.check_data,
+                      known_source_gaps=a.known_source_gaps, observation_period_cap=a.observation_period_cap,
+                      sensitivity=a.sensitivity, sensitivity_seeds=a.sensitivity_seeds,
                       run_args={k: v for k, v in vars(a).items() if k != "names"})
     except RunPrivacyError as e:
         print(f"PRIVACY CHECK FAILED: {e}", file=sys.stderr)
@@ -133,12 +147,19 @@ def main(argv=None) -> int:
     print(f"privacy check: {pc['hits']} hit(s) for {pc['n_names']} name(s)" if pc.get("checked") else "privacy check: no names to scan for (give --names-file)")
     print(f"per-site intermediates (private, do not share): {r['private_dir']}")
     print("address table used: " + (", ".join(f"{k}: {v}" for k, v in sorted(r["address_table"].items())) or "none (SDI / RUCA off)"))
-    gaps = [f for f in r["data_checks"] if f.get("severity") == "error"]
-    warns = [f for f in r["data_checks"] if f.get("severity") == "warning"]
+    # unexpected findings first (ETL mapping gaps and anything unexplained), then the expected ones (confirmed source gaps and
+    # intentional concept-set exclusions, each listed once)
+    unexpected = [f for f in r["data_checks"] if not f.get("expected")]
+    gaps = [f for f in unexpected if f.get("severity") == "error"]
+    warns = [f for f in unexpected if f.get("severity") == "warning"]
+    expected = [f for f in r["data_checks"] if f.get("expected")]
     if gaps:
         print(f"DATA GAPS ACCEPTED with --allow-data-gaps ({len(gaps)}):\n" + format_findings(gaps), file=sys.stderr)
     if warns:
         print(f"data warnings ({len(warns)}), also in the run record:\n" + format_findings(warns), file=sys.stderr)
+    if expected:
+        print(f"expected findings ({len(expected)}: confirmed source gaps and intentional concept-set exclusions):\n"
+              + format_findings(expected), file=sys.stderr)
     if r["comparison"] is not None:
         print(r["comparison"][0].to_string(index=False))
     return 0

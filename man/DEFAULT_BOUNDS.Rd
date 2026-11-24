@@ -4,6 +4,7 @@
 \name{DEFAULT_BOUNDS}
 \alias{DEFAULT_BOUNDS}
 \alias{DEFAULT_RESCALE}
+\alias{DEFAULT_UNIT_CONVERSIONS}
 \title{Physiologic plausibility bounds and rescaling for single vital / lab measurements}
 \format{
 Named lists of numeric vectors.
@@ -12,11 +13,19 @@ Named lists of numeric vectors.
 DEFAULT_BOUNDS
 
 DEFAULT_RESCALE
+
+DEFAULT_UNIT_CONVERSIONS
 }
 \description{
 \code{DEFAULT_BOUNDS} is \code{list(name = c(min, max))} in conventional US units (mg/dL, g/dL, 10^3/uL, degrees Celsius). A single
 measurement outside its bounds is dropped (not clipped) before the stay's mean and latest value are taken, so one artifact
 such as a BMI of 562000 cannot dominate a stay. \code{DEFAULT_RESCALE} is \code{list(name = c(above, up_to, divisor))}: a value in
 \verb{(above, up_to]} is divided first (WBC is a count per uL at some sites, 10^3/uL at others).
+}
+\details{
+\code{DEFAULT_UNIT_CONVERSIONS} (0.35.0) is \code{list(name = list(list(unit_concept_ids, unit_texts, factor)))}: a lab value whose
+\code{unit_concept_id} is one of the UCUM ids (8753 mmol/L, 8749 umol/L, 8636 g/L), or whose \code{unit_concept_id} is empty and whose
+\code{unit_source_value} (lower case, no spaces, the micro sign read as "u") is one of the texts, is multiplied by \code{factor} before the bounds:
+glucose and BUN mmol/L, creatinine umol/L, albumin and hemoglobin g/L, to mg/dL or g/dL.
 }
 \keyword{datasets}
