@@ -37,6 +37,6 @@ test_that("prior utilization counts equal FeatureExtraction's visit-concept coun
   n <- function(concept) { v <- got$covariateValue[got$covariateId %/% 1000 == concept]; if (length(v)) v else 0 }
   # window: the 365 days before admission, the admission day excluded (endDays = -1), as extract_prior_utilization
   expect_equal(c(ours$prior_ip_count, ours$prior_ed_count, ours$prior_os_count),
-               c(n(9201) + n(262), n(9203), n(9202) + n(581385)))
+               c(n(9201) + n(262), n(9203), n(581385)))
   expect_equal(ours$prior_ip_count, 2)
 })
