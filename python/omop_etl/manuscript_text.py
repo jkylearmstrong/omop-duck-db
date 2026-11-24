@@ -339,6 +339,8 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     ctx["attrition"] = ({"qualifying_stays": int(q), "stays_per_patient": int(q) / n_ if n_ else None} if q and (not n_ or int(q) >= n_)
                         else _attrition(tabs, n_))
     ctx["random_draw"] = _random_draw(wb, prefix)
+    if run_rec.get("random_draw_redrawn"):  # patients whose stay in the reused draw is no longer eligible, given another eligible stay
+        ctx["random_draw"]["redrawn"] = int(run_rec["random_draw_redrawn"])
     if ctx["cohort"].get("contrast"):
         ctx["table1_contrast"] = " and ".join(ctx["cohort"].pop("contrast"))
     window = run_rec.get("window")
