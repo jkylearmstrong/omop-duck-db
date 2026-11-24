@@ -137,3 +137,31 @@ def test_maps_to_skips_deprecated_rows():
     src = Path(build_omop_cdm.__file__).read_text()
     assert src.count("WHERE relationship_id = 'Maps to'\n") == 0
     assert src.count("WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL") == 8
+
+
+def test_section_2_2_bullets_and_anion_gap_with_empty_chloride(tmp_path):
+    """C15: the BMI and eGFR sentences ate the newline after their bullet ("...those 365 days.- Laboratory Measures"), and the anion
+    gap sentence named chloride although chloride is an empty source column (manuscript_checks: "chloride 2")."""
+    pytest.importorskip("jinja2")
+    import copy
+
+    from omop_etl import manuscript_text as mtx
+    from test_rubin_fixes_0340 import _workbook
+
+    ctx = mtx.manuscript_context(_workbook(tmp_path), run={"n_sites": 3, "window": ["2017-01-01", "2022-09-30"], "profile": "ederri",
+                                                           "bmi_fill": "derive_lookback"}, summary={"n_features": 95}, params={})
+    ctx["lr"]["labs"] = ["creatinine", "eGFR", "sodium", "bicarbonate", "Anion Gap"]
+
+    def body(empty):
+        c = copy.deepcopy(ctx)
+        c["features"] = {**(c.get("features") or {}), "n_columns": 120, "n": 95, "empty": empty, "n_empty": len(empty)}
+        return mtx.render_manuscript_body(c, version="0.34.1")["markdown"]
+
+    for md in (body(["potassium", "chloride"]), body(["potassium"])):
+        lines = md.splitlines()
+        for item in ("- Vital Signs:", "- Laboratory Measures (Index Stay Mean):", "- Medication Exposure (OMOP Drug Exposure):"):
+            assert sum(ln.startswith(item) for ln in lines) == 1, item
+        assert not re.search(r"\.- [A-Z]", md)
+    with_empty = body(["potassium", "chloride"])
+    assert len(re.findall("chloride", with_empty, re.I)) == 1 and "anion gap takes" not in with_empty
+    assert "sodium − chloride − bicarbonate" in body(["potassium"])
