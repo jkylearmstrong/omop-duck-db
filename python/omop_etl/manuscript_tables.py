@@ -68,6 +68,13 @@ _BMI = [f"BMI: Underweight (<18.5 kg/m²)", f"BMI: Normal (18.5{EN}24.9 kg/m²)"
 _AGE = [f"Age: 18{EN}44 years", f"Age: 45{EN}64 years", f"Age: 65{EN}74 years", "Age: 75+ years"]
 _RACE = ["Race: White", "Race: Black / African American", "Race: Other / Unknown"]
 _TOB = ["Tobacco: Never user", "Tobacco: Former user", "Tobacco: Current user"]
+#: 0.34.1: a stay with no smoking status and no tobacco code; printed only when the feature table has such stays
+TOB_MISSING = "Tobacco: Missing / Unknown"
+
+
+def _tob_levels(m) -> list[str]:
+    s = m.get("m_tobacco") if hasattr(m, "get") else None
+    return _TOB + ([TOB_MISSING] if s is not None and (s == TOB_MISSING).any() else [])
 
 #: Model feature columns -> the clinical label printed in Figure 2 (SHAP) and the text; the labels of Tables 1 and 4 where they exist.
 FEATURE_LABELS = {
@@ -274,7 +281,7 @@ def manuscript_table1(df: pd.DataFrame, *, label_col: str = "readmitted_30d", mi
         cat(lv, m.get("m_ruca"), lv)
     for lv in _DISC:
         cat("Discharge Status: " + lv, m.get("m_disch"), lv)
-    for lv in _TOB:
+    for lv in _tob_levels(m):
         cat(lv, m.get("m_tobacco"), lv)
     for lv in _BMI:
         cat(lv, m.get("m_bmi"), lv)
@@ -618,7 +625,7 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     for names, lab in MANUSCRIPT_LABS:
         num(g, lab, _col(m, *names))
     g = "Other clinical features"
-    levels(g, "m_tobacco", _TOB[0], _TOB[1:])
+    levels(g, "m_tobacco", _TOB[0], _tob_levels(m)[1:])
     levels(g, "m_bmi", _BMI[1], _BMI[2:], before=_BMI[:1])
     for c, lab in _MEDS:
         flag(g, lab, _col(m, c))

@@ -347,7 +347,7 @@ load_care_site <- function(con, source_dir, site_id = NULL, site_anon = NULL, si
     LEFT JOIN (
         SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
         FROM concept_relationship
-        WHERE relationship_id = 'Maps to'
+        WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
         GROUP BY concept_id_1
     ) cr
       ON cr.concept_id_1 = c.concept_id
@@ -553,14 +553,14 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     CREATE OR REPLACE TEMPORARY TABLE _new_address_history AS
     SELECT p.person_id,
            pcornet_id(COALESCE(UPPER(src.ADDRESS_STATE), '') || '_' || COALESCE(src.ADDRESS_ZIP5, '') || '_' || COALESCE(UPPER(src.ADDRESS_CITY), '')) AS location_id,
-           regexp_extract(CAST(src.ADDRESS_ZIP5 AS VARCHAR), '^\\s*(\\d{5})', 1) AS zip5,
+           CASE WHEN regexp_matches(NULLIF(TRIM(CAST(src.ADDRESS_ZIP5 AS VARCHAR)), ''), '^[0-9]{5}') THEN substr(NULLIF(TRIM(CAST(src.ADDRESS_ZIP5 AS VARCHAR)), ''), 1, 5) WHEN regexp_matches(NULLIF(TRIM(CAST(src.ADDRESS_ZIP5 AS VARCHAR)), ''), '^[0-9]{3,4}$') THEN lpad(NULLIF(TRIM(CAST(src.ADDRESS_ZIP5 AS VARCHAR)), ''), 5, '0') WHEN regexp_matches(NULLIF(TRIM(CAST(src.ADDRESS_ZIP9 AS VARCHAR)), ''), '^[0-9]{5}([^0-9]|$)') OR regexp_matches(NULLIF(TRIM(CAST(src.ADDRESS_ZIP9 AS VARCHAR)), ''), '^[0-9]{9}$') THEN substr(NULLIF(TRIM(CAST(src.ADDRESS_ZIP9 AS VARCHAR)), ''), 1, 5) WHEN regexp_matches(NULLIF(TRIM(CAST(src.ADDRESS_ZIP9 AS VARCHAR)), ''), '^[0-9]{8}$') THEN substr(lpad(NULLIF(TRIM(CAST(src.ADDRESS_ZIP9 AS VARCHAR)), ''), 9, '0'), 1, 5) END AS zip5,
            parse_omop_date(src.ADDRESS_PERIOD_START) AS address_start,
            parse_omop_date(src.ADDRESS_PERIOD_END) AS address_end,
            UPPER(src.ADDRESS_PREFERRED) AS preferred
     FROM _temp_address_history src
     JOIN person p ON p.person_source_value = %s
     WHERE src.PATID IS NOT NULL
-      AND (src.ADDRESS_STATE IS NOT NULL OR src.ADDRESS_ZIP5 IS NOT NULL OR src.ADDRESS_CITY IS NOT NULL);
+      AND (src.ADDRESS_STATE IS NOT NULL OR src.ADDRESS_ZIP5 IS NOT NULL OR src.ADDRESS_ZIP9 IS NOT NULL OR src.ADDRESS_CITY IS NOT NULL);
   ", patid_expr))
   DBI::dbExecute(con, "DELETE FROM person_address_history WHERE person_id IN (SELECT person_id FROM _new_address_history);")
   DBI::dbExecute(con, "INSERT INTO person_address_history
@@ -730,7 +730,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     LEFT JOIN (
         SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
         FROM concept_relationship
-        WHERE relationship_id = 'Maps to'
+        WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
         GROUP BY concept_id_1
     ) cr
       ON cr.concept_id_1 = COALESCE(c1.concept_id, c2.concept_id)
@@ -809,7 +809,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     LEFT JOIN (
         SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
         FROM concept_relationship
-        WHERE relationship_id = 'Maps to'
+        WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
         GROUP BY concept_id_1
     ) cr
       ON cr.concept_id_1 = c.concept_id
@@ -892,7 +892,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     LEFT JOIN (
         SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
         FROM concept_relationship
-        WHERE relationship_id = 'Maps to'
+        WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
         GROUP BY concept_id_1
     ) cr
       ON cr.concept_id_1 = c.concept_id
@@ -940,7 +940,7 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
   prepare_source_view(
     con, "_temp_vital", path,
     c("VITALID", "PATID", "ENCOUNTERID", "MEASURE_DATE", "MEASURE_TIME",
-      "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC", "SMOKING")
+      "VITAL_SOURCE", "HT", "WT", "ORIGINAL_BMI", "BMI", "SYSTOLIC", "DIASTOLIC", "SMOKING", "TOBACCO")
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
 
@@ -1021,7 +1021,7 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
       LEFT JOIN (
           SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
           FROM concept_relationship
-          WHERE relationship_id = 'Maps to'
+          WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
           GROUP BY concept_id_1
       ) cr
         ON cr.concept_id_1 = c.concept_id
@@ -1064,12 +1064,12 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
         0 AS observation_source_concept_id,
         NULL AS unit_source_value,
         NULL AS qualifier_source_value,
-        src.SMOKING AS value_source_value,
+        CASE WHEN LPAD(TRIM(src.SMOKING), 2, '0') IN ('01', '02', '03', '04', '05', '06', '07', '08') THEN src.SMOKING ELSE 'TOBACCO ' || TRIM(src.TOBACCO) END AS value_source_value,
         NULL AS observation_event_id,
         0 AS obs_event_field_concept_id
     FROM _temp_vital src
     JOIN (VALUES ('01', 45881517), ('02', 45884037), ('03', 45883458), ('04', 45879404), ('05', 45881518), ('06', 45885135), ('07', 45884038), ('08', 45878118)) sm(code, value_concept_id)
-      ON sm.code = LPAD(TRIM(src.SMOKING), 2, '0')
+      ON sm.code = CASE WHEN LPAD(TRIM(src.SMOKING), 2, '0') IN ('01', '02', '03', '04', '05', '06', '07', '08') THEN LPAD(TRIM(src.SMOKING), 2, '0') ELSE CASE LPAD(TRIM(src.TOBACCO), 2, '0') WHEN '01' THEN '05' WHEN '02' THEN '04' WHEN '03' THEN '03' END END
     LEFT JOIN person p
       ON p.person_source_value = __PATID__
     LEFT JOIN visit_occurrence vo
@@ -1138,7 +1138,7 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
       LEFT JOIN (
           SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
           FROM concept_relationship
-          WHERE relationship_id = 'Maps to'
+          WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
           GROUP BY concept_id_1
       ) cr
         ON cr.concept_id_1 = c.concept_id
@@ -1217,7 +1217,7 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
       LEFT JOIN (
           SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
           FROM concept_relationship
-          WHERE relationship_id = 'Maps to'
+          WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
           GROUP BY concept_id_1
       ) cr
         ON cr.concept_id_1 = c.concept_id
@@ -1296,7 +1296,7 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
       LEFT JOIN (
           SELECT concept_id_1, MIN(concept_id_2) AS concept_id_2
           FROM concept_relationship
-          WHERE relationship_id = 'Maps to'
+          WHERE relationship_id = 'Maps to' AND invalid_reason IS NULL
           GROUP BY concept_id_1
       ) cr
         ON cr.concept_id_1 = c.concept_id

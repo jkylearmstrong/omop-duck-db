@@ -310,6 +310,8 @@ def _fill_bmi(con, cohort: pd.DataFrame, bmi_ids: Sequence[int], measured: pd.Se
     ids = lambda xs: ", ".join(str(int(x)) for x in xs) or "NULL"  # noqa: E731
     cols = {r[0] for r in con.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'measurement'").fetchall()}
     unit = "m.unit_concept_id" if "unit_concept_id" in cols else "CAST(NULL AS INTEGER)"
+    # the unit as written, for a database whose unit_concept_id is 0 but whose source says "kg" or "cm" (0.34.1 review)
+    usv = "lower(trim(m.unit_source_value))" if "unit_source_value" in cols else "CAST(NULL AS VARCHAR)"
     try:
         got = con.execute(f"""
             WITH m AS (
@@ -319,10 +321,13 @@ def _fill_bmi(con, cohort: pd.DataFrame, bmi_ids: Sequence[int], measured: pd.Se
                        CASE WHEN m.measurement_concept_id IN ({ids(BMI_HEIGHT_CONCEPTS)}) THEN 'h'
                             WHEN m.measurement_concept_id IN ({ids(BMI_WEIGHT_CONCEPTS)}) THEN 'w' ELSE 'b' END AS kind,
                        CASE WHEN m.measurement_concept_id IN ({ids(BMI_HEIGHT_CONCEPTS)}) THEN
-                                 CASE WHEN {unit} = 8582 OR (COALESCE({unit}, 0) <> 9330 AND m.value_as_number >= 100)
+                                 CASE WHEN {unit} = 8582 OR {usv} IN ('cm', 'centimeter', 'centimeters')
+                                           OR (COALESCE({unit}, 0) NOT IN (9326, 9330) AND COALESCE({usv}, '') NOT IN ('in', 'inch', 'inches', '[in_i]')
+                                               AND m.value_as_number >= 100)
                                       THEN m.value_as_number / 100.0 ELSE m.value_as_number * 0.0254 END
                             WHEN m.measurement_concept_id IN ({ids(BMI_WEIGHT_CONCEPTS)}) THEN
-                                 CASE WHEN {unit} = 9529 THEN m.value_as_number ELSE m.value_as_number * 0.45359237 END
+                                 CASE WHEN {unit} = 9529 OR {usv} IN ('kg', 'kgs', 'kilogram', 'kilograms') THEN m.value_as_number
+                                      ELSE m.value_as_number * 0.45359237 END
                             ELSE m.value_as_number END AS v
                 FROM _bmi_c c
                 JOIN measurement m ON m.person_id = c.subject_id
@@ -818,6 +823,29 @@ def extract_benchmark_features(
     return out
 
 
+#: PCORnet VITAL.SMOKING as loaded by the converter: observation 43054909 (LOINC 72166-2) with the LOINC answer concept, and the
+#: PCORnet code in value_source_value (0.34.1). Current: 01, 02, 05, 07, 08; former: 03; never: 04 (06 "unknown if ever" is no status).
+SMOKING_CURRENT = {"01": 45881517, "02": 45884037, "05": 45881518, "07": 45884038, "08": 45878118}
+SMOKING_FORMER = {"03": 45883458}
+SMOKING_NEVER = {"04": 45879404}
+TOBACCO_UNKNOWN = "Missing / Unknown"
+#: SNOMED "never smoked tobacco" (4144272) and "non-smoker" (4052039) observations
+NEVER_SMOKER_CONCEPTS = (4144272, 4052039)
+#: a diagnosis code without dots or case, for the tobacco ICD codes
+_TOB_DX = "upper(replace(trim(co.condition_source_value), '.', ''))"
+
+
+def _smoking_is(codes: Mapping[str, int], cols: set[str] | None = None) -> str:
+    """SQL: the observation row ``o`` is a VITAL smoking status in ``codes`` (by answer concept, else by the PCORnet code).
+    ``cols`` are the observation table's columns; a column it lacks reads as NULL."""
+    ids = ", ".join(str(v) for v in codes.values())
+    pc = ", ".join(f"'{k}'" for k in codes)
+    vc = "o.value_as_concept_id" if cols is None or "value_as_concept_id" in cols else "CAST(NULL AS INTEGER)"
+    vs = "o.value_source_value" if cols is None or "value_source_value" in cols else "CAST(NULL AS VARCHAR)"
+    return (f"(o.observation_concept_id = 43054909 AND ({vc} IN ({ids}) OR (COALESCE({vc}, 0) = 0 "
+            f"AND lpad(trim(COALESCE({vs}, '')), 2, '0') IN ({pc}))))")
+
+
 def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd.DataFrame, *, lookback_days: int = 365) -> pd.DataFrame:
     """The eDERRI protocol's history columns, one row per cohort row in cohort order (what the study's pipeline computed).
 
@@ -829,7 +857,8 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
       observation (581385; 0.34.1, before only the custom concept 2000000048) visits; ``prior_outpatient_count`` - prior outpatient (9202, 581477) and telehealth (5083) visits only
       (0.34.0; "all minus inpatient / ED" also counted visits of unknown or other type);
     * ``days_since_prior_encounter`` / ``days_since_prior_ip_ed`` - days from the latest such prior visit to the admission
-      (``lookback_days`` when there is none; ED/inpatient visits only for the second);
+      (``lookback_days`` when there is none; for the second, inpatient, observation and ED visits only, as ``prior_ip_os_ed_count``
+      counts them - observation stays since 0.34.1);
     * ``readmission_count_twelve_months`` - inpatient visits in the 365 days before the admission;
     * ``n_secondary_dx`` - secondary diagnoses of the index stay (0.34.0): distinct diagnosis codes as recorded (ICD-9-CM /
       ICD-10-CM source value, dots and case ignored; the standard concept when there is none) dated from admission to discharge,
@@ -839,7 +868,9 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
       maps to two SNOMED concepts counted twice;
     * ``elix_pre_index_conditions_count`` - distinct condition concepts dated before the admission (all history);
     * ``tobacco`` - ``"Current user"`` (tobacco observation concepts 4005823 / 4276526, or ICD F17, Z72.0, 305.1), ``"Former user"``
-      (4310280, Z87.891, V15.82), else ``"Never user"`` (the protocol has no "unknown" level).
+      (4310280, Z87.891, V15.82), ``"Never user"`` (a recorded never-smoker status: VITAL code 04 or concepts 4144272 / 4052039), else ``"Missing / Unknown"``. The smoking
+      status of PCORnet VITAL (observation 43054909, LOINC 72166-2, with its answer concept or the PCORnet code) counts too, and
+      the ICD codes match with or without dots (0.34.1). Until 0.34.0 a stay with no status was "Never user", and VITAL was not read.
     """
     if lookback_days < 0:
         raise ValueError("lookback_days must be non-negative.")
@@ -852,7 +883,7 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
                    COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 581385, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
                    COUNT(CASE WHEN pv.visit_concept_id IN ({_OUTPATIENT_SQL}) THEN 1 END) AS prior_outpatient_count,
                    COALESCE(date_diff('day', MAX(pv.visit_start_date), CAST(c.cohort_start_date AS DATE)), {lb}) AS days_since_prior_encounter,
-                   COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262) THEN pv.visit_start_date END),
+                   COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 581385, 2000000048) THEN pv.visit_start_date END),
                                       CAST(c.cohort_start_date AS DATE)), {lb}) AS days_since_prior_ip_ed,
                    COUNT(CASE WHEN pv.visit_concept_id IN (9201, 262)
                                AND pv.visit_start_date >= CAST(c.cohort_start_date AS DATE) - 365 THEN 1 END) AS readmission_count_twelve_months
@@ -869,18 +900,19 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
                                          THEN {_DX_CODE_SQL} END) AS n_secondary_dx,
                    COUNT(DISTINCT CASE WHEN co.condition_start_date < CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END)
                        AS elix_pre_index_conditions_count,
-                   MAX(CASE WHEN co.condition_source_value LIKE 'F17%' OR co.condition_source_value LIKE 'Z72.0%'
-                             OR co.condition_source_value LIKE '305.1%' THEN 1 ELSE 0 END) AS tob_cur_dx,
-                   MAX(CASE WHEN co.condition_source_value LIKE 'Z87.891%' OR co.condition_source_value LIKE 'V15.82%' THEN 1 ELSE 0 END)
-                       AS tob_former_dx
+                   MAX(CASE WHEN {_TOB_DX} LIKE 'F17%' OR {_TOB_DX} LIKE 'Z720%' OR {_TOB_DX} LIKE '3051%' THEN 1 ELSE 0 END) AS tob_cur_dx,
+                   MAX(CASE WHEN {_TOB_DX} LIKE 'Z87891%' OR {_TOB_DX} LIKE 'V1582%' THEN 1 ELSE 0 END) AS tob_former_dx
             FROM _bf_ph c
             LEFT JOIN condition_occurrence co ON co.person_id = c.subject_id
                  AND co.condition_start_date <= CAST(c.cohort_end_date AS DATE)
             GROUP BY c.row_id ORDER BY c.row_id""").df()
-        obs = con.execute("""
+        ocols = {r[0].lower() for r in con.execute("DESCRIBE observation").fetchall()}
+        obs = con.execute(f"""
             SELECT c.row_id,
-                   MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) THEN 1 ELSE 0 END) AS tob_cur_obs,
-                   MAX(CASE WHEN o.observation_concept_id = 4310280 THEN 1 ELSE 0 END) AS tob_former_obs
+                   MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) OR {_smoking_is(SMOKING_CURRENT, ocols)} THEN 1 ELSE 0 END) AS tob_cur_obs,
+                   MAX(CASE WHEN o.observation_concept_id = 4310280 OR {_smoking_is(SMOKING_FORMER, ocols)} THEN 1 ELSE 0 END) AS tob_former_obs,
+                   MAX(CASE WHEN o.observation_concept_id IN ({", ".join(map(str, NEVER_SMOKER_CONCEPTS))})
+                             OR {_smoking_is(SMOKING_NEVER, ocols)} THEN 1 ELSE 0 END) AS tob_never_obs
             FROM _bf_ph c
             LEFT JOIN observation o ON o.person_id = c.subject_id AND o.observation_date <= CAST(c.cohort_end_date AS DATE)
             GROUP BY c.row_id ORDER BY c.row_id""").df()
@@ -891,7 +923,8 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
     out = util.drop(columns=["row_id"]).copy()
     out["n_secondary_dx"] = dx["n_secondary_dx"].to_numpy()
     out["elix_pre_index_conditions_count"] = dx["elix_pre_index_conditions_count"].to_numpy()
-    out["tobacco"] = np.where(cur, "Current user", np.where(former, "Former user", "Never user"))
+    never = obs["tob_never_obs"].to_numpy() == 1
+    out["tobacco"] = np.where(cur, "Current user", np.where(former, "Former user", np.where(never, "Never user", TOBACCO_UNKNOWN)))
     return out
 
 

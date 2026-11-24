@@ -685,6 +685,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         if "all" not in allow and "concept_set_coverage" not in allow:
             # the old lists are known to miss codes the bundled sets hold: reproducing them must not fail on it (still recorded)
             allow.append("concept_set_coverage")
+    # how a missing in-stay BMI is filled (extract_benchmark_features' default for the profile); the Methods text describes it
+    bmi_fill_used = (feature_kwargs or {}).get("bmi_fill") or ("derive_lookback" if profile in ("ederri", "both") else "derive")
     settings = json.loads(json.dumps({"window": [start, end], "profile": profile, "concept_sets": concept_sets["sha256"], "cohort_params": c_params, "attrition_mode": attrition_mode,
                                       "address_table": address_table, "address_tie_break": address_tie_break, "address_undated": undated,
                                       "ruca": (_file_fingerprint(ruca_crosswalk) or {}).get("sha256", None if ruca_crosswalk is None else "in memory"),
@@ -835,7 +837,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                        run={"n_sites": len(labels), "window": [start, end], "decisions": dec, "bootstraps": n_bootstraps,
                                             "random_state": random_state, "preset": preset, "environment": run_environment(),
                                             "cohort_params": c_params, "qualifying_stays": n_qualifying,
-                                            **({"random_draw_redrawn": redrawn_total} if pinned is not None else {})},
+                                            **({"random_draw_redrawn": redrawn_total} if pinned is not None else {}), "bmi_fill": bmi_fill_used},
                                        summary=res.get("summary"))
         staged = [d["qmd"], *([d["bib"]] if d.get("bib") else []), *d["files"].values()]
         doc_record.update({"renderer": d["renderer"], "files": [p.name for p in staged], "missing": d["missing"], "note": d["note"],
@@ -872,6 +874,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                   str(site_labels_arg) not in ("random", "ordered") else str(site_labels_arg or "ordered"))
     (out / f"{prefix}_run.json").write_text(json.dumps({"n_sites": len(labels), "labels": sorted(labels.values()), "window": [start, end], "profile": profile, "preset": preset, "decisions": dec, "pinned": pinned is not None,
                                                      **({"random_draw_redrawn": redrawn_total} if pinned is not None else {}),
+                                                       "bmi_fill": bmi_fill_used,
                                                        "n": int(len(pooled)), "qualifying_stays": n_qualifying, "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
                                                        "cohort_params": json.loads(json.dumps(c_params, default=str)),
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},

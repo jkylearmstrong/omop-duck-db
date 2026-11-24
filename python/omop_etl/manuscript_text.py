@@ -341,6 +341,8 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     ctx["random_draw"] = _random_draw(wb, prefix)
     if run_rec.get("random_draw_redrawn"):  # patients whose stay in the reused draw is no longer eligible, given another eligible stay
         ctx["random_draw"]["redrawn"] = int(run_rec["random_draw_redrawn"])
+    # how a stay with no BMI recorded during the stay was filled (0.34.1); a run record without "bmi_fill" gets its profile's default
+    ctx["bmi_fill"] = run_rec.get("bmi_fill") or ("derive_lookback" if run_rec.get("profile", "ederri") in ("ederri", "both") else "derive")
     if ctx["cohort"].get("contrast"):
         ctx["table1_contrast"] = " and ".join(ctx["cohort"].pop("contrast"))
     window = run_rec.get("window")

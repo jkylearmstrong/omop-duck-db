@@ -166,6 +166,8 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
   ids <- function(x) if (length(x)) paste(as.integer(x), collapse = ", ") else "NULL"
   cols <- DBI::dbGetQuery(con, "SELECT column_name FROM information_schema.columns WHERE table_name = 'measurement'")$column_name
   unit <- if ("unit_concept_id" %in% cols) "m.unit_concept_id" else "CAST(NULL AS INTEGER)"
+  # the unit as written, for a database whose unit_concept_id is 0 but whose source says "kg" or "cm" (0.34.1 review)
+  usv <- if ("unit_source_value" %in% cols) "lower(trim(m.unit_source_value))" else "CAST(NULL AS VARCHAR)"
   hts <- ids(.BMI_HEIGHT_CONCEPTS); wts <- ids(.BMI_WEIGHT_CONCEPTS)
   duckdb::duckdb_register(con, "_bmi_c", cohort[, c("row_id", "subject_id", "cohort_start_date", "cohort_end_date")])
   on.exit(duckdb::duckdb_unregister(con, "_bmi_c"), add = TRUE)
@@ -175,10 +177,13 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
              CAST(m.measurement_date AS DATE) >= CAST(c.cohort_start_date AS DATE) AS in_stay,
              CASE WHEN m.measurement_concept_id IN (%1$s) THEN 'h' WHEN m.measurement_concept_id IN (%2$s) THEN 'w' ELSE 'b' END AS kind,
              CASE WHEN m.measurement_concept_id IN (%1$s) THEN
-                       CASE WHEN %3$s = 8582 OR (COALESCE(%3$s, 0) <> 9330 AND m.value_as_number >= 100)
+                       CASE WHEN %3$s = 8582 OR %8$s IN ('cm', 'centimeter', 'centimeters')
+                                 OR (COALESCE(%3$s, 0) NOT IN (9326, 9330) AND COALESCE(%8$s, '') NOT IN ('in', 'inch', 'inches', '[in_i]')
+                                     AND m.value_as_number >= 100)
                             THEN m.value_as_number / 100.0 ELSE m.value_as_number * 0.0254 END
                   WHEN m.measurement_concept_id IN (%2$s) THEN
-                       CASE WHEN %3$s = 9529 THEN m.value_as_number ELSE m.value_as_number * 0.45359237 END
+                       CASE WHEN %3$s = 9529 OR %8$s IN ('kg', 'kgs', 'kilogram', 'kilograms') THEN m.value_as_number
+                            ELSE m.value_as_number * 0.45359237 END
                   ELSE m.value_as_number END AS v
       FROM _bmi_c c
       JOIN measurement m ON m.person_id = c.subject_id
@@ -194,7 +199,7 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
            arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'b') AS prior_bmi,
            arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'w')
              / (arg_max(v, struct_pack(t := ts, id := mid)) FILTER (WHERE NOT in_stay AND kind = 'h') ^ 2) AS prior_derived
-    FROM m2 GROUP BY row_id", hts, wts, unit, if (mode == "derive_lookback") as.integer(lookback_days) else 0L, ids(bmi_ids), lo, hi))
+    FROM m2 GROUP BY row_id", hts, wts, unit, if (mode == "derive_lookback") as.integer(lookback_days) else 0L, ids(bmi_ids), lo, hi, usv))
   idx <- match(seq_along(measured) - 1L, got$row_id)
   steps <- c(derived_in_stay = "stay_derived")
   if (mode == "derive_lookback") steps <- c(steps, recorded_prior = "prior_bmi", derived_prior = "prior_derived")
@@ -217,7 +222,8 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
 #' `n_secondary_dx` (secondary diagnoses of the index stay since 0.34.0: distinct diagnosis codes as recorded, dots and case ignored,
 #' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`),
 #' `elix_pre_index_conditions_count` (distinct condition concepts before the admission, all history) and `tobacco`
-#' (`"Current user"`, `"Former user"` or `"Never user"` from tobacco observation concepts and ICD F17 / Z72.0 / 305.1 / Z87.891 /
+#' (`"Current user"`, `"Former user"`, `"Never user"` or, with no status, `"Missing / Unknown"` (0.34.1), from tobacco observation
+#' concepts, the PCORnet VITAL smoking status (43054909) and ICD F17 / Z72.0 / 305.1 / Z87.891 /
 #' V15.82). Visits are counted in `[admission - lookback_days, admission)`; diagnoses and observations up to the discharge date.
 #' Same as Python `omop_etl.extract_protocol_history_features`.
 #'
@@ -238,7 +244,7 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
            COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 581385, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
            COUNT(CASE WHEN pv.visit_concept_id IN (9202, 581477, 5083) THEN 1 END) AS prior_outpatient_count,
            COALESCE(date_diff('day', MAX(pv.visit_start_date), CAST(c.cohort_start_date AS DATE)), %1$d) AS days_since_prior_encounter,
-           COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262) THEN pv.visit_start_date END),
+           COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 581385, 2000000048) THEN pv.visit_start_date END),
                               CAST(c.cohort_start_date AS DATE)), %1$d) AS days_since_prior_ip_ed,
            COUNT(CASE WHEN pv.visit_concept_id IN (9201, 262)
                        AND pv.visit_start_date >= CAST(c.cohort_start_date AS DATE) - 365 THEN 1 END) AS readmission_count_twelve_months
@@ -254,32 +260,45 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
   principal <- paste0("(", paste(if (length(parts)) parts else "FALSE", collapse = " OR "), ")")
   code <- "coalesce(nullif(upper(replace(trim(co.condition_source_value), '.', '')), ''), 'concept:' || CAST(co.condition_concept_id AS VARCHAR))"
   in_stay <- "co.condition_start_date >= CAST(c.cohort_start_date AS DATE)"
+  tdx <- "upper(replace(trim(co.condition_source_value), '.', ''))"  # tobacco ICD codes with or without dots (0.34.1)
   dx <- DBI::dbGetQuery(con, paste0("
     SELECT c.row_id,
            COUNT(DISTINCT CASE WHEN ", in_stay, " THEN ", code, " END)
            - COUNT(DISTINCT CASE WHEN ", in_stay, " AND ", principal, " THEN ", code, " END) AS n_secondary_dx,
            COUNT(DISTINCT CASE WHEN co.condition_start_date < CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END) AS elix_pre_index_conditions_count,
-           MAX(CASE WHEN co.condition_source_value LIKE 'F17%' OR co.condition_source_value LIKE 'Z72.0%'
-                     OR co.condition_source_value LIKE '305.1%' THEN 1 ELSE 0 END) AS tob_cur_dx,
-           MAX(CASE WHEN co.condition_source_value LIKE 'Z87.891%' OR co.condition_source_value LIKE 'V15.82%' THEN 1 ELSE 0 END) AS tob_former_dx
+           MAX(CASE WHEN ", tdx, " LIKE 'F17%' OR ", tdx, " LIKE 'Z720%' OR ", tdx, " LIKE '3051%' THEN 1 ELSE 0 END) AS tob_cur_dx,
+           MAX(CASE WHEN ", tdx, " LIKE 'Z87891%' OR ", tdx, " LIKE 'V1582%' THEN 1 ELSE 0 END) AS tob_former_dx
     FROM _bf_ph c
     LEFT JOIN condition_occurrence co ON co.person_id = c.subject_id
          AND co.condition_start_date <= CAST(c.cohort_end_date AS DATE)
     GROUP BY c.row_id ORDER BY c.row_id"))
-  obs <- DBI::dbGetQuery(con, "
+  ocols <- tolower(DBI::dbGetQuery(con, "DESCRIBE observation")$column_name)
+  obs <- DBI::dbGetQuery(con, paste0("
     SELECT c.row_id,
-           MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) THEN 1 ELSE 0 END) AS tob_cur_obs,
-           MAX(CASE WHEN o.observation_concept_id = 4310280 THEN 1 ELSE 0 END) AS tob_former_obs
+           MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) OR ", .bf_smoking_is(.SMOKING_CURRENT, ocols), " THEN 1 ELSE 0 END) AS tob_cur_obs,
+           MAX(CASE WHEN o.observation_concept_id = 4310280 OR ", .bf_smoking_is(.SMOKING_FORMER, ocols), " THEN 1 ELSE 0 END) AS tob_former_obs,
+           MAX(CASE WHEN o.observation_concept_id IN (4144272, 4052039) OR ", .bf_smoking_is(.SMOKING_NEVER, ocols), " THEN 1 ELSE 0 END) AS tob_never_obs
     FROM _bf_ph c
     LEFT JOIN observation o ON o.person_id = c.subject_id AND o.observation_date <= CAST(c.cohort_end_date AS DATE)
-    GROUP BY c.row_id ORDER BY c.row_id")
+    GROUP BY c.row_id ORDER BY c.row_id"))
   cur <- dx$tob_cur_dx == 1 | obs$tob_cur_obs == 1
   former <- dx$tob_former_dx == 1 | obs$tob_former_obs == 1
   out <- util[, setdiff(names(util), "row_id"), drop = FALSE]
   out$n_secondary_dx <- dx$n_secondary_dx
   out$elix_pre_index_conditions_count <- dx$elix_pre_index_conditions_count
-  out$tobacco <- ifelse(cur, "Current user", ifelse(former, "Former user", "Never user"))
+  out$tobacco <- ifelse(cur, "Current user", ifelse(former, "Former user", ifelse(obs$tob_never_obs == 1, "Never user", "Missing / Unknown")))
   out
+}
+
+# PCORnet VITAL.SMOKING as loaded by the converter (observation 43054909, LOINC 72166-2): answer concept, else the PCORnet code (0.34.1)
+.SMOKING_CURRENT <- c("01" = 45881517L, "02" = 45884037L, "05" = 45881518L, "07" = 45884038L, "08" = 45878118L)
+.SMOKING_FORMER <- c("03" = 45883458L)
+.SMOKING_NEVER <- c("04" = 45879404L)
+.bf_smoking_is <- function(codes, cols) {
+  vc <- if ("value_as_concept_id" %in% cols) "o.value_as_concept_id" else "CAST(NULL AS INTEGER)"
+  vs <- if ("value_source_value" %in% cols) "o.value_source_value" else "CAST(NULL AS VARCHAR)"
+  sprintf("(o.observation_concept_id = 43054909 AND (%s IN (%s) OR (COALESCE(%s, 0) = 0 AND lpad(trim(COALESCE(%s, '')), 2, '0') IN (%s))))",
+          vc, paste(codes, collapse = ", "), vc, vs, paste0("'", names(codes), "'", collapse = ", "))
 }
 
 # Reorder an extractor result (one row per distinct person x index date) to the cohort's row order.
