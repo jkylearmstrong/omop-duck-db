@@ -157,7 +157,9 @@ EDERRI_MEDICATION_SPECS <- lapply(load_concept_sets("medications_ederri"), funct
 #'
 #' One row per cohort row, in cohort order: `prior_encounters_all_count`, `prior_ip_os_ed_count` (inpatient 9201 / 262, ED
 #' 9203 and 2000000048 visits), `days_since_prior_encounter`, `days_since_prior_ip_ed` (`lookback_days` when there is none),
-#' `readmission_count_twelve_months`, `n_secondary_dx_ccs` (distinct condition concepts from admission to discharge),
+#' `readmission_count_twelve_months`, `prior_outpatient_count` (outpatient 9202 / 581477 and telehealth 5083 visits, since 0.34.0),
+#' `n_secondary_dx` (secondary diagnoses of the index stay since 0.34.0: distinct diagnosis codes as recorded, dots and case ignored,
+#' from admission to discharge, leaving out the principal diagnosis's code; it replaces `n_secondary_dx_ccs`),
 #' `elix_pre_index_conditions_count` (distinct condition concepts before the admission, all history) and `tobacco`
 #' (`"Current user"`, `"Former user"` or `"Never user"` from tobacco observation concepts and ICD F17 / Z72.0 / 305.1 / Z87.891 /
 #' V15.82). Visits are counted in `[admission - lookback_days, admission)`; diagnoses and observations up to the discharge date.
@@ -178,6 +180,7 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
     SELECT c.row_id,
            COUNT(pv.visit_occurrence_id) AS prior_encounters_all_count,
            COUNT(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262, 2000000048) THEN 1 END) AS prior_ip_os_ed_count,
+           COUNT(CASE WHEN pv.visit_concept_id IN (9202, 581477, 5083) THEN 1 END) AS prior_outpatient_count,
            COALESCE(date_diff('day', MAX(pv.visit_start_date), CAST(c.cohort_start_date AS DATE)), %1$d) AS days_since_prior_encounter,
            COALESCE(date_diff('day', MAX(CASE WHEN pv.visit_concept_id IN (9201, 9203, 262) THEN pv.visit_start_date END),
                               CAST(c.cohort_start_date AS DATE)), %1$d) AS days_since_prior_ip_ed,
@@ -188,9 +191,17 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
          AND pv.visit_start_date < CAST(c.cohort_start_date AS DATE)
          AND pv.visit_start_date >= CAST(c.cohort_start_date AS DATE) - %1$d
     GROUP BY c.row_id, c.cohort_start_date ORDER BY c.row_id", lb))
-  dx <- DBI::dbGetQuery(con, "
+  co_cols <- tolower(DBI::dbGetQuery(con, "DESCRIBE condition_occurrence")$column_name)
+  ids <- "44786627, 44786628, 32902"  # primary condition (the PCORnet ETL's PDX = 'P'), first position, primary diagnosis
+  parts <- sprintf("coalesce(co.%s, 0) IN (%s)", intersect(c("condition_type_concept_id", "condition_status_concept_id"), co_cols), ids)
+  if ("condition_status_source_value" %in% co_cols) parts <- c(parts, "upper(coalesce(co.condition_status_source_value, '')) = 'P'")
+  principal <- paste0("(", paste(if (length(parts)) parts else "FALSE", collapse = " OR "), ")")
+  code <- "coalesce(nullif(upper(replace(trim(co.condition_source_value), '.', '')), ''), 'concept:' || CAST(co.condition_concept_id AS VARCHAR))"
+  in_stay <- "co.condition_start_date >= CAST(c.cohort_start_date AS DATE)"
+  dx <- DBI::dbGetQuery(con, paste0("
     SELECT c.row_id,
-           COUNT(DISTINCT CASE WHEN co.condition_start_date >= CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END) AS n_secondary_dx_ccs,
+           COUNT(DISTINCT CASE WHEN ", in_stay, " THEN ", code, " END)
+           - COUNT(DISTINCT CASE WHEN ", in_stay, " AND ", principal, " THEN ", code, " END) AS n_secondary_dx,
            COUNT(DISTINCT CASE WHEN co.condition_start_date < CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END) AS elix_pre_index_conditions_count,
            MAX(CASE WHEN co.condition_source_value LIKE 'F17%' OR co.condition_source_value LIKE 'Z72.0%'
                      OR co.condition_source_value LIKE '305.1%' THEN 1 ELSE 0 END) AS tob_cur_dx,
@@ -198,7 +209,7 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
     FROM _bf_ph c
     LEFT JOIN condition_occurrence co ON co.person_id = c.subject_id
          AND co.condition_start_date <= CAST(c.cohort_end_date AS DATE)
-    GROUP BY c.row_id ORDER BY c.row_id")
+    GROUP BY c.row_id ORDER BY c.row_id"))
   obs <- DBI::dbGetQuery(con, "
     SELECT c.row_id,
            MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) THEN 1 ELSE 0 END) AS tob_cur_obs,
@@ -209,7 +220,7 @@ extract_protocol_history_features <- function(con, cohort, lookback_days = 365) 
   cur <- dx$tob_cur_dx == 1 | obs$tob_cur_obs == 1
   former <- dx$tob_former_dx == 1 | obs$tob_former_obs == 1
   out <- util[, setdiff(names(util), "row_id"), drop = FALSE]
-  out$n_secondary_dx_ccs <- dx$n_secondary_dx_ccs
+  out$n_secondary_dx <- dx$n_secondary_dx
   out$elix_pre_index_conditions_count <- dx$elix_pre_index_conditions_count
   out$tobacco <- ifelse(cur, "Current user", ifelse(former, "Former user", "Never user"))
   out

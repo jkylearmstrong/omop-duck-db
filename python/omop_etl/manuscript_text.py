@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 __all__ = ["manuscript_context", "render_manuscript_body", "template_dir", "available_templates", "load_params", "MISSING_MARK"]
@@ -186,7 +187,13 @@ def _loso(tabs) -> dict[str, Any]:
     aucs = [c["est"] for c in (_ci(v) for v in site_rows[auc_col]) if c] if auc_col else []
     if not aucs:
         return {}
-    return {"n_sites": len(aucs), "auc_min": min(aucs), "auc_max": max(aucs), "auc_mean": sum(aucs) / len(aucs)}
+    out = {"n_sites": len(aucs), "auc_min": min(aucs), "auc_max": max(aucs), "auc_mean": sum(aucs) / len(aucs)}
+    mean_row = t5[t5.iloc[:, 0].astype(str).str.startswith("Mean of")]
+    if auc_col and len(mean_row):  # the text quotes the table's own (rounded) mean, not a mean of the rounded site values
+        m = _first_number(mean_row.iloc[0][auc_col])
+        if m is not None:
+            out["auc_mean"] = m
+    return out
 
 
 def _regression(tabs) -> dict[str, Any]:
@@ -331,6 +338,7 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     q = run_rec.get("qualifying_stays")
     ctx["attrition"] = ({"qualifying_stays": int(q), "stays_per_patient": int(q) / n_ if n_ else None} if q and (not n_ or int(q) >= n_)
                         else _attrition(tabs, n_))
+    ctx["random_draw"] = _random_draw(wb, prefix)
     if ctx["cohort"].get("contrast"):
         ctx["table1_contrast"] = " and ".join(ctx["cohort"].pop("contrast"))
     window = run_rec.get("window")
@@ -633,8 +641,21 @@ SHEET_KEYS = {"Table 1": "table1", "Table 2": "performance", "Table 3": "tuning"
 _FIGURE_KEYS = (("flowchart", ("Flowchart", "CONSORT")), ("shap", ("SHAP_XGBoost", "SHAP_4Panel", "SHAP")))
 _FIGURE_CAPTIONS = {"flowchart": "Cohort selection flowchart. P = unique patients; each step is a patient-level count from the omop-duck-db cohort "
                                  "attrition table, summed over the {nsites_word} health systems. The final box is the analytic cohort: one qualifying "
-                                 "stay drawn at random for each patient.",
+                                 "stay drawn at random for each patient.{draw_note}",
                     "shap": "SHAP Summary Plot for XGBoost with 50/50 Balanced Training (Top 15 Predictors, {shap_n} Sampled Patients)"}
+
+
+def _random_draw(wb: Path, prefix: str | None) -> dict[str, Any]:
+    """The patients the study's reused random draw leaves out (Figure 1's last exclusion arrow), from ``<prefix>_CONSORT_Attrition.csv``
+    next to the workbook: ``{"excluded": n}``, or ``{}`` for a run without a pinned draw."""
+    f = wb.with_name(f"{prefix}_CONSORT_Attrition.csv") if prefix else None
+    if f is None or not f.exists():
+        return {}
+    from omop_etl.study_run import mark_random_draw
+
+    a = mark_random_draw(pd.read_csv(f))
+    k = int(pd.to_numeric(a.loc[a["into_final"], "subjects_dropped"], errors="coerce").fillna(0).sum()) if "subjects_dropped" in a else 0
+    return {"excluded": k} if k > 0 else {}
 
 
 def _caption_with_context(cap: str, context: Mapping[str, Any]) -> str:
@@ -642,8 +663,26 @@ def _caption_with_context(cap: str, context: Mapping[str, Any]) -> str:
     n = (context.get("run") or {}).get("n_sites")
     words_ = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     cap = cap.replace("{nsites_word}", words_.get(n, str(n)) if n else "").replace("  ", " ")
+    k = (context.get("random_draw") or {}).get("excluded")
+    cap = cap.replace("{draw_note}", f" The study scores the stays of one random draw, made once and reused in every analysis; the {k:,} patients whose "
+                                     "qualifying stays in the window were not in that draw branch off the last arrow." if k else "")
     shap_n = (context.get("shap") or {}).get("n_sample")
     return cap.replace("{shap_n}", f"{shap_n:,}") if shap_n else cap.replace(", {shap_n} Sampled Patients", "")
+
+
+def metric_cells(t: pd.DataFrame, digits: int | None = None) -> pd.DataFrame:
+    """Tables 2 and 3 as printed: every number in a metric column (one that holds a non-whole number) as text with ``digits`` places
+    (default :data:`omop_etl.manuscript_tables.METRIC_DECIMALS`), so 0.6 prints as 0.60. The workbook keeps them as numbers, and
+    Excel reads a number back without its trailing zero, so the printed table cannot rely on the cell. Count columns are left alone."""
+    from omop_etl.manuscript_tables import METRIC_DECIMALS
+
+    d = METRIC_DECIMALS if digits is None else digits
+    out = t.copy().astype(object)
+    for c in out.columns:
+        vals = [v for v in out[c] if isinstance(v, (float, np.floating)) and not pd.isna(v)]
+        if any(not float(v).is_integer() for v in vals):
+            out[c] = [f"{float(v):.{d}f}" if isinstance(v, (float, np.floating)) and not pd.isna(v) else v for v in out[c]]
+    return out
 
 
 def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], images: Sequence[Path], *, workbook: str | Path,
@@ -663,6 +702,8 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
             cap = re.sub(r"^Table S?\d+:\s*", "", str(title))
             if key == "grid":  # the workbook keeps the unrounded auc_raw / f1_raw tuning selects on; the printed table does not
                 t = t.drop(columns=[c for c in t.columns if str(c).endswith("_raw")])
+            if key in ("performance", "loso", "grid"):  # Table S4 too: Rubin's 2 decimals (C10 review)
+                t = metric_cells(t)
             if key in layout.get("transpose", []):
                 t = transpose_for_print(t)
             tables[key] = (_esc(cap), _table_md(t))

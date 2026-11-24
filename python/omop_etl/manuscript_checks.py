@@ -43,7 +43,8 @@ def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequ
     8. no snake_case column name (``lab_...``, ``vital_...``, ``elix_...``) in the text."""
     from pypdf import PdfReader
 
-    pages = [p.extract_text() or "" for p in PdfReader(str(pdf)).pages]
+    # the page number printed at the foot of each page is dropped, so a phrase that runs onto the next page reads as one ("heart 2 rate")
+    pages = [re.sub(r"\s*\b\d{1,3}\s*$", "", p.extract_text() or "") for p in PdfReader(str(pdf)).pages]
     text = "\n".join(pages)
     flat = re.sub(r"\s+", " ", text)
     out: list[dict[str, Any]] = []

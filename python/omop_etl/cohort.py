@@ -2654,7 +2654,7 @@ def export_consort_flowchart(attrition: Any, out_path: str | Path = "figure1.png
             ax.annotate("", xy=(x, yb + 0.5), xytext=(3.6, y0 - 0.26),
                         arrowprops=dict(arrowstyle="-|>", lw=1.2, shrinkA=0, shrinkB=0))
             share = 100.0 * int(cnt) / total if total else 0.0
-            ax.text(x, yb, f"{lab}\nN = {int(cnt):,} ({share:.2f}%)", ha="center", va="center", fontsize=10, bbox=box)
+            ax.text(x, yb, f"{lab}\nN = {int(cnt):,} ({share:.1f}%)", ha="center", va="center", fontsize=10, bbox=box)
     if title:
         ax.text(5, n * 2 + 0.6, title, ha="center", va="center", fontsize=12, fontweight="bold")
     out = Path(out_path)

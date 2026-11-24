@@ -403,7 +403,7 @@ def los_by_site(df: pd.DataFrame, *, site_col: str = "site_anon", los_col: str =
             rows.append([name, f"<{min_cell}" if len(d) < min_cell else len(d)] + [""] * (len(cols) - 2))
             continue
         allv = d[los_col].dropna()
-        rows.append([name, len(d), int(y.sum()), int((~y).sum()), f"{100 * y.mean():.2f}%", ms(allv), ms(a), ms(b), md(allv), md(a), md(b),
+        rows.append([name, len(d), int(y.sum()), int((~y).sum()), f"{100 * y.mean():.1f}%", ms(allv), ms(a), ms(b), md(allv), md(a), md(b),
                      a.max(), b.max(), p_text(stats.ttest_ind(a, b, equal_var=False).pvalue), p_text(stats.mannwhitneyu(a, b).pvalue)])
     return pd.DataFrame(rows, columns=cols)
 
@@ -635,8 +635,8 @@ def plot_cohort_flowchart(attrition: pd.DataFrame, n: int, n_readmitted: int, *,
     arrow(cx, bottom, cx, y)
     final_bottom = box(x0, x1, y, text, h, main)
     lx, rx = (x0 + cx - 0.1) / 2, (cx + 0.1 + x1) / 2
-    left, lh = box_text(["30-day readmission", f"N = {n_readmitted:,} ({100 * n_readmitted / n:.2f}%)"], cx - 0.1 - x0, outcome)
-    right, rh = box_text(["No readmission", f"N = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.2f}%)"], x1 - cx - 0.1, outcome)
+    left, lh = box_text(["30-day readmission", f"N = {n_readmitted:,} ({100 * n_readmitted / n:.1f}%)"], cx - 0.1 - x0, outcome)
+    right, rh = box_text(["No readmission", f"N = {n - n_readmitted:,} ({100 * (n - n_readmitted) / n:.1f}%)"], x1 - cx - 0.1, outcome)
     yo = final_bottom - 0.5
     ym = (final_bottom + yo) / 2
     ax.plot([cx, cx], [final_bottom, ym], color="black", lw=1.1)
@@ -759,14 +759,42 @@ def explain_models(X: pd.DataFrame, y: pd.Series | np.ndarray, *, grid: Mapping[
     return out
 
 
+def _violin_profile(x: np.ndarray, rank: np.ndarray, grid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Gaussian-smoothed density of ``x`` on ``grid`` and, at each grid point, the density-weighted mean of ``rank`` (the colour)."""
+    if len(x) == 0:
+        return np.zeros(len(grid)), np.full(len(grid), 0.5)
+    sd = float(np.std(x))
+    bw = 1.06 * (sd if sd > 0 else (grid[-1] - grid[0]) / 50) * len(x) ** (-1 / 5)
+    bw = max(bw, (grid[-1] - grid[0]) / 200)
+    if len(x) > 5000:  # the profile of a large sample is the same from a binned one; keeps the plot fast
+        edges = np.linspace(grid[0], grid[-1], 801)
+        idx = np.clip(np.digitize(x, edges) - 1, 0, 799)
+        w = np.bincount(idx, minlength=800).astype(float)
+        wr = np.bincount(idx, weights=rank, minlength=800)
+        centers = (edges[:-1] + edges[1:]) / 2
+        keep = w > 0
+        x, rank_w, w = centers[keep], wr[keep], w[keep]
+    else:
+        rank_w, w = rank.astype(float), np.ones(len(x))
+    k = np.exp(-0.5 * ((grid[:, None] - x[None, :]) / bw) ** 2)
+    dens = k @ w
+    col = np.divide(k @ rank_w, dens, out=np.full(len(grid), 0.5), where=dens > 0)
+    return dens, np.clip(col, 0, 1)
+
+
 def plot_shap_beeswarm(values: Any, data: pd.DataFrame, *, max_display: int = 15, title: str | None = None, ax: Any = None,
-                       path: str | Path | None = None, dpi: int = 200, seed: int = 0, labels: Callable[[str], str] | None = None) -> Any:
-    """Beeswarm of SHAP values for the ``max_display`` most important features (one dot per patient, coloured by the
-    feature's value rank from low to high). Returns the Figure (or the Axes' figure when ``ax`` is given). ``labels`` turns a
-    column name into its axis label; the default is the clinical label of :func:`omop_etl.manuscript_tables.feature_label`
-    (``labels=str`` keeps the column names).
+                       path: str | Path | None = None, dpi: int = 200, seed: int = 0, labels: Callable[[str], str] | None = None,
+                       kind: str = "violin") -> Any:
+    """SHAP summary plot for the ``max_display`` most important features. ``kind="violin"`` (default since 0.34.0, Dr. Rubin: the
+    vertical extent shows how many patients have each SHAP value) draws one violin per feature, its height the density of the
+    patients' SHAP values and its colour the mean value rank of the feature among the patients at that SHAP value (blue low, red
+    high), as the shap package's layered violin does; ``kind="beeswarm"`` draws one dot per patient, coloured by the feature's value
+    rank. Returns the Figure (or the Axes' figure when ``ax`` is given). ``labels`` turns a column name into its axis label; the
+    default is the clinical label of :func:`omop_etl.manuscript_tables.feature_label` (``labels=str`` keeps the column names).
 
     Drawn with matplotlib alone, so it looks the same whether or not the ``shap`` package is installed."""
+    if kind not in ("violin", "beeswarm"):
+        raise ValueError("kind must be 'violin' or 'beeswarm'.")
     sv = np.asarray(values, dtype=float)
     if sv.shape != data.shape:
         raise ValueError(f"values {sv.shape} and data {data.shape} must have the same shape.")
@@ -782,10 +810,23 @@ def plot_shap_beeswarm(values: Any, data: pd.DataFrame, *, max_display: int = 15
     else:
         fig = ax.figure
     cmap = matplotlib.colormaps["coolwarm"]
+    lo_x, hi_x = float(np.nanmin(sv[:, top])) if len(top) else -1.0, float(np.nanmax(sv[:, top])) if len(top) else 1.0
+    pad = 0.05 * (hi_x - lo_x or 1.0)
+    grid = np.linspace(lo_x - pad, hi_x + pad, 121)
     for row, j in enumerate(top[::-1]):
         a = data.iloc[:, j].to_numpy(dtype=float)
         rank = pd.Series(a).rank(pct=True).to_numpy() if np.nanstd(a) > 0 else np.full(len(a), 0.5)
-        ax.scatter(sv[:, j], row + rng.uniform(-0.28, 0.28, len(a)), c=cmap(rank), s=5, linewidths=0, rasterized=True)
+        if kind == "beeswarm":
+            ax.scatter(sv[:, j], row + rng.uniform(-0.28, 0.28, len(a)), c=cmap(rank), s=5, linewidths=0, rasterized=True)
+            continue
+        x = sv[:, j]
+        ok = ~np.isnan(x)
+        dens, rk = _violin_profile(x[ok], np.nan_to_num(rank[ok], nan=0.5), grid)
+        half = 0.42 * dens / dens.max() if dens.max() > 0 else dens
+        for k in range(len(grid) - 1):
+            h = max(half[k], half[k + 1])
+            if h > 1e-3:
+                ax.fill_between(grid[k:k + 2], row - half[k:k + 2], row + half[k:k + 2], color=cmap(rk[k]), linewidth=0)
     ax.axvline(0, color="#888888", lw=0.8)
     ax.set_yticks(range(len(top)))
     if labels is None:

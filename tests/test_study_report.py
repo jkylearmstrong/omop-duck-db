@@ -182,7 +182,7 @@ def test_plot_cohort_flowchart_writes_png_and_validates(attrition, tmp_path):
     fig = sr.plot_cohort_flowchart(attrition, 600, 90, path=f)
     assert f.exists() and f.stat().st_size > 5000
     texts = " ".join(t.get_text() for t in fig.axes[0].texts)
-    assert "N = P = 600" in texts and "N = 90 (15.00%)" in texts and "N = 510 (85.00%)" in texts and "P = 100" in texts
+    assert "N = P = 600" in texts and "N = 90 (15.0%)" in texts and "N = 510 (85.0%)" in texts and "P = 100" in texts
     with pytest.raises(ValueError, match="step_name"):
         sr.plot_cohort_flowchart(attrition.drop(columns="step_name"), 600, 90)
     with pytest.raises(ValueError, match="n_readmitted"):

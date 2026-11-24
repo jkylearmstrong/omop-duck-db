@@ -133,7 +133,7 @@ test_that("extract_protocol_history_features follows the protocol's windows", {
   expect_equal(c(h$days_since_prior_encounter[[1]], h$days_since_prior_ip_ed[[1]]), c(40, 40))
   expect_equal(h$readmission_count_twelve_months[[1]], 1)
   expect_equal(c(h$days_since_prior_encounter[[2]], h$prior_encounters_all_count[[2]]), c(365, 0))
-  expect_equal(c(h$n_secondary_dx_ccs[[1]], h$elix_pre_index_conditions_count[[1]]), c(1, 1))
+  expect_equal(c(h$n_secondary_dx[[1]], h$elix_pre_index_conditions_count[[1]], h$prior_outpatient_count[[1]]), c(1, 1, 1))
   expect_equal(h$tobacco, c("Current user", "Former user", "Never user"))
   expect_equal(extract_protocol_history_features(con, cohort, lookback_days = 30)$days_since_prior_encounter[[2]], 30)
   expect_error(extract_protocol_history_features(con, cohort, lookback_days = -1), "non-negative")
@@ -228,4 +228,27 @@ test_that("resolve_address_table stops instead of guessing", {
   expect_error(resolve_address_table(con, "nope_address"), "does not exist")
   expect_null(resolve_address_table(con, NULL))
   expect_equal(find_address_tables(con)$table, "ederri_address_history")
+})
+
+test_that("n_secondary_dx leaves out the principal diagnosis and counts codes once; prior_outpatient_count (0.34.0)", {
+  con <- DBI::dbConnect(duckdb::duckdb()); on.exit(DBI::dbDisconnect(con, shutdown = TRUE))
+  DBI::dbExecute(con, "CREATE TABLE visit_occurrence (visit_occurrence_id BIGINT, person_id BIGINT, visit_concept_id INT, visit_start_date DATE,
+                       visit_end_date DATE)")
+  DBI::dbExecute(con, "INSERT INTO visit_occurrence VALUES (1, 1, 9202, DATE '2019-11-01', NULL), (2, 1, 5083, DATE '2019-10-01', NULL),
+                       (3, 1, 581477, DATE '2019-09-01', NULL), (4, 1, 9203, DATE '2019-08-01', NULL), (5, 1, 0, DATE '2019-07-01', NULL)")
+  DBI::dbExecute(con, "CREATE TABLE condition_occurrence (person_id BIGINT, condition_concept_id INT, condition_start_date DATE,
+                       condition_source_value VARCHAR, condition_type_concept_id INT, condition_status_concept_id INT,
+                       condition_status_source_value VARCHAR, visit_occurrence_id BIGINT)")
+  DBI::dbExecute(con, "INSERT INTO condition_occurrence VALUES
+    (1, 201826, DATE '2020-01-10', 'E11.65', 44786627, 0, 'P', 9), (1, 201826, DATE '2020-01-11', 'E1165', 0, 0, 'S', 9),
+    (1, 316866, DATE '2020-01-10', 'I10', 0, 0, 'S', 9), (1, 316866, DATE '2020-01-12', 'i10', 0, 0, 'S', 9),
+    (1, 4229440, DATE '2020-01-10', 'I50.9', 0, 0, 'S', 9), (1, 4229441, DATE '2020-01-10', 'I50.9', 0, 0, 'S', 9),
+    (1, 255573, DATE '2020-01-11', NULL, 0, 0, NULL, 9), (1, 4180628, DATE '2019-05-01', 'N18.3', 0, 0, 'S', 1)")
+  DBI::dbExecute(con, "CREATE TABLE observation (person_id BIGINT, observation_concept_id INT, observation_date DATE)")
+  cohort <- data.frame(row_id = 0L, subject_id = 1L, cohort_start_date = as.Date("2020-01-10"), cohort_end_date = as.Date("2020-01-15"))
+  h <- extract_protocol_history_features(con, cohort)
+  expect_equal(h$n_secondary_dx[[1]], 3)
+  expect_equal(h$prior_outpatient_count[[1]], 3)
+  expect_equal(h$prior_encounters_all_count[[1]], 5)
+  expect_false("n_secondary_dx_ccs" %in% names(h))
 })

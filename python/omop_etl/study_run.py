@@ -18,7 +18,7 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
+__all__ = ["assign_site_labels", "load_site_labels", "save_site_labels", "validate_site_labels", "RunPrivacyError", "run_environment", "run_study", "PROTOCOL_COHORT_PARAMS", "pin_stays", "figure1_attrition", "redraw_cohort_flowchart", "mark_random_draw", "drop_last_lab_values", "STUDY_DECISIONS", "STUDY_PRESETS", "resolve_decisions"]
 
 from omop_etl.concept_sets import CONCEPT_SET_VERSION, LEGACY_CONCEPT_SETS  # noqa: E402
 
@@ -493,6 +493,12 @@ def redraw_cohort_flowchart(run_dir: str | Path, *, prefix: str = "Study", path:
     return out
 
 
+def drop_last_lab_values(df: pd.DataFrame) -> pd.DataFrame:
+    """The feature table without the latest in-stay lab values (``lab_<name>_last``): the models see each laboratory's index-stay
+    mean only (decision ``last_lab_values="drop"``)."""
+    return df.drop(columns=[c for c in df.columns if re.fullmatch(r"lab_.+_last", str(c))])
+
+
 def _canonical_order(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
     """Pools the site frames in an order that depends only on the data: sites by their key (``site_source``), then rows by person and
     stay. The cross-validation folds and the upsampled training rows are drawn by row position, so before this the model tables changed
@@ -714,7 +720,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                 "private_dir": priv, "checked_only": True}
     pooled = _canonical_order(frames)
     if dec["last_lab_values"] == "drop":  # the models see the index-stay mean of each laboratory only (Methods 2.2, Tables 1 and 4)
-        pooled = pooled.drop(columns=[c for c in pooled.columns if re.fullmatch(r"lab_.+_last", str(c))])
+        pooled = drop_last_lab_values(pooled)
     attrition = pd.concat(atts, ignore_index=True)
     # Figure 1 always shows every step down to the analysed cohort, the grant protocol window included, so the figure, the text and
     # the tables give the same N; consort_final_steps only decides whether Table S3 of the workbook lists the last two steps

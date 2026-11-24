@@ -178,7 +178,7 @@ load_macros <- function(con, temporary = NULL, skip_unresolved = FALSE) {
 .append_state <- new.env(parent = emptyenv())
 .SINCE_COLS <- list(
   `_temp_encounter` = "ADMIT_DATE", `_temp_diagnosis` = c("DX_DATE", "ADMIT_DATE"), `_temp_procedures` = c("PX_DATE", "ADMIT_DATE"),
-  `_temp_lab_result` = "RESULT_DATE", `_temp_vital` = "MEASURE_DATE", `_temp_prescribing` = c("RX_START_DATE", "RX_ORDER_DATE"),
+  `_temp_lab_result` = c("RESULT_DATE", "SPECIMEN_DATE", "LAB_ORDER_DATE"), `_temp_vital` = "MEASURE_DATE", `_temp_prescribing` = c("RX_START_DATE", "RX_ORDER_DATE"),
   `_temp_med_admin` = "MEDADMIN_START_DATE", `_temp_dispensing` = c("DISPENSE_DATE", "DISPENSING_DATE"), `_temp_death` = "DEATH_DATE")
 .APPEND_ANTIJOIN <- list(
   `_temp_demographic` = c("PATID", "person", "person_source_value"),

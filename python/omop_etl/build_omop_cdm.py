@@ -105,7 +105,7 @@ def _source_relation(path):
 _APPEND: dict = {}
 _SINCE_COLS = {
     "_temp_encounter": ["ADMIT_DATE"], "_temp_diagnosis": ["DX_DATE", "ADMIT_DATE"], "_temp_procedures": ["PX_DATE", "ADMIT_DATE"],
-    "_temp_lab_result": ["RESULT_DATE"], "_temp_vital": ["MEASURE_DATE"],
+    "_temp_lab_result": ["RESULT_DATE", "SPECIMEN_DATE", "LAB_ORDER_DATE"], "_temp_vital": ["MEASURE_DATE"],
     "_temp_prescribing": ["RX_START_DATE", "RX_ORDER_DATE"], "_temp_med_admin": ["MEDADMIN_START_DATE"],
     "_temp_dispensing": ["DISPENSE_DATE", "DISPENSING_DATE"], "_temp_death": ["DEATH_DATE"],
 }
@@ -769,7 +769,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
                 WHEN 'ED' THEN 9203 -- Emergency
                 WHEN 'AV' THEN 9202 -- Outpatient
                 WHEN 'OA' THEN 9202 -- Outpatient
-                WHEN 'OT' THEN 9202 -- Other Ambulatory
+                -- OT (other) and NI / UN fall through to 0: an encounter of unknown type is not an outpatient visit (0.34.0)
                 WHEN 'TH' THEN 5083 -- Telehealth
                 ELSE 0
             END AS visit_concept_id,
@@ -985,6 +985,15 @@ def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids
     con.execute("DROP VIEW IF EXISTS _temp_procedures;")
 
 
+#: The lab value as a number (0.34.0). RESULT_NUM first, as before; then RESULT_NUM with thousands separators or a leading operator
+#: removed ("1,200", "<0.01"); then RAW_RESULT when it is only a number with an optional leading operator. A text result ("positive",
+#: "7.5 H") stays NULL. The original text is kept in value_source_value.
+LAB_VALUE_SQL = """COALESCE(
+                TRY_CAST(src.RESULT_NUM AS DOUBLE),
+                TRY_CAST(regexp_replace(trim(src.RESULT_NUM), '^[<>= ]+|,', '', 'g') AS DOUBLE),
+                TRY_CAST(regexp_replace(trim(src.RAW_RESULT), '^[<>= ]+|,', '', 'g') AS DOUBLE))"""
+
+
 def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "lab_result_cm")
     if path is None:
@@ -997,7 +1006,8 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
         path,
         [
             "LAB_RESULT_CM_ID", "PATID", "LAB_LOINC", "RESULT_DATE", "RESULT_TIME",
-            "RESULT_NUM", "RESULT_UNIT", "PROVIDERID", "ENCOUNTERID", "RAW_LAB_NAME", "RAW_LAB_CODE"
+            "RESULT_NUM", "RESULT_UNIT", "PROVIDERID", "ENCOUNTERID", "RAW_LAB_NAME", "RAW_LAB_CODE",
+            "SPECIMEN_DATE", "SPECIMEN_TIME", "LAB_ORDER_DATE", "RAW_RESULT"
         ],
     )
 
@@ -1014,12 +1024,15 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
                 CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
                 0
             ) AS measurement_concept_id,
-            parse_omop_date(src.RESULT_DATE) AS measurement_date,
-            parse_omop_datetime(src.RESULT_DATE, src.RESULT_TIME) AS measurement_datetime,
+            COALESCE(parse_omop_date(src.RESULT_DATE), parse_omop_date(src.SPECIMEN_DATE),
+                     parse_omop_date(src.LAB_ORDER_DATE)) AS measurement_date,
+            COALESCE(parse_omop_datetime(src.RESULT_DATE, src.RESULT_TIME),
+                     parse_omop_datetime(src.SPECIMEN_DATE, src.SPECIMEN_TIME),
+                     parse_omop_datetime(src.LAB_ORDER_DATE, NULL)) AS measurement_datetime,
             src.RESULT_TIME AS measurement_time,
             {TYPE_CONCEPT_EHR_MEASUREMENT} AS measurement_type_concept_id,
             0 AS operator_concept_id,
-            TRY_CAST(src.RESULT_NUM AS DOUBLE) AS value_as_number,
+            {LAB_VALUE_SQL} AS value_as_number,
             0 AS value_as_concept_id,
             0 AS unit_concept_id,
             NULL AS range_low,
@@ -1031,7 +1044,7 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
             COALESCE(c.concept_id, 0) AS measurement_source_concept_id,
             src.RESULT_UNIT AS unit_source_value,
             0 AS unit_source_concept_id,
-            src.RESULT_NUM AS value_source_value,
+            COALESCE(src.RESULT_NUM, src.RAW_RESULT) AS value_source_value,
             NULL AS measurement_event_id,
             0 AS meas_event_field_concept_id
         FROM _temp_lab_result src

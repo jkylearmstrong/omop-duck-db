@@ -598,7 +598,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             WHEN 'ED' THEN 9203 -- Emergency
             WHEN 'AV' THEN 9202 -- Outpatient
             WHEN 'OA' THEN 9202 -- Outpatient
-            WHEN 'OT' THEN 9202 -- Other Ambulatory
+            -- OT (other) and NI / UN fall through to 0: an encounter of unknown type is not an outpatient visit (0.34.0)
             WHEN 'TH' THEN 5083 -- Telehealth
             ELSE 0
         END AS visit_concept_id,
@@ -819,7 +819,8 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   prepare_source_view(
     con, "_temp_lab_result", path,
     c("LAB_RESULT_CM_ID", "PATID", "LAB_LOINC", "RESULT_DATE", "RESULT_TIME",
-      "RESULT_NUM", "RESULT_UNIT", "PROVIDERID", "ENCOUNTERID", "RAW_LAB_NAME", "RAW_LAB_CODE")
+      "RESULT_NUM", "RESULT_UNIT", "PROVIDERID", "ENCOUNTERID", "RAW_LAB_NAME", "RAW_LAB_CODE",
+      "SPECIMEN_DATE", "SPECIMEN_TIME", "LAB_ORDER_DATE", "RAW_RESULT")
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
 
@@ -834,12 +835,18 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
             0
         ) AS measurement_concept_id,
-        parse_omop_date(src.RESULT_DATE) AS measurement_date,
-        parse_omop_datetime(src.RESULT_DATE, src.RESULT_TIME) AS measurement_datetime,
+        COALESCE(parse_omop_date(src.RESULT_DATE), parse_omop_date(src.SPECIMEN_DATE),
+                 parse_omop_date(src.LAB_ORDER_DATE)) AS measurement_date,
+        COALESCE(parse_omop_datetime(src.RESULT_DATE, src.RESULT_TIME),
+                 parse_omop_datetime(src.SPECIMEN_DATE, src.SPECIMEN_TIME),
+                 parse_omop_datetime(src.LAB_ORDER_DATE, NULL)) AS measurement_datetime,
         src.RESULT_TIME AS measurement_time,
         %d AS measurement_type_concept_id,
         0 AS operator_concept_id,
-        TRY_CAST(src.RESULT_NUM AS DOUBLE) AS value_as_number,
+        COALESCE(
+            TRY_CAST(src.RESULT_NUM AS DOUBLE),
+            TRY_CAST(regexp_replace(trim(src.RESULT_NUM), '^[<>= ]+|,', '', 'g') AS DOUBLE),
+            TRY_CAST(regexp_replace(trim(src.RAW_RESULT), '^[<>= ]+|,', '', 'g') AS DOUBLE)) AS value_as_number,
         0 AS value_as_concept_id,
         0 AS unit_concept_id,
         NULL AS range_low,
@@ -851,7 +858,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         COALESCE(c.concept_id, 0) AS measurement_source_concept_id,
         src.RESULT_UNIT AS unit_source_value,
         0 AS unit_source_concept_id,
-        src.RESULT_NUM AS value_source_value,
+        COALESCE(src.RESULT_NUM, src.RAW_RESULT) AS value_source_value,
         NULL AS measurement_event_id,
         0 AS meas_event_field_concept_id
     FROM _temp_lab_result src
