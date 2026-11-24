@@ -651,7 +651,7 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
 
     patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
 
-    run_insert(con, "LOCATION (from LDS_ADDRESS_HISTORY)", """
+    run_insert(con, "LOCATION (from LDS_ADDRESS_HISTORY)", f"""
         INSERT INTO location (
             location_id,
             address_1,
@@ -672,7 +672,7 @@ def load_location(con, source_dir, site_id=None, disambiguate_patids=False):
             NULL AS address_2,
             ADDRESS_CITY AS city,
             UPPER(ADDRESS_STATE) AS state,
-            COALESCE(ADDRESS_ZIP9, ADDRESS_ZIP5) AS zip,
+            {ZIP5_SQL.replace('src.', '')} AS zip,  -- 5 digits, leading zeros restored (0.34.2; was the raw ZIP9 or ZIP5)
             NULL AS county,
             COALESCE(ADDRESS_ZIP5, '') || ', ' || COALESCE(ADDRESS_STATE, '') AS location_source_value,
             4330426 AS country_concept_id,

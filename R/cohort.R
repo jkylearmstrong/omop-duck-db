@@ -538,7 +538,7 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
                             window_days = 30, gap_days = 0, verified = TRUE,
                             evidence = .STUDY_FOLLOWUP_EVIDENCE, rule = "random", seed = 42,
                             pinned_keys = FALSE, require_diabetes = FALSE, transfer_ids = integer(0),
-                            diabetes_drug_rule = "names", diabetes_drug_ancestors = integer(0),
+                            still_in_hospital = character(0), diabetes_drug_rule = "names", diabetes_drug_ancestors = integer(0),
                             concept_ancestor_ref = NULL, metformin_only_pcos = NULL,
                             one_per_patient = TRUE) {
   list(cohort_id = cohort_id, outcome = outcome, label = label, schema = schema, visit_ids = visit_ids,
@@ -547,7 +547,7 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
        exclude_death = exclude_death, death_ids = death_ids, death_sources = death_sources,
        window_days = window_days, gap_days = gap_days, verified = verified, evidence = evidence,
        rule = rule, seed = seed, pinned_keys = pinned_keys, require_diabetes = require_diabetes,
-       transfer_ids = transfer_ids, diabetes_drug_rule = diabetes_drug_rule,
+       transfer_ids = transfer_ids, still_in_hospital = still_in_hospital, diabetes_drug_rule = diabetes_drug_rule,
        diabetes_drug_ancestors = diabetes_drug_ancestors, concept_ancestor_ref = concept_ancestor_ref,
        metformin_only_pcos = metformin_only_pcos, one_per_patient = one_per_patient)
 }
@@ -702,6 +702,11 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
   if (length(spec$transfer_ids)) {
     add("Not transferred to another acute-care hospital",
         sprintf("COALESCE(v.discharged_to_concept_id, 0) NOT IN (%s)", .int_list(spec$transfer_ids)))
+  }
+  if (length(spec$still_in_hospital)) {
+    add("Discharged (not still in hospital)",
+        sprintf("UPPER(TRIM(COALESCE(v.discharged_to_source_value, ''))) NOT IN (%s)",
+                paste(.sql_str(spec$still_in_hospital), collapse = ", ")))
   }
   if (!is.null(spec$metformin_only_pcos)) {
     add("Not metformin-only prediabetes / PCOS (patient-level)",
@@ -1372,7 +1377,8 @@ remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_r
   if (!is.null(spec$min_los_days)) bits <- c(bits, sprintf("LOS >= %s d", .sql_int(spec$min_los_days)))
   if (!is.null(spec$washin_days) && spec$washin_days > 0) bits <- c(bits, sprintf("wash-in %s d", .sql_int(spec$washin_days)))
   bits <- c(bits, if (isTRUE(spec$exclude_death)) "exclude in-hospital death" else "in-hospital death retained",
-            if (length(spec$transfer_ids)) "exclude acute-care transfers")
+            if (length(spec$transfer_ids)) "exclude acute-care transfers",
+            if (length(spec$still_in_hospital)) "exclude stays still in hospital")
   bits <- c(bits, sprintf("outcome %s", spec$label))
   if (!is.null(spec$window_days) && spec$outcome != "in_hospital") {
     bits <- c(bits, sprintf("window (%s, %s] d", .sql_int(spec$gap_days), .sql_int(spec$window_days)))
@@ -1484,6 +1490,9 @@ remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_r
 #'   hospital"; those index stays are excluded (replication rule A6; AMA is kept). Default none, so existing attrition
 #'   tables do not change; the PCORnet ETL writes `8717` for a transfer (`DISCHARGE_STATUS` 'IP'). Adds the attrition
 #'   step "Not transferred to another acute-care hospital". `integer(0)` keeps transfers.
+#' @param still_in_hospital_status Discharge source values (`discharged_to_source_value`, case and spaces ignored) meaning the
+#'   patient was still in hospital at extraction (PCORnet DISCHARGE_STATUS `"SH"`); those index stays have no discharge and are
+#'   excluded (0.34.2). Default none. Adds the attrition step "Discharged (not still in hospital)".
 #' @param death_sources Where a patient's death date comes from: `"death_table"` and/or
 #'   `"discharge_disposition"` (the end date of any visit discharged to a death concept). Default `"death_table"`
 #'   for readmission / cohort-only, both for mortality outcomes.
@@ -1575,6 +1584,7 @@ define_study_cohort <- function(con,
                                 require_verified_followup = TRUE,
                                 death_discharge_concept_ids = NULL,
                                 transfer_discharge_concept_ids = NULL,
+                                still_in_hospital_status = NULL,
                                 death_sources = NULL,
                                 followup_evidence = NULL,
                                 age_method = "completed_years",
@@ -1705,6 +1715,16 @@ define_study_cohort <- function(con,
       .resolve_death_ids(transfer_discharge_concept_ids, "transfer_discharge_concept_ids")
   sources <- if (is.null(death_sources)) conv$death_sources else
     .resolve_choices(death_sources, .STUDY_DEATH_SOURCES, "death_sources")
+  sih <- toupper(trimws(as.character(still_in_hospital_status %||% character(0))))
+  sih <- sih[nzchar(sih)]
+  if (length(sih)) {
+    vtab <- if (is.null(schema)) "visit_occurrence" else paste0(schema, ".visit_occurrence")
+    vcols <- tolower(DBI::dbGetQuery(con, paste("DESCRIBE", vtab))$column_name)
+    if (!"discharged_to_source_value" %in% vcols) {
+      warning("still_in_hospital_status is set but visit_occurrence has no discharged_to_source_value; the step is skipped.", call. = FALSE)
+      sih <- character(0)
+    }
+  }
   evidence <- if (is.null(followup_evidence)) conv$evidence else
     .resolve_choices(followup_evidence, .STUDY_FOLLOWUP_EVIDENCE, "followup_evidence")
 
@@ -1728,7 +1748,7 @@ define_study_cohort <- function(con,
     age_method = method, min_los_days = min_los, washin_days = washin_n, exclude_death = exclude,
     death_ids = death_ids, death_sources = sources, window_days = window, gap_days = gap_n, verified = verified,
     evidence = evidence, rule = rule, seed = seed_n, require_diabetes = isTRUE(require_diabetes),
-    transfer_ids = transfer_ids, diabetes_drug_rule = diabetes_drug_rule,
+    transfer_ids = transfer_ids, still_in_hospital = sih, diabetes_drug_rule = diabetes_drug_rule,
     diabetes_drug_ancestors = drug$ancestors, concept_ancestor_ref = drug$ca, metformin_only_pcos = mf_pcos,
     one_per_patient = one_per_patient
   )
@@ -1802,6 +1822,7 @@ define_study_cohort <- function(con,
     require_verified_followup = verified && .study_followup_applicable(spec),
     death_discharge_concept_ids = death_ids,
     transfer_discharge_concept_ids = transfer_ids,
+    still_in_hospital_status = sih,
     diabetes_drug_rule = diabetes_drug_rule,
     exclude_metformin_only_prediabetes_pcos = mf_pcos,
     death_sources = sources,
@@ -2650,6 +2671,7 @@ filter_measurements <- function(con,
 #' @inheritParams define_study_cohort
 #' @param target_table Name of the table the cohort is written to when materialised (default `"cohort"`).
 #' @param transfer_discharge_concept_ids Transfer-to-acute-care discharge concepts to exclude (default `8717`; `integer(0)` keeps transfers).
+#' @param still_in_hospital_status Discharge source values meaning still in hospital (default `"SH"`; `NULL` keeps those stays).
 #' @param diabetes_drug_rule,diabetes_rxnorm_cuis,exclude_metformin_only_prediabetes_pcos As in [define_study_cohort()].
 #' @return As [define_study_cohort()].
 #' @export
@@ -2663,6 +2685,7 @@ build_ederri_diabetes_cohort <- function(con,
                                          followup_days = NULL,
                                          require_verified_followup = FALSE,
                                          transfer_discharge_concept_ids = 8717,
+                                         still_in_hospital_status = "SH",
                                          diabetes_drug_rule = "names",
                                          diabetes_rxnorm_cuis = NULL,
                                          exclude_metformin_only_prediabetes_pcos = FALSE) {
@@ -2677,6 +2700,7 @@ build_ederri_diabetes_cohort <- function(con,
     followup_days = followup_days,
     require_verified_followup = require_verified_followup,
     transfer_discharge_concept_ids = transfer_discharge_concept_ids,
+    still_in_hospital_status = still_in_hospital_status,
     diabetes_drug_rule = diabetes_drug_rule,
     diabetes_rxnorm_cuis = diabetes_rxnorm_cuis,
     exclude_metformin_only_prediabetes_pcos = exclude_metformin_only_prediabetes_pcos,

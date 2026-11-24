@@ -19,8 +19,9 @@ reproducible: addresses that tie on every earlier key, for example two periods t
 pick one at random).
 
 RUCA labels follow the reference coding: primary code 1 = Metropolitan, 2 = Micropolitan, 3 and above = Small Town / Rural.
-USDA code 99 ("not coded") therefore lands in Small Town / Rural, as in the reference; pass ``code_99_missing=True`` to
-treat it as unknown instead (this changes the feature, so only do so if the model was trained that way).
+USDA code 99 ("not coded": unpopulated tracts, PO-box ZIPs) is "RUCA: Missing / Unknown" since 0.34.2 (Kyle's review: it is
+not a rural place); the reference put it in Small Town / Rural, which ``code_99_missing=False`` restores (only for a model
+trained that way).
 """
 
 from __future__ import annotations
@@ -50,7 +51,18 @@ SDI_PROBS = (0.2, 0.4, 0.6, 0.8)
 _ADDRESS_TABLE = "person_address_history"
 
 
-def ruca_category(code: Any, *, code_99_missing: bool = False) -> str:
+def zip5_sql(expr: str) -> str:
+    """SQL turning a stored ZIP text into its 5-digit ZIP, or NULL (0.34.2): the first five digits of a 5- or 9-digit ZIP
+    ("02108", "02108-1234", "021081234"); a 4-digit ZIP or an 8-digit ZIP+4 that lost its leading zero is padded ("8101" ->
+    "08101", "21081234" -> "02108"). A 3-digit value is left out: in a de-identified extract it is a ZIP3, which the ZIP3
+    fallback reads. Before, readers took the first run of five digits and a 4-digit ZIP was lost."""
+    t = f"NULLIF(TRIM(CAST({expr} AS VARCHAR)), '')"
+    return (f"CASE WHEN regexp_matches({t}, '^[0-9]{{5}}([^0-9]|$)') OR regexp_matches({t}, '^[0-9]{{9}}$') THEN substr({t}, 1, 5) "
+            f"WHEN regexp_matches({t}, '^[0-9]{{4}}$') THEN lpad({t}, 5, '0') "
+            f"WHEN regexp_matches({t}, '^[0-9]{{8}}$') THEN substr(lpad({t}, 9, '0'), 1, 5) END")
+
+
+def ruca_category(code: Any, *, code_99_missing: bool = True) -> str:
     """Primary RUCA code -> model category (secondary digits, e.g. 4.2, are ignored)."""
     try:
         if code is None or pd.isna(code):
@@ -177,7 +189,7 @@ def _location_has_zip(con) -> bool:
         return False
     try:
         return con.execute("SELECT 1 FROM person p JOIN location l ON l.location_id = p.location_id "
-                           "WHERE regexp_matches(CAST(l.zip AS VARCHAR), '\\d{5}') LIMIT 1").fetchone() is not None
+                           f"WHERE {zip5_sql('l.zip')} IS NOT NULL LIMIT 1").fetchone() is not None
     except duckdb.Error:
         return False
 
@@ -241,7 +253,7 @@ def _index_addresses(con, stays_sql: str, address_table: str | None, tie_break: 
         return con.execute(f"""
             SELECT person_id, stay_id, zip5, CASE WHEN zip5 IS NULL THEN 'no_zip' ELSE 'person_location' END AS rule
             FROM (
-                SELECT s.person_id, s.stay_id, nullif(regexp_extract(CAST(l.zip AS VARCHAR), '(\\d{{5}})', 1), '') AS zip5
+                SELECT s.person_id, s.stay_id, {zip5_sql('l.zip')} AS zip5
                 FROM ({stays_sql}) s
                 LEFT JOIN person p ON p.person_id = s.person_id
                 LEFT JOIN location l ON l.location_id = p.location_id
@@ -258,8 +270,8 @@ def _index_addresses(con, stays_sql: str, address_table: str | None, tie_break: 
                      st DESC NULLS LAST"""
     head = f"""
         WITH m AS (
-            SELECT s.person_id, s.stay_id, s.admit_date, a.zip5, {listed} AS listed, a.address_start AS st, a.address_end AS en, a.preferred,
-                   (a.zip5 IS NULL) AS nozip,
+            SELECT s.person_id, s.stay_id, s.admit_date, {zip5_sql('a.zip5')} AS zip5, {listed} AS listed, a.address_start AS st, a.address_end AS en, a.preferred,
+                   ({zip5_sql('a.zip5')} IS NULL) AS nozip,
                    (a.address_start IS NULL OR a.address_start <= s.admit_date) AS started,
                    (a.address_end IS NULL OR a.address_end >= s.admit_date) AS ongoing
             FROM ({stays_sql}) s LEFT JOIN {address_table} a ON a.person_id = s.person_id
@@ -293,7 +305,7 @@ def derive_geography_features(
     tie_break: str = "deterministic",
     undated: str = "last",
     fit_cut_points: bool = False,
-    code_99_missing: bool = False,
+    code_99_missing: bool = True,
 ) -> pd.DataFrame:
     """RUCA category and SDI quintile for each index stay.
 

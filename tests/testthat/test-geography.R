@@ -26,8 +26,8 @@ add_visit <- function(con, vid, pid, d) {
 test_that("ruca_category and SDI binning follow the reference coding with fixed cut points", {
   expect_equal(ruca_category(c(1, "2.1", 4.2, 99, NA, 0, "x")),
                c("RUCA: Metropolitan (1.0)", "RUCA: Micropolitan (2.0)", "RUCA: Small Town / Rural (3+)",
-                 "RUCA: Small Town / Rural (3+)", rep("RUCA: Missing / Unknown", 3)))
-  expect_equal(ruca_category(99, code_99_missing = TRUE), "RUCA: Missing / Unknown")
+                 rep("RUCA: Missing / Unknown", 4)))  # RUCA 99 is unknown since 0.34.2
+  expect_equal(ruca_category(99, code_99_missing = FALSE), "RUCA: Small Town / Rural (3+)")
   expect_equal(fit_sdi_cut_points(1:100), c(20.8, 40.6, 60.4, 80.2))
   q <- assign_sdi_quintile(c(5, 20, 44.9, 45, 99, NA), cuts)
   expect_equal(q[1:5], c("SDI Quintile 1 (Least Deprived)", "SDI Quintile 2", "SDI Quintile 2", "SDI Quintile 3", "SDI Quintile 5 (Most Deprived)"))
@@ -59,7 +59,7 @@ test_that("the address in effect at admission wins, with the reference fallbacks
   expect_equal(g[c("1", "2", "3", "4"), "rule"], c("in_effect", "in_effect", "earliest_after", "earliest_after"))
   expect_equal(g["1", "ruca_category"], "RUCA: Micropolitan (2.0)")
   expect_equal(g["1", "sdi_quintile"], "SDI Quintile 2")
-  expect_equal(g["4", "ruca_category"], "RUCA: Small Town / Rural (3+)")
+  expect_equal(g["4", "ruca_category"], "RUCA: Missing / Unknown")  # RUCA 99 (0.34.2)
   expect_equal(attr(g, "sdi_cut_points"), cuts)
 })
 

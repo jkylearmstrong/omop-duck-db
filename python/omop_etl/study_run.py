@@ -226,7 +226,7 @@ def resolve_decisions(preset: str = "package", **overrides: Any) -> dict[str, An
 PROTOCOL_COHORT_PARAMS: dict[str, Any] = dict(
     visit_type=[9201, 262], require_diabetes=True, min_age=18, min_los_days=1, washin_days=365, followup_days=30,
     require_verified_followup=True, target_outcome="all_cause_readmission", outcome_visit_type=[9201, 262],
-    transfer_discharge_concept_ids=[8717], exclude_metformin_only_prediabetes_pcos=True)
+    transfer_discharge_concept_ids=[8717], still_in_hospital_status=["SH"], exclude_metformin_only_prediabetes_pcos=True)
 
 
 def pin_stays(cohort: pd.DataFrame, selection: str | Path | pd.DataFrame, *, on: str = "visit_occurrence_id", strict: bool = True,

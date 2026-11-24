@@ -373,7 +373,7 @@ feature_set_extraction_r <- function(fs, concepts = NULL, long_term_start_days =
 #' @return A `study_feature`.
 #' @name builtin_study_features
 #' @export
-ruca_feature <- function(crosswalk, name = "ruca", code_99_missing = FALSE) {
+ruca_feature <- function(crosswalk, name = "ruca", code_99_missing = TRUE) {
   xwalk <- read_ruca_crosswalk(crosswalk)
   groups <- c("RUCA: Metropolitan (1.0)" = 1, "RUCA: Micropolitan (2.0)" = 2, "RUCA: Small Town / Rural (3+)" = 3)
   study_feature(name, c("ruca_code", "ruca_group"), function(ctx, state, fit) {

@@ -25,7 +25,8 @@ One row per cohort row, in cohort order: \code{prior_encounters_all_count}, \cod
 from admission to discharge, leaving out the principal diagnosis's code; it replaces \code{n_secondary_dx_ccs}; since 0.34.2 only
 diagnoses on the index visit count when the cohort has \code{visit_occurrence_id}, and one with no visit id counts by date),
 \code{elix_pre_index_conditions_count} (distinct condition concepts before the admission, all history) and \code{tobacco}
-(\code{"Current user"}, \code{"Former user"}, \code{"Never user"} or, with no status, \code{"Missing / Unknown"} (0.34.1), from tobacco observation concepts, the PCORnet VITAL smoking status (43054909) and ICD F17 / Z72.0 / 305.1 / Z87.891 /
+(\code{"Current user"}, \code{"Former user"}, \code{"Never user"} or, with no status, \code{"Missing / Unknown"} (0.34.1); since 0.34.2 the level of
+the latest tobacco record on or before discharge, a same-day tie going to the higher level; from tobacco observation concepts, the PCORnet VITAL smoking status (43054909) and ICD F17 / Z72.0 / 305.1 / Z87.891 /
 V15.82). Visits are counted in \verb{[admission - lookback_days, admission)}; diagnoses and observations up to the discharge date.
 Same as Python \code{omop_etl.extract_protocol_history_features}.
 }

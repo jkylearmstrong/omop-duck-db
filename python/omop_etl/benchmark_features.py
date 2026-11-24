@@ -869,7 +869,9 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
       column was ``n_secondary_dx_ccs`` and counted distinct standard concepts with the principal diagnosis, so one ICD code that
       maps to two SNOMED concepts counted twice;
     * ``elix_pre_index_conditions_count`` - distinct condition concepts dated before the admission (all history);
-    * ``tobacco`` - ``"Current user"`` (tobacco observation concepts 4005823 / 4276526, or ICD F17, Z72.0, 305.1), ``"Former user"``
+    * ``tobacco`` - the level of the latest tobacco record on or before discharge (0.34.2; until 0.34.1 any current-use record
+      ever made the stay "Current user"; a same-day tie goes to the higher level): ``"Current user"`` (tobacco observation concepts
+      4005823 / 4276526, or ICD F17, Z72.0, 305.1), ``"Former user"``
       (4310280, Z87.891, V15.82), ``"Never user"`` (a recorded never-smoker status: VITAL code 04 or concepts 4144272 / 4052039), else ``"Missing / Unknown"``. The smoking
       status of PCORnet VITAL (observation 43054909, LOINC 72166-2, with its answer concept or the PCORnet code) counts too, and
       the ICD codes match with or without dots (0.34.1). Until 0.34.0 a stay with no status was "Never user", and VITAL was not read.
@@ -907,8 +909,9 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
                    - COUNT(DISTINCT CASE WHEN {in_stay} AND {principal} THEN {_DX_CODE_SQL} END) AS n_secondary_dx,
                    COUNT(DISTINCT CASE WHEN co.condition_start_date < CAST(c.cohort_start_date AS DATE) THEN co.condition_concept_id END)
                        AS elix_pre_index_conditions_count,
-                   MAX(CASE WHEN {_TOB_DX} LIKE 'F17%' OR {_TOB_DX} LIKE 'Z720%' OR {_TOB_DX} LIKE '3051%' THEN 1 ELSE 0 END) AS tob_cur_dx,
-                   MAX(CASE WHEN {_TOB_DX} LIKE 'Z87891%' OR {_TOB_DX} LIKE 'V1582%' THEN 1 ELSE 0 END) AS tob_former_dx
+                   MAX(CASE WHEN {_TOB_DX} LIKE 'F17%' OR {_TOB_DX} LIKE 'Z720%' OR {_TOB_DX} LIKE '3051%' THEN co.condition_start_date END)
+                       AS tob_cur_dx,
+                   MAX(CASE WHEN {_TOB_DX} LIKE 'Z87891%' OR {_TOB_DX} LIKE 'V1582%' THEN co.condition_start_date END) AS tob_former_dx
             FROM _bf_ph c
             LEFT JOIN condition_occurrence co ON co.person_id = c.subject_id
                  AND co.condition_start_date <= CAST(c.cohort_end_date AS DATE)
@@ -916,22 +919,39 @@ def extract_protocol_history_features(con: duckdb.DuckDBPyConnection, cohort: pd
         ocols = {r[0].lower() for r in con.execute("DESCRIBE observation").fetchall()}
         obs = con.execute(f"""
             SELECT c.row_id,
-                   MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) OR {_smoking_is(SMOKING_CURRENT, ocols)} THEN 1 ELSE 0 END) AS tob_cur_obs,
-                   MAX(CASE WHEN o.observation_concept_id = 4310280 OR {_smoking_is(SMOKING_FORMER, ocols)} THEN 1 ELSE 0 END) AS tob_former_obs,
+                   MAX(CASE WHEN o.observation_concept_id IN (4005823, 4276526) OR {_smoking_is(SMOKING_CURRENT, ocols)}
+                            THEN o.observation_date END) AS tob_cur_obs,
+                   MAX(CASE WHEN o.observation_concept_id = 4310280 OR {_smoking_is(SMOKING_FORMER, ocols)} THEN o.observation_date END)
+                       AS tob_former_obs,
                    MAX(CASE WHEN o.observation_concept_id IN ({", ".join(map(str, NEVER_SMOKER_CONCEPTS))})
-                             OR {_smoking_is(SMOKING_NEVER, ocols)} THEN 1 ELSE 0 END) AS tob_never_obs
+                             OR {_smoking_is(SMOKING_NEVER, ocols)} THEN o.observation_date END) AS tob_never_obs
             FROM _bf_ph c
             LEFT JOIN observation o ON o.person_id = c.subject_id AND o.observation_date <= CAST(c.cohort_end_date AS DATE)
             GROUP BY c.row_id ORDER BY c.row_id""").df()
     finally:
         con.unregister("_bf_ph")
-    cur = (dx["tob_cur_dx"].to_numpy() == 1) | (obs["tob_cur_obs"].to_numpy() == 1)
-    former = (dx["tob_former_dx"].to_numpy() == 1) | (obs["tob_former_obs"].to_numpy() == 1)
+    out_tob = _latest_tobacco(dx, obs)
     out = util.drop(columns=["row_id"]).copy()
     out["n_secondary_dx"] = dx["n_secondary_dx"].to_numpy()
     out["elix_pre_index_conditions_count"] = dx["elix_pre_index_conditions_count"].to_numpy()
-    never = obs["tob_never_obs"].to_numpy() == 1
-    out["tobacco"] = np.where(cur, "Current user", np.where(former, "Former user", np.where(never, "Never user", TOBACCO_UNKNOWN)))
+    out["tobacco"] = out_tob
+    return out
+
+
+def _latest_tobacco(dx: pd.DataFrame, obs: pd.DataFrame) -> np.ndarray:
+    """The tobacco level of the latest tobacco record on or before discharge (0.34.2, Kyle): ``dx`` / ``obs`` hold the latest date
+    of each level (``tob_cur_*``, ``tob_former_*``, ``tob_never_obs``; NaT when none). Records on the same latest date resolve
+    to the higher level (Current, then Former, then Never); no record is "Missing / Unknown"."""
+    def d(frame: pd.DataFrame, col: str) -> pd.Series:
+        return pd.to_datetime(frame[col]).reset_index(drop=True)
+
+    levels = pd.DataFrame({"Current user": pd.concat([d(dx, "tob_cur_dx"), d(obs, "tob_cur_obs")], axis=1).max(axis=1),
+                           "Former user": pd.concat([d(dx, "tob_former_dx"), d(obs, "tob_former_obs")], axis=1).max(axis=1),
+                           "Never user": d(obs, "tob_never_obs")})
+    latest = levels.max(axis=1)
+    out = np.full(len(levels), TOBACCO_UNKNOWN, dtype=object)
+    for name in reversed(list(levels.columns)):          # Never, then Former, then Current: a same-day tie goes to the higher level
+        out[(levels[name] == latest).to_numpy() & latest.notna().to_numpy()] = name
     return out
 
 

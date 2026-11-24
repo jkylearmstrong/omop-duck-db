@@ -506,7 +506,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
         NULL AS address_2,
         ADDRESS_CITY AS city,
         UPPER(ADDRESS_STATE) AS state,
-        COALESCE(ADDRESS_ZIP9, ADDRESS_ZIP5) AS zip,
+        CASE WHEN regexp_matches(NULLIF(TRIM(CAST(ADDRESS_ZIP5 AS VARCHAR)), ''), '^[0-9]{5}') THEN substr(NULLIF(TRIM(CAST(ADDRESS_ZIP5 AS VARCHAR)), ''), 1, 5) WHEN regexp_matches(NULLIF(TRIM(CAST(ADDRESS_ZIP5 AS VARCHAR)), ''), '^[0-9]{3,4}$') THEN lpad(NULLIF(TRIM(CAST(ADDRESS_ZIP5 AS VARCHAR)), ''), 5, '0') WHEN regexp_matches(NULLIF(TRIM(CAST(ADDRESS_ZIP9 AS VARCHAR)), ''), '^[0-9]{5}([^0-9]|$)') OR regexp_matches(NULLIF(TRIM(CAST(ADDRESS_ZIP9 AS VARCHAR)), ''), '^[0-9]{9}$') THEN substr(NULLIF(TRIM(CAST(ADDRESS_ZIP9 AS VARCHAR)), ''), 1, 5) WHEN regexp_matches(NULLIF(TRIM(CAST(ADDRESS_ZIP9 AS VARCHAR)), ''), '^[0-9]{8}$') THEN substr(lpad(NULLIF(TRIM(CAST(ADDRESS_ZIP9 AS VARCHAR)), ''), 9, '0'), 1, 5) END AS zip,  -- 5 digits, leading zeros restored (0.34.2)
         NULL AS county,
         COALESCE(ADDRESS_ZIP5, '') || ', ' || COALESCE(ADDRESS_STATE, '') AS location_source_value,
         4330426 AS country_concept_id,

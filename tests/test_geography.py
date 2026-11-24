@@ -46,8 +46,8 @@ def test_ruca_category_and_code_99():
     assert ruca_category(1) == "RUCA: Metropolitan (1.0)"
     assert ruca_category("2.1") == "RUCA: Micropolitan (2.0)"
     assert ruca_category(4.2) == "RUCA: Small Town / Rural (3+)"
-    assert ruca_category(99) == "RUCA: Small Town / Rural (3+)"          # reference coding
-    assert ruca_category(99, code_99_missing=True) == RUCA_MISSING
+    assert ruca_category(99) == RUCA_MISSING                              # 0.34.2: "not coded" is not rural
+    assert ruca_category(99, code_99_missing=False) == "RUCA: Small Town / Rural (3+)"   # the reference coding
     assert ruca_category(None) == ruca_category(float("nan")) == ruca_category("x") == ruca_category(0) == RUCA_MISSING
 
 
@@ -94,9 +94,9 @@ def test_address_in_effect_then_fallbacks():
     assert g.loc[4, ["zip5", "rule"]].tolist() == ["17821", "earliest_after"]
     assert g.loc[1, "ruca_category"] == "RUCA: Micropolitan (2.0)" and g.loc[1, "sdi_quintile"] == SDI_LABELS[1]
     assert g.loc[2, "sdi_quintile"] == SDI_LABELS[4]
-    assert g.loc[4, "ruca_category"] == "RUCA: Small Town / Rural (3+)"
+    assert g.loc[4, "ruca_category"] == RUCA_MISSING                     # RUCA 99 (0.34.2)
     assert g.attrs["sdi_cut_points"] == CUTS
-    assert derive_geography_features(c, RUCA, SDI, CUTS, code_99_missing=True).set_index("stay_id").loc[4, "ruca_category"] == RUCA_MISSING
+    assert derive_geography_features(c, RUCA, SDI, CUTS, code_99_missing=False).set_index("stay_id").loc[4, "ruca_category"] == "RUCA: Small Town / Rural (3+)"
 
 
 def test_latest_before_and_preference_tiebreak():
