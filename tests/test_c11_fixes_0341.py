@@ -130,6 +130,30 @@ def test_methods_say_how_many_patients_were_redrawn(tmp_path):
     assert "no longer met the criteria" not in none["markdown"]
 
 
+def test_one_excluded_patient_is_singular_and_the_draw_is_explained_once(tmp_path, monkeypatch):
+    """C14 printed "1 patients" and said "made once and reused" twice when a run both excludes and redraws."""
+    pytest.importorskip("jinja2")
+    import re
+
+    from omop_etl import manuscript_text as mtx
+    from omop_etl.manuscript_report import read_workbook_tables
+    from omop_etl.study_report import _patients
+    from test_rubin_fixes_0340 import _workbook
+
+    assert (_patients(1), _patients(0), _patients(2)) == ("patient", "patients", "patients")
+    monkeypatch.setattr(mtx, "_random_draw", lambda wb, prefix: {"excluded": 1})
+    wb = _workbook(tmp_path)
+    tabs = {k: v for k, v in read_workbook_tables(wb).items() if not k.startswith("Manifest")}
+    run = {"n_sites": 3, "window": ["2017-01-01", "2022-09-30"], "random_draw_redrawn": 966}
+    text = re.sub(r"\s+", " ", mtx.full_manuscript_markdown(tabs, [], workbook=wb, run=run, summary={"n_features": 95}, version="0.34.1")["markdown"])
+    assert "1 patient whose qualifying stays in the window were not in that draw is excluded" in text
+    assert "1 patients" not in text
+    assert text.count("made once and") == 1
+    assert "For 966 patients whose stay in that draw no longer met the criteria" in text
+    cap = mtx._caption_with_context("{draw_note}", {"random_draw": {"excluded": 1}})
+    assert "the 1 patient whose qualifying stays in the window were not in that draw branches off" in cap
+
+
 # ------------------------------------------------------------------ review of PR 103 (Kyle, 2026-11-24)
 def test_discharge_remap_never_zeroes_a_concept_and_trims_the_join(tmp_path):
     from omop_etl.build_omop_cdm import backfill_discharge_status
