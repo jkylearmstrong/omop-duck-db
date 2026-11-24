@@ -655,6 +655,7 @@ def extract_benchmark_features(
     elif unit_conversions is not None:
         unit_conversions = {**DEFAULT_UNIT_CONVERSIONS, **dict(unit_conversions)}
     unit_converted: dict[str, float] = {}
+    combination_flags: dict[str, int] = {}
     cohort = _cohort_frame(con, cohort_table, cohort_id)
     n = len(cohort)
     out = pd.DataFrame({"person_id": cohort["subject_id"].to_numpy()})
@@ -746,6 +747,8 @@ def extract_benchmark_features(
                     cls = re.search(r"Medication class '([^']+)'", w)
                     warnings.warn(DataGapWarning(f"medication classes: {w}", "feature_skipped",
                                                  f"{prefix}med_{cls.group(1)}" if cls else None), stacklevel=2)
+                for cls_name, k in (med.attrs.get("combination_flags_by_class") or {}).items():
+                    combination_flags[f"{prefix}med_{cls_name}"] = combination_flags.get(f"{prefix}med_{cls_name}", 0) + int(k)
                 add("medications" if not prefix else "medications_ederri", _align(cohort, med, prefix=prefix + "med_", only=list(specs)))
         if include_protocol_history:
             try:
@@ -886,6 +889,7 @@ def extract_benchmark_features(
     out.attrs["imputation_values"] = imputation
     out.attrs["bmi_filled"] = bmi_filled
     out.attrs["unit_converted"] = unit_converted
+    out.attrs["combination_flags"] = combination_flags   # per med column: stays flagged only through a combination / brand concept
     out.attrs["address_table"] = address_used
     out.attrs["geography"] = geography
     return out

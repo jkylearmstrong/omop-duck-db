@@ -434,6 +434,7 @@ def extract_medication_classes(
 
     db_con.register("_med_cohort_df", base[["_row", "person_id", "index_date"] + (["end_date"] if ecol else [])])
     combination_flags = 0
+    combination_by_class: dict[str, int] = {}
     flags: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
     flags_plain: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
     flags_combo: dict[str, dict[str, set]] = {"source": {}, "standard": {}}
@@ -593,7 +594,10 @@ def extract_medication_classes(
                         "JOIN _med_drug_targets t ON t.drug_concept_id = de.drug_concept_id "
                         "JOIN _med_class_concepts m ON m.concept_id = t.target_concept_id "
                         f"WHERE TRUE {lo} {hi} {route_clause} {drug_type_clause}").fetchall()
-                    combination_flags = len({(h[0], h[1]) for h in extra} - {(h[0], h[1]) for h in hits})
+                    new_pairs = {(h[0], h[1]) for h in extra} - {(h[0], h[1]) for h in hits}
+                    combination_flags = len(new_pairs)
+                    for _, cls_new in new_pairs:
+                        combination_by_class[cls_new] = combination_by_class.get(cls_new, 0) + 1
                     hits = list(hits) + list(extra)
             for hit in hits:
                 row, cls = hit[0], hit[1]
@@ -721,6 +725,7 @@ def extract_medication_classes(
             result[f"{cls}_type_{type_id}"] = np.isin(rows_index, list(t_rows)).astype(int)
 
     result.attrs["combination_flags"] = int(combination_flags)
+    result.attrs["combination_flags_by_class"] = dict(sorted(combination_by_class.items()))  # stays a class reached only this way
     if return_audit:
         return result, audit_medication_strategies(result, classes=list(specs), **audit_kwargs)
     return result

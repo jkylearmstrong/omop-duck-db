@@ -394,6 +394,8 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
         meta["bmi_filled_share"] = ({k: round(v / len(feats), 4) for k, v in (feats.attrs.get("bmi_filled") or {}).items()}
                                     if len(feats) else None)  # shares, not counts: the per-site metadata stays shareable
         meta["unit_converted"] = feats.attrs.get("unit_converted") or {}   # shares of each lab's values converted from SI units
+        meta["combination_share"] = ({k: round(v / len(feats), 4) for k, v in (feats.attrs.get("combination_flags") or {}).items() if v}
+                                     if len(feats) else {})  # share of stays a med class reached only through an ingredient of a combination
     finally:
         con.close()
 
@@ -794,6 +796,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
     frames, atts, all_frames = [], [], []
     op_capped: dict[str, Any] = {}
     unit_converted: dict[str, Any] = {}
+    combination_share: dict[str, Any] = {}
     qualifying_stays: dict[str, int | None] = {}
     redrawn_total = 0
     for site in sites:
@@ -828,6 +831,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                 op_capped[labels[site]] = meta["observation_period_cap"]
             if meta.get("unit_converted"):
                 unit_converted[labels[site]] = meta["unit_converted"]
+            if meta.get("combination_share"):
+                combination_share[labels[site]] = meta["combination_share"]
             if sensitivity:
                 fa = priv / f"features_all_{site}.parquet"
                 if not fa.exists():
@@ -854,6 +859,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
             op_capped[labels[site]] = meta["observation_period_cap"]
         if meta.get("unit_converted"):
             unit_converted[labels[site]] = meta["unit_converted"]
+        if meta.get("combination_share"):
+            combination_share[labels[site]] = meta["combination_share"]
         raised = _caught_findings(caught, labels[site], scrub)
         address_used[labels[site]] = sanitize(str(meta.get("address_table")), scrub)
         df.to_parquet(f)
@@ -984,6 +991,7 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
                                                        **({"observation_period_cap": {"cap": observation_period_cap, "by_site": dict(sorted(op_capped.items()))}}
                                                           if observation_period_cap is not None else {}),
                                                        "unit_converted": dict(sorted(unit_converted.items())),
+                                                       "medication_combination_share": dict(sorted(combination_share.items())),
                                                        "n": int(len(pooled)), "qualifying_stays": n_qualifying, "bootstraps": n_bootstraps, "random_state": random_state, "timings_seconds": timings,
                                                        "cohort_params": json.loads(json.dumps(c_params, default=str)),
                                                        "address_table": {"requested": address_table, "used": dict(sorted(address_used.items()))},

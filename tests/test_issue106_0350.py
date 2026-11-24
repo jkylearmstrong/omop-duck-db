@@ -56,6 +56,7 @@ def test_combination_products_count_for_every_ingredient_class():
     got = extract_medication_classes(con, "coh", specs, strategy="standard", person_col="subject_id", window="pre_admission")
     assert got["ace"].tolist() == [1, 1, 1, 1] and got["thiazide"].tolist() == [1, 1, 0, 0]
     assert got.attrs["combination_flags"] == 5
+    assert sum(got.attrs["combination_flags_by_class"].values()) == 5 and set(got.attrs["combination_flags_by_class"]) == {"ace", "thiazide"}
     off = extract_medication_classes(con, "coh", specs, strategy="standard", person_col="subject_id", window="pre_admission",
                                      combination_ingredients=False)
     assert off["ace"].tolist() == [0, 0, 0, 1] and off["thiazide"].tolist() == [0, 0, 0, 0]
@@ -205,6 +206,7 @@ def test_run_study_sensitivity_cap_and_known_gaps(tmp_path, monkeypatch):
     assert rec["observation_period_cap"]["cap"] == "2023-12-31"
     assert {v["share_shortened"] for v in rec["observation_period_cap"]["by_site"].values()} == {1.0}
     assert set(rec["data_checks"]["by_cause"]) == {"source_gap", "intentional", "etl_mapping", "unexplained"}
+    assert "medication_combination_share" in rec
     assert all(f.get("cause") for f in r["data_checks"])
     for s in keys:
         assert (Path(str(out) + "_private") / f"features_all_{s}.parquet").exists()
