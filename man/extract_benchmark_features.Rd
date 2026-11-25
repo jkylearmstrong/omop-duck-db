@@ -43,7 +43,8 @@ extract_benchmark_features(
   impute = NULL,
   impute_values = NULL,
   bmi_fill = NULL,
-  bmi_lookback_days = 365
+  bmi_lookback_days = 365,
+  unit_conversions = "default"
 )
 }
 \arguments{
@@ -120,6 +121,10 @@ weight there, \code{"none"} leaves it missing. Default \code{NULL}: \code{"deriv
 \code{attr(, "bmi_filled")} counts the stays each step filled.}
 
 \item{bmi_lookback_days}{window before admission for \code{bmi_fill = "derive_lookback"} (default 365).}
+
+\item{unit_conversions}{\code{"default"} (\link{DEFAULT_UNIT_CONVERSIONS}: glucose and BUN mmol/L, creatinine umol/L, albumin and hemoglobin
+g/L to mg/dL or g/dL, applied to each lab value before the bounds), a list in the same layout replacing the rules of the names
+it lists, or \code{NULL} for none. \code{attr(, "unit_converted")} gives the share of each lab's kept values that were converted.}
 }
 \value{
 A data frame in cohort order; \code{attr(, "feature_groups")} lists the columns per group and \code{attr(, "skipped")} the

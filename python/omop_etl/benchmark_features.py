@@ -28,7 +28,7 @@ from omop_etl.concept_sets import ancestor_specs, codes_by_name, concept_set_fro
 from omop_etl.data_gaps import DataGapWarning
 
 __all__ = ["extract_benchmark_features", "ederri_disposition_level", "extract_protocol_history_features", "DEFAULT_DISPOSITION_MAP", "BENCHMARK_LAB_LOINCS", "BENCHMARK_VITAL_LOINCS", "BENCHMARK_LAB_CONCEPT_SETS", "BENCHMARK_VITAL_CONCEPT_SETS",
-           "DEFAULT_BOUNDS", "DEFAULT_RESCALE", "EDERRI_MEDICATION_SPECS"]
+           "DEFAULT_BOUNDS", "DEFAULT_RESCALE", "DEFAULT_UNIT_CONVERSIONS", "EDERRI_MEDICATION_SPECS"]
 
 #: Lab concept sets (feature ``lab_<name>``), read from the bundled OHDSI concept-set files ``concept_sets/labs/<name>.json``
 #: (see :mod:`omop_etl.concept_sets`); ``BENCHMARK_LAB_LOINCS`` is the same as ``{name: [LOINC code, ...]}``. A superset of
@@ -60,6 +60,36 @@ DEFAULT_BOUNDS: dict[str, tuple[float, float]] = {
 #: ``{feature name: (above, up_to, divisor)}``: a value in ``(above, up_to]`` is divided by ``divisor`` before the bounds are
 #: applied. WBC is reported as a count per uL (7500) by some sites and in 10^3/uL (7.5) by others.
 DEFAULT_RESCALE: dict[str, tuple[float, float, float]] = {"wbc": (200.0, 200000.0, 1000.0)}
+
+#: Explicit UCUM conversions to the conventional US units of :data:`DEFAULT_BOUNDS` (0.35.0, issue 106; for sites that report SI
+#: units). ``{lab name: [(UCUM unit_concept_ids, unit source texts, factor)]}``: a value whose ``unit_concept_id`` is one of the ids,
+#: or whose ``unit_concept_id`` is empty and whose ``unit_source_value`` (lower case, no spaces, "µ" read as "u") is one of the texts,
+#: is multiplied by ``factor`` before the bounds are applied. 8753 = mmol/L, 8749 = umol/L, 8636 = g/L.
+DEFAULT_UNIT_CONVERSIONS: dict[str, list[tuple[tuple[int, ...], tuple[str, ...], float]]] = {
+    "glucose": [((8753,), ("mmol/l",), 18.016)],                                          # mmol/L -> mg/dL
+    "bun": [((8753,), ("mmol/l",), 2.801)],                                               # urea (nitrogen) mmol/L -> BUN mg/dL
+    "creatinine": [((8749,), ("umol/l", "micromol/l", "mcmol/l"), 1 / 88.42)],          # umol/L -> mg/dL
+    "albumin": [((8636,), ("g/l",), 0.1)],                                                # g/L -> g/dL
+    "hemoglobin": [((8636,), ("g/l",), 0.1)],                                             # g/L -> g/dL
+}
+
+
+def _conversion_frame(conversions: Mapping[str, Sequence[Sequence[Any]]] | None) -> pd.DataFrame:
+    """One row per (name, unit_concept_id or unit text, factor) of ``conversions``."""
+    rows = []
+    for name, rules in (conversions or {}).items():
+        for ids, texts, factor in rules:
+            rows += [(name, int(i), None, float(factor)) for i in ids]
+            rows += [(name, None, _norm_unit(t), float(factor)) for t in texts]
+    return pd.DataFrame(rows, columns=["name", "unit_concept_id", "unit_text", "factor"]).astype(
+        {"unit_concept_id": "Int64", "unit_text": "object", "factor": "float64"})
+
+
+def _norm_unit(text: str) -> str:
+    return str(text).strip().lower().replace(" ", "").replace("µ", "u").replace("μ", "u")
+
+
+_UNIT_NORM_SQL = "replace(replace(replace(lower(trim(m.unit_source_value)), ' ', ''), 'µ', 'u'), 'μ', 'u')"
 
 #: Medication classes of the eDERRI protocol: the ATC class concepts, flag ``med_<name>``. Differs from the generic defaults
 #: (``antihypertensives`` is ATC C02 only, ``lipid_modifying`` is all of C10, ``biguanides`` is A10BA); use it with
@@ -211,9 +241,13 @@ def _check_lab_coverage(con, sets: Mapping[str, Mapping[str, Any]], cohort: pd.D
         warnings.warn(DataGapWarning(f"lab_{name}: in-stay rows for this analyte use LOINC codes outside its concept set ({fmt(g)}); "
                                      f"add them to concept_sets/labs/{name}.json or accept with --allow-data-gaps lab_{name}",
                                      "concept_set_coverage", f"lab_{name}"), stacklevel=3)
+    from omop_etl.data_gaps import ConceptSetExclusionWarning
+
     for name, g in miss[~hard].groupby("name", sort=False):
-        warnings.warn(f"lab_{name}: in-stay rows use codes of the same analyte in another unit type or specimen, not counted "
-                      f"({fmt(g)}); the set leaves them out on purpose or they need a unit conversion", stacklevel=3)
+        warnings.warn(ConceptSetExclusionWarning(
+            f"lab_{name}: in-stay rows use codes of the same analyte in another unit type or specimen, not counted "
+            f"({fmt(g)}); the set leaves them out on purpose or they need a unit conversion", f"lab_{name}",
+            [str(c) for c in g["concept_code"]]), stacklevel=3)
 
 #: Visit concepts of an outpatient visit (0.34.0): outpatient (9202; PCORnet AV and OA), office visit (581477) and telehealth (5083).
 OUTPATIENT_VISIT_CONCEPTS: tuple[int, ...] = (9202, 581477, 5083)
@@ -256,30 +290,45 @@ def _bounds_frame(cmap: pd.DataFrame, bounds: Mapping[str, Sequence[float | None
 
 def _measurement_stats(con, cohort: pd.DataFrame, cmap: pd.DataFrame, pre_days: int,
                        bounds: Mapping[str, Sequence[float | None]] | None = None,
-                       rescale: Mapping[str, Sequence[float]] | None = None) -> pd.DataFrame:
-    """Per (row_id, name): mean, latest value and count of plausible measurements dated in [admit - pre_days, discharge].
+                       rescale: Mapping[str, Sequence[float]] | None = None,
+                       conversions: Mapping[str, Sequence[Sequence[Any]]] | None = None) -> pd.DataFrame:
+    """Per (row_id, name): mean, latest value and count of plausible measurements dated in [admit - pre_days, discharge], and
+    ``n_converted``, how many of them were converted from another unit.
 
-    A value in a name's rescale range is divided first; a value outside the name's bounds is dropped (not clipped)."""
+    A value in a unit of ``conversions`` (:data:`DEFAULT_UNIT_CONVERSIONS`) is converted first, a value in a name's rescale range is
+    divided next; a value outside the name's bounds is dropped (not clipped)."""
     if cmap.empty:
-        return pd.DataFrame(columns=["row_id", "name", "mean", "last", "n"])
+        return pd.DataFrame(columns=["row_id", "name", "mean", "last", "n", "n_converted"])
+    conv = _conversion_frame({k: v for k, v in (conversions or {}).items() if k in set(cmap["name"])})
+    cols = {r[0].lower() for r in con.execute("DESCRIBE SELECT * FROM measurement LIMIT 0").fetchall()} if len(conv) else set()
+    if len(conv) and ("unit_concept_id" in cols or "unit_source_value" in cols):
+        uid = "m.unit_concept_id" if "unit_concept_id" in cols else "CAST(NULL AS BIGINT)"
+        utext = _UNIT_NORM_SQL if "unit_source_value" in cols else "CAST(NULL AS VARCHAR)"
+        conv_join = (f"LEFT JOIN _bf_conv cv ON cv.name = f.name AND (cv.unit_concept_id = {uid} "
+                     f"OR (coalesce({uid}, 0) = 0 AND cv.unit_text = {utext}))")
+        factor = "coalesce(cv.factor, 1.0)"
+        con.register("_bf_conv", conv)
+    else:
+        conv_join, factor = "", "1.0"
     con.register("_bf_c", cohort[["row_id", "subject_id", "cohort_start_date", "cohort_end_date"]])
     con.register("_bf_map", _bounds_frame(cmap, bounds, rescale))
     try:
         return con.execute(f"""
             SELECT t.row_id, t.name, avg(t.v) AS mean,
                    arg_max(t.v, struct_pack(t := t.ts, id := t.mid)) AS last,
-                   count(*) AS n
+                   count(*) AS n, count(*) FILTER (WHERE t.conv_f <> 1.0) AS n_converted
             FROM (
                 SELECT c.row_id, f.name, m.measurement_id AS mid,
                        COALESCE(m.measurement_datetime, CAST(m.measurement_date AS TIMESTAMP)) AS ts,
-                       CASE WHEN m.value_as_number > f.rs_lo AND m.value_as_number <= f.rs_hi
-                            THEN m.value_as_number / f.rs_div ELSE m.value_as_number END AS v,
-                       f.lo AS lo, f.hi AS hi
+                       CASE WHEN m.value_as_number * {factor} > f.rs_lo AND m.value_as_number * {factor} <= f.rs_hi
+                            THEN m.value_as_number * {factor} / f.rs_div ELSE m.value_as_number * {factor} END AS v,
+                       {factor} AS conv_f, f.lo AS lo, f.hi AS hi
                 FROM _bf_c c
                 JOIN measurement m ON m.person_id = c.subject_id
                      AND m.measurement_date >= CAST(c.cohort_start_date AS DATE) - {int(pre_days)}
                      AND m.measurement_date <= CAST(c.cohort_end_date AS DATE)
                 JOIN _bf_map f ON f.concept_id = m.measurement_concept_id
+                {conv_join}
                 WHERE m.value_as_number IS NOT NULL
             ) t
             WHERE t.v BETWEEN t.lo AND t.hi
@@ -288,6 +337,8 @@ def _measurement_stats(con, cohort: pd.DataFrame, cmap: pd.DataFrame, pre_days: 
     finally:
         con.unregister("_bf_c")
         con.unregister("_bf_map")
+        if conv_join:
+            con.unregister("_bf_conv")
 
 
 #: Body height and body weight concepts used to compute a BMI where none was recorded (LOINC 8302-2 / 3137-5 height,
@@ -452,6 +503,7 @@ def extract_benchmark_features(
     feature_fit: bool | Sequence[str] = False,
     bmi_fill: str | None = None,
     bmi_lookback_days: int = 365,
+    unit_conversions: Mapping[str, Sequence[Sequence[Any]]] | str | None = "default",
 ) -> pd.DataFrame:
     """Leakage-free modelling table, one row per cohort row, in cohort order.
 
@@ -507,6 +559,11 @@ def extract_benchmark_features(
         stays each step filled.
     bmi_lookback_days : int, default 365
         Window before the admission used by ``bmi_fill="derive_lookback"``.
+    unit_conversions : "default", mapping or None, default "default"
+        Explicit UCUM unit conversions applied to each lab value before the bounds (:data:`DEFAULT_UNIT_CONVERSIONS`: glucose and
+        BUN mmol/L, creatinine umol/L, albumin and hemoglobin g/L, to mg/dL or g/dL), matched on ``unit_concept_id`` or, where that
+        is empty, on ``unit_source_value``. A mapping in the same layout replaces the rules of the names it lists; ``None`` turns
+        them off. ``attrs["unit_converted"]`` gives the share of each lab's kept values that were converted.
     derive_labs : bool, default True
         Adds ``lab_egfr`` (CKD-EPI 2021) and fills ``lab_anion_gap`` (Na - Cl - HCO3) where no anion gap was measured, each for the
         mean and ``_last``.
@@ -591,6 +648,14 @@ def extract_benchmark_features(
     elif bounds is not None:
         bounds = {**DEFAULT_BOUNDS, **{k: tuple(v) for k, v in bounds.items()}}
     rescale = DEFAULT_RESCALE if bounds is not None else None
+    if isinstance(unit_conversions, str):
+        if unit_conversions != "default":
+            raise ValueError("unit_conversions must be 'default', a mapping {name: [(unit_concept_ids, unit_texts, factor)]} or None.")
+        unit_conversions = DEFAULT_UNIT_CONVERSIONS
+    elif unit_conversions is not None:
+        unit_conversions = {**DEFAULT_UNIT_CONVERSIONS, **dict(unit_conversions)}
+    unit_converted: dict[str, float] = {}
+    combination_flags: dict[str, int] = {}
     cohort = _cohort_frame(con, cohort_table, cohort_id)
     n = len(cohort)
     out = pd.DataFrame({"person_id": cohort["subject_id"].to_numpy()})
@@ -682,6 +747,8 @@ def extract_benchmark_features(
                     cls = re.search(r"Medication class '([^']+)'", w)
                     warnings.warn(DataGapWarning(f"medication classes: {w}", "feature_skipped",
                                                  f"{prefix}med_{cls.group(1)}" if cls else None), stacklevel=2)
+                for cls_name, k in (med.attrs.get("combination_flags_by_class") or {}).items():
+                    combination_flags[f"{prefix}med_{cls_name}"] = combination_flags.get(f"{prefix}med_{cls_name}", 0) + int(k)
                 add("medications" if not prefix else "medications_ederri", _align(cohort, med, prefix=prefix + "med_", only=list(specs)))
         if include_protocol_history:
             try:
@@ -709,7 +776,10 @@ def extract_benchmark_features(
         lmap = _concept_map(con, loincs, lab_concept_ids, lab_sets)
         _check_lab_coverage(con, lab_sets or {n: concept_set_from_codes(c) for n, c in loincs.items() if c and n not in (lab_concept_ids or {})},
                             cohort, lab_lookback_days)
-        stats = _measurement_stats(con, cohort, lmap, lab_lookback_days, bounds, rescale)
+        stats = _measurement_stats(con, cohort, lmap, lab_lookback_days, bounds, rescale, unit_conversions)
+        if len(stats) and stats["n_converted"].sum():
+            tot = stats.groupby("name")[["n", "n_converted"]].sum()
+            unit_converted = {str(k): round(float(r.n_converted / r.n), 4) for k, r in tot.iterrows() if r.n_converted}
         present = [x for x in loincs if x in set(lmap["name"])]
         skipped += [f"lab_{x}" for x in loincs if x not in present]
         labs = _wide(stats, "lab_", present, n, with_last=True).drop(columns=["row_id"])
@@ -818,6 +888,8 @@ def extract_benchmark_features(
     out.attrs["key_columns"] = keys
     out.attrs["imputation_values"] = imputation
     out.attrs["bmi_filled"] = bmi_filled
+    out.attrs["unit_converted"] = unit_converted
+    out.attrs["combination_flags"] = combination_flags   # per med column: stays flagged only through a combination / brand concept
     out.attrs["address_table"] = address_used
     out.attrs["geography"] = geography
     return out

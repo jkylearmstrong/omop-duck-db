@@ -587,6 +587,7 @@ class _StudySpec:
     concept_ancestor_ref: str | None = None           # resolved concept_ancestor table for those rules
     metformin_only_pcos: str | None = None            # PCOS concept set of the metformin-only exclusion, or None
     one_per_patient: bool = True                      # False keeps every eligible stay (adds stay_rank)
+    visit_table: str | None = None                    # stands in for visit_occurrence (the merged episodes of merge_episodes_days)
 
 
 # ---- identifier / literal helpers -------------------------------------------------------------------
@@ -612,6 +613,8 @@ def _quote_ident_path(name: Any, what: str, max_parts: int) -> str:
 
 
 def _tbl(spec: _StudySpec, name: str) -> str:
+    if name == "visit_occurrence" and spec.visit_table:
+        return spec.visit_table
     return name if spec.schema is None else f"{_quote_ident_path(spec.schema, 'schema', 2)}.{name}"
 
 
@@ -1497,6 +1500,7 @@ def define_study_cohort(
     max_admit_date: Any = None,
     sample_stay_rule: str | None = None,
     random_seed: int | None = None,
+    merge_episodes_days: int | None = None,
 ) -> pd.DataFrame:
     r"""Defines a leak-free index-stay study cohort (one stay per patient) with an optional outcome.
 
@@ -1606,6 +1610,16 @@ def define_study_cohort(
         When given it overrides ``sampling_rule`` and ``one_per_patient``.
     random_seed : int, optional
         Seed of the random rule; when given it overrides ``random_state``.
+    merge_episodes_days : int or None, default None
+        Sensitivity analysis (0.35.0, issue 106). ``None`` (default) keeps every stay as recorded: a readmission must start
+        after the discharge day, so one that starts on the discharge day or overlaps the index stay is not counted (the legacy
+        rule). An integer first merges the index and outcome visit types of a person into episodes (:func:`episode_view_sql`):
+        ``0`` joins overlapping stays and a stay starting on the discharge day of the one before, ``k`` also those starting up
+        to ``k`` days later. Every rule (length of stay, death and transfer at discharge, the outcome) then applies to the
+        episode, which keeps its first stay's ``visit_occurrence_id``. The CDM is not changed (a temporary view). Features
+        extracted afterwards read the unmerged ``visit_occurrence`` and join diagnoses by that first stay's id, so the discharge
+        status and the visit-linked diagnosis counts describe the first stay, not the episode: use it for the cohort and outcome
+        counts, not as a feature table.
     death_sources : {"death_table", "discharge_disposition"} or sequence, optional
         Where a patient's death date comes from: the ``death`` table and / or the end date of any visit
         discharged to a death concept. Default: ``death_table`` only for readmission / cohort-only, both for
@@ -1864,6 +1878,15 @@ def define_study_cohort(
         one_per_patient=one_per_patient,
     )
 
+    if merge_episodes_days is not None:
+        merge_n = _whole_number(merge_episodes_days, "merge_episodes_days", minimum=0)
+        types = sorted(set(visit_ids or ()) | set(outcome_ids))
+        con.execute(f"CREATE OR REPLACE TEMP VIEW {_STUDY_EPISODES_VIEW} AS "
+                    + episode_view_sql(con, _tbl(spec, "visit_occurrence"), types, merge_n))
+        spec = dataclasses.replace(spec, visit_table=_STUDY_EPISODES_VIEW)
+    else:
+        merge_n = None
+
     _warn_unmapped_transfer_discharge(con, spec)
     check_observation_period_ends(con)
 
@@ -1944,9 +1967,47 @@ def define_study_cohort(
         "exclude_metformin_only_prediabetes_pcos": mf_pcos,
         "followup_evidence": list(evidence),
         "one_per_patient": one_per_patient,
+        "merge_episodes_days": merge_n,
         "schema": schema,
     }
     return df
+
+
+_STUDY_EPISODES_VIEW = "_study_episodes"
+
+
+def episode_view_sql(con, visit_table: str, visit_concept_ids: Sequence[int], merge_days: int) -> str:
+    """SQL of the visits with stays merged into episodes (0.35.0, issue 106; the episode-merging sensitivity analysis).
+
+    Visits of ``visit_concept_ids`` of one person are merged when one starts no later than ``merge_days`` after the latest end
+    of the episode so far: ``0`` merges overlapping stays and a stay that starts on the discharge day of the one before (a transfer
+    or a same-day readmission, which the readmission rule ``start > discharge`` never counts), ``1`` also the next day. The episode
+    keeps its first stay's row (``visit_occurrence_id``, type, admission) with the earliest start, the latest end and the discharge
+    status of the stay that ends last. Other visits are returned unchanged."""
+    cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {visit_table}").fetchall()]
+    low = {c.lower(): c for c in cols}
+    ids = _int_list(visit_concept_ids)
+    k = int(merge_days)
+    rep = ["e._s AS visit_start_date", "e._e AS visit_end_date"]
+    rep += [f'l."{low[c]}" AS "{low[c]}"' for c in ("visit_end_datetime", "discharged_to_concept_id", "discharged_to_source_value")
+            if c in low]
+    order = "visit_start_date, visit_end_date, visit_occurrence_id"
+    return f"""
+        WITH m AS (SELECT * FROM {visit_table} WHERE visit_concept_id IN ({ids})),
+        o AS (SELECT person_id, visit_occurrence_id, visit_start_date, visit_end_date,
+                     max(visit_end_date) OVER (PARTITION BY person_id ORDER BY {order}
+                                               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS _prev_end FROM m),
+        g AS (SELECT *, sum(CASE WHEN _prev_end IS NULL OR CAST(visit_start_date AS DATE) > CAST(_prev_end AS DATE) + {k} THEN 1 ELSE 0 END)
+                        OVER (PARTITION BY person_id ORDER BY {order} ROWS UNBOUNDED PRECEDING) AS _ep FROM o),
+        e AS (SELECT person_id, _ep, min(visit_start_date) AS _s, max(visit_end_date) AS _e,
+                     arg_min(visit_occurrence_id, struct_pack(a := visit_start_date, b := visit_end_date, c := visit_occurrence_id)) AS _first,
+                     arg_max(visit_occurrence_id, struct_pack(n := visit_end_date IS NOT NULL, a := visit_end_date, b := visit_start_date,
+                                                               c := visit_occurrence_id)) AS _last
+              FROM g GROUP BY person_id, _ep)
+        SELECT f.* REPLACE ({", ".join(rep)})
+        FROM e JOIN m f ON f.visit_occurrence_id = e._first JOIN m l ON l.visit_occurrence_id = e._last
+        UNION ALL
+        SELECT * FROM {visit_table} WHERE visit_concept_id IS NULL OR visit_concept_id NOT IN ({ids})"""
 
 
 def _write_index_keys(df: pd.DataFrame, path: Path) -> None:

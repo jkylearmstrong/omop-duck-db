@@ -343,6 +343,9 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
         ctx["random_draw"]["redrawn"] = int(run_rec["random_draw_redrawn"])
     # how a stay with no BMI recorded during the stay was filled (0.34.1); a run record without "bmi_fill" gets its profile's default
     ctx["bmi_fill"] = run_rec.get("bmi_fill") or ("derive_lookback" if run_rec.get("profile", "ederri") in ("ederri", "both") else "derive")
+    ctx["hemoglobin_from_hematocrit"] = bool(run_rec.get("hemoglobin_from_hematocrit"))
+    if run_rec.get("sensitivity"):  # the seed and all-eligible-stays sensitivity analyses (run_study(sensitivity=True), 0.35.0)
+        ctx["sensitivity"] = dict(run_rec["sensitivity"])
     if ctx["cohort"].get("contrast"):
         ctx["table1_contrast"] = " and ".join(ctx["cohort"].pop("contrast"))
     window = run_rec.get("window")

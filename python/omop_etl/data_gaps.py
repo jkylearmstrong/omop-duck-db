@@ -23,7 +23,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
-__all__ = ["DataGapWarning", "DataGapError", "GAP_CHECKS", "feature_coverage", "geography_findings", "group_missing_shares", "FEATURE_PREFIXES", "assess", "format_findings", "mask_counts", "sanitize"]
+__all__ = ["DataGapWarning", "DataGapError", "ConceptSetExclusionWarning", "GAP_CHECKS", "GAP_CAUSES", "classify_findings",
+           "collapse_concept_set_exclusions", "load_known_source_gaps", "feature_coverage", "geography_findings", "group_missing_shares", "FEATURE_PREFIXES", "assess", "format_findings", "mask_counts", "sanitize"]
 
 #: Every check that can fail a study run, with what it means. ``--allow-data-gaps`` takes these names (or a feature
 #: group's name, or ``all``).
@@ -58,6 +59,124 @@ class DataGapWarning(UserWarning):
         super().__init__(message)
         self.check = check
         self.column = column
+
+
+class ConceptSetExclusionWarning(UserWarning):
+    """A lab's rows sit under codes its concept set leaves out on purpose (another unit type or specimen). Not a gap: a study run
+    lists each such lab once per study (check ``concept_set_exclusion``, cause ``intentional``), not once per site (0.35.0)."""
+
+    def __init__(self, message: str, column: str | None = None, codes: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.column = column
+        self.codes = list(codes)
+
+
+#: Why a finding is there (0.35.0, issue 106). ``source_gap``: a gap in the source extract that the study team has confirmed
+#: (listed in the known-source-gaps file; expected); ``intentional``: a design choice such as a concept set that leaves codes out on
+#: purpose (expected); ``etl_mapping``: rows that exist but were not mapped or read (vocabulary, concept-set coverage, unmapped
+#: discharge status, a feature with no concept: fix the ETL); ``unexplained``: anything else, to be looked at.
+GAP_CAUSES: dict[str, str] = {
+    "source_gap": "confirmed gap in the source extract (listed in the known-source-gaps file)",
+    "intentional": "a deliberate design choice (a concept set leaves these codes out on purpose)",
+    "etl_mapping": "rows exist but were not mapped or not read: an ETL or vocabulary gap to fix",
+    "unexplained": "not explained yet: look at it",
+}
+_ETL_CHECKS = {"vocabulary", "concept_set_coverage", "transfer", "feature_skipped", "address_table", "sdoh_partial"}
+
+
+def load_known_source_gaps(spec: Any) -> dict[str, str]:
+    """The study team's confirmed source gaps: ``{key: reason}``. ``spec`` is a mapping, a sequence of keys, a JSON file (an object
+    ``{key: reason}`` or a list of keys) or a text file with one key per line (``# reason`` after it). A key is a feature column
+    (``lab_potassium``; ``lab_potassium`` also covers ``lab_potassium_last``), a feature group (``vitals``) or a check, optionally
+    for one site only as ``<site>:<key>`` (the site's name as given to ``--sites``; keep the file private)."""
+    import json
+    from pathlib import Path
+
+    if spec is None:
+        return {}
+    if isinstance(spec, Mapping):
+        return {str(k).strip(): str(v) for k, v in spec.items() if str(k).strip()}
+    if isinstance(spec, (str, Path)) and Path(spec).exists():
+        text = Path(spec).read_text(encoding="utf-8")
+        if str(spec).lower().endswith(".json"):
+            data = json.loads(text)
+            return load_known_source_gaps(data if isinstance(data, Mapping) else list(data))
+        out = {}
+        for line in text.splitlines():
+            key, _, why = line.partition("#")
+            if key.strip():
+                out[key.strip()] = why.strip()
+        return out
+    if isinstance(spec, (str, Path)):
+        raise ValueError(f"known source gaps file {str(spec)!r} does not exist")
+    return {str(k).strip(): "" for k in spec if str(k).strip()}
+
+
+def _known_match(f: Mapping[str, Any], known: Mapping[str, str], site_keys: Mapping[str, str]) -> str | None:
+    """The key of ``known`` that covers finding ``f`` (``site_keys``: anonymous label -> site name), or None. A finding of an ETL
+    check (an unmapped or unread input, :data:`_ETL_CHECKS`) is covered only by a key naming that check, never by a column or group
+    key: listing ``lab_potassium`` as a source gap must not hide potassium rows that exist but were not mapped."""
+    names = ([f.get("check")] if f.get("check") in _ETL_CHECKS else
+             [n for n in (f.get("column"), f.get("group"), f.get("check")) if n])
+    names = [n for n in names if n]
+    site = site_keys.get(str(f.get("site")), None)
+    for key in known:
+        scope, _, item = key.rpartition(":")
+        if scope and scope != site:
+            continue
+        for n in names:
+            if n == item or (n == f.get("column") and str(n).startswith(item + "_")):
+                return key
+    return None
+
+
+def classify_findings(findings: Sequence[dict[str, Any]], known_source_gaps: Mapping[str, str] | None = None,
+                      site_keys: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """Adds ``cause`` (a key of :data:`GAP_CAUSES`) and ``expected`` to each finding, in place, and returns them. A finding covered by
+    ``known_source_gaps`` (:func:`load_known_source_gaps`) is a ``source_gap`` with its reason in ``known_reason``; an intentional
+    concept-set exclusion is ``intentional``; the checks of an unmapped or unread input are ``etl_mapping``; the rest
+    ``unexplained``. Expected findings (source gaps and intentional exclusions) never fail a run (:func:`assess`)."""
+    known = dict(known_source_gaps or {})
+    keys = dict(site_keys or {})
+    for f in findings:
+        hit = _known_match(f, known, keys) if known else None
+        if hit is not None:
+            f["cause"] = "source_gap"
+            if known[hit]:
+                f["known_reason"] = known[hit]
+        elif f.get("check") == "concept_set_exclusion":
+            f["cause"] = "intentional"
+        elif f.get("check") in _ETL_CHECKS:
+            f["cause"] = "etl_mapping"
+        else:
+            f["cause"] = f.get("cause") if f.get("cause") in GAP_CAUSES else "unexplained"
+        f["expected"] = f["cause"] in ("source_gap", "intentional")
+    return list(findings)
+
+
+def collapse_concept_set_exclusions(findings: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The per-site ``concept_set_exclusion`` findings merged into one study-level finding per lab (``site`` = ``"all"``), listing the
+    left-out codes and the number of sites, never per-site shares. Other findings are returned unchanged, in order."""
+    out: list[dict[str, Any]] = []
+    merged: dict[str, dict[str, Any]] = {}
+    for f in findings:
+        if f.get("check") != "concept_set_exclusion":
+            out.append(f)
+            continue
+        col = str(f.get("column") or "?")
+        m = merged.get(col)
+        if m is None:
+            m = merged[col] = {"site": "all", "check": "concept_set_exclusion", "column": col, "severity": "info", "codes": [],
+                               "_sites": set(), "cause": "intentional", "expected": True}
+            out.append(m)
+        m["_sites"].add(f.get("site"))
+        m["codes"] = sorted(set(m["codes"]) | set(f.get("codes") or ()))
+    for m in merged.values():
+        n = len(m.pop("_sites"))
+        m["n_sites"] = n
+        m["message"] = (f"{m['column']}: rows under {', '.join(m['codes']) or 'other codes'} (same analyte, another unit type or "
+                        f"specimen) are left out of the concept set on purpose, at {n} site(s)")
+    return out
 
 
 class DataGapError(RuntimeError):
@@ -180,6 +299,8 @@ def group_missing_shares(frame: pd.DataFrame, groups: Mapping[str, Sequence[str]
 
 
 def _allowed(f: Mapping[str, Any], allow: set[str]) -> bool:
+    if f.get("expected"):  # a confirmed source gap or an intentional exclusion (classify_findings)
+        return True
     if {"all", f.get("check"), f.get("group")} & allow:
         return True
     col = f.get("column")
@@ -210,4 +331,6 @@ def assess(findings: Sequence[dict[str, Any]], allow: Iterable[str] = ()) -> lis
 
 def format_findings(findings: Sequence[Mapping[str, Any]]) -> str:
     """One line per finding, for the console."""
-    return "\n".join(f"  [{f.get('site', '-')}] {f['check']}: {f['message']}" + (" (allowed)" if f.get("allowed") else "") for f in findings)
+    return "\n".join(f"  [{f.get('site', '-')}] {f['check']}: {f['message']}"
+                     + (f" [{f['cause']}" + (f": {f['known_reason']}" if f.get("known_reason") else "") + "]" if f.get("cause") else "")
+                     + (" (allowed)" if f.get("allowed") else "") for f in findings)

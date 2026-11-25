@@ -43,7 +43,8 @@ define_study_cohort(
   min_admit_date = NULL,
   max_admit_date = NULL,
   sample_stay_rule = NULL,
-  random_seed = NULL
+  random_seed = NULL,
+  merge_episodes_days = NULL
 )
 }
 \arguments{
@@ -180,6 +181,14 @@ drop patients whose only diabetes drug is metformin and who have prediabetes or 
 stay, \code{one_per_patient = FALSE}). Overrides \code{sampling_rule} and \code{one_per_patient}.}
 
 \item{random_seed}{\code{NULL}, or the seed of the random rule (overrides \code{random_state}).}
+
+\item{merge_episodes_days}{Sensitivity analysis (0.35.0). \code{NULL} (default) keeps every stay as recorded: a readmission must
+start after the discharge day, so one starting on the discharge day or overlapping the index stay is not counted (the
+legacy rule). An integer first merges the index and outcome visit types of a person into episodes: \code{0} joins overlapping
+stays and a stay starting on the discharge day of the one before, \code{k} also those starting up to \code{k} days later. Every rule
+then applies to the episode, which keeps its first stay's \code{visit_occurrence_id}. The CDM is not changed (a temporary view).
+Features extracted afterwards read the unmerged \code{visit_occurrence}, so the discharge status and the visit-linked diagnosis
+counts describe the first stay, not the episode: use it for the cohort and outcome counts, not as a feature table.}
 }
 \value{
 A \code{data.frame}, one row per patient ordered by \code{subject_id}, with columns \code{cohort_definition_id},

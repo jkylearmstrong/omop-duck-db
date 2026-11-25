@@ -584,7 +584,44 @@ get_cohort_summary <- function(con, cohort_id = NULL) {
 #' @keywords internal
 #' @noRd
 .study_tbl <- function(spec, name) {
+  if (identical(name, "visit_occurrence") && !is.null(spec$visit_table)) return(spec$visit_table)
   if (is.null(spec$schema)) name else paste0(.quote_ident_path(spec$schema, "schema", 2L), ".", name)
+}
+
+.STUDY_EPISODES_VIEW <- "_study_episodes"
+
+# SQL of the visits with stays merged into episodes (0.35.0, issue 106; the episode-merging sensitivity analysis). Visits of
+# visit_concept_ids of one person are merged when one starts no later than merge_days after the latest end of the episode so
+# far (0: overlapping stays and a stay starting on the discharge day). The episode keeps its first stay's row with the earliest
+# start, the latest end and the discharge status of the stay that ends last; other visits are returned unchanged.
+# Mirror of omop_etl.cohort.episode_view_sql.
+#' @keywords internal
+#' @noRd
+.study_episode_view_sql <- function(con, visit_table, visit_concept_ids, merge_days) {
+  cols <- DBI::dbGetQuery(con, paste("DESCRIBE SELECT * FROM", visit_table))$column_name
+  low <- stats::setNames(cols, tolower(cols))
+  ids <- .int_list(visit_concept_ids)
+  k <- as.integer(merge_days)
+  rep <- c("e._s AS visit_start_date", "e._e AS visit_end_date")
+  for (cc in c("visit_end_datetime", "discharged_to_concept_id", "discharged_to_source_value")) {
+    if (cc %in% names(low)) rep <- c(rep, sprintf('l."%s" AS "%s"', low[[cc]], low[[cc]]))
+  }
+  ord <- "visit_start_date, visit_end_date, visit_occurrence_id"
+  paste0("
+    WITH m AS (SELECT * FROM ", visit_table, " WHERE visit_concept_id IN (", ids, ")),
+    o AS (SELECT person_id, visit_occurrence_id, visit_start_date, visit_end_date,
+                 max(visit_end_date) OVER (PARTITION BY person_id ORDER BY ", ord, "
+                                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS _prev_end FROM m),
+    g AS (SELECT *, sum(CASE WHEN _prev_end IS NULL OR CAST(visit_start_date AS DATE) > CAST(_prev_end AS DATE) + ", k, " THEN 1 ELSE 0 END)
+                    OVER (PARTITION BY person_id ORDER BY ", ord, " ROWS UNBOUNDED PRECEDING) AS _ep FROM o),
+    e AS (SELECT person_id, _ep, min(visit_start_date) AS _s, max(visit_end_date) AS _e,
+                 arg_min(visit_occurrence_id, struct_pack(a := visit_start_date, b := visit_end_date, c := visit_occurrence_id)) AS _first,
+                 arg_max(visit_occurrence_id, struct_pack(n := visit_end_date IS NOT NULL, a := visit_end_date, b := visit_start_date, c := visit_occurrence_id)) AS _last
+          FROM g GROUP BY person_id, _ep)
+    SELECT f.* REPLACE (", paste(rep, collapse = ", "), ")
+    FROM e JOIN m f ON f.visit_occurrence_id = e._first JOIN m l ON l.visit_occurrence_id = e._last
+    UNION ALL
+    SELECT * FROM ", visit_table, " WHERE visit_concept_id IS NULL OR visit_concept_id NOT IN (", ids, ")")
 }
 
 # ---- SQL generators ----------------------------------------------------------------------------------
@@ -1465,6 +1502,13 @@ remap_discharge_status <- function(con, schema = NULL, concept_id = 8717L, dry_r
 #'   `stable_random`, identical across DuckDB versions and sites), `"earliest"`, `"latest"` or `"all"` (every eligible
 #'   stay, `one_per_patient = FALSE`). Overrides `sampling_rule` and `one_per_patient`.
 #' @param random_seed `NULL`, or the seed of the random rule (overrides `random_state`).
+#' @param merge_episodes_days Sensitivity analysis (0.35.0). `NULL` (default) keeps every stay as recorded: a readmission must
+#'   start after the discharge day, so one starting on the discharge day or overlapping the index stay is not counted (the
+#'   legacy rule). An integer first merges the index and outcome visit types of a person into episodes: `0` joins overlapping
+#'   stays and a stay starting on the discharge day of the one before, `k` also those starting up to `k` days later. Every rule
+#'   then applies to the episode, which keeps its first stay's `visit_occurrence_id`. The CDM is not changed (a temporary view).
+#'   Features extracted afterwards read the unmerged `visit_occurrence`, so the discharge status and the visit-linked diagnosis
+#'   counts describe the first stay, not the episode: use it for the cohort and outcome counts, not as a feature table.
 #' @param sampling_rule `"random"` (default), `"first"` or `"last"`: which eligible stay represents a patient --
 #'   the stay minimising `hash(visit_occurrence_id, random_state)` (ties by id), the earliest start, or the latest
 #'   start.
@@ -1605,7 +1649,8 @@ define_study_cohort <- function(con,
                                 min_admit_date = NULL,
                                 max_admit_date = NULL,
                                 sample_stay_rule = NULL,
-                                random_seed = NULL) {
+                                random_seed = NULL,
+                                merge_episodes_days = NULL) {
   if (!is.null(sample_stay_rule)) {
     stay_rule <- tolower(trimws(as.character(sample_stay_rule)))
     if (length(stay_rule) != 1L || !stay_rule %in% names(.STUDY_SAMPLE_STAY_RULES)) {
@@ -1752,6 +1797,14 @@ define_study_cohort <- function(con,
     diabetes_drug_ancestors = drug$ancestors, concept_ancestor_ref = drug$ca, metformin_only_pcos = mf_pcos,
     one_per_patient = one_per_patient
   )
+  merge_n <- NULL
+  if (!is.null(merge_episodes_days)) {
+    merge_n <- .whole_number(merge_episodes_days, "merge_episodes_days", minimum = 0)
+    types <- sort(unique(c(visit_ids, outcome_ids)))
+    DBI::dbExecute(con, paste0("CREATE OR REPLACE TEMP VIEW ", .STUDY_EPISODES_VIEW, " AS ",
+                               .study_episode_view_sql(con, .study_tbl(spec, "visit_occurrence"), types, merge_n)))
+    spec$visit_table <- .STUDY_EPISODES_VIEW
+  }
   .warn_unmapped_transfer_discharge(con, spec)
   check_observation_period_ends(con)
 
@@ -1828,6 +1881,7 @@ define_study_cohort <- function(con,
     death_sources = sources,
     followup_evidence = evidence,
     one_per_patient = one_per_patient,
+    merge_episodes_days = merge_n,
     schema = schema
   )
   df

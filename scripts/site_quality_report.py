@@ -175,7 +175,8 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
     import duckdb
 
     from omop_etl.benchmark_features import (BENCHMARK_LAB_CONCEPT_SETS, BENCHMARK_LAB_LOINCS, DEFAULT_BOUNDS, DEFAULT_RESCALE,
-                                             _bounds_frame, _concept_map, _ensure_vocabulary)
+                                             DEFAULT_UNIT_CONVERSIONS, _UNIT_NORM_SQL, _bounds_frame, _concept_map, _conversion_frame,
+                                             _ensure_vocabulary)
 
     src = pd.DataFrame([(n, str(c)) for n, cs in BENCHMARK_LAB_LOINCS.items() for c in cs], columns=["name", "loinc"])
     out = []
@@ -193,11 +194,18 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
             cmap = _bounds_frame(_concept_map(con, None, None, BENCHMARK_LAB_CONCEPT_SETS), DEFAULT_BOUNDS, DEFAULT_RESCALE)
             con.register("_lf_src", src)
             con.register("_lf_map", cmap)
-            f = con.execute("""
+            con.register("_lf_conv", _conversion_frame(DEFAULT_UNIT_CONVERSIONS))
+            mcols = {r[0].lower() for r in con.execute("DESCRIBE measurement").fetchall()}
+            uid = "m.unit_concept_id" if "unit_concept_id" in mcols else "CAST(NULL AS INTEGER)"
+            utxt = _UNIT_NORM_SQL if "unit_source_value" in mcols else "CAST(NULL AS VARCHAR)"
+            # the bounds are checked after the package's SI-unit conversions, as feature extraction does (review of PR 107)
+            f = con.execute(f"""
                 WITH r AS (
-                    SELECT s.name, m.measurement_concept_id AS cid, m.measurement_date AS d, m.value_as_number AS x,
+                    SELECT s.name, m.measurement_concept_id AS cid, m.measurement_date AS d, m.value_as_number * coalesce(cv.factor, 1.0) AS x,
                            m.unit_source_value AS u
                     FROM measurement m JOIN _lf_src s ON m.measurement_source_value = s.loinc
+                    LEFT JOIN _lf_conv cv ON cv.name = s.name AND (cv.unit_concept_id = {uid}
+                         OR (coalesce({uid}, 0) = 0 AND cv.unit_text = {utxt}))
                     WHERE m.measurement_date IS NULL OR m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)),
                 b AS (SELECT DISTINCT name, lo, hi, rs_lo, rs_hi, rs_div FROM _lf_map),
                 k AS (SELECT DISTINCT name, concept_id FROM _lf_map)
@@ -246,9 +254,122 @@ def lab_funnel(db_dir: Path, sites: Mapping[str, str], start: str, end: str, dea
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 
+def readmission_overlap(private_dir: Path, db_dir: Path, sites: Mapping[str, str], deadline: float,
+                        visit_types: tuple[int, ...] = (9201, 262)) -> pd.DataFrame:
+    """Per site: index stays with another inpatient stay that starts on their discharge day (``day 0``) or inside them
+    (``overlapping``). The readmission rule (start after the discharge day) counts neither, as the legacy rule did; the pre-C16
+    audit found them at 1 to 15% of the counted readmissions per site (issue 106). Shares only: % of index stays and % of the counted
+    readmissions. ``define_study_cohort(merge_episodes_days=0)`` is the sensitivity analysis that merges them into one episode."""
+    import duckdb
+
+    types = ", ".join(str(int(t)) for t in visit_types)
+    out = []
+    for site, label in sites.items():
+        f = private_dir / f"cohort_{site}.parquet"
+        if not f.exists():
+            continue
+        if time.time() > deadline:
+            print(f"time limit reached before {label}; stopping the readmission overlap check", file=sys.stderr)
+            break
+        con = duckdb.connect(str(db_dir / f"omop_{site}.duckdb"), read_only=True)
+        try:
+            c = pd.read_parquet(f, columns=["subject_id", "visit_occurrence_id", "cohort_start_date", "cohort_end_date", "outcome_flag"])
+            con.register("_ro_c", c)
+            r = con.execute(f"""
+                WITH k AS (
+                    SELECT c.visit_occurrence_id, max(CAST(c.outcome_flag AS INTEGER)) AS y,
+                           bool_or(CAST(v.visit_start_date AS DATE) = CAST(c.cohort_end_date AS DATE)) AS day0,
+                           bool_or(CAST(v.visit_start_date AS DATE) >= CAST(c.cohort_start_date AS DATE)
+                                   AND CAST(v.visit_start_date AS DATE) < CAST(c.cohort_end_date AS DATE)) AS overlap
+                    FROM _ro_c c LEFT JOIN visit_occurrence v ON v.person_id = c.subject_id AND v.visit_occurrence_id <> c.visit_occurrence_id
+                         AND v.visit_concept_id IN ({types})
+                    GROUP BY c.visit_occurrence_id)
+                SELECT count(*), sum(y), count(*) FILTER (WHERE day0), count(*) FILTER (WHERE overlap),
+                       count(*) FILTER (WHERE day0 OR overlap), count(*) FILTER (WHERE (day0 OR overlap) AND y = 0)
+                FROM k""").fetchone()
+            n, y, d0, ov, either, uncounted = (int(x or 0) for x in r)
+            out.append({"site": label, "pct_stays_day0": round(100 * d0 / n, 2) if n else None,
+                        "pct_stays_overlapping": round(100 * ov / n, 2) if n else None,
+                        "pct_of_readmissions": round(100 * either / y, 2) if y else None,
+                        "pct_stays_not_counted": round(100 * uncounted / n, 2) if n else None})
+        finally:
+            con.close()
+    return pd.DataFrame(out)
+
+
+def unit_medians(db_dir: Path, sites: Mapping[str, str], start: str, end: str, deadline: float, factor: float = 5.0,
+                 min_share: float = 0.01) -> pd.DataFrame:
+    """Per site and lab: the median value of each unit (``unit_source_value``) that holds at least ``min_share`` of the lab's rows (and
+    at least 11 rows), after the package's UCUM conversions (``DEFAULT_UNIT_CONVERSIONS``), and ``ratio`` = largest / smallest
+    median. A ratio of ``factor`` or more means a unit the package does not convert, or a mislabelled unit (issue 106)."""
+    import duckdb
+
+    from omop_etl.benchmark_features import (BENCHMARK_LAB_CONCEPT_SETS, DEFAULT_UNIT_CONVERSIONS, _UNIT_NORM_SQL, _concept_map,
+                                             _conversion_frame, _ensure_vocabulary)
+
+    conv = _conversion_frame(DEFAULT_UNIT_CONVERSIONS)
+    out = []
+    for site, label in sites.items():
+        if time.time() > deadline:
+            print(f"time limit reached before {label}; stopping the unit check", file=sys.stderr)
+            break
+        con = duckdb.connect(str(db_dir / f"omop_{site}.duckdb"), read_only=True)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                _ensure_vocabulary(con, "auto")
+            con.register("_um_map", _concept_map(con, None, None, BENCHMARK_LAB_CONCEPT_SETS))
+            con.register("_um_conv", conv)
+            u = con.execute(f"""
+                WITH r AS (
+                    SELECT k.name, coalesce(nullif(trim(m.unit_source_value), ''), '(none)') AS unit,
+                           m.value_as_number * coalesce(cv.factor, 1.0) AS x
+                    FROM measurement m JOIN (SELECT DISTINCT name, concept_id FROM _um_map) k ON k.concept_id = m.measurement_concept_id
+                    LEFT JOIN _um_conv cv ON cv.name = k.name AND (cv.unit_concept_id = m.unit_concept_id
+                         OR (coalesce(m.unit_concept_id, 0) = 0 AND cv.unit_text = {_UNIT_NORM_SQL}))
+                    WHERE m.value_as_number IS NOT NULL AND m.measurement_date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE))
+                SELECT name, unit, count(*) AS n, median(x) AS med FROM r GROUP BY 1, 2""", [start, end]).df()
+            for name, g in u.groupby("name"):
+                g = g[(g["n"] >= 11) & (g["n"] >= min_share * g["n"].sum())]
+                pos = g[g["med"] > 0]
+                ratio = float(pos["med"].max() / pos["med"].min()) if len(pos) >= 2 else None
+                out.append({"site": label, "name": name, "units": "; ".join(f"{r.unit} {r.med:.3g} ({100 * r.n / g['n'].sum():.0f}%)"
+                                                                            for r in g.sort_values("n", ascending=False).itertuples()),
+                            "ratio": round(ratio, 2) if ratio else None, "flag": bool(ratio and ratio >= factor)})
+        finally:
+            con.close()
+    return pd.DataFrame(out)
+
+
+def funnel_causes(funnel: pd.DataFrame, known: Mapping[str, str], site_keys: Mapping[str, str]) -> pd.Series:
+    """Why a lab is lost at a site, from its funnel row: a gap the study team confirmed (``--known-source-gaps``), no row with the lab's
+    codes at all (likely a source gap), rows that exist but are not mapped to the lab's concepts (an ETL mapping gap), or rows with no
+    number (a source gap, or a raw result the ETL did not read)."""
+    from omop_etl.data_gaps import _known_match
+
+    out = []
+    for r in funnel.itertuples():
+        f = {"site": r.site, "column": f"lab_{r.name}", "check": "column_missing", "group": "labs"}
+        if known and _known_match(f, known, site_keys) is not None:
+            out.append("source gap (confirmed)")
+        elif not r.source_rows and not r.concept_rows:
+            out.append("no rows with its codes (likely a source gap)")
+        elif r.source_rows and (pd.isna(r.pct_mapped) or r.pct_mapped < 50) and r.concept_rows < r.source_rows:
+            out.append("ETL mapping gap (rows not mapped to the lab's concepts)")
+        elif pd.notna(r.pct_no_number) and r.pct_no_number >= 50:
+            out.append("no numeric value (source gap, or a raw result the ETL did not read)")
+        elif pd.notna(getattr(r, "pct_out_of_bounds", None)) and r.pct_out_of_bounds >= 50:
+            out.append("values outside the physiologic bounds (a unit or scale the package does not convert)")
+        else:
+            out.append("")
+    return pd.Series(out, index=funnel.index, dtype=object)
+
+
 def flags(feat: pd.DataFrame, cats: pd.DataFrame, att: pd.DataFrame, unm: pd.DataFrame, bnd: pd.DataFrame,
-          pct_gap: float, ratio: float, funnel: pd.DataFrame | None = None) -> list[dict[str, Any]]:
-    """Measures where the sites differ: ranges only, no site label or count."""
+          pct_gap: float, ratio: float, funnel: pd.DataFrame | None = None, overlap: pd.DataFrame | None = None,
+          units: pd.DataFrame | None = None, known: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+    """Measures where the sites differ: ranges only, no site label or count. A measure the study team listed as a confirmed source
+    gap (``known``) is marked ``expected``."""
     out: list[dict[str, Any]] = []
 
     def spread(kind: str, name: str, vals: pd.Series, unit: str = "%") -> None:
@@ -288,6 +409,33 @@ def flags(feat: pd.DataFrame, cats: pd.DataFrame, att: pd.DataFrame, unm: pd.Dat
             for col, what in (("pct_mapped", "mapped to the set"), ("pct_no_date", "no date"), ("pct_no_number", "no number"),
                               ("pct_out_of_bounds", "outside bounds")):
                 spread("Lab funnel", f"lab_{n} source rows: % {what}", g[col])
+            if "cause" in g:  # each cause once per lab, with the number of sites (no site label)
+                for cause, k in g.loc[g["cause"].astype(bool), "cause"].value_counts().items():
+                    out.append({"domain": "Lab funnel", "measure": f"lab_{n}: {cause}", "min": None, "max": None, "unit": f"{k} site(s)",
+                                "cause": cause})
+    if overlap is not None and len(overlap):
+        for col, what in (("pct_stays_day0", "% of index stays with an inpatient stay starting on the discharge day"),
+                          ("pct_stays_overlapping", "% of index stays with an inpatient stay starting inside them"),
+                          ("pct_of_readmissions", "day-0 or overlapping stays as % of the counted readmissions")):
+            v = pd.to_numeric(overlap[col], errors="coerce").dropna()
+            if len(v):  # always reported (issue 106), not only when the sites differ
+                out.append({"domain": "Readmission rule", "measure": what, "min": round(float(v.min()), 1), "max": round(float(v.max()), 1), "unit": "%"})
+    if units is not None and len(units):
+        for n, g in units[units["flag"]].groupby("name"):
+            out.append({"domain": "Lab units", "measure": f"lab_{n}: per-unit medians differ by a factor of 5 or more after the package's "
+                        "conversions", "min": round(float(g["ratio"].min()), 1), "max": round(float(g["ratio"].max()), 1),
+                        "unit": f"ratio, {len(g)} site(s)"})
+    if known:
+        from omop_etl.data_gaps import _known_match
+
+        for f in out:
+            if f.get("cause") == "source gap (confirmed)":  # a lab funnel cause, which also honours site-scoped keys
+                f["expected"] = True
+                continue
+            m = re.match(r"((?:lab|vital|med|elix|disp|ederri)_[a-z0-9_]+)", str(f.get("measure", "")))
+            if m and _known_match({"column": m.group(1), "site": None}, {k: v for k, v in known.items() if ":" not in k}, {}) is not None:
+                f["expected"] = True
+                f["cause"] = "source gap (confirmed)"
     return out
 
 
@@ -317,6 +465,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pct-gap", type=float, default=20.0)
     p.add_argument("--ratio", type=float, default=1.5)
     p.add_argument("--max-seconds", type=float, default=1200)
+    p.add_argument("--known-source-gaps", type=Path,
+                   help="the study team's confirmed source gaps (the file reproduce_study.py --known-source-gaps reads): marked as expected")
     a = p.parse_args(argv)
     t0 = time.time()
     labels = {str(k): str(v) for k, v in json.loads(a.labels.read_text(encoding="utf-8")).items()}
@@ -328,7 +478,14 @@ def main(argv: list[str] | None = None) -> int:
     sites = {s: l for s, l in labels.items() if (a.private_dir / f"features_{s}.parquet").exists()}
     unm, bnd = (db_rows(a.db_dir, sites, a.start, a.end, t0 + a.max_seconds) if a.db_dir else (pd.DataFrame(), pd.DataFrame()))
     fun = lab_funnel(a.db_dir, sites, a.start, a.end, t0 + a.max_seconds) if a.db_dir else pd.DataFrame()
-    fl = flags(feat, cats, att, unm, bnd, a.pct_gap, a.ratio, fun)
+    from omop_etl.data_gaps import load_known_source_gaps
+
+    known = load_known_source_gaps(a.known_source_gaps) if a.known_source_gaps else {}
+    if len(fun):
+        fun["cause"] = funnel_causes(fun, known, {v: k for k, v in sites.items()})
+    ovl = readmission_overlap(a.private_dir, a.db_dir, sites, t0 + a.max_seconds) if a.db_dir else pd.DataFrame()
+    uni = unit_medians(a.db_dir, sites, a.start, a.end, t0 + a.max_seconds) if a.db_dir else pd.DataFrame()
+    fl = flags(feat, cats, att, unm, bnd, a.pct_gap, a.ratio, fun, overlap=ovl, units=uni, known=known)
     a.detail.parent.mkdir(parents=True, exist_ok=True)
     a.flags.parent.mkdir(parents=True, exist_ok=True)
     md = [f"# Per-site data quality ({len(frames)} sites, {a.start} to {a.end})", "", "Keep this file with the data: it has per-site counts.", ""]
@@ -356,8 +513,18 @@ def main(argv: list[str] | None = None) -> int:
                "source_rows: rows whose measurement_source_value is one of the lab's LOINC codes; concept_rows: rows mapped to the lab's "
                "concepts whatever their source text; unmapped_concepts: the concepts the unmapped source rows carry.", ""]
         for col in ("source_rows", "concept_rows", "pct_mapped", "unmapped_concepts", "pct_no_date", "pct_no_number", "pct_out_of_bounds",
-                    "top_units"):
+                    "top_units", "cause"):
             md += [f"### {col}", "", _wide(fun, "name", col)]
+    if len(ovl):
+        md += ["## Day-0 and overlapping inpatient stays (not counted as readmissions)", "",
+               "Index stays with another inpatient stay that starts on their discharge day (day 0) or inside them (overlapping), "
+               "as % of index stays and of the counted readmissions; pct_stays_not_counted: such stays with no counted readmission. "
+               "define_study_cohort(merge_episodes_days=0) is the episode-merging sensitivity analysis.", "",
+               ovl.pipe(_md, index=False), ""]
+    if len(uni):
+        md += ["## Lab units: median per unit after the package's conversions", "",
+               "ratio: largest / smallest unit median; 5 or more is flagged (an unconverted or mislabelled unit).", "",
+               _wide(uni, "name", "units"), "### ratio", "", _wide(uni, "name", "ratio")]
     md += ["## Flags (measures where the sites differ)", "", pd.DataFrame(fl).pipe(_md, index=False) if fl else "(none)", ""]
     a.detail.write_text("\n".join(md), encoding="utf-8")
     a.flags.write_text(json.dumps({"sites": len(frames), "pct_gap": a.pct_gap, "ratio": a.ratio, "flags": fl}, indent=1), encoding="utf-8")

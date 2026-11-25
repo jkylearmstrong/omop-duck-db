@@ -50,6 +50,44 @@ DEFAULT_DISPENSED_TYPE_CONCEPT_IDS <- c(38000175L, 32823L)
   stop(sprintf("Vocabulary table '%s' is not reachable (or empty) on this connection.", name))
 }
 
+# Relationships from a drug concept to a concept that may name its ingredients, and from there to an ingredient (retired links
+# count: a deprecated drug keeps them). Mirror of omop_etl.medication_classes._nonstandard_drug_targets_sql.
+.MED_HOP_RELATIONSHIPS <- c("Tradename of", "Quantified form of", "Consists of", "Has quantified form", "Contains", "Form of")
+.MED_INGREDIENT_RELATIONSHIPS <- c("RxNorm has ing", "Has ingredient", "Brand name of", "Tradename of")
+
+#' @keywords internal
+#' @noRd
+.med_nonstandard_targets_sql <- function(drugs_sql, concept, cr, ds = NULL) {
+  hop <- paste(.med_q(.MED_HOP_RELATIONSHIPS), collapse = ", ")
+  ing <- paste(.med_q(.MED_INGREDIENT_RELATIONSHIPS), collapse = ", ")
+  ds_sql <- if (!is.null(ds)) sprintf("UNION SELECT r.src, d.ingredient_concept_id FROM rel r JOIN %s d ON d.drug_concept_id = r.cid", ds) else ""
+  paste0("
+    WITH s AS (SELECT DISTINCT x.drug_concept_id AS src FROM (", drugs_sql, ") x
+               LEFT JOIN ", concept, " c ON c.concept_id = x.drug_concept_id
+               WHERE coalesce(x.drug_concept_id, 0) <> 0
+                 AND (c.concept_id IS NULL OR c.standard_concept IS DISTINCT FROM 'S' OR c.invalid_reason IS NOT NULL)),
+    rel1 AS (SELECT src, src AS cid FROM s
+             UNION SELECT s.src, r.concept_id_2 FROM s JOIN ", cr, " r ON r.concept_id_1 = s.src AND r.relationship_id IN (", hop, ")),
+    rel AS (SELECT src, cid FROM rel1
+            UNION SELECT r1.src, r.concept_id_2 FROM rel1 r1 JOIN ", cr, " r ON r.concept_id_1 = r1.cid AND r.relationship_id IN (", hop, ")),
+    cand AS (SELECT r.src, x.concept_id_2 AS tgt FROM rel r JOIN ", cr, " x ON x.concept_id_1 = r.cid AND x.relationship_id IN (", ing, ")
+             ", ds_sql, "
+             UNION SELECT s.src, t.concept_id FROM s JOIN ", concept, " c ON c.concept_id = s.src AND c.concept_class_id = 'Ingredient'
+                   JOIN ", concept, " t ON lower(t.concept_name) = lower(c.concept_name) AND t.concept_id <> c.concept_id),
+    ingr AS (SELECT DISTINCT cand.src, t.concept_id AS tgt FROM cand
+             JOIN ", concept, " t ON t.concept_id = cand.tgt AND t.concept_class_id = 'Ingredient'
+              AND t.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND t.standard_concept = 'S' AND t.invalid_reason IS NULL),
+    hops AS (SELECT DISTINCT r.src, t.concept_id AS tgt FROM rel r
+             JOIN ", concept, " t ON t.concept_id = r.cid AND r.cid <> r.src AND t.vocabulary_id IN ('RxNorm', 'RxNorm Extension')
+              AND t.standard_concept = 'S' AND t.invalid_reason IS NULL),
+    maps AS (SELECT DISTINCT s.src, r.concept_id_2 AS tgt FROM s
+             JOIN ", cr, " r ON r.concept_id_1 = s.src AND r.relationship_id = 'Maps to' AND r.invalid_reason IS NULL
+             JOIN ", concept, " t ON t.concept_id = r.concept_id_2 AND t.standard_concept = 'S' AND t.invalid_reason IS NULL)
+    SELECT src AS drug_concept_id, tgt AS target_concept_id,
+           count(*) FILTER (WHERE kind = 'ingredient') OVER (PARTITION BY src) AS n_targets FROM (
+      SELECT src, tgt, 'ingredient' AS kind FROM ingr UNION SELECT src, tgt, 'drug' FROM hops UNION SELECT src, tgt, 'drug' FROM maps)")
+}
+
 #' Combination Product Disaggregation Audit
 #'
 #' Audits medication exposures for a specific OMOP class concept to determine the proportion
@@ -232,6 +270,13 @@ audit_combination_products <- function(con, class_concept_id, cohort_table = NUL
 #' @param offset_anchor Reference anchor date to evaluate offsets against (`"visit_start_date"`, `"visit_end_date"`, `"index_date"`).
 #' @param anchor Alias for `offset_anchor`.
 #' @param drug_type_concept_ids Optional vector of concept IDs to restrict drug exposure type concepts.
+#' @param combination_ingredients Standard strategy (default `TRUE`, 0.35.0): a drug row whose `drug_concept_id` is not a valid
+#'   standard concept (a deprecated RxNorm drug, a Brand Name, a combination product no single ingredient could replace) has no
+#'   place in `concept_ancestor`, so it used to count for no class. It now counts for the class of each of its valid standard
+#'   RxNorm ingredients (`drug_strength` and the ingredient relationships, retired links included), of the valid standard drugs
+#'   met on the way and of its valid 'Maps to' targets: a combination product counts for every class of its ingredients.
+#'   `drug_exposure` is not changed. `FALSE` restores the earlier behaviour. `attr(result, "combination_flags")` counts the
+#'   (row, class) flags only this rule set.
 #' @param return_audit Also return [audit_medication_strategies()] output (needs `strategy = "both"`).
 #' @param ... Forwarded to [audit_medication_strategies()].
 #' @return A data frame with `person_id`, `index_date`, optional `site`, and per class `<class>_source`,
@@ -255,6 +300,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
                                        offset_anchor = c("visit_start_date", "visit_end_date", "index_date"),
                                        anchor = NULL,
                                        drug_type_concept_ids = NULL,
+                                       combination_ingredients = TRUE,
                                        return_audit = FALSE, ...) {
   strategy <- match.arg(strategy)
   on_unresolved <- match.arg(on_unresolved)
@@ -324,6 +370,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     dt_clause <- sprintf("AND de.drug_type_concept_id IN (%s)", paste(as.integer(drug_type_concept_ids), collapse = ", "))
   }
 
+  combination_flags <- 0L
   flags <- list(source = list(), standard = list())
   flags_plain <- list(standard = list())
   flags_combo <- list(standard = list())
@@ -452,7 +499,37 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
       "SELECT DISTINCT v.row_id, m.drug_class", combo_hit_sel, type_sel, " FROM _med_cohort v ",
       "JOIN drug_exposure de ON de.person_id = v.person_id ",
       "JOIN _med_class_concepts m ON m.concept_id = de.drug_concept_id ",
-      "WHERE TRUE ", lo, " ", hi, " ", route_clause))
+      "WHERE TRUE ", lo, " ", hi, " ", route_clause, " ", dt_clause))
+    if (isTRUE(combination_ingredients)) {
+      # non-standard drug concepts (no concept_ancestor rows): credit the classes of their ingredients (issue 106)
+      ds_tbl <- tryCatch(.med_resolve_table(db_con, "drug_strength", vocab_schema = v_schema, vocab_db = vocab_db), error = function(e) NULL)
+      cr_ok <- tryCatch({ DBI::dbGetQuery(db_con, paste0("SELECT 1 FROM ", cr_tbl, " LIMIT 0")); TRUE }, error = function(e) FALSE)
+      concept_cols <- tolower(names(DBI::dbGetQuery(db_con, paste0("SELECT * FROM ", concept, " LIMIT 0"))))
+      cr_ok <- cr_ok && all(c("standard_concept", "invalid_reason", "vocabulary_id") %in% concept_cols)
+      if (cr_ok) {
+        drugs <- "SELECT DISTINCT de.drug_concept_id FROM drug_exposure de WHERE de.person_id IN (SELECT person_id FROM _med_cohort)"
+        DBI::dbExecute(db_con, paste0("CREATE OR REPLACE TEMPORARY TABLE _med_drug_targets AS ",
+                                      .med_nonstandard_targets_sql(drugs, concept, cr_tbl, ds_tbl)))
+        tmp <- c(tmp, "_med_drug_targets")
+        if (length(ex_cond_parts) > 0) {  # the dose-form exclusions apply to the exposure's own concept too
+          DBI::dbExecute(db_con, sprintf(paste0(
+            "DELETE FROM _med_drug_targets WHERE drug_concept_id IN (SELECT ca.descendant_concept_id FROM ",
+            "(SELECT DISTINCT drug_concept_id AS descendant_concept_id FROM _med_drug_targets) ca ",
+            "JOIN %s c ON c.concept_id = ca.descendant_concept_id WHERE (%s))"), concept, paste(ex_cond_parts, collapse = " OR ")))
+        }
+        combo2 <- if (filter_combo) ", GREATEST(m.is_combination, CASE WHEN t.n_targets > 1 THEN 1 ELSE 0 END) AS is_combination" else ""
+        extra <- DBI::dbGetQuery(db_con, paste0(
+          "SELECT DISTINCT v.row_id, m.drug_class", combo2, type_sel, " FROM _med_cohort v ",
+          "JOIN drug_exposure de ON de.person_id = v.person_id ",
+          "JOIN _med_drug_targets t ON t.drug_concept_id = de.drug_concept_id ",
+          "JOIN _med_class_concepts m ON m.concept_id = t.target_concept_id ",
+          "WHERE TRUE ", lo, " ", hi, " ", route_clause, " ", dt_clause))
+        if (nrow(extra)) {
+          combination_flags <- length(setdiff(paste(extra$row_id, extra$drug_class), paste(hits$row_id, hits$drug_class)))
+          hits <- unique(rbind(hits, extra[, names(hits), drop = FALSE]))
+        }
+      }
+    }
     flags$standard <- split(hits$row_id, hits$drug_class)
     if (filter_combo && "is_combination" %in% names(hits)) {
       plain_hits <- hits[hits$is_combination == 0, , drop = FALSE]
@@ -585,6 +662,7 @@ extract_medication_classes <- function(db_con, cohort_table, medication_specs, s
     }
   }
 
+  attr(result, "combination_flags") <- as.integer(combination_flags)
   if (isTRUE(return_audit)) {
     return(list(flags = result, audit = audit_medication_strategies(result, classes = names(specs),
                                                                    vocab_schema = vocab_schema, vocab_db = vocab_db, ...)))

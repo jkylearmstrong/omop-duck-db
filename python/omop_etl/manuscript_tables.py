@@ -38,6 +38,14 @@ MANUSCRIPT_LABS = [(("lab_albumin",), "Albumin"), (("lab_alt",), "ALT"), (("lab_
                    (("lab_lactate",), "Lactate"), (("lab_ldl",), "LDL"), (("lab_wbc",), "Leukocytes (WBC)"), (("lab_pco2",), "pCO2"),
                    (("lab_po2",), "pO2"), (("lab_sodium",), "Sodium"), (("lab_troponin_i",), "Troponin I")]
 #: A lab whose column is absent (for example the four 0.29.0 labs under the ``legacy_2026_11_11`` concept sets) gets no row.
+
+
+def _manuscript_labs(m: pd.DataFrame) -> list[tuple[tuple[str, ...], str]]:
+    """:data:`MANUSCRIPT_LABS`, with a Hemoglobin row in Hematocrit's place when the model has hemoglobin but no hematocrit (0.35.0:
+    hemoglobin estimated as hematocrit / 3 at every site keeps the hemoglobin column; run C19 left it out of Tables 1 and 4)."""
+    if "lab_hematocrit" in m.columns or "lab_hemoglobin" not in m.columns:
+        return list(MANUSCRIPT_LABS)
+    return [((("lab_hemoglobin",), "Hemoglobin") if lab == "Hematocrit" else (names, lab)) for names, lab in MANUSCRIPT_LABS]
 _MEDS = [("med_insulins", "Medication: Insulins"), ("med_biguanides", "Medication: Biguanides (Metformin)"),
          ("med_sulfonylureas", "Medication: Sulfonylureas"), ("med_lipid_modifying", "Medication: Lipid Modifying Agents (Statins)"),
          ("med_antihypertensives", "Medication: Antihypertensives"), ("med_raas", "Medication: RAAS Inhibitors (ACEi/ARB)"),
@@ -289,7 +297,7 @@ def manuscript_table1(df: pd.DataFrame, *, label_col: str = "readmitted_30d", mi
     cont("Diastolic Blood Pressure (mmHg)", _col(m, "vital_diastolic_bp", "diastolic_bp"))
     for c, lab in _MEDS:
         cat(lab, _col(m, c), 1)
-    for names, lab in MANUSCRIPT_LABS:
+    for names, lab in _manuscript_labs(m):
         cont(lab, _col(m, *names))
     out = [{"Feature": lab, **{g: f(mk) for g, mk in groups}} for lab, f in rows]
     return pd.DataFrame(out)
@@ -346,7 +354,7 @@ def manuscript_completeness(df: pd.DataFrame, *, label_col: str = "readmitted_30
         s = _col(m, *names)
         if s is not None:
             items.append((lab, s.isna().to_numpy()))
-    for names, lab in MANUSCRIPT_LABS:
+    for names, lab in _manuscript_labs(m):
         s = _col(m, *names)
         if s is not None:
             items.append((f"{lab} not measured at index admission", s.isna().to_numpy()))
@@ -509,7 +517,7 @@ CLINICAL_INCREMENTS: dict[str, tuple[str, float]] = {
     "Diastolic Blood Pressure (mmHg)": ("10 mmHg", 10), "Albumin": ("1 g/dL", 1), "ALT": ("10 U/L", 10), "Anion Gap": ("1 mEq/L", 1),
     "AST": ("10 U/L", 10), "Bicarbonate (CO2)": ("5 mEq/L", 5), "BUN": ("10 mg/dL", 10), "Creatinine": ("1 mg/dL", 1),
     "eGFR (2021)": ("10 mL/min/1.73 m²", 10), "Glucose": ("50 mg/dL", 50), "HbA1c": ("1 percentage point", 1),
-    "Hematocrit": ("5 percentage points", 5), "LDL": ("30 mg/dL", 30), "Leukocytes (WBC)": ("5 x10^9/L", 5), "Sodium": ("5 mEq/L", 5),
+    "Hematocrit": ("5 percentage points", 5), "Hemoglobin": ("1 g/dL", 1), "LDL": ("30 mg/dL", 30), "Leukocytes (WBC)": ("5 x10^9/L", 5), "Sodium": ("5 mEq/L", 5),
     # 0.29.0 labs. Troponin I stays per 1 SD: conventional (ng/mL) and high-sensitivity (ng/L) assays differ by 1000x in unit.
     "Lactate": ("1 mmol/L", 1), "pCO2": ("10 mmHg", 10), "pO2": ("10 mmHg", 10)}
 
@@ -622,7 +630,7 @@ def manuscript_regression(df: pd.DataFrame, *, label_col: str = "readmitted_30d"
     num(g, "Systolic Blood Pressure (mmHg)", _col(m, "vital_systolic_bp", "systolic_bp"))
     num(g, "Diastolic Blood Pressure (mmHg)", _col(m, "vital_diastolic_bp", "diastolic_bp"))
     g = "Laboratory values"
-    for names, lab in MANUSCRIPT_LABS:
+    for names, lab in _manuscript_labs(m):
         num(g, lab, _col(m, *names))
     g = "Other clinical features"
     levels(g, "m_tobacco", _TOB[0], _tob_levels(m)[1:])
