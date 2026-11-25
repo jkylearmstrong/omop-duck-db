@@ -435,8 +435,8 @@ def los_by_site(df: pd.DataFrame, *, site_col: str = "site_anon", los_col: str =
     def p_text(p):  # a test with no variation in a group has no p-value: shown as a dash, never as "nan"
         return "—" if not np.isfinite(p) else "<0.001" if p < 0.001 else f"{p:.3f}"
 
-    def ms(s):
-        return f"{s.mean():.2f} ± {s.std():.2f}"
+    def ms(s):  # one decimal, as Table 1 (0.35.1; C20 printed 5.28 ± 6.81 here and 5.3 ± 6.8 there)
+        return f"{s.mean():.1f} ± {s.std():.1f}"
 
     def md(s):
         return f"{s.median():.1f} [{s.quantile(.25):.1f}–{s.quantile(.75):.1f}]"
@@ -484,13 +484,15 @@ def index_stay_dates(df: pd.DataFrame, *, admit_col: str = "admit_date", dischar
 def export_workbook(sheets: Sequence[tuple[str, str, pd.DataFrame]], path: str | Path, *, title: str = "Study tables",
                     subtitle: str = "", manifest_sheet: str = "Manifest", byline: str | None = None,
                     manifest_headers: Sequence[str] = ("Sheet", "Caption", "Rows"),
-                    describe: Callable[[str], str] | None = None) -> Path:
+                    describe: Callable[[str], str] | None = None, number_formats: Mapping[str, str] | None = None) -> Path:
     """Writes ``[(sheet_name, caption, table), ...]`` to one formatted .xlsx with a manifest sheet listing each table.
 
     The manifest sheet (named ``manifest_sheet``) has the title, the subtitle, then, when ``byline`` is not ``None``, a byline row
     (an empty string leaves that row blank) and the table index one row lower. ``manifest_headers`` names the index columns (sheet,
     caption, rows); ``describe(caption)``, when given, fills a fourth column (its header is ``manifest_headers[3]``).
-    Sheet names are truncated to Excel's 31 characters. Requires openpyxl (``pip install openpyxl``)."""
+    ``number_formats`` maps a sheet name to an Excel number format (``"0.00"``) for its metric columns (a column with a non-whole
+    number; every number in it, so an exact 0.0 shows as 0.00 too, and count columns stay as they are), so Excel shows 0.6 as 0.60, as
+    the printed table does (C20 Table 5). Sheet names are truncated to Excel's 31 characters. Requires openpyxl (``pip install openpyxl``)."""
     try:
         import openpyxl
         from openpyxl.styles import Alignment, Font, PatternFill
@@ -524,13 +526,19 @@ def export_workbook(sheets: Sequence[tuple[str, str, pd.DataFrame]], path: str |
             k += 1
         used.add(sheet)
         ws = wb.create_sheet(sheet)
+        fmt_ = (number_formats or {}).get(name)
+        metric_cols = ({j for j, col in enumerate(table.columns, 1)
+                        if any(isinstance(v, (float, np.floating)) and np.isfinite(v) and not float(v).is_integer() for v in table[col])}
+                       if fmt_ else set())
         ws["A1"], ws["A1"].font = caption, Font(bold=True, color="1F4E79")
         for j, col in enumerate(table.columns, 1):
             c = ws.cell(row=3, column=j, value=str(col))
             c.fill, c.font, c.alignment = head_fill, head_font, Alignment(wrap_text=True, vertical="center")
         for r, row in enumerate(table.itertuples(index=False), 4):
             for j, v in enumerate(row, 1):
-                ws.cell(row=r, column=j, value=None if (isinstance(v, float) and np.isnan(v)) else (v.item() if hasattr(v, "item") else v))
+                c = ws.cell(row=r, column=j, value=None if (isinstance(v, float) and np.isnan(v)) else (v.item() if hasattr(v, "item") else v))
+                if j in metric_cols and isinstance(c.value, float):
+                    c.number_format = fmt_
         for j, col in enumerate(table.columns, 1):
             width = max([len(str(col))] + [len(str(v)) for v in table.iloc[:, j - 1].head(200)] + [8])
             ws.column_dimensions[get_column_letter(j)].width = min(width + 2, 60)

@@ -1,0 +1,28 @@
+{
+  "about": "Order of the main tables, supplementary tables and figures. It sets their numbers; an absent item is skipped and later ones move up. Keys are the ones render_manuscript_body takes. Since v0.33.0 the tuning comparison (workbook Table 3) is not printed; its values still feed the text. Since v0.33.3 the CONSORT table (workbook Table S3) is not printed, because Figure 1 shows the same steps down to the analysed cohort, and the length-of-stay table is printed with the sites as columns ('transpose'); the workbook keeps both as delivered. Since v0.33.4 'title' is the manuscript title used when the study team's parameters file gives none (an explicit title or the parameters' 'title' still wins), and the tables listed in 'keep_together' are kept on one page with their caption in the PDF. Since v0.35.1 the length-of-stay table is kept on one page too (C20: its last row ran alone onto the next page).",
+  "tables": [
+    "table1",
+    "performance",
+    "loso",
+    "lr"
+  ],
+  "supplementary": [
+    "stay_type",
+    "completeness",
+    "los",
+    "grid"
+  ],
+  "figures": [
+    "flowchart",
+    "shap"
+  ],
+  "transpose": [
+    "los"
+  ],
+  "title": "Multi-Center Benchmark of Traditional Machine Learning Models for 30-Day Hospital Readmission Risk Prediction",
+  "keep_together": [
+    "performance",
+    "loso",
+    "los"
+  ]
+}

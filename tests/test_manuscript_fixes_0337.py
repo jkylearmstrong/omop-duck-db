@@ -185,7 +185,7 @@ def test_final_draft_checks_pass_on_a_rendered_manuscript(tmp_path):
     assert r["missing"] == [], r["note"]
     res = final_draft_checks(r["files"]["pdf"])
     assert [x for x in res if not x["ok"]] == [], res
-    assert len(res) == 10
+    assert len(res) == 17
 
 
 def test_final_draft_checks_catch_each_problem(tmp_path):
@@ -197,4 +197,5 @@ def test_final_draft_checks_catch_each_problem(tmp_path):
                                           "potassium potassium"])
     failed = {x["check"] for x in final_draft_checks(pdf) if not x["ok"]}
     assert failed == {"title on page 1", "no 'pinned'", "no *_last labs", "Table 4 reference rows", "Table 3 has F1, no Brier",
-                      "references end on the last page", "empty source columns named once", "no snake_case column names"}
+                      "references end on the last page", "empty source columns named once", "no snake_case column names",
+                      "Table 1 SDI Missing / Unknown row"}
