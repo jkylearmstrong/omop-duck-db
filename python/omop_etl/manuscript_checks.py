@@ -89,10 +89,11 @@ def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequ
     claims = "no externally supplied list" in flat
     draw = re.findall(r".{0,40}(?:saved random draw|original random draw|made once and reused|pin_stays).{0,30}", flat)
     add("self-contained cohort claim matches the draw", not (claims and draw), "; ".join(draw[:2]))
-    t1 = _section(text, "Table 1:", ("Table 2:", "3.2 "))
+    # stop tokens anchored to the heading: a bare "3.2 " matches inside "27.0 ± 33.2" (C20: Table 1 cut before the SDI rows)
+    t1 = _section(text, "Table 1:", ("Table 2:", "\n3.2 ", "3.2 Overall"))
     sdi_ok = "SDI Quintile 1" not in t1 or "SDI Quintile: Missing / Unknown" in re.sub(r"\s+", " ", t1)
-    add("Table 1 SDI Missing / Unknown row", bool(t1) and sdi_ok, "Table 1 not found" if not t1 else "row missing")
-    m = re.search(r"increment Δ \(e\.g\., (.*?)\)\s*or, for indicator", flat)
+    add("Table 1 SDI Missing / Unknown row", bool(t1) and sdi_ok, "Table 1 not found" if not t1 else ("" if sdi_ok else "row missing"))
+    m = re.search(r"increment (?:Δ|D) \(e\.g\., (.*?)\)\s*or, for indicator", flat)
     t4flat = re.sub(r"\s+", " ", t4)
     wrong = []
     for ex in (m.group(1).split(", ") if m else []):
@@ -125,8 +126,8 @@ def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequ
 
 
 def workbook_checks(workbook: str | Path) -> list[dict[str, Any]]:
-    """Checks of the manuscript workbook: every non-whole number in the metric sheets (Tables 2, 4 and 5) is shown with 2 decimals
-    (C20: Excel showed Table 5's 0.60 as 0.6)."""
+    """Checks of the manuscript workbook: every number in a metric column of the metric sheets (Tables 2, 4, 5 and 6; a column holding
+    a non-whole number) is shown with 2 decimals (C20: Excel showed Table 5's 0.60 as 0.6)."""
     import openpyxl
 
     from omop_etl.manuscript_tables import METRIC_DECIMALS, METRIC_SHEETS
@@ -137,10 +138,10 @@ def workbook_checks(workbook: str | Path) -> list[dict[str, Any]]:
     for name in METRIC_SHEETS:
         if name[:31] not in wb.sheetnames:
             continue
-        for row in wb[name[:31]].iter_rows(min_row=4):
-            for c in row:
-                if isinstance(c.value, float) and not c.value.is_integer() and c.number_format != want:
-                    bad.append(f"{name[:8]} {c.coordinate}")
+        for col in wb[name[:31]].iter_cols(min_row=4):
+            nums = [c for c in col if isinstance(c.value, float)]
+            if any(not c.value.is_integer() for c in nums):
+                bad += [f"{name[:8]} {c.coordinate}" for c in nums if c.number_format != want]
     return [{"check": "workbook metrics shown to 2 decimals", "ok": not bad, "detail": ", ".join(bad[:6])}]
 
 

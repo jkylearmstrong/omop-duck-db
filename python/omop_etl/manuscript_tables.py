@@ -222,8 +222,9 @@ def _grp(df: pd.DataFrame, label_col: str):
 #: and of the text that quotes them (Dr. Rubin, 2026-11-23; the Nov 11 deliverable printed 2 and 3)
 TABLE1_DECIMALS = 1
 METRIC_DECIMALS = 2
-#: sheets whose metric cells Excel shows with METRIC_DECIMALS places (0.35.1: C20's Table 5 showed 0.6 where the PDF printed 0.60)
-METRIC_SHEETS = ("Table 2 - Model Performance", "Table 4 - Stay Type Decomp", "Table 5 - Cross-Site LOSO")
+#: sheets whose metric columns Excel shows with METRIC_DECIMALS places (0.35.1: C20's Table 5 showed 0.6 where the PDF printed 0.60,
+#: and Table 6's standardized betas 0 / -0.1)
+METRIC_SHEETS = ("Table 2 - Model Performance", "Table 4 - Stay Type Decomp", "Table 5 - Cross-Site LOSO", "Table 6 - Multivariable LR")
 
 
 def _n_pct(mask: np.ndarray, base: np.ndarray, min_cell: int | None) -> str:

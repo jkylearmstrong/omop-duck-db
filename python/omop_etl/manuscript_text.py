@@ -246,9 +246,9 @@ def _regression(tabs) -> dict[str, Any]:
 
 #: (Table 4 feature, how Section 2.3 names its increment)
 _INCREMENT_EXAMPLES = (("Systolic Blood Pressure (mmHg)", "{inc} of blood pressure"), ("BUN", "{inc} of BUN"), ("Sodium", "{inc} of sodium"),
-                       ("Prior Outpatient Visit Count", "{inc} (prior outpatient visits)"),
-                       ("Prior Outpatient Visits (12 Months)", "{inc} (prior outpatient visits)"),
-                       ("Prior Outpatient / Other Encounter Count", "{inc} (prior outpatient encounters)"))
+                       ("Prior Outpatient Visit Count", "{inc} of prior outpatient visits"),
+                       ("Prior Outpatient Visits (12 Months)", "{inc} of prior outpatient visits"),
+                       ("Prior Outpatient / Other Encounter Count", "{inc} of prior outpatient encounters"))
 
 
 def _is_indicator_term(feature: str) -> bool:

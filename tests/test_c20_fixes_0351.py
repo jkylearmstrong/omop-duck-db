@@ -135,8 +135,8 @@ def test_final_draft_checks_catch_the_c20_slips(tmp_path):
 
     pdf = t37.text_pdf(tmp_path / "c20.pdf", [
         "with no externally supplied list of index stays. The study's original random draw, made once and reused.",
-        "Table 1: x SDI Quintile 1 (Least Deprived) SDI Quintile 5 (Most Deprived) 3.2 Models",
-        "increment D (e.g., 10 mmHg of blood pressure) or, for indicator variables",
+        "Table 1: x Prior Outpatient Visit Count 27.0 +/- 33.2 SDI Quintile 1 (Least Deprived) SDI Quintile 5 (Most Deprived) 3.2 Models",
+        "increment D (e.g., 10 mmHg of blood pressure, 10 outpatient encounters) or, for indicator variables",
         "Table 4: Reference 10 mmHg 3.5 SHAP",
         "across ten repeated random draws the AUC-ROC ranged from 0.73. Readers",
         "Table S1: Cohort Partition by Whether the Drawn Stay HistGBM AUC-ROC 0.698 0.693 Table S2: x",
@@ -144,4 +144,17 @@ def test_final_draft_checks_catch_the_c20_slips(tmp_path):
         "Mann-Whitney U Test P-Value <0.001"])
     failed = {x["check"] for x in final_draft_checks(pdf) if not x["ok"]}
     assert {"no range missing its upper end", "self-contained cohort claim matches the draw", "Table 1 SDI Missing / Unknown row",
-            "Table S1 AUC-ROC to 2 decimals", "Table S3 LOS mean ± SD to 1 decimal", "Table S3 on one page"} <= failed
+            "Section 2.3 increments are Table 4's", "Table S1 AUC-ROC to 2 decimals", "Table S3 LOS mean ± SD to 1 decimal", "Table S3 on one page"} <= failed
+
+
+def test_export_workbook_formats_whole_metric_columns_only(tmp_path):
+    pytest.importorskip("openpyxl")
+    import openpyxl
+
+    from omop_etl.study_report import export_workbook
+
+    t = pd.DataFrame({"Site": ["A", "B"], "Patients": [1200.0, 900.0], "Standardized Beta": [0.0, -0.1]})
+    p = export_workbook([("Table 6 - Multivariable LR", "Table 6", t)], tmp_path / "w.xlsx", number_formats={"Table 6 - Multivariable LR": "0.00"})
+    ws = openpyxl.load_workbook(p)["Table 6 - Multivariable LR"]
+    assert ws["C4"].number_format == "0.00" and ws["C5"].number_format == "0.00"  # 0.0 shows as 0.00 too
+    assert ws["B4"].number_format == "General"  # a count column stays as it is
