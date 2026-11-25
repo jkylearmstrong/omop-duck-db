@@ -261,7 +261,7 @@ def test_table_s4_prints_two_decimals_and_anion_gap_is_title_case(tmp_path):
     assert list(out["AUC"]) == ["0.70", "0.73"] and list(out["Configuration"]) == ["C=0.001", "C=0.01"]
     assert list(out["Brier"]) == ["0.08", "0.08"]
     src = (Path(__file__).resolve().parents[1] / "python" / "omop_etl" / "manuscript_text.py").read_text(encoding="utf-8")
-    assert '("performance", "loso", "grid")' in src
+    assert '("performance", "loso", "grid"' in src
     assert mt.feature_label("lab_anion_gap") == "Anion Gap"
     assert dict((lab, name) for cols, name in mt.MANUSCRIPT_LABS for lab in cols)["lab_anion_gap"] == "Anion Gap"
 

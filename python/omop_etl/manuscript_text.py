@@ -231,9 +231,24 @@ def _regression(tabs) -> dict[str, Any]:
     # abstract named prior readmissions and anion gap but not discharge against medical advice, OR 1.88)
     largest = max(risk, key=lambda r: r["or"], default=None)
     largest_or = largest if largest is not None and largest not in risk[:2] else None
-    return {"n_terms": len(rows), "rows": rows, "by_feature": by, "top_risk": risk[:2], "largest_or": largest_or, "protective": protective, "example": example,
+    # the Section 2.3 examples of a clinical increment, only for rows that Table 4 reports in that increment (C20 named "10
+    # outpatient encounters" while the table reported prior outpatient visits per 1 SD)
+    examples = []
+    for feat, phrase in _INCREMENT_EXAMPLES:
+        r = by.get(feat)
+        inc = (r or {}).get("increment", "")
+        if r and re.match(r"^\d", inc) and "sd" not in inc.lower().split():
+            examples.append(phrase.format(inc=inc))
+    return {"n_terms": len(rows), "rows": rows, "by_feature": by, "increment_examples": list(dict.fromkeys(examples)), "top_risk": risk[:2], "largest_or": largest_or, "protective": protective, "example": example,
             "protective_names": [r["feature"] for r in protective], "labs": labs,
             "indicator_terms": [r["feature"] for r in rows if r["feature"].endswith((": not measured", ": missing"))]}
+
+
+#: (Table 4 feature, how Section 2.3 names its increment)
+_INCREMENT_EXAMPLES = (("Systolic Blood Pressure (mmHg)", "{inc} of blood pressure"), ("BUN", "{inc} of BUN"), ("Sodium", "{inc} of sodium"),
+                       ("Prior Outpatient Visit Count", "{inc} (prior outpatient visits)"),
+                       ("Prior Outpatient Visits (12 Months)", "{inc} (prior outpatient visits)"),
+                       ("Prior Outpatient / Other Encounter Count", "{inc} (prior outpatient encounters)"))
 
 
 def _is_indicator_term(feature: str) -> bool:
@@ -339,8 +354,12 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     ctx["attrition"] = ({"qualifying_stays": int(q), "stays_per_patient": int(q) / n_ if n_ else None} if q and (not n_ or int(q) >= n_)
                         else _attrition(tabs, n_))
     ctx["random_draw"] = _random_draw(wb, prefix)
+    # the run reapplied a saved draw of index stays (run_study(pinned_stays=)): the text must not call the cohort self-contained (C20)
+    pinned_in = (run_rec.get("inputs") or {}).get("pinned_stays") or {}
     if run_rec.get("random_draw_redrawn"):  # patients whose stay in the reused draw is no longer eligible, given another eligible stay
         ctx["random_draw"]["redrawn"] = int(run_rec["random_draw_redrawn"])
+    # (a run whose attrition shows the saved draw's exclusion step, or whose record counts redrawn patients, reapplied one too)
+    ctx["pinned"] = ({"file": pinned_in.get("file")} if run_rec.get("pinned") or pinned_in or ctx["random_draw"] else {})
     # how a stay with no BMI recorded during the stay was filled (0.34.1); a run record without "bmi_fill" gets its profile's default
     ctx["bmi_fill"] = run_rec.get("bmi_fill") or ("derive_lookback" if run_rec.get("profile", "ederri") in ("ederri", "both") else "derive")
     ctx["hemoglobin_from_hematocrit"] = bool(run_rec.get("hemoglobin_from_hematocrit"))
@@ -359,7 +378,8 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     dec = run_rec.get("decisions") or {}
     ctx["decisions"] = dec
     ctx["run"] = {k: run_rec[k] for k in ("n_sites", "bootstraps", "random_state", "preset") if run_rec.get(k) is not None}
-    ctx["cohort_call"] = cohort_call(run_rec.get("cohort_params"), window)
+    ctx["cohort_call"] = cohort_call(run_rec.get("cohort_params"), window, pinned=ctx["pinned"] or None,
+                                     random_state=ctx["run"].get("random_state"), redraw=dec.get("ineligible_draw", "redraw") == "redraw")
     labels = list(run_rec.get("labels") or [])
     if not labels:
         for prefix_ in ("Table 5", "Table S1"):
@@ -425,14 +445,27 @@ def manuscript_context(workbook: str | Path, *, run: Mapping[str, Any] | str | P
     return {k: v for k, v in ctx.items() if v not in ({}, None)}
 
 
-def cohort_call(params: Mapping[str, Any] | None = None, window: Sequence[str] | None = None) -> str:
+def cohort_call(params: Mapping[str, Any] | None = None, window: Sequence[str] | None = None, *, pinned: Mapping[str, Any] | None = None,
+                random_state: int | None = None, redraw: bool = True) -> str:
     """The ``define_study_cohort(...)`` call of a run, as code text for the Data & Code Availability section: the run's own cohort
-    parameters (run record ``cohort_params``), otherwise the package's protocol defaults, with the window and stay rule the study adds."""
+    parameters (run record ``cohort_params``), otherwise the package's protocol defaults, with the window and stay rule the study adds.
+
+    ``pinned`` (``{"file": name}``): the run reapplied a saved draw of index stays, so the call keeps every qualifying stay
+    (``sample_stay_rule="all"``) and :func:`omop_etl.study_run.pin_stays` follows it, as run_study does (C20 printed the random
+    rule for a run that used a saved draw)."""
     from omop_etl.study_run import PROTOCOL_COHORT_PARAMS
 
     p = dict(params or PROTOCOL_COHORT_PARAMS)
     if window:
         p.update(min_admit_date=str(window[0]), max_admit_date=str(window[1]))
+    if pinned is not None:
+        p["sample_stay_rule"] = "all"
+        p.pop("random_seed", None)
+        lines = [f"    {k}={v!r}," for k, v in p.items()]
+        seed = 42 if random_state is None else int(random_state)
+        file = (pinned or {}).get("file") or "selected_stays.csv"
+        return ("cohort = define_study_cohort(\n    con,\n" + "\n".join(lines) + "\n)\n"
+                f"cohort = pin_stays(cohort, {file!r}, strict=False, redraw={bool(redraw)!r}, random_state={seed!r})")
     p["sample_stay_rule"] = "random"
     if "random_seed" not in p and "random_state" not in p:
         # the draw's seed is define_study_cohort's own default unless the run set one; print it so readers can repeat the draw
@@ -542,6 +575,20 @@ def _environment(missing: list[str]):
         lo, hi = fmt(r[0], digits), fmt(r[1], digits)
         return lo if lo == hi else f"{lo}{sep}{hi}"
 
+    def from_range(r, digits=2, verb="ranged from", same="was", sep=" to "):
+        """"ranged from lo to hi", or "was v" when both ends print the same at ``digits`` places (C20: "the AUC-ROC ranged from
+        0.73." when ten seeds gave 0.7321 to 0.7346). ``same`` may hold ``{v}`` for the value and ``{range}`` for the spread one
+        place further ("was {v} in every draw ({range})"); ``{range}`` is dropped, with its brackets, when that spread collapses too."""
+        if not _ok(r) or len(r) != 2:
+            return f"{verb} {r}"
+        lo, hi = fmt(r[0], digits), fmt(r[1], digits)
+        if lo != hi:
+            return f"{verb} {lo}{sep}{hi}"
+        fine = fmt_range(r, digits + 1, sep=sep)
+        out = same if "{v}" in same else f"{same} {{v}}"
+        out = out.replace("{v}", lo)
+        return re.sub(r"\s*\(\{range\}\)", "", out) if sep not in fine else out.replace("{range}", fine)
+
     def pct(v, digits=2):
         return f"{float(v):.{digits}f}%" if _ok(v) else str(v)
 
@@ -581,7 +628,7 @@ def _environment(missing: list[str]):
                 return f"{order[0]} through {order[-1]}"
         return join(sorted(labels))
 
-    env.filters.update(fmt=fmt, fmt_range=fmt_range, n=n, pct=pct, or_ci=or_ci, join_and=join, lower_first=lower_first,
+    env.filters.update(fmt=fmt, fmt_range=fmt_range, from_range=from_range, n=n, pct=pct, or_ci=or_ci, join_and=join, lower_first=lower_first,
                        words=words, label_span=label_span)
     return env
 
@@ -732,7 +779,7 @@ def full_manuscript_markdown(tabs: Mapping[str, tuple[str, pd.DataFrame]], image
             cap = re.sub(r"^Table S?\d+:\s*", "", str(title))
             if key == "grid":  # the workbook keeps the unrounded auc_raw / f1_raw tuning selects on; the printed table does not
                 t = t.drop(columns=[c for c in t.columns if str(c).endswith("_raw")])
-            if key in ("performance", "loso", "grid"):  # Table S4 too: Rubin's 2 decimals (C10 review)
+            if key in ("performance", "loso", "grid", "stay_type"):  # Table S4 too: Rubin's 2 decimals (C10 review); Table S1 since 0.35.1 (C20)
                 t = metric_cells(t)
             if key in layout.get("transpose", []):
                 t = transpose_for_print(t)

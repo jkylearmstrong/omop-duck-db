@@ -222,6 +222,8 @@ def _grp(df: pd.DataFrame, label_col: str):
 #: and of the text that quotes them (Dr. Rubin, 2026-11-23; the Nov 11 deliverable printed 2 and 3)
 TABLE1_DECIMALS = 1
 METRIC_DECIMALS = 2
+#: sheets whose metric cells Excel shows with METRIC_DECIMALS places (0.35.1: C20's Table 5 showed 0.6 where the PDF printed 0.60)
+METRIC_SHEETS = ("Table 2 - Model Performance", "Table 4 - Stay Type Decomp", "Table 5 - Cross-Site LOSO")
 
 
 def _n_pct(mask: np.ndarray, base: np.ndarray, min_cell: int | None) -> str:
@@ -285,6 +287,7 @@ def manuscript_table1(df: pd.DataFrame, *, label_col: str = "readmitted_30d", mi
         cat(lv, m.get("m_race"), lv)
     for lv in _SDI:
         cat(lv, m.get("m_sdi"), lv)
+    cat("SDI Quintile: Missing / Unknown", m.get("m_sdi"), "SDI: Missing / Unknown")  # 0.35.1: Section 3.1 says each category ends with it (C20)
     for lv in _RUCA:
         cat(lv, m.get("m_ruca"), lv)
     for lv in _DISC:
@@ -510,7 +513,7 @@ def validate_manuscript_sheets(sheets: Mapping[str, tuple[str, pd.DataFrame]], *
 # Table 6 increments as the delivered workbook prints them: label -> (increment text, size in the measure's own unit).
 CLINICAL_INCREMENTS: dict[str, tuple[str, float]] = {
     "Prior Inpatient / Obs / ED Count": ("1 stay", 1), "Prior Outpatient / Other Encounter Count": ("10 encounters", 10),
-    "Prior Outpatient Visits (12 Months)": ("10 visits", 10), "Secondary Diagnosis Count (Index Stay)": ("1 diagnosis", 1),
+    "Prior Outpatient Visits (12 Months)": ("10 visits", 10), "Prior Outpatient Visit Count": ("10 visits", 10), "Secondary Diagnosis Count (Index Stay)": ("1 diagnosis", 1),
     "Number of Secondary Diagnosis CCS Categories": ("1 category", 1), "Index Admission Length of Stay (days)": ("1 day", 1),
     "Days Since Prior Encounter": ("30 days", 30), "Days Since Prior Inpatient / Obs / ED Encounter": ("30 days", 30),
     "Prior Readmissions in Past 12 Months": ("1 readmission", 1), "Systolic Blood Pressure (mmHg)": ("10 mmHg", 10),
@@ -775,7 +778,8 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
     validate_manuscript_sheets(sheets, bootstrap_intervals=check_bootstrap_intervals)
     out = export_workbook([(name, cap, t) for name, (cap, t) in sheets.items()], path, title=title,
                           subtitle=f"N = {n:,}; aggregate results only" if subtitle is None else subtitle, manifest_sheet=MANIFEST_SHEET,
-                          byline=byline, manifest_headers=MANIFEST_HEADERS, describe=_manifest_description)
+                          byline=byline, manifest_headers=MANIFEST_HEADERS, describe=_manifest_description,
+                          number_formats={k: "0" + "." + "0" * METRIC_DECIMALS for k in METRIC_SHEETS})
     return {"sheets": {k: v[1] for k, v in sheets.items()}, "path": out}
 
 

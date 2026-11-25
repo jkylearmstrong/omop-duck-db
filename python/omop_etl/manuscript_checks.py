@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Sequence
 
-__all__ = ["TITLE", "EMPTY_SOURCE_TERMS", "MULTILEVEL_FEATURES", "final_draft_checks", "main"]
+__all__ = ["TITLE", "EMPTY_SOURCE_TERMS", "MULTILEVEL_FEATURES", "final_draft_checks", "workbook_checks", "main"]
 
 TITLE = "Multi-Center Benchmark of Traditional Machine Learning Models for 30-Day Hospital Readmission Risk Prediction"
 # the ten measures no site's source extract had (C8); each is named once, in the Section 2.2 sentence, and nowhere else
@@ -43,7 +43,14 @@ def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequ
     7. each of ``empty_terms`` appears exactly once (the Section 2.2 sentence on the empty source columns);
     8. no snake_case column name (``lab_...``, ``vital_...``, ``elix_...``) in the text;
     9. no collapsed bullet (".- ", a list item run into the sentence before it; C15);
-    10. no text within ``footer_gap`` points above a page's number (a caption pushed into the footer; C17 Figure 1)."""
+    10. no text within ``footer_gap`` points above a page's number (a caption pushed into the footer; C17 Figure 1);
+    11. no range that lost its upper end ("ranged from 0.73." / "ranged from 0.73 with"; C20 Section 4.1);
+    12. the cohort is not called free of an external list of index stays while the text describes a saved draw (C20 Sections 2.1, 6);
+    13. Table 1 has an "SDI Quintile: Missing / Unknown" row when it has SDI quintiles (C20);
+    14. every Section 2.3 increment example ("10 mmHg of ...") is an increment that Table 4 prints (C20: "10 outpatient encounters");
+    15. the stay-type table (Table S1) prints AUC-ROC to 2 decimals, as Tables 2 and 3 (C20 printed 0.698);
+    16. the length-of-stay table (Table S3) prints length-of-stay mean ± SD to 1 decimal, as Table 1 (C20 printed 5.28 ± 6.81);
+    17. the length-of-stay table ends on the page its caption is on (C20: its last row ran alone onto the next page)."""
     from pypdf import PdfReader
 
     # the page number printed at the foot of each page is dropped, so a phrase that runs onto the next page reads as one ("heart 2 rate")
@@ -77,7 +84,64 @@ def final_draft_checks(pdf: str | Path, *, title: str = TITLE, empty_terms: Sequ
     add("no collapsed bullets", not bullets, "; ".join(bullets[:3]))
     crowded = _footer_collisions(pdf, footer_gap)
     add("nothing runs into the page number", not crowded, ", ".join(f"page {p}" for p in crowded[:10]))
+    dangling = re.findall(r".{0,40}\branged? from -?\d+\.\d+(?!\d|\.\d|%)(?!\s*(?:to|–|-)\s*-?\d).{0,20}", flat)
+    add("no range missing its upper end", not dangling, "; ".join(dangling[:3]))
+    claims = "no externally supplied list" in flat
+    draw = re.findall(r".{0,40}(?:saved random draw|original random draw|made once and reused|pin_stays).{0,30}", flat)
+    add("self-contained cohort claim matches the draw", not (claims and draw), "; ".join(draw[:2]))
+    t1 = _section(text, "Table 1:", ("Table 2:", "3.2 "))
+    sdi_ok = "SDI Quintile 1" not in t1 or "SDI Quintile: Missing / Unknown" in re.sub(r"\s+", " ", t1)
+    add("Table 1 SDI Missing / Unknown row", bool(t1) and sdi_ok, "Table 1 not found" if not t1 else "row missing")
+    m = re.search(r"increment Δ \(e\.g\., (.*?)\)\s*or, for indicator", flat)
+    t4flat = re.sub(r"\s+", " ", t4)
+    wrong = []
+    for ex in (m.group(1).split(", ") if m else []):
+        inc = re.match(r"(\d+(?:\.\d+)?\s+\S+)", ex)
+        if inc and inc.group(1) not in t4flat:
+            wrong.append(ex)
+    add("Section 2.3 increments are Table 4's", not wrong, "; ".join(wrong))
+    # the supplementary tables by caption, not number: a run without one of them numbers the rest differently
+    nxt = re.compile(r"Table S\d+:|Appendix A")
+
+    def by_caption(words: str) -> str:
+        i = text.find(words)
+        if i < 0:
+            return ""
+        m_ = nxt.search(text, i + len(words))
+        return text[i:m_.start() if m_ else len(text)]
+
+    s1 = by_caption("Cohort Partition by Whether")
+    s1_three = re.findall(r"\b0\.\d{3}\b", s1)
+    add("Table S1 AUC-ROC to 2 decimals", not s1_three, ", ".join(s1_three[:4]))
+    los_cap = "Distribution of Index Stay Length of Stay"
+    s3 = by_caption(los_cap)
+    s3_two = re.findall(r"\d+\.\d{2} (?:±|\+/-) \d+\.\d{2}", s3)
+    add("Table S3 LOS mean ± SD to 1 decimal", not s3_two, ", ".join(s3_two[:3]))
+    cap = next((i for i, p in enumerate(pages) if los_cap in re.sub(r"\s+", " ", p)), None)
+    end = next((i for i, p in enumerate(pages) if cap is not None and i >= cap and "Whitney" in p), None)
+    add("Table S3 on one page", cap is None or end is None or end == cap,
+        "" if cap is None or end is None else f"caption on page {cap + 1}, last row on page {end + 1}")
     return out
+
+
+def workbook_checks(workbook: str | Path) -> list[dict[str, Any]]:
+    """Checks of the manuscript workbook: every non-whole number in the metric sheets (Tables 2, 4 and 5) is shown with 2 decimals
+    (C20: Excel showed Table 5's 0.60 as 0.6)."""
+    import openpyxl
+
+    from omop_etl.manuscript_tables import METRIC_DECIMALS, METRIC_SHEETS
+
+    wb = openpyxl.load_workbook(str(workbook))
+    want = "0." + "0" * METRIC_DECIMALS
+    bad = []
+    for name in METRIC_SHEETS:
+        if name[:31] not in wb.sheetnames:
+            continue
+        for row in wb[name[:31]].iter_rows(min_row=4):
+            for c in row:
+                if isinstance(c.value, float) and not c.value.is_integer() and c.number_format != want:
+                    bad.append(f"{name[:8]} {c.coordinate}")
+    return [{"check": "workbook metrics shown to 2 decimals", "ok": not bad, "detail": ", ".join(bad[:6])}]
 
 
 def _footer_collisions(pdf: str | Path, gap: float) -> list[int]:
@@ -104,10 +168,10 @@ def _footer_collisions(pdf: str | Path, gap: float) -> list[int]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 1:
-        print("usage: python -m omop_etl.manuscript_checks <manuscript.pdf>")
+    if len(args) not in (1, 2):
+        print("usage: python -m omop_etl.manuscript_checks <manuscript.pdf> [<Manuscript_Tables.xlsx>]")
         return 2
-    res = final_draft_checks(args[0])
+    res = final_draft_checks(args[0]) + (workbook_checks(args[1]) if len(args) == 2 else [])
     for r in res:
         print(f"{'PASS' if r['ok'] else 'FAIL'}  {r['check']}" + (f"  ({r['detail']})" if r["detail"] and not r["ok"] else ""))
     print(f"{sum(r['ok'] for r in res)} of {len(res)} checks passed")
