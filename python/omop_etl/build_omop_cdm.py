@@ -1276,6 +1276,13 @@ LAB_VALUE_SQL = """COALESCE(
                 TRY_CAST(regexp_replace(trim(src.RAW_RESULT), '^[<>= ]+|,', '', 'g') AS DOUBLE))"""
 
 
+#: The operator of a censored lab value (0.35.2): "<0.01" is stored as 0.01 with operator_concept_id 4171756 ("<"), so the number
+#: is no longer read as an exact value. OMOP "Meas Value Operator" concepts; 0 when the text has no leading operator.
+LAB_OPERATOR_SQL = """CASE regexp_extract(COALESCE(NULLIF(trim(src.RESULT_NUM), ''), trim(src.RAW_RESULT)), '^(<=|>=|=<|=>|<|>|=)', 1)
+                WHEN '<' THEN 4171756 WHEN '<=' THEN 4171754 WHEN '=<' THEN 4171754 WHEN '>' THEN 4172704 WHEN '>=' THEN 4171755
+                WHEN '=>' THEN 4171755 WHEN '=' THEN 4172703 ELSE 0 END"""
+
+
 def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "lab_result_cm")
     if path is None:
@@ -1313,7 +1320,7 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
                      parse_omop_datetime(src.LAB_ORDER_DATE, NULL)) AS measurement_datetime,
             src.RESULT_TIME AS measurement_time,
             {TYPE_CONCEPT_EHR_MEASUREMENT} AS measurement_type_concept_id,
-            0 AS operator_concept_id,
+            {LAB_OPERATOR_SQL} AS operator_concept_id,
             {LAB_VALUE_SQL} AS value_as_number,
             0 AS value_as_concept_id,
             0 AS unit_concept_id,

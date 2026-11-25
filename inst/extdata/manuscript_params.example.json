@@ -1,0 +1,11 @@
+{
+  "_about": "Example of the study team's --manuscript-params file (JSON or YAML). Copy it outside the repository, fill it in, and pass it to reproduce_study.py --manuscript-params and to python -m omop_etl.manuscript_checks --params. Every value below is a placeholder; the package stores no names. Keys the package reads: title, authors (name, affiliation or affiliations, email, corresponding, role), irb_statement, consortium, consortium_short. ORCIDs, funding and conflicts of interest are not read yet.",
+  "title": "Multi-Center Benchmark of Traditional Machine Learning Models for 30-Day Hospital Readmission Risk Prediction",
+  "authors": [
+    {"name": "First Author, MD", "affiliations": ["Department, Institution"], "role": "Conceptualization, methodology, writing (original draft)."},
+    {"name": "Second Author, PhD", "affiliations": ["Department, Institution"], "role": "Software, formal analysis, writing (review and editing)."}
+  ],
+  "irb_statement": "This study was reviewed by the institutional review board of <Institution> (protocol <number>), which waived informed consent.",
+  "consortium": "<Consortium full name>",
+  "consortium_short": "<Short name>"
+}
