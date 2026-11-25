@@ -291,7 +291,7 @@ def workbook_checks(workbook: str | Path, *, tolerance: float = 0.3) -> list[dic
 
 
 def _flat(s: str) -> str:
-    return re.sub(r"\s+", "", s).replace("−", "-")
+    return re.sub(r"\s+", "", s).replace("−", "-").replace("–", "-").replace("—", "-")
 
 
 def pdf_workbook_checks(pdf: str | Path, workbook: str | Path) -> list[dict[str, Any]]:

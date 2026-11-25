@@ -393,3 +393,34 @@ def test_example_manuscript_params_file_reads_and_holds_only_placeholders():
     p = load_params(Path(__file__).resolve().parents[1] / "inst" / "extdata" / "manuscript_params.example.json")
     assert [a["name"] for a in _param_authors(p)] == ["First Author, MD", "Second Author, PhD"]
     assert "<Institution>" in p["irb_statement"] and p["consortium"].startswith("<")
+
+
+def _plain_pdf(path: Path, text: str, chunk: int = 2500) -> Path:
+    """A text-layer PDF of ``text`` (Latin-1 only, parentheses escaped), one chunk per page."""
+    import test_manuscript_fixes_0337 as t37
+
+    t = " ".join(text.replace("±", "+/-").replace("–", "-").replace("−", "-").split())
+    t = t.encode("latin-1", "replace").decode("latin-1").replace("\\", "").replace("(", "\\(").replace(")", "\\)")
+    pages = [t[i:i + chunk] for i in range(0, len(t), chunk)]
+    return t37.text_pdf(path, [p.rstrip("\\") for p in pages])
+
+
+def test_pdf_numbers_must_match_the_workbook(tmp_path):
+    pytest.importorskip("pypdf")
+    from omop_etl.manuscript_checks import pdf_workbook_checks, release_checks
+    from omop_etl.manuscript_report import read_workbook_tables
+    from omop_etl.manuscript_text import full_manuscript_markdown
+
+    wb = _wb(tmp_path)
+    md_ = full_manuscript_markdown(read_workbook_tables(wb), [], workbook=wb, run={"n_sites": 3})["markdown"]
+    plain = re.sub(r"```\{=typst\}.*?```", " ", md_, flags=re.S).replace("|", " ").replace("*", "")
+    good = pdf_workbook_checks(_plain_pdf(tmp_path / "good.pdf", plain), wb)
+    assert good[0]["ok"], good
+    s1 = plain.find("Cohort Partition by Whether")
+    bad_text = plain[:s1] + plain[s1:].replace("0.71", "0.72", 1)        # a stay-type AUC-ROC that differs from the workbook
+    bad = pdf_workbook_checks(_plain_pdf(tmp_path / "bad.pdf", bad_text), wb)
+    assert not bad[0]["ok"] and "stay-type table 0.71" in bad[0]["detail"]
+    run = tmp_path / "Study_run.json"
+    run.write_text(json.dumps({"pinned": False}), encoding="utf-8")
+    res = release_checks(tmp_path / "good.pdf", wb, run_json=run)
+    assert len(res) == 20 + 4 + 1 + 5
