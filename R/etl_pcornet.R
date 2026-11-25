@@ -860,7 +860,9 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
                  parse_omop_datetime(src.LAB_ORDER_DATE, NULL)) AS measurement_datetime,
         src.RESULT_TIME AS measurement_time,
         %d AS measurement_type_concept_id,
-        0 AS operator_concept_id,
+        CASE regexp_extract(COALESCE(NULLIF(trim(src.RESULT_NUM), ''), trim(src.RAW_RESULT)), '^(<=|>=|=<|=>|<|>|=)', 1)
+            WHEN '<' THEN 4171756 WHEN '<=' THEN 4171754 WHEN '=<' THEN 4171754 WHEN '>' THEN 4172704 WHEN '>=' THEN 4171755
+            WHEN '=>' THEN 4171755 WHEN '=' THEN 4172703 ELSE 0 END AS operator_concept_id,
         COALESCE(
             TRY_CAST(src.RESULT_NUM AS DOUBLE),
             TRY_CAST(regexp_replace(trim(src.RESULT_NUM), '^[<>= ]+|,', '', 'g') AS DOUBLE),

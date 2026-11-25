@@ -238,17 +238,26 @@ def _regression(tabs) -> dict[str, Any]:
         r = by.get(feat)
         inc = (r or {}).get("increment", "")
         if r and re.match(r"^\d", inc) and "sd" not in inc.lower().split():
-            examples.append(phrase.format(inc=inc))
+            examples.append(_increment_phrase(inc, phrase))
     return {"n_terms": len(rows), "rows": rows, "by_feature": by, "increment_examples": list(dict.fromkeys(examples)), "top_risk": risk[:2], "largest_or": largest_or, "protective": protective, "example": example,
             "protective_names": [r["feature"] for r in protective], "labs": labs,
             "indicator_terms": [r["feature"] for r in rows if r["feature"].endswith((": not measured", ": missing"))]}
 
 
-#: (Table 4 feature, how Section 2.3 names its increment)
-_INCREMENT_EXAMPLES = (("Systolic Blood Pressure (mmHg)", "{inc} of blood pressure"), ("BUN", "{inc} of BUN"), ("Sodium", "{inc} of sodium"),
-                       ("Prior Outpatient Visit Count", "{inc} of prior outpatient visits"),
-                       ("Prior Outpatient Visits (12 Months)", "{inc} of prior outpatient visits"),
-                       ("Prior Outpatient / Other Encounter Count", "{inc} of prior outpatient encounters"))
+#: (Table 4 feature, the measure Section 2.3 names with its increment)
+_INCREMENT_EXAMPLES = (("Systolic Blood Pressure (mmHg)", "blood pressure"), ("BUN", "BUN"), ("Sodium", "sodium"),
+                       ("Prior Outpatient Visit Count", "prior outpatient visits"),
+                       ("Prior Outpatient Visits (12 Months)", "prior outpatient visits"),
+                       ("Prior Outpatient / Other Encounter Count", "prior outpatient encounters"))
+
+
+def _increment_phrase(inc: str, measure: str) -> str:
+    """Table 4's increment named with its measure: "10 mmHg of blood pressure", but "10 prior outpatient visits" when the unit is the
+    thing counted (C20r printed "10 visits of prior outpatient visits")."""
+    num, _, unit = inc.partition(" ")
+    if unit and unit.rstrip("s").lower() == measure.split()[-1].rstrip("s").lower():
+        return f"{num} {measure}"
+    return f"{inc} of {measure}"
 
 
 def _is_indicator_term(feature: str) -> bool:
@@ -673,6 +682,9 @@ def render_manuscript_body(context: Mapping[str, Any], *, tables: Mapping[str, s
         table_md[k] = f"**{numbers.get(k, 'Table')}: {cap}**\n\n{body}" if cap else body
         if k in layout.get("keep_together", []):  # the PDF keeps the caption and the table on one page; Word ignores the raw Typst
             table_md[k] = f"```{{=typst}}\n#block(breakable: false)[\n```\n\n{table_md[k]}\n\n```{{=typst}}\n]\n```"
+        elif cap:  # a table that may break keeps its caption with its first rows (C20r: "Table 1:" alone at the foot of page 5)
+            head = f"**{numbers.get(k, 'Table')}: {cap}**"
+            table_md[k] = f"```{{=typst}}\n#block(sticky: true)[\n```\n\n{head}\n\n```{{=typst}}\n]\n```\n\n{body}"
     figure_md = {}
     for k, v in figures.items():
         cap, file, width = (tuple(v) + ("100%",))[:3] if isinstance(v, tuple) else ("", v, "100%")
@@ -730,14 +742,19 @@ def metric_cells(t: pd.DataFrame, digits: int | None = None) -> pd.DataFrame:
     """Tables 2 and 3 as printed: every number in a metric column (one that holds a non-whole number) as text with ``digits`` places
     (default :data:`omop_etl.manuscript_tables.METRIC_DECIMALS`), so 0.6 prints as 0.60. The workbook keeps them as numbers, and
     Excel reads a number back without its trailing zero, so the printed table cannot rely on the cell. Count columns are left alone."""
-    from omop_etl.manuscript_tables import METRIC_DECIMALS
+    from omop_etl.manuscript_tables import METRIC_DECIMALS, excel_text
 
     d = METRIC_DECIMALS if digits is None else digits
     out = t.copy().astype(object)
+
+    def num(v) -> bool:  # an int 0 in a metric column is a metric too (0.35.2); a bool is not
+        return isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, (bool, np.bool_)) and not pd.isna(v)
+
     for c in out.columns:
-        vals = [v for v in out[c] if isinstance(v, (float, np.floating)) and not pd.isna(v)]
+        vals = [v for v in out[c] if num(v)]
         if any(not float(v).is_integer() for v in vals):
-            out[c] = [f"{float(v):.{d}f}" if isinstance(v, (float, np.floating)) and not pd.isna(v) else v for v in out[c]]
+            # rounded as Excel shows the cell (half away from zero), so the PDF and the workbook agree on a tie (C20r: 0.695)
+            out[c] = [excel_text(v, d) if num(v) else v for v in out[c]]
     return out
 
 

@@ -815,7 +815,7 @@ __all__ = [
     "isotonic_apply", "adjust_for_prevalence", "capacity_threshold", "capacity_risk_tiers", "evaluate_at_capacity",
 ]
 
-__version__ = "0.35.1"
+__version__ = "0.35.2"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 

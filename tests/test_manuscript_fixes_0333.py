@@ -109,7 +109,8 @@ def test_length_of_stay_table_is_printed_with_sites_as_columns(tmp_path):
     los = tabs[key][1]
     cap = out["numbers"]["los"]
     block = md_[md_.index(f"**{cap}:"):]
-    lines = [line for line in block.splitlines()[1:] if line.strip()]
+    # the raw Typst that keeps the caption with the table (0.35.2) is not part of the table
+    lines = [line for line in block.splitlines()[1:] if line.strip() and not line.startswith(("```", "]", "#block"))]
     table = []
     for line in lines:
         if not line.startswith("|"):

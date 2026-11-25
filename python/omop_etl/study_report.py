@@ -537,7 +537,7 @@ def export_workbook(sheets: Sequence[tuple[str, str, pd.DataFrame]], path: str |
         for r, row in enumerate(table.itertuples(index=False), 4):
             for j, v in enumerate(row, 1):
                 c = ws.cell(row=r, column=j, value=None if (isinstance(v, float) and np.isnan(v)) else (v.item() if hasattr(v, "item") else v))
-                if j in metric_cols and isinstance(c.value, float):
+                if j in metric_cols and isinstance(c.value, (int, float)) and not isinstance(c.value, bool):  # an int 0 too (0.35.2)
                     c.number_format = fmt_
         for j, col in enumerate(table.columns, 1):
             width = max([len(str(col))] + [len(str(v)) for v in table.iloc[:, j - 1].head(200)] + [8])

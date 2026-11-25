@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from omop_etl.data_gaps import DataGapError, format_findings  # noqa: E402
-from omop_etl.study_run import STUDY_DECISIONS, STUDY_PRESETS, RunPrivacyError, run_study  # noqa: E402
+from omop_etl.study_run import PROTOCOL_COHORT_PARAMS, STUDY_DECISIONS, STUDY_PRESETS, RunPrivacyError, run_study  # noqa: E402
 
 
 def main(argv=None) -> int:
@@ -87,6 +87,10 @@ def main(argv=None) -> int:
     p.add_argument("--observation-period-cap", metavar="DATE",
                    help="read observation periods as ending no later than this date (a temporary view, the databases are not changed), "
                         "instead of repairing the end-date spike by hand; at least the study end plus the follow-up window")
+    p.add_argument("--merge-episodes-days", type=int, metavar="DAYS",
+                   help="sensitivity analysis: merge an inpatient stay that starts on or before the previous stay's end day plus DAYS into "
+                        "one episode before the cohort is built (0 = same-day transfers and overlapping stays; default: not merged). "
+                        "The cohort changes, so the features are extracted again")
     p.add_argument("--sensitivity", action="store_true",
                    help="also run the sensitivity analyses: the random draw repeated with --sensitivity-seeds and every eligible stay "
                         "(patient-grouped folds); extracts the features of every eligible stay, so the run takes longer")
@@ -114,6 +118,8 @@ def main(argv=None) -> int:
     try:
         r = run_study(a.db_dir, a.out, sites=a.sites, site_labels=labels, label_seed=a.label_seed, labels_out=a.labels_out, start=a.start, end=a.end, profile=None if a.profile == "none" else a.profile,
                       pinned_stays=a.pinned_stays, ruca_crosswalk=a.ruca, sdi_table=a.sdi,
+                      cohort_params=(dict(PROTOCOL_COHORT_PARAMS, merge_episodes_days=a.merge_episodes_days)
+                                     if a.merge_episodes_days is not None else None),
                       address_table=None if a.address_table == "person_location" else a.address_table, n_bootstraps=a.bootstraps,
                       loso=not a.no_loso, figures=not a.no_figures, reuse_features=a.reuse_features, compare_to=a.compare_to, prefix=a.prefix,
                       attrition_mode=a.attrition, table5=a.table5, sdi_missing_term=a.sdi_missing_term, address_tie_break=a.tie_break, address_undated=a.address_undated,

@@ -25,7 +25,7 @@ import pandas as pd
 
 from omop_etl.study_report import _newton_logit, export_workbook
 
-__all__ = ["feature_label", "FEATURE_LABELS", "manuscript_frame", "bmi_age_readmission", "round_metric_text", "TABLE1_DECIMALS", "METRIC_DECIMALS", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
+__all__ = ["feature_label", "FEATURE_LABELS", "manuscript_frame", "bmi_age_readmission", "round_metric_text", "excel_text", "TABLE1_DECIMALS", "METRIC_DECIMALS", "manuscript_table1", "manuscript_completeness", "manuscript_consort", "manuscript_regression",
            "manuscript_workbook", "compare_workbooks", "workbook_similarity", "workbook_deltas", "delta_summary", "SIMILARITY_TOLERANCES", "MANUSCRIPT_LABS", "MANUSCRIPT_ELIXHAUSER", "ManuscriptValidationError", "validate_manuscript_sheets"]
 
 EN = "–"
@@ -236,6 +236,16 @@ def _n_pct(mask: np.ndarray, base: np.ndarray, min_cell: int | None) -> str:
 def _ms(v: pd.Series) -> str:
     v = pd.to_numeric(v, errors="coerce").dropna()
     return f"{v.mean():.{TABLE1_DECIMALS}f} {PM} {v.std():.{TABLE1_DECIMALS}f}" if len(v) > 1 else ""
+
+
+def excel_text(v: Any, digits: int = METRIC_DECIMALS) -> str:
+    """``v`` with ``digits`` places as Excel shows it: half away from zero on the number as written (0.695 shows 0.70). Python's
+    ``f"{0.695:.2f}"`` rounds the binary double just below 0.695 and prints 0.69, so a printed table formatted that way can differ
+    from the workbook by 0.01 (C20r Table S1)."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    q = Decimal(repr(float(v))).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)
+    return f"{q + 0:.{digits}f}" if q else f"{0:.{digits}f}"  # no "-0.00"
 
 
 def round_metric_text(v: Any, digits: int = METRIC_DECIMALS) -> Any:
@@ -739,7 +749,7 @@ def manuscript_workbook(df: pd.DataFrame, tables: Mapping[str, pd.DataFrame], pa
         auc_col = [c for c in t.columns if c.endswith("AUC")][0]
         sheets["Table 4 - Stay Type Decomp"] = ("Table 4: Cohort Partition by Whether the Drawn Stay Was the Patient's First Admission (Simpson's Paradox)", pd.DataFrame({
             "Stay drawn for the patient": t["Subset"], "Patients (N)": t["Stays"], "Share of patients": (100 * t["Share"]).map("{:.1f}%".format),
-            "30-Day Readmission Rate": (100 * t["Readmit rate"]).map("{:.1f}%".format), auc_col.replace("AUC", "AUC-ROC"): t[auc_col].round(3)}))
+            "30-Day Readmission Rate": (100 * t["Readmit rate"]).map("{:.1f}%".format), auc_col.replace("AUC", "AUC-ROC"): t[auc_col].map(round_metric_text)}))  # at METRIC_DECIMALS as Tables 2 and 5 (C20r: 0.695 printed 0.69, Excel 0.70)
     if "LOSO_By_Site" in tables:
         if table5 not in ("manuscript", "calibrated"):
             raise ValueError("table5 must be 'manuscript' or 'calibrated'.")
