@@ -20,6 +20,7 @@ The follow-ups in issue 106 (Kyle's suggestions after run C17). Version bump 0.3
   - `site_quality_report.py`: the lab funnel checks the bounds after the SI-unit conversions; a site-scoped confirmed gap is marked expected in the flags.
   - Medication classes: `disaggregate_combinations` also marks a hop / 'Maps to' target that is itself a combination; packs ('Contains') and precise ingredients ('Form of') are followed. Python and R.
   - Template v0.35.0 Section 2.2 says SI-unit values are converted before the plausibility ranges.
+  - Run C19 review: when hemoglobin replaces hematocrit, Tables 1 and 4 print a Hemoglobin row in Hematocrit's place (per 1 g/dL in the clinical increments); it had no row although it was a top predictor in Figure 2. The qualifying-stay count of the text is the analysed patients' stays only, equal to the all-stays sensitivity count (C19 printed 529,826 and 529,825). Reused features from the first 0.35.0 build no longer replay the duplicated period-end warning. `site_quality_report.py` names a lab whose rows are mostly outside the physiologic bounds.
 
 # omopduckdb 0.34.2
 

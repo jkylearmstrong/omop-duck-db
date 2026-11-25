@@ -360,6 +360,10 @@ def test_pr107_review_fixes(tmp_path):
     d = pd.DataFrame({"lab_hematocrit": [30.0, 36.0, None], "lab_hemoglobin": [10.0, 12.0, None], "lab_hematocrit_last": [30.0, 33.0, None]})
     assert hemoglobin_is_hematocrit(d)
     assert list(drop_duplicate_predictors(d).columns) == ["lab_hemoglobin"]
+    from omop_etl.manuscript_tables import _manuscript_labs
+
+    labs = dict((lab, names) for names, lab in _manuscript_labs(drop_duplicate_predictors(d)))
+    assert labs.get("Hemoglobin") == ("lab_hemoglobin",) and "Hematocrit" not in labs   # Tables 1 and 4 keep a row for it
     d.loc[1, "lab_hemoglobin"] = 11.0      # one measured hemoglobin: two predictors
     assert not hemoglobin_is_hematocrit(d) and "lab_hematocrit" in drop_duplicate_predictors(d)
 

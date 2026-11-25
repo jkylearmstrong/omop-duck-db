@@ -358,6 +358,8 @@ def funnel_causes(funnel: pd.DataFrame, known: Mapping[str, str], site_keys: Map
             out.append("ETL mapping gap (rows not mapped to the lab's concepts)")
         elif pd.notna(r.pct_no_number) and r.pct_no_number >= 50:
             out.append("no numeric value (source gap, or a raw result the ETL did not read)")
+        elif pd.notna(getattr(r, "pct_out_of_bounds", None)) and r.pct_out_of_bounds >= 50:
+            out.append("values outside the physiologic bounds (a unit or scale the package does not convert)")
         else:
             out.append("")
     return pd.Series(out, index=funnel.index, dtype=object)

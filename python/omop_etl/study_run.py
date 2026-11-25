@@ -368,6 +368,7 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
                 every = cohort.copy() if pinned is not None else define_study_cohort(con, materialise=False, min_admit_date=start, max_admit_date=end,
                                                                                      sample_stay_rule="all", attrition=False, **dict(params))
             every.attrs = {}
+        qualifying_rows = None
         if attrition_mode == "full_history":
             # the manuscript's CONSORT: every rule over the whole history, then the study window and the one stay per patient last
             with _period_end_check_reported():
@@ -382,6 +383,7 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
                 in_win = full[(d >= pd.Timestamp(start)) & (d <= pd.Timestamp(end))]
                 if int(in_win["subject_id"].nunique()) == n_final:
                     meta["qualifying_stays"] = int(len(in_win))
+                    qualifying_rows = in_win
             att = pd.concat([att, pd.DataFrame([{"step_name": f"Index admission {start} to {end}, one stay per patient", "subjects_retained": n_final, "site": site}])],
                             ignore_index=True)
         elif attrition_mode != "windowed":
@@ -406,6 +408,9 @@ def _site_frame(db_dir: Path, site: str, *, start: str, end: str, params: Mappin
                                              "(different cohort definition, window or data cut); "
                                              + ("their patients were given another eligible stay at random" if redraw else "they were dropped"), "pinned"), stacklevel=2)
             att = pd.concat([att, pd.DataFrame([{"step_name": "Stay selected for the patient (pinned list)", "subjects_retained": len(cohort), "site": site}])], ignore_index=True)
+            if meta.get("qualifying_stays") is not None and qualifying_rows is not None and "subject_id" in cohort:
+                # the stays of the analysed patients only: a patient outside the pinned draw is not in the cohort (C19 printed one stay more)
+                meta["qualifying_stays"] = int(qualifying_rows["subject_id"].isin(set(cohort["subject_id"])).sum())
         path = work / f"cohort_{site}.parquet"
         cohort.to_parquet(path)
         if every is not None:  # features once, for every eligible stay; the primary rows are picked out of them below
@@ -863,7 +868,9 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         if reuse_features and f.exists() and a.exists():
             df = pd.read_parquet(f).assign(site_anon=labels[site])  # the current labels, even if the saved run used others
             meta = json.loads(m.read_text(encoding="utf-8")) if m.exists() else {"address_table": "unknown (reused features from before 0.29.0)"}
-            saved = [dict(x, site=labels[site]) for x in meta.get("raised", [])]
+            # the cohort build's own period-end warning, saved by 0.35.0 runs before the fix: it repeats the observation_period finding
+            saved = [dict(x, site=labels[site]) for x in meta.get("raised", [])
+                     if not (x.get("check") == "warning" and " observation periods end on " in str(x.get("message", "")))]
             if "settings" not in meta:
                 saved.append({"site": labels[site], "check": "stale_features", "severity": "warning",
                               "message": "reused features were saved before 0.29.0: the settings they were built with are unknown"})
@@ -977,6 +984,8 @@ def run_study(db_dir: str | Path, out_dir: str | Path, *, sites: Sequence[str], 
         sens_tab.to_csv(out / f"{prefix}_Sensitivity.csv", index=False)
         res["files"].append(str(out / f"{prefix}_Sensitivity.csv"))
         timings["sensitivity"] = round(time.time() - t_sens, 1)
+        if n_qualifying is not None:  # the same stays by definition: one count in the text (reused features from before the fix)
+            n_qualifying = int(sens_summary["all_stays_n"])
     comparison = None
     if compare_to is not None:
         summary, diffs = compare_workbooks(wb["path"], compare_to)
