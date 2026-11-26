@@ -85,7 +85,7 @@ _DATE_FORMATS = ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%m/%d/%Y", "%Y%m%d")
 def _date_sql(cols: Sequence[str]) -> str:
     """The first column that parses as a date (the formats of the PCORnet converter's ``parse_omop_date``), inline so the
     expression needs no macro and runs on a read-only connection."""
-    one = lambda c: ("COALESCE(TRY_CAST(" + c + " AS DATE), " + ", ".join(f"CAST(TRY_STRPTIME({c}, '{f}') AS DATE)"  # noqa: E731
+    one = lambda c: ("COALESCE(TRY_CAST(" + c + " AS DATE), " + ", ".join(f"CAST(TRY_STRPTIME({c}, '{f}') AS DATE)"
                                                                          for f in _DATE_FORMATS) + ")")
     return "COALESCE(" + ", ".join(one(f"NULLIF(trim(r.{c}), '')") for c in cols) + ")"
 
@@ -99,7 +99,8 @@ def _hhmm_sql(time_col: str) -> str:
 
 
 def backfill_lab_values(con, lab_result_cm, *, names: Sequence[str] | None = None, concept_sets: Any = None,
-                        start: str | None = None, end: str | None = None, dry_run: bool = False) -> pd.DataFrame:
+                        start: str | None = None, end: str | None = None, dry_run: bool = False,
+                        stay_concepts: Sequence[int] = (9201, 262)) -> pd.DataFrame:
     """Fills ``value_as_number`` of laboratory rows that have none from the raw PCORnet ``LAB_RESULT_CM`` file (0.35.3, run C21:
     a site builder read only ``RESULT_NUM``, so a result held as text in ``RAW_RESULT``, such as a censored "<0.01", was lost).
 
@@ -120,7 +121,8 @@ def backfill_lab_values(con, lab_result_cm, *, names: Sequence[str] | None = Non
     a read-only connection. Otherwise the connection must be writable; work on a copy.
 
     Returns one row per laboratory: ``null_rows`` (rows without a number), ``filled``, ``filled_censored`` (of those, with an
-    operator), ``ambiguous`` (raw rows give different values), ``not_parseable`` (raw text with no number: qualitative, blank or
+    operator), ``filled_in_stay`` (of those, dated from the day before to the last day of a visit of ``stay_concepts``, inpatient
+    by default, of the same person: the rows a study's in-stay features can use), ``ambiguous`` (raw rows give different values), ``not_parseable`` (raw text with no number: qualitative, blank or
     other) and ``no_match``, with ``pct_filled`` (of ``null_rows``, 1 decimal). Counts only, never the text."""
     import os
     import warnings
@@ -135,7 +137,7 @@ def backfill_lab_values(con, lab_result_cm, *, names: Sequence[str] | None = Non
     sets = concept_sets or BENCHMARK_LAB_CONCEPT_SETS
     cmap = _concept_map(con, None, None, {n: sets[n] for n in (names or list(sets)) if n in sets})
     cmap = cmap[["name", "concept_id"]].drop_duplicates()
-    cols = ["name", "null_rows", "filled", "filled_censored", "ambiguous", "not_parseable", "no_match", "pct_filled"]
+    cols = ["name", "null_rows", "filled", "filled_censored", "filled_in_stay", "ambiguous", "not_parseable", "no_match", "pct_filled"]
     if cmap.empty:
         return pd.DataFrame(columns=cols)
     src = f"read_csv_auto({sql_path_literal(os.fspath(lab_result_cm))}, all_varchar = true, header = true)"
@@ -188,14 +190,19 @@ def backfill_lab_values(con, lab_result_cm, *, names: Sequence[str] | None = Non
             SELECT mid, name, count(*) AS n, count(*) FILTER (WHERE val IS NULL) AS n_null,
                    count(DISTINCT CAST(val AS VARCHAR) || '|' || CAST(op AS VARCHAR)) AS n_vals, max(val) AS val, max(op) AS op
             FROM use GROUP BY mid, name""")
-        out = con.execute("""
+        stays = ", ".join(str(int(c)) for c in stay_concepts) or "NULL"
+        in_stay = ("EXISTS (SELECT 1 FROM measurement m JOIN visit_occurrence v ON v.person_id = m.person_id "
+                   f"WHERE m.measurement_id = t.mid AND v.visit_concept_id IN ({stays}) "
+                   "AND t.dt BETWEEN v.visit_start_date - 1 AND coalesce(v.visit_end_date, v.visit_start_date))")
+        out = con.execute(f"""
             SELECT t.name, count(*) AS null_rows,
                    count(*) FILTER (WHERE k.n_null = 0 AND k.n_vals = 1) AS filled,
                    count(*) FILTER (WHERE k.n_null = 0 AND k.n_vals = 1 AND k.op <> 0) AS filled_censored,
+                   count(*) FILTER (WHERE k.n_null = 0 AND k.n_vals = 1 AND t.in_stay) AS filled_in_stay,
                    count(*) FILTER (WHERE k.n_null < k.n AND NOT (k.n_null = 0 AND k.n_vals = 1)) AS ambiguous,
                    count(*) FILTER (WHERE k.n_null = k.n) AS not_parseable,
                    count(*) FILTER (WHERE k.mid IS NULL) AS no_match
-            FROM (SELECT DISTINCT mid, name FROM _blv_t) t LEFT JOIN _blv_pick k USING (mid, name)
+            FROM (SELECT DISTINCT t.mid, t.name, {in_stay} AS in_stay FROM _blv_t t) t LEFT JOIN _blv_pick k USING (mid, name)
             GROUP BY t.name ORDER BY t.name""").df()
         if not dry_run:
             con.execute("""CREATE OR REPLACE TEMP TABLE _blv_fill AS

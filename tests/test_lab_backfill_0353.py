@@ -29,6 +29,8 @@ def _db(path):
             (6, 6, "2020-06-06", "2020-06-06 00:00:00", None, "4548-4"),   # no raw row
             (7, 1, "2020-06-07", "2020-06-07 00:00:00", 5.9, "4548-4"),    # already has a number: untouched
             (8, 2, "2021-06-01", "2021-06-01 00:00:00", None, "4548-4")]   # outside start/end
+    con.execute("CREATE TABLE visit_occurrence AS SELECT * FROM (VALUES (1, 1, 9201, DATE '2020-05-31', DATE '2020-06-03'), "
+                "(2, 2, 9202, DATE '2020-06-02', DATE '2020-06-02')) t(visit_occurrence_id, person_id, visit_concept_id, visit_start_date, visit_end_date)")
     con.execute("CREATE TABLE measurement (measurement_id BIGINT, person_id BIGINT, measurement_concept_id BIGINT, measurement_date DATE, "
                 "measurement_datetime TIMESTAMP, value_as_number DOUBLE, measurement_source_value VARCHAR, operator_concept_id BIGINT)")
     con.executemany("INSERT INTO measurement VALUES (?, ?, 3004410, ?, ?, ?, ?, 0)", [list(r) for r in rows])
@@ -60,7 +62,7 @@ def test_dry_run_counts_and_read_only(site):
     con = duckdb.connect(str(site / "omop.duckdb"), read_only=True)
     r = backfill_lab_values(con, site / "LAB_RESULT_CM.csv", names=["hba1c"], start="2020-01-01", end="2020-12-31",
                             dry_run=True).set_index("name").loc["hba1c"]
-    assert (r["null_rows"], r["filled"], r["filled_censored"], r["ambiguous"], r["not_parseable"], r["no_match"]) == (6, 3, 2, 1, 1, 1)
+    assert (r["null_rows"], r["filled"], r["filled_censored"], r["filled_in_stay"], r["ambiguous"], r["not_parseable"], r["no_match"]) == (6, 3, 2, 1, 1, 1, 1)
     assert r["pct_filled"] == 50.0
     assert con.execute("SELECT count(*) FROM measurement WHERE value_as_number IS NULL").fetchone()[0] == 7
     con.close()
@@ -69,8 +71,8 @@ def test_dry_run_counts_and_read_only(site):
 def test_fill_writes_value_and_operator(site):
     con = duckdb.connect(str(site / "omop.duckdb"))
     backfill_lab_values(con, site / "LAB_RESULT_CM.csv", names=["hba1c"], start="2020-01-01", end="2020-12-31")
-    got = dict((i, (v, op)) for i, v, op in con.execute(
-        "SELECT measurement_id, value_as_number, operator_concept_id FROM measurement ORDER BY 1").fetchall())
+    got = {i: (v, op) for i, v, op in con.execute(
+        "SELECT measurement_id, value_as_number, operator_concept_id FROM measurement ORDER BY 1").fetchall()}
     assert got[1] == (4.0, 4171756) and got[2] == (14.0, 4172704) and got[4] == (6.6, 0)
     assert got[3] == (None, 0) and got[5] == (None, 0) and got[6] == (None, 0)
     assert got[7] == (5.9, 0) and got[8] == (None, 0)
