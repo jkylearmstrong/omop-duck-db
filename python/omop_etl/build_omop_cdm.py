@@ -41,7 +41,7 @@ TYPE_CONCEPT_PRIMARY_DX = 44786627  # "Primary admission diagnosis"
 
 DEFAULT_ALIASES = {
     "PATID": ["PATID", "SSID", "PAT_ID", "PERSON_ID"],
-    "PROVIDERID": ["PROVIDERID", "PROVIDER_ID"],
+    "PROVIDERID": ["PROVIDERID", "PROVIDER_ID", "MEDADMIN_PROVIDERID", "RX_PROVIDERID"],
     "ENCOUNTERID": ["ENCOUNTERID", "ENCOUNTER_ID"],
     "DIAGNOSISID": ["DIAGNOSISID", "DIAGNOSIS_ID"],
     "PROCEDURESID": ["PROCEDURESID", "PROCEDURES_ID", "PROCEDUREID"],
@@ -1010,6 +1010,537 @@ def backfill_condition_concepts(con, *, add_rows=True):
     return out
 
 
+def _insert_mapped_cols(con, table_name: str, col_exprs: dict[str, str], from_where_sql: str) -> int:
+    """Inserts into ``table_name`` populating only columns that exist on ``table_name`` (others get 0 if NOT NULL integer else NULL)."""
+    desc = con.execute(f"DESCRIBE {table_name}").fetchall()
+    col_names = []
+    select_exprs = []
+    lower_map = {k.lower(): v for k, v in col_exprs.items()}
+    for r in desc:
+        cname, ctype, nullable = r[0], str(r[1]).upper(), str(r[2]).upper()
+        col_names.append(f'"{cname}"')
+        if cname.lower() in lower_map:
+            select_exprs.append(lower_map[cname.lower()])
+        elif nullable == "NO" and ("INT" in ctype or "DOUBLE" in ctype or "FLOAT" in ctype or "DECIMAL" in ctype):
+            select_exprs.append("0")
+        else:
+            select_exprs.append("NULL")
+    before = int(con.execute(f"SELECT count(*) FROM {table_name}").fetchone()[0])
+    con.execute(f"INSERT INTO {table_name} ({', '.join(col_names)}) SELECT {', '.join(select_exprs)} {from_where_sql}")
+    return int(con.execute(f"SELECT count(*) FROM {table_name}").fetchone()[0]) - before
+
+
+def backfill_vital_tobacco(con, vital_path, *, dry_run: bool = False, crosswalk=None) -> dict:
+    """Backfills ``observation`` (concept 43054909, LOINC 72166-2) from PCORnet ``VITAL.TOBACCO`` when ``SMOKING`` has no status
+    (0.35.3; databases built before 0.34.1 loaded ``SMOKING`` only).
+
+    Applies the exact 0.34.1 converter rule: when ``SMOKING`` is not one of ``01``..``08``, ``TOBACCO`` ``01`` -> 45881518
+    (current smoker), ``02`` -> 45879404 (never smoker), ``03`` -> 45883458 (former smoker), with ``value_source_value`` set to
+    ``'TOBACCO ' || trim(TOBACCO)``. Accepts ``PATID`` / ``SSID`` aliases, optional ``crosswalk`` CSV, ``ENCOUNTERID`` fallback,
+    and ``.csv`` / ``.parquet`` / ``.zip`` inputs. Idempotent: rows matching an existing ``(person_id, observation_date,
+    value_as_concept_id)`` under concept 43054909 are skipped. ``dry_run=True`` runs on a read-only connection."""
+    from pathlib import Path
+    from omop_etl.lab_text import _date_sql, _hhmm_sql, _open_raw_relation, _resolve_col
+
+    with _open_raw_relation(vital_path) as (src, parent_dir):
+        have = {r[0].upper(): r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src} LIMIT 0").fetchall()}
+        pat_col = _resolve_col(have, "PATID")
+        eid_col = _resolve_col(have, "ENCOUNTERID")
+        tob_col = _resolve_col(have, "TOBACCO", ("TOBACCO",))
+        if tob_col is None or "MEASURE_DATE" not in have:
+            return {"candidates": 0, "inserted": 0, "already_present": 0}
+        if pat_col is None and eid_col is None:
+            raise ValueError(f"{vital_path!r} has neither a PATID/SSID column nor an ENCOUNTERID column.")
+        smk_col = _resolve_col(have, "SMOKING", ("SMOKING",))
+        vid_col = _resolve_col(have, "VITALID", ("VITALID", "VITAL_ID"))
+        t_col = have.get("MEASURE_TIME")
+
+        tables_lower = {r[0].lower() for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+        has_vo = "visit_occurrence" in tables_lower
+        vcols = ({r[0].lower() for r in con.execute("DESCRIBE SELECT * FROM visit_occurrence LIMIT 0").fetchall()}
+                 if has_vo else set())
+        can_eid = bool(eid_col and has_vo and "visit_source_value" in vcols)
+
+        try:
+            con.execute("""CREATE OR REPLACE TEMP TABLE _bvt_pmap AS
+                SELECT DISTINCT trim(CAST(person_source_value AS VARCHAR)) AS rk, person_id AS pid
+                FROM person WHERE person_source_value IS NOT NULL AND trim(CAST(person_source_value AS VARCHAR)) <> ''""")
+            xw_path = Path(os.fspath(crosswalk)) if crosswalk is not None else (parent_dir / "crosswalk.csv")
+            if pat_col and xw_path.is_file():
+                xsrc = f"read_csv_auto({sql_path_literal(str(xw_path))}, all_varchar = true, header = true, ignore_errors = true)"
+                xhave = {r[0].upper(): r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {xsrc} LIMIT 0").fetchall()}
+                if "PATID" in xhave and "SSID" in xhave:
+                    con.execute(f"""INSERT INTO _bvt_pmap
+                        SELECT DISTINCT trim(x.{xhave['SSID']}), pm.pid FROM {xsrc} x JOIN _bvt_pmap pm ON pm.rk = trim(x.{xhave['PATID']})
+                        WHERE trim(x.{xhave['SSID']}) NOT IN (SELECT rk FROM _bvt_pmap)
+                        UNION
+                        SELECT DISTINCT trim(x.{xhave['PATID']}), pm.pid FROM {xsrc} x JOIN _bvt_pmap pm ON pm.rk = trim(x.{xhave['SSID']})
+                        WHERE trim(x.{xhave['PATID']}) NOT IN (SELECT rk FROM _bvt_pmap)""")
+
+            joins = []
+            pid_exprs = []
+            if pat_col:
+                joins.append(f"LEFT JOIN _bvt_pmap pm ON pm.rk = trim(r.{pat_col})")
+                pid_exprs.append("pm.pid")
+            if can_eid:
+                con.execute("""CREATE OR REPLACE TEMP TABLE _bvt_vmap AS
+                    SELECT trim(CAST(visit_source_value AS VARCHAR)) AS eid, min(visit_occurrence_id) AS vid, min(person_id) AS pid
+                    FROM visit_occurrence WHERE visit_source_value IS NOT NULL AND trim(CAST(visit_source_value AS VARCHAR)) <> ''
+                    GROUP BY 1 HAVING count(DISTINCT person_id) = 1""")
+                joins.append(f"LEFT JOIN _bvt_vmap vm ON vm.eid = trim(r.{eid_col})")
+                pid_exprs.append("vm.pid")
+                vid_expr = "vm.vid"
+            else:
+                vid_expr = "CAST(NULL AS BIGINT)"
+            pid_sql = f"COALESCE({', '.join(pid_exprs)})" if len(pid_exprs) > 1 else pid_exprs[0]
+
+            smk_none = (f"lpad(trim(coalesce(r.{smk_col}, '')), 2, '0') NOT IN ('01','02','03','04','05','06','07','08')"
+                        if smk_col else "TRUE")
+            dt_sql = _date_sql(["MEASURE_DATE"], "r")
+            hhmm_sql = _hhmm_sql(t_col, "r") if t_col else "CAST(NULL AS VARCHAR)"
+            ts_sql = f"TRY_CAST(CAST({dt_sql} AS VARCHAR) || ' ' || coalesce({hhmm_sql}, '00:00') || ':00' AS TIMESTAMP)"
+            dedup = (f"QUALIFY row_number() OVER (PARTITION BY r.{vid_col}) = 1"
+                     if vid_col else "QUALIFY row_number() OVER (PARTITION BY pid, dt, vcid, vsv) = 1")
+
+            con.execute(f"""CREATE OR REPLACE TEMP TABLE _bvt_cand AS
+                SELECT {pid_sql} AS pid, {vid_expr} AS vid, {dt_sql} AS dt, {ts_sql} AS dts,
+                       CASE lpad(trim(r.{tob_col}), 2, '0')
+                            WHEN '01' THEN 45881518 WHEN '02' THEN 45879404 WHEN '03' THEN 45883458 END AS vcid,
+                       'TOBACCO ' || trim(r.{tob_col}) AS vsv
+                FROM {src} r {' '.join(joins)}
+                WHERE ({smk_none}) AND lpad(trim(coalesce(r.{tob_col}, '')), 2, '0') IN ('01', '02', '03')
+                  AND {pid_sql} IS NOT NULL AND {dt_sql} IS NOT NULL
+                {dedup}""")
+
+            n_cand = int(con.execute("SELECT count(*) FROM _bvt_cand").fetchone()[0])
+            con.execute(f"""CREATE OR REPLACE TEMP TABLE _bvt_new AS
+                SELECT c.* FROM _bvt_cand c
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM observation o
+                    WHERE o.person_id = c.pid AND o.observation_concept_id = {CONCEPT_TOBACCO_SMOKING_STATUS}
+                      AND o.observation_date = c.dt AND o.value_as_concept_id = c.vcid)""")
+            n_new = int(con.execute("SELECT count(*) FROM _bvt_new").fetchone()[0])
+            inserted = 0
+            if n_new and not dry_run:
+                inserted = _insert_mapped_cols(
+                    con, "observation",
+                    {
+                        "observation_id": "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER (ORDER BY pid, dt, vcid)",
+                        "person_id": "pid",
+                        "observation_concept_id": str(CONCEPT_TOBACCO_SMOKING_STATUS),
+                        "observation_date": "dt",
+                        "observation_datetime": "dts",
+                        "observation_type_concept_id": str(TYPE_CONCEPT_EHR_MEASUREMENT),
+                        "value_as_concept_id": "vcid",
+                        "visit_occurrence_id": "vid",
+                        "observation_source_value": "'72166-2'",
+                        "observation_source_concept_id": "0",
+                        "value_source_value": "vsv",
+                        "obs_event_field_concept_id": "0",
+                    },
+                    "FROM _bvt_new",
+                )
+            return {"candidates": n_cand, "inserted": inserted if not dry_run else n_new, "already_present": n_cand - n_new}
+        finally:
+            for t in ("_bvt_pmap", "_bvt_vmap", "_bvt_cand", "_bvt_new"):
+                con.execute(f"DROP TABLE IF EXISTS {t}")
+
+
+def route_drug_domains(con, *, dry_run: bool = False) -> dict:
+    """Moves rows in ``drug_exposure`` whose standard ``drug_concept_id`` belongs to another OMOP v5.4 clinical event domain
+    (``Device``, ``Procedure``, ``Observation``, ``Measurement``) into the matching domain table and removes them from
+    ``drug_exposure`` (0.35.3)."""
+    tables_lower = {r[0].lower() for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+    out = {"device_exposure": 0, "procedure_occurrence": 0, "observation": 0, "measurement": 0, "total_routed": 0}
+    dcols = {r[0].lower() for r in con.execute("DESCRIBE drug_exposure").fetchall()}
+    qty_expr = "TRY_CAST(round(x.quantity) AS INTEGER)" if "quantity" in dcols else "NULL"
+    qty_flt = "TRY_CAST(x.quantity AS DOUBLE)" if "quantity" in dcols else "NULL"
+    prov_expr = "x.provider_id" if "provider_id" in dcols else "NULL"
+    vid_expr = "x.visit_occurrence_id" if "visit_occurrence_id" in dcols else "NULL"
+    vd_expr = "x.visit_detail_id" if "visit_detail_id" in dcols else "NULL"
+    sv_expr = "x.drug_source_value" if "drug_source_value" in dcols else "NULL"
+    scid_expr = "coalesce(x.drug_source_concept_id, 0)" if "drug_source_concept_id" in dcols else "0"
+    usv_expr = "x.dose_unit_source_value" if "dose_unit_source_value" in dcols else "NULL"
+    edt_expr = "x.drug_exposure_end_date" if "drug_exposure_end_date" in dcols else "x.drug_exposure_start_date"
+    edts_expr = "x.drug_exposure_end_datetime" if "drug_exposure_end_datetime" in dcols else "NULL"
+    sdts_expr = "x.drug_exposure_start_datetime" if "drug_exposure_start_datetime" in dcols else "CAST(x.drug_exposure_start_date AS TIMESTAMP)"
+
+    try:
+        con.execute(f"""CREATE OR REPLACE TEMP TABLE _rdd_src AS
+            SELECT x.rowid AS rid, c.domain_id AS dom, x.person_id AS pid, x.drug_concept_id AS cid,
+                   x.drug_exposure_start_date AS sdt, {sdts_expr} AS sdts, {edt_expr} AS edt, {edts_expr} AS edts,
+                   x.drug_type_concept_id AS tcid, {qty_expr} AS qty_i, {qty_flt} AS qty_f,
+                   {prov_expr} AS prov, {vid_expr} AS vid, {vd_expr} AS vd,
+                   {sv_expr} AS sv, {scid_expr} AS scid, {usv_expr} AS usv
+            FROM drug_exposure x JOIN concept c ON c.concept_id = x.drug_concept_id
+            WHERE coalesce(x.drug_concept_id, 0) <> 0
+              AND c.domain_id IN ('Device', 'Procedure', 'Observation', 'Measurement')""")
+        counts = dict(con.execute("SELECT dom, count(*) FROM _rdd_src GROUP BY 1").fetchall())
+        domain_tables = [("Device", "device_exposure"), ("Procedure", "procedure_occurrence"),
+                         ("Observation", "observation"), ("Measurement", "measurement")]
+        routed_domains = []
+        for dom, tbl in domain_tables:
+            n = int(counts.get(dom, 0))
+            if not n or tbl not in tables_lower:
+                continue
+            out[tbl] = n
+            routed_domains.append(dom)
+            if dry_run:
+                continue
+            if tbl == "device_exposure":
+                _insert_mapped_cols(con, tbl, {
+                    "device_exposure_id": "(SELECT coalesce(max(device_exposure_id), 0) FROM device_exposure) + row_number() OVER (ORDER BY rid)",
+                    "person_id": "pid", "device_concept_id": "cid",
+                    "device_exposure_start_date": "sdt", "device_exposure_start_datetime": "sdts",
+                    "device_exposure_end_date": "edt", "device_exposure_end_datetime": "edts",
+                    "device_type_concept_id": "tcid", "quantity": "qty_i", "provider_id": "prov",
+                    "visit_occurrence_id": "vid", "visit_detail_id": "vd",
+                    "device_source_value": "sv", "device_source_concept_id": "scid",
+                    "unit_concept_id": "0", "unit_source_value": "usv", "unit_source_concept_id": "0",
+                }, "FROM _rdd_src WHERE dom = 'Device'")
+            elif tbl == "procedure_occurrence":
+                _insert_mapped_cols(con, tbl, {
+                    "procedure_occurrence_id": "(SELECT coalesce(max(procedure_occurrence_id), 0) FROM procedure_occurrence) + row_number() OVER (ORDER BY rid)",
+                    "person_id": "pid", "procedure_concept_id": "cid",
+                    "procedure_date": "sdt", "procedure_datetime": "sdts",
+                    "procedure_end_date": "edt", "procedure_end_datetime": "edts",
+                    "procedure_type_concept_id": "tcid", "modifier_concept_id": "0", "quantity": "qty_i",
+                    "provider_id": "prov", "visit_occurrence_id": "vid", "visit_detail_id": "vd",
+                    "procedure_source_value": "sv", "procedure_source_concept_id": "scid",
+                }, "FROM _rdd_src WHERE dom = 'Procedure'")
+            elif tbl == "observation":
+                _insert_mapped_cols(con, tbl, {
+                    "observation_id": "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER (ORDER BY rid)",
+                    "person_id": "pid", "observation_concept_id": "cid",
+                    "observation_date": "sdt", "observation_datetime": "sdts",
+                    "observation_type_concept_id": "tcid", "value_as_number": "qty_f", "value_as_concept_id": "0",
+                    "provider_id": "prov", "visit_occurrence_id": "vid", "visit_detail_id": "vd",
+                    "observation_source_value": "sv", "observation_source_concept_id": "scid",
+                    "unit_source_value": "usv", "obs_event_field_concept_id": "0",
+                }, "FROM _rdd_src WHERE dom = 'Observation'")
+            elif tbl == "measurement":
+                _insert_mapped_cols(con, tbl, {
+                    "measurement_id": "(SELECT coalesce(max(measurement_id), 0) FROM measurement) + row_number() OVER (ORDER BY rid)",
+                    "person_id": "pid", "measurement_concept_id": "cid",
+                    "measurement_date": "sdt", "measurement_datetime": "sdts",
+                    "measurement_type_concept_id": "tcid", "operator_concept_id": "0",
+                    "value_as_number": "qty_f", "value_as_concept_id": "0", "unit_concept_id": "0",
+                    "provider_id": "prov", "visit_occurrence_id": "vid", "visit_detail_id": "vd",
+                    "measurement_source_value": "sv", "measurement_source_concept_id": "scid",
+                    "unit_source_value": "usv", "unit_source_concept_id": "0", "meas_event_field_concept_id": "0",
+                }, "FROM _rdd_src WHERE dom = 'Measurement'")
+        out["total_routed"] = sum(out[k] for k in ("device_exposure", "procedure_occurrence", "observation", "measurement"))
+        if routed_domains and not dry_run:
+            dom_in = ", ".join(f"'{d}'" for d in routed_domains)
+            con.execute(f"DELETE FROM drug_exposure WHERE rowid IN (SELECT rid FROM _rdd_src WHERE dom IN ({dom_in}))")
+        return out
+    finally:
+        con.execute("DROP TABLE IF EXISTS _rdd_src")
+
+
+def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=None, route_domains: bool = True,
+                       force: bool = False) -> dict:
+    """Loads PCORnet ``MED_ADMIN`` into an existing CDM database (0.35.3), resolving RxNorm, 10/11-digit NDC, HCPCS/CPT4 and
+    exact RxNorm drug names to valid standard OMOP concepts, and routing each record to the OMOP v5.4 table of its target
+    concept's ``domain_id`` (``drug_exposure`` for ``Drug`` and unmapped rows, ``device_exposure`` for ``Device``,
+    ``procedure_occurrence`` for ``Procedure``, ``observation`` for ``Observation``, ``measurement`` for ``Measurement``;
+    ``type_concept_id`` = 38000180).
+
+    Accepts ``.csv``, ``.parquet``, or ``.zip`` inputs and ``PATID`` / ``SSID`` / ``MEDADMIN_PROVIDERID`` aliases. Idempotent:
+    when the database already holds ``drug_type_concept_id`` = 38000180 rows and ``force=False``, returns immediately without
+    duplicating rows. Needs the vocabulary attached; ``dry_run=True`` runs on a read-only connection."""
+    from pathlib import Path
+    from omop_etl.lab_text import _date_sql, _hhmm_sql, _open_raw_relation, _resolve_col
+
+    if not con.execute("SELECT 1 FROM concept_relationship WHERE relationship_id = 'Maps to' LIMIT 1").fetchone():
+        raise ValueError("backfill_med_admin: concept_relationship holds no 'Maps to' rows; attach the central vocabulary first.")
+
+    out = {"source_rows": 0, "drug_exposure": 0, "device_exposure": 0, "procedure_occurrence": 0,
+           "observation": 0, "measurement": 0, "unmapped_drug": 0, "already_loaded": False}
+    if not force:
+        existing = int(con.execute(f"SELECT count(*) FROM drug_exposure WHERE drug_type_concept_id = {TYPE_CONCEPT_MED_ADMIN}").fetchone()[0])
+        if existing > 0:
+            out["already_loaded"] = True
+            return out
+
+    tables_lower = {r[0].lower() for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+    has_vo = "visit_occurrence" in tables_lower
+    vcols = ({r[0].lower() for r in con.execute("DESCRIBE SELECT * FROM visit_occurrence LIMIT 0").fetchall()} if has_vo else set())
+    has_pr = "provider" in tables_lower
+    pcols = ({r[0].lower() for r in con.execute("DESCRIBE SELECT * FROM provider LIMIT 0").fetchall()} if has_pr else set())
+
+    with _open_raw_relation(med_admin_path) as (src, parent_dir):
+        have = {r[0].upper(): r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src} LIMIT 0").fetchall()}
+        pat_col = _resolve_col(have, "PATID")
+        eid_col = _resolve_col(have, "ENCOUNTERID")
+        sdate_col = _resolve_col(have, "MEDADMIN_START_DATE")
+        if sdate_col is None or (pat_col is None and eid_col is None):
+            raise ValueError(f"{med_admin_path!r} lacks required MEDADMIN_START_DATE or PATID/SSID/ENCOUNTERID columns.")
+        id_col = _resolve_col(have, "MEDADMINID")
+        stime_col = _resolve_col(have, "MEDADMIN_START_TIME")
+        edate_col = _resolve_col(have, "MEDADMIN_STOP_DATE")
+        mtype_col = _resolve_col(have, "MEDADMIN_TYPE")
+        mcode_col = _resolve_col(have, "MEDADMIN_CODE")
+        ndc_col = _resolve_col(have, "RAW_RX_NDC", ("RAW_MEDADMIN_CODE",))
+        mname_col = _resolve_col(have, "RAW_MEDADMIN_MED_NAME")
+        prov_col = _resolve_col(have, "PROVIDERID")
+        route_col = _resolve_col(have, "MEDADMIN_ROUTE", ("MEDADMIN_ROUTE", "RAW_MEDADMIN_ROUTE"))
+        unit_col = _resolve_col(have, "MEDADMIN_DOSE_ADMIN_UNIT", ("MEDADMIN_DOSE_ADMIN_UNIT", "RAW_MEDADMIN_DOSE_ADMIN_UNIT"))
+        dose_col = _resolve_col(have, "MEDADMIN_DOSE_ADMIN", ("MEDADMIN_DOSE_ADMIN",))
+
+        can_eid = bool(eid_col and has_vo and "visit_source_value" in vcols)
+        can_prov = bool(prov_col and has_pr and "provider_source_value" in pcols)
+
+        try:
+            con.execute("""CREATE OR REPLACE TEMP TABLE _bma_pmap AS
+                SELECT DISTINCT trim(CAST(person_source_value AS VARCHAR)) AS rk, person_id AS pid
+                FROM person WHERE person_source_value IS NOT NULL AND trim(CAST(person_source_value AS VARCHAR)) <> ''""")
+            xw_path = Path(os.fspath(crosswalk)) if crosswalk is not None else (parent_dir / "crosswalk.csv")
+            if pat_col and xw_path.is_file():
+                xsrc = f"read_csv_auto({sql_path_literal(str(xw_path))}, all_varchar = true, header = true, ignore_errors = true)"
+                xhave = {r[0].upper(): r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {xsrc} LIMIT 0").fetchall()}
+                if "PATID" in xhave and "SSID" in xhave:
+                    con.execute(f"""INSERT INTO _bma_pmap
+                        SELECT DISTINCT trim(x.{xhave['SSID']}), pm.pid FROM {xsrc} x JOIN _bma_pmap pm ON pm.rk = trim(x.{xhave['PATID']})
+                        WHERE trim(x.{xhave['SSID']}) NOT IN (SELECT rk FROM _bma_pmap)
+                        UNION
+                        SELECT DISTINCT trim(x.{xhave['PATID']}), pm.pid FROM {xsrc} x JOIN _bma_pmap pm ON pm.rk = trim(x.{xhave['SSID']})
+                        WHERE trim(x.{xhave['PATID']}) NOT IN (SELECT rk FROM _bma_pmap)""")
+
+            joins = []
+            pid_exprs = []
+            if pat_col:
+                joins.append(f"LEFT JOIN _bma_pmap pm ON pm.rk = trim(r.{pat_col})")
+                pid_exprs.append("pm.pid")
+            if can_eid:
+                con.execute("""CREATE OR REPLACE TEMP TABLE _bma_vmap AS
+                    SELECT trim(CAST(visit_source_value AS VARCHAR)) AS eid, min(visit_occurrence_id) AS vid, min(person_id) AS pid
+                    FROM visit_occurrence WHERE visit_source_value IS NOT NULL AND trim(CAST(visit_source_value AS VARCHAR)) <> ''
+                    GROUP BY 1 HAVING count(DISTINCT person_id) = 1""")
+                joins.append(f"LEFT JOIN _bma_vmap vm ON vm.eid = trim(r.{eid_col})")
+                pid_exprs.append("vm.pid")
+                vid_sql = "vm.vid"
+            else:
+                vid_sql = "CAST(NULL AS BIGINT)"
+            if can_prov:
+                con.execute("""CREATE OR REPLACE TEMP TABLE _bma_prmap AS
+                    SELECT trim(CAST(provider_source_value AS VARCHAR)) AS psv, min(provider_id) AS prid
+                    FROM provider WHERE provider_source_value IS NOT NULL AND trim(CAST(provider_source_value AS VARCHAR)) <> ''
+                    GROUP BY 1""")
+                joins.append(f"LEFT JOIN _bma_prmap prm ON prm.psv = trim(r.{prov_col})")
+                pr_sql = "prm.prid"
+            else:
+                pr_sql = "CAST(NULL AS BIGINT)"
+            pid_sql = f"COALESCE({', '.join(pid_exprs)})" if len(pid_exprs) > 1 else pid_exprs[0]
+
+            sdt_sql = _date_sql([sdate_col], "r")
+            edt_sql = f"COALESCE({_date_sql([edate_col], 'r')}, {sdt_sql})" if edate_col else sdt_sql
+            hhmm_sql = _hhmm_sql(stime_col, "r") if stime_col else "CAST(NULL AS VARCHAR)"
+            sdts_sql = f"TRY_CAST(CAST({sdt_sql} AS VARCHAR) || ' ' || coalesce({hhmm_sql}, '00:00') || ':00' AS TIMESTAMP)"
+            edts_sql = (f"CAST({_date_sql([edate_col], 'r')} AS TIMESTAMP)" if edate_col else "CAST(NULL AS TIMESTAMP)")
+
+            tp_sql = f"upper(trim(coalesce(r.{mtype_col}, '')))" if mtype_col else "''"
+            cd_sql = f"NULLIF(trim(r.{mcode_col}), '')" if mcode_col else "CAST(NULL AS VARCHAR)"
+            nd_sql = f"NULLIF(trim(r.{ndc_col}), '')" if ndc_col else "CAST(NULL AS VARCHAR)"
+            nm_sql = f"NULLIF(trim(r.{mname_col}), '')" if mname_col else "CAST(NULL AS VARCHAR)"
+            rt_sql = f"NULLIF(trim(r.{route_col}), '')" if route_col else "CAST(NULL AS VARCHAR)"
+            un_sql = f"NULLIF(trim(r.{unit_col}), '')" if unit_col else "CAST(NULL AS VARCHAR)"
+            qt_sql = f"TRY_CAST(r.{dose_col} AS DOUBLE)" if dose_col else "CAST(NULL AS DOUBLE)"
+            dedup = f"WHERE r.{id_col} IS NOT NULL AND trim(r.{id_col}) <> '' QUALIFY row_number() OVER (PARTITION BY r.{id_col}) = 1" if id_col else ""
+
+            con.execute(f"""CREATE OR REPLACE TEMP TABLE _bma_stg AS
+                SELECT row_number() OVER (ORDER BY sdt, pid, coalesce(cd, nd, nm, '')) AS seq_id, pid, vid, prid, sdt, sdts, edt, edts, tp, cd, nd, nm,
+                       COALESCE(cd, nd, nm) AS sv, rt, un, qt
+                FROM (
+                    SELECT {pid_sql} AS pid, {vid_sql} AS vid, {pr_sql} AS prid,
+                           {sdt_sql} AS sdt, {sdts_sql} AS sdts, {edt_sql} AS edt, {edts_sql} AS edts,
+                           {tp_sql} AS tp, {cd_sql} AS cd, {nd_sql} AS nd, {nm_sql} AS nm,
+                           {rt_sql} AS rt, {un_sql} AS un, {qt_sql} AS qt
+                           {f', r.{id_col}' if id_col else ''}
+                    FROM {src} r {' '.join(joins)}
+                    {dedup}
+                ) sub
+                WHERE pid IS NOT NULL AND sdt IS NOT NULL""")
+
+            out["source_rows"] = int(con.execute("SELECT count(*) FROM _bma_stg").fetchone()[0])
+            if out["source_rows"] == 0:
+                return out
+
+            # Distinct code dictionary -> standard concept + domain_id
+            try:
+                con.execute("SELECT 1 FROM drug_strength LIMIT 0")
+                has_ds = True
+            except duckdb.Error:
+                has_ds = False
+            ds_union = "UNION SELECT r.key_id, ds.ingredient_concept_id FROM rel r JOIN drug_strength ds ON ds.drug_concept_id = r.scid" if has_ds else ""
+
+            con.execute("""CREATE OR REPLACE TEMP TABLE _bma_keys AS
+                SELECT row_number() OVER () AS key_id, tp, cd, nd, nm,
+                       COALESCE(cd, nd) AS raw_code,
+                       CASE
+                           WHEN regexp_matches(COALESCE(cd, nd, ''), '^[0-9]{4}-[0-9]{4}-[0-9]{2}$') THEN '0' || replace(COALESCE(cd, nd), '-', '')
+                           WHEN regexp_matches(COALESCE(cd, nd, ''), '^[0-9]{5}-[0-9]{3}-[0-9]{2}$')
+                               THEN split_part(COALESCE(cd, nd), '-', 1) || '0' || split_part(COALESCE(cd, nd), '-', 2) || split_part(COALESCE(cd, nd), '-', 3)
+                           WHEN regexp_matches(COALESCE(cd, nd, ''), '^[0-9]{5}-[0-9]{4}-[0-9]$')
+                               THEN split_part(COALESCE(cd, nd), '-', 1) || split_part(COALESCE(cd, nd), '-', 2) || '0' || split_part(COALESCE(cd, nd), '-', 3)
+                           ELSE regexp_replace(COALESCE(cd, nd, ''), '[^0-9]', '', 'g') END AS digits,
+                       lower(trim(nm)) AS lnm
+                FROM (SELECT DISTINCT tp, cd, nd, nm FROM _bma_stg)""")
+
+            con.execute(f"""CREATE OR REPLACE TEMP TABLE _bma_kmap AS
+                WITH src_match AS (
+                    -- 1. Explicit or pattern vocabulary match
+                    SELECT k.key_id, c.concept_id AS scid, c.standard_concept AS std, c.invalid_reason AS inv, c.domain_id AS sdom, 1 AS prio
+                    FROM _bma_keys k JOIN concept c
+                      ON ((k.tp = 'RX' OR (k.tp NOT IN ('ND', 'CH', 'CP') AND regexp_matches(COALESCE(k.raw_code, ''), '^[0-9]{{1,8}}$')))
+                          AND c.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND c.concept_code = k.raw_code)
+                      OR ((k.tp = 'ND' OR length(k.digits) = 11) AND c.vocabulary_id = 'NDC' AND c.concept_code = k.digits AND length(k.digits) = 11)
+                      OR (k.tp IN ('CH', 'CP') AND c.vocabulary_id IN ('HCPCS', 'CPT4') AND upper(c.concept_code) = upper(k.raw_code))
+                ),
+                best_src AS (
+                    SELECT key_id, scid, std, inv, sdom FROM (
+                        SELECT *, row_number() OVER (PARTITION BY key_id ORDER BY (std = 'S' AND inv IS NULL) DESC, (inv IS NULL) DESC, scid) AS rn
+                        FROM src_match
+                    ) WHERE rn = 1
+                ),
+                mapped AS (
+                    -- Direct valid standard concept or valid 'Maps to' target
+                    SELECT b.key_id, b.scid,
+                           CASE WHEN b.std = 'S' AND b.inv IS NULL THEN b.scid ELSE min(t.concept_id) END AS tcid
+                    FROM best_src b
+                    LEFT JOIN concept_relationship cr ON cr.concept_id_1 = b.scid AND cr.relationship_id = 'Maps to' AND cr.invalid_reason IS NULL
+                    LEFT JOIN concept t ON t.concept_id = cr.concept_id_2 AND t.standard_concept = 'S' AND t.invalid_reason IS NULL
+                    GROUP BY b.key_id, b.scid, b.std, b.inv
+                    HAVING (b.std = 'S' AND b.inv IS NULL) OR count(DISTINCT t.concept_id) = 1
+                ),
+                unmapped_src AS (
+                    SELECT b.key_id, b.scid FROM best_src b WHERE b.key_id NOT IN (SELECT key_id FROM mapped WHERE tcid IS NOT NULL)
+                ),
+                rel AS (
+                    SELECT key_id, scid FROM unmapped_src
+                    UNION SELECT u.key_id, cr.concept_id_2 AS scid FROM unmapped_src u
+                    JOIN concept_relationship cr ON cr.concept_id_1 = u.scid AND cr.relationship_id IN ('Tradename of', 'Quantified form of', 'Consists of')
+                ),
+                ing_cand AS (
+                    SELECT r.key_id, cr.concept_id_2 AS ing FROM rel r
+                    JOIN concept_relationship cr ON cr.concept_id_1 = r.scid AND cr.relationship_id IN ('RxNorm has ing', 'Has ingredient', 'Brand name of', 'Tradename of')
+                    {ds_union}
+                ),
+                by_ing AS (
+                    SELECT ic.key_id, u.scid, min(t.concept_id) AS tcid
+                    FROM ing_cand ic JOIN unmapped_src u USING (key_id)
+                    JOIN concept t ON t.concept_id = ic.ing AND t.concept_class_id = 'Ingredient'
+                     AND t.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND t.standard_concept = 'S' AND t.invalid_reason IS NULL
+                    GROUP BY ic.key_id, u.scid HAVING count(DISTINCT t.concept_id) = 1
+                ),
+                by_name AS (
+                    SELECT k.key_id, 0 AS scid,
+                           CASE WHEN count(*) FILTER (WHERE c.concept_class_id = 'Ingredient') = 1
+                                THEN min(c.concept_id) FILTER (WHERE c.concept_class_id = 'Ingredient')
+                                WHEN count(*) = 1 THEN min(c.concept_id) END AS tcid
+                    FROM _bma_keys k JOIN concept c ON lower(c.concept_name) = k.lnm
+                     AND c.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND c.standard_concept = 'S' AND c.invalid_reason IS NULL
+                    WHERE k.lnm IS NOT NULL AND k.lnm NOT IN ('', 'ni', 'un', 'ot')
+                      AND k.key_id NOT IN (SELECT key_id FROM mapped WHERE tcid IS NOT NULL)
+                      AND k.key_id NOT IN (SELECT key_id FROM by_ing WHERE tcid IS NOT NULL)
+                    GROUP BY k.key_id
+                ),
+                combined AS (
+                    SELECT key_id, scid, tcid FROM mapped WHERE tcid IS NOT NULL
+                    UNION ALL SELECT key_id, scid, tcid FROM by_ing WHERE tcid IS NOT NULL
+                    UNION ALL SELECT key_id, scid, tcid FROM by_name WHERE tcid IS NOT NULL
+                )
+                SELECT k.tp, k.cd, k.nd, k.nm,
+                       coalesce(cb.scid, bs.scid, 0) AS scid,
+                       coalesce(cb.tcid, 0) AS tcid,
+                       coalesce(tc.domain_id, 'Drug') AS dom
+                FROM _bma_keys k
+                LEFT JOIN combined cb ON cb.key_id = k.key_id
+                LEFT JOIN best_src bs ON bs.key_id = k.key_id
+                LEFT JOIN concept tc ON tc.concept_id = cb.tcid""")
+
+            con.execute("""CREATE OR REPLACE TEMP TABLE _bma_resolved AS
+                SELECT s.*, m.scid, m.tcid,
+                       CASE WHEN m.dom IN ('Drug', 'Device', 'Procedure', 'Observation', 'Measurement') THEN m.dom ELSE 'Drug' END AS dom
+                FROM _bma_stg s
+                JOIN _bma_kmap m ON m.tp IS NOT DISTINCT FROM s.tp AND m.cd IS NOT DISTINCT FROM s.cd
+                                AND m.nd IS NOT DISTINCT FROM s.nd AND m.nm IS NOT DISTINCT FROM s.nm""")
+
+            if not route_domains:
+                con.execute("UPDATE _bma_resolved SET tcid = CASE WHEN dom = 'Drug' THEN tcid ELSE 0 END, dom = 'Drug'")
+
+            dom_counts = dict(con.execute("SELECT dom, count(*) FROM _bma_resolved GROUP BY 1").fetchall())
+            out["unmapped_drug"] = int(con.execute("SELECT count(*) FROM _bma_resolved WHERE dom = 'Drug' AND tcid = 0").fetchone()[0])
+
+            targets = [
+                ("Drug", "drug_exposure", {
+                    "drug_exposure_id": "(SELECT coalesce(max(drug_exposure_id), 0) FROM drug_exposure) + row_number() OVER (ORDER BY seq_id)",
+                    "person_id": "pid", "drug_concept_id": "tcid",
+                    "drug_exposure_start_date": "sdt", "drug_exposure_start_datetime": "sdts",
+                    "drug_exposure_end_date": "edt", "drug_exposure_end_datetime": "edts",
+                    "drug_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "quantity": "qt",
+                    "route_concept_id": "0", "provider_id": "prid", "visit_occurrence_id": "vid",
+                    "drug_source_value": "sv", "drug_source_concept_id": "scid",
+                    "route_source_value": "rt", "dose_unit_source_value": "un",
+                }),
+                ("Device", "device_exposure", {
+                    "device_exposure_id": "(SELECT coalesce(max(device_exposure_id), 0) FROM device_exposure) + row_number() OVER (ORDER BY seq_id)",
+                    "person_id": "pid", "device_concept_id": "tcid",
+                    "device_exposure_start_date": "sdt", "device_exposure_start_datetime": "sdts",
+                    "device_exposure_end_date": "edt", "device_exposure_end_datetime": "edts",
+                    "device_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "quantity": "TRY_CAST(round(qt) AS INTEGER)",
+                    "provider_id": "prid", "visit_occurrence_id": "vid",
+                    "device_source_value": "sv", "device_source_concept_id": "scid",
+                    "unit_concept_id": "0", "unit_source_value": "un", "unit_source_concept_id": "0",
+                }),
+                ("Procedure", "procedure_occurrence", {
+                    "procedure_occurrence_id": "(SELECT coalesce(max(procedure_occurrence_id), 0) FROM procedure_occurrence) + row_number() OVER (ORDER BY seq_id)",
+                    "person_id": "pid", "procedure_concept_id": "tcid",
+                    "procedure_date": "sdt", "procedure_datetime": "sdts",
+                    "procedure_end_date": "edt", "procedure_end_datetime": "edts",
+                    "procedure_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "modifier_concept_id": "0",
+                    "quantity": "TRY_CAST(round(qt) AS INTEGER)", "provider_id": "prid", "visit_occurrence_id": "vid",
+                    "procedure_source_value": "sv", "procedure_source_concept_id": "scid",
+                }),
+                ("Observation", "observation", {
+                    "observation_id": "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER (ORDER BY seq_id)",
+                    "person_id": "pid", "observation_concept_id": "tcid",
+                    "observation_date": "sdt", "observation_datetime": "sdts",
+                    "observation_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "value_as_number": "qt",
+                    "value_as_concept_id": "0", "provider_id": "prid", "visit_occurrence_id": "vid",
+                    "observation_source_value": "sv", "observation_source_concept_id": "scid",
+                    "unit_source_value": "un", "obs_event_field_concept_id": "0",
+                }),
+                ("Measurement", "measurement", {
+                    "measurement_id": "(SELECT coalesce(max(measurement_id), 0) FROM measurement) + row_number() OVER (ORDER BY seq_id)",
+                    "person_id": "pid", "measurement_concept_id": "tcid",
+                    "measurement_date": "sdt", "measurement_datetime": "sdts",
+                    "measurement_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "operator_concept_id": "0",
+                    "value_as_number": "qt", "value_as_concept_id": "0", "unit_concept_id": "0",
+                    "provider_id": "prid", "visit_occurrence_id": "vid",
+                    "measurement_source_value": "sv", "measurement_source_concept_id": "scid",
+                    "unit_source_value": "un", "unit_source_concept_id": "0", "meas_event_field_concept_id": "0",
+                }),
+            ]
+            for dom, tbl, exprs in targets:
+                n = int(dom_counts.get(dom, 0))
+                if not n:
+                    continue
+                if tbl not in tables_lower:
+                    # Fallback if optional domain table is absent in a minimal schema: route as unmapped drug
+                    if dom != "Drug" and "drug_exposure" in tables_lower and not dry_run:
+                        _insert_mapped_cols(con, "drug_exposure", targets[0][2], f"FROM _bma_resolved WHERE dom = '{dom}'")
+                        out["drug_exposure"] += n
+                    continue
+                out[tbl] += n
+                if not dry_run:
+                    _insert_mapped_cols(con, tbl, exprs, f"FROM _bma_resolved WHERE dom = '{dom}'")
+            return out
+        finally:
+            for t in ("_bma_pmap", "_bma_vmap", "_bma_prmap", "_bma_stg", "_bma_keys", "_bma_kmap", "_bma_resolved"):
+                con.execute(f"DROP TABLE IF EXISTS {t}")
+
+
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "encounter")
     if path is None:
@@ -1787,6 +2318,10 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
 
     if not loaded_any:
         print("Skipping DRUG_EXPOSURE - no prescribing.csv, med_admin.csv, or dispensing.csv found")
+    else:
+        routed = route_drug_domains(con)
+        if routed["total_routed"]:
+            print(f"  -> routed {routed['total_routed']} non-Drug exposure row(s) to OMOP v5.4 domain tables: {routed}")
 
 
 def load_death(con, source_dir, site_id=None, disambiguate_patids=False):
