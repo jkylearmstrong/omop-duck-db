@@ -210,7 +210,7 @@ M4,,04JAN2021,,,RX,,unknown local compounding,1,S20
     assert res["source_rows"] == 4
     assert res["drug_exposure"] == 2 and res["unmapped_drug"] == 1
     assert res["device_exposure"] == 1 and res["procedure_occurrence"] == 1
-    assert con.execute("SELECT drug_concept_id FROM drug_exposure ORDER BY drug_exposure_id").fetchall() == [(1503297,), (0,)]
+    assert sorted(con.execute("SELECT drug_concept_id FROM drug_exposure").fetchall()) == [(0,), (1503297,)]
     assert con.execute("SELECT device_concept_id FROM device_exposure").fetchall() == [(4200001,)]
     assert con.execute("SELECT procedure_concept_id FROM procedure_occurrence").fetchall() == [(900002,)]
 

@@ -1349,8 +1349,9 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
             dedup = f"WHERE r.{id_col} IS NOT NULL AND trim(r.{id_col}) <> '' QUALIFY row_number() OVER (PARTITION BY r.{id_col}) = 1" if id_col else ""
 
             con.execute(f"""CREATE OR REPLACE TEMP TABLE _bma_stg AS
-                SELECT row_number() OVER (ORDER BY sdt, pid, coalesce(cd, nd, nm, '')) AS seq_id, pid, vid, prid, sdt, sdts, edt, edts, tp, cd, nd, nm,
-                       COALESCE(cd, nd, nm) AS sv, rt, un, qt
+                SELECT pid, vid, prid, sdt, sdts, edt, edts, tp, cd, nd, nm,
+                       COALESCE(cd, nd, nm) AS sv, rt, un, qt,
+                       md5(coalesce(tp, '') || chr(31) || coalesce(cd, '') || chr(31) || coalesce(nd, '') || chr(31) || coalesce(nm, '')) AS hk
                 FROM (
                     SELECT {pid_sql} AS pid, {vid_sql} AS vid, {pr_sql} AS prid,
                            {sdt_sql} AS sdt, {sdts_sql} AS sdts, {edt_sql} AS edt, {edts_sql} AS edts,
@@ -1375,8 +1376,9 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
             ds_union = "UNION SELECT r.key_id, ds.ingredient_concept_id FROM rel r JOIN drug_strength ds ON ds.drug_concept_id = r.scid" if has_ds else ""
 
             con.execute("""CREATE OR REPLACE TEMP TABLE _bma_keys AS
-                SELECT row_number() OVER () AS key_id, tp, cd, nd, nm,
+                SELECT row_number() OVER () AS key_id, hk, tp, cd, nd, nm,
                        COALESCE(cd, nd) AS raw_code,
+                       upper(COALESCE(cd, nd)) AS ucode,
                        CASE
                            WHEN regexp_matches(COALESCE(cd, nd, ''), '^[0-9]{4}-[0-9]{4}-[0-9]{2}$') THEN '0' || replace(COALESCE(cd, nd), '-', '')
                            WHEN regexp_matches(COALESCE(cd, nd, ''), '^[0-9]{5}-[0-9]{3}-[0-9]{2}$')
@@ -1385,17 +1387,35 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                                THEN split_part(COALESCE(cd, nd), '-', 1) || split_part(COALESCE(cd, nd), '-', 2) || '0' || split_part(COALESCE(cd, nd), '-', 3)
                            ELSE regexp_replace(COALESCE(cd, nd, ''), '[^0-9]', '', 'g') END AS digits,
                        lower(trim(nm)) AS lnm
-                FROM (SELECT DISTINCT tp, cd, nd, nm FROM _bma_stg)""")
+                FROM (SELECT DISTINCT hk, tp, cd, nd, nm FROM _bma_stg)""")
 
             con.execute(f"""CREATE OR REPLACE TEMP TABLE _bma_kmap AS
-                WITH src_match AS (
-                    -- 1. Explicit or pattern vocabulary match
-                    SELECT k.key_id, c.concept_id AS scid, c.standard_concept AS std, c.invalid_reason AS inv, c.domain_id AS sdom, 1 AS prio
-                    FROM _bma_keys k JOIN concept c
-                      ON ((k.tp = 'RX' OR (k.tp NOT IN ('ND', 'CH', 'CP') AND regexp_matches(COALESCE(k.raw_code, ''), '^[0-9]{{1,8}}$')))
-                          AND c.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND c.concept_code = k.raw_code)
-                      OR ((k.tp = 'ND' OR length(k.digits) = 11) AND c.vocabulary_id = 'NDC' AND c.concept_code = k.digits AND length(k.digits) = 11)
-                      OR (k.tp IN ('CH', 'CP') AND c.vocabulary_id IN ('HCPCS', 'CPT4') AND upper(c.concept_code) = upper(k.raw_code))
+                WITH rx_c AS (
+                    SELECT concept_id, concept_code, standard_concept, invalid_reason, domain_id
+                    FROM concept WHERE vocabulary_id IN ('RxNorm', 'RxNorm Extension')
+                ),
+                ndc_c AS (
+                    SELECT concept_id, concept_code, standard_concept, invalid_reason, domain_id
+                    FROM concept WHERE vocabulary_id = 'NDC'
+                ),
+                proc_c AS (
+                    SELECT concept_id, upper(concept_code) AS ucode, standard_concept, invalid_reason, domain_id
+                    FROM concept WHERE vocabulary_id IN ('HCPCS', 'CPT4')
+                ),
+                src_match AS (
+                    -- 1. Explicit or pattern vocabulary hash equi-joins (avoids nested-loop OR join on 7M concepts)
+                    SELECT k.key_id, c.concept_id AS scid, c.standard_concept AS std, c.invalid_reason AS inv, c.domain_id AS sdom
+                    FROM _bma_keys k JOIN rx_c c ON c.concept_code = k.raw_code
+                    WHERE k.raw_code IS NOT NULL
+                      AND (k.tp = 'RX' OR (k.tp NOT IN ('ND', 'CH', 'CP') AND regexp_matches(k.raw_code, '^[0-9]{{1,8}}$')))
+                    UNION ALL
+                    SELECT k.key_id, c.concept_id AS scid, c.standard_concept AS std, c.invalid_reason AS inv, c.domain_id AS sdom
+                    FROM _bma_keys k JOIN ndc_c c ON c.concept_code = k.digits
+                    WHERE length(k.digits) = 11
+                    UNION ALL
+                    SELECT k.key_id, c.concept_id AS scid, c.standard_concept AS std, c.invalid_reason AS inv, c.domain_id AS sdom
+                    FROM _bma_keys k JOIN proc_c c ON c.ucode = k.ucode
+                    WHERE k.ucode IS NOT NULL AND k.tp IN ('CH', 'CP')
                 ),
                 best_src AS (
                     SELECT key_id, scid, std, inv, sdom FROM (
@@ -1433,13 +1453,17 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                      AND t.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND t.standard_concept = 'S' AND t.invalid_reason IS NULL
                     GROUP BY ic.key_id, u.scid HAVING count(DISTINCT t.concept_id) = 1
                 ),
+                rx_names AS (
+                    SELECT concept_id, lower(concept_name) AS lnm, concept_class_id
+                    FROM concept
+                    WHERE vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND standard_concept = 'S' AND invalid_reason IS NULL
+                ),
                 by_name AS (
                     SELECT k.key_id, 0 AS scid,
                            CASE WHEN count(*) FILTER (WHERE c.concept_class_id = 'Ingredient') = 1
                                 THEN min(c.concept_id) FILTER (WHERE c.concept_class_id = 'Ingredient')
                                 WHEN count(*) = 1 THEN min(c.concept_id) END AS tcid
-                    FROM _bma_keys k JOIN concept c ON lower(c.concept_name) = k.lnm
-                     AND c.vocabulary_id IN ('RxNorm', 'RxNorm Extension') AND c.standard_concept = 'S' AND c.invalid_reason IS NULL
+                    FROM _bma_keys k JOIN rx_names c ON c.lnm = k.lnm
                     WHERE k.lnm IS NOT NULL AND k.lnm NOT IN ('', 'ni', 'un', 'ot')
                       AND k.key_id NOT IN (SELECT key_id FROM mapped WHERE tcid IS NOT NULL)
                       AND k.key_id NOT IN (SELECT key_id FROM by_ing WHERE tcid IS NOT NULL)
@@ -1450,7 +1474,7 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                     UNION ALL SELECT key_id, scid, tcid FROM by_ing WHERE tcid IS NOT NULL
                     UNION ALL SELECT key_id, scid, tcid FROM by_name WHERE tcid IS NOT NULL
                 )
-                SELECT k.tp, k.cd, k.nd, k.nm,
+                SELECT k.hk,
                        coalesce(cb.scid, bs.scid, 0) AS scid,
                        coalesce(cb.tcid, 0) AS tcid,
                        coalesce(tc.domain_id, 'Drug') AS dom
@@ -1460,11 +1484,11 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                 LEFT JOIN concept tc ON tc.concept_id = cb.tcid""")
 
             con.execute("""CREATE OR REPLACE TEMP TABLE _bma_resolved AS
-                SELECT s.*, m.scid, m.tcid,
+                SELECT s.pid, s.vid, s.prid, s.sdt, s.sdts, s.edt, s.edts, s.sv, s.rt, s.un, s.qt,
+                       m.scid, m.tcid,
                        CASE WHEN m.dom IN ('Drug', 'Device', 'Procedure', 'Observation', 'Measurement') THEN m.dom ELSE 'Drug' END AS dom
                 FROM _bma_stg s
-                JOIN _bma_kmap m ON m.tp IS NOT DISTINCT FROM s.tp AND m.cd IS NOT DISTINCT FROM s.cd
-                                AND m.nd IS NOT DISTINCT FROM s.nd AND m.nm IS NOT DISTINCT FROM s.nm""")
+                JOIN _bma_kmap m ON m.hk = s.hk""")
 
             if not route_domains:
                 con.execute("UPDATE _bma_resolved SET tcid = CASE WHEN dom = 'Drug' THEN tcid ELSE 0 END, dom = 'Drug'")
@@ -1474,7 +1498,7 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
 
             targets = [
                 ("Drug", "drug_exposure", {
-                    "drug_exposure_id": "(SELECT coalesce(max(drug_exposure_id), 0) FROM drug_exposure) + row_number() OVER (ORDER BY seq_id)",
+                    "drug_exposure_id": "(SELECT coalesce(max(drug_exposure_id), 0) FROM drug_exposure) + row_number() OVER ()",
                     "person_id": "pid", "drug_concept_id": "tcid",
                     "drug_exposure_start_date": "sdt", "drug_exposure_start_datetime": "sdts",
                     "drug_exposure_end_date": "edt", "drug_exposure_end_datetime": "edts",
@@ -1484,7 +1508,7 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                     "route_source_value": "rt", "dose_unit_source_value": "un",
                 }),
                 ("Device", "device_exposure", {
-                    "device_exposure_id": "(SELECT coalesce(max(device_exposure_id), 0) FROM device_exposure) + row_number() OVER (ORDER BY seq_id)",
+                    "device_exposure_id": "(SELECT coalesce(max(device_exposure_id), 0) FROM device_exposure) + row_number() OVER ()",
                     "person_id": "pid", "device_concept_id": "tcid",
                     "device_exposure_start_date": "sdt", "device_exposure_start_datetime": "sdts",
                     "device_exposure_end_date": "edt", "device_exposure_end_datetime": "edts",
@@ -1494,7 +1518,7 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                     "unit_concept_id": "0", "unit_source_value": "un", "unit_source_concept_id": "0",
                 }),
                 ("Procedure", "procedure_occurrence", {
-                    "procedure_occurrence_id": "(SELECT coalesce(max(procedure_occurrence_id), 0) FROM procedure_occurrence) + row_number() OVER (ORDER BY seq_id)",
+                    "procedure_occurrence_id": "(SELECT coalesce(max(procedure_occurrence_id), 0) FROM procedure_occurrence) + row_number() OVER ()",
                     "person_id": "pid", "procedure_concept_id": "tcid",
                     "procedure_date": "sdt", "procedure_datetime": "sdts",
                     "procedure_end_date": "edt", "procedure_end_datetime": "edts",
@@ -1503,7 +1527,7 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                     "procedure_source_value": "sv", "procedure_source_concept_id": "scid",
                 }),
                 ("Observation", "observation", {
-                    "observation_id": "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER (ORDER BY seq_id)",
+                    "observation_id": "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER ()",
                     "person_id": "pid", "observation_concept_id": "tcid",
                     "observation_date": "sdt", "observation_datetime": "sdts",
                     "observation_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "value_as_number": "qt",
@@ -1512,7 +1536,7 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                     "unit_source_value": "un", "obs_event_field_concept_id": "0",
                 }),
                 ("Measurement", "measurement", {
-                    "measurement_id": "(SELECT coalesce(max(measurement_id), 0) FROM measurement) + row_number() OVER (ORDER BY seq_id)",
+                    "measurement_id": "(SELECT coalesce(max(measurement_id), 0) FROM measurement) + row_number() OVER ()",
                     "person_id": "pid", "measurement_concept_id": "tcid",
                     "measurement_date": "sdt", "measurement_datetime": "sdts",
                     "measurement_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "operator_concept_id": "0",
