@@ -130,7 +130,7 @@ def test_captions_stay_with_their_tables_in_the_markdown(tmp_path):
     wb = _wb(tmp_path)
     out = full_manuscript_markdown(read_workbook_tables(wb), [], workbook=wb, run={"n_sites": 3, "bootstraps": 1000})
     text = out["markdown"]
-    assert out["template"] == "0.35.2"
+    assert out["template"] in ("0.35.2", "0.36.0")
     t1 = text.find("**Table 1:")
     assert t1 > 0 and "#block(sticky: true)[" in text[t1 - 60:t1]       # a table that may break keeps its caption with its rows
     s4 = text.find(f"**{out['numbers']['grid']}:")

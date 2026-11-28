@@ -28,6 +28,7 @@
 ^docs$
 .dockerignore
 ^Dockerfile$
+^Dockerfile\.dgx$
 ^scripts$
 ^testing$
 ^\.Renviron$

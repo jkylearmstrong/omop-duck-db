@@ -1,0 +1,112 @@
+---
+title: "Run this study at your site"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Run this study at your site}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(eval = FALSE, collapse = TRUE, comment = "#>")
+```
+
+End-to-end guide for a sister site or consortium hub starting from a fresh clone (or published container tag) and raw PCORnet extracts (0.36.0, M5/S5).
+
+## 1. Check the runtime environment
+
+Verify Python, DuckDB, pandas, PyArrow, scikit-learn, XGBoost, NumPy, R, and Quarto against the checked-in reference (`config/reference_env.json`):
+
+```bash
+python scripts/check_env.py
+# Inside a release container:
+python scripts/check_env.py --image ghcr.io/jkylearmstrong/omop-duck-db:0.36.0 --policy pinned
+```
+
+## 2. Raw PCORnet tables read by `etl_pcornet()` vs. post-build backfills
+
+A sister site building from scratch with `omop-duck-db >= 0.36.0` (either Python `omop_etl.etl_pcornet()` or R `omopduckdb::etl_pcornet()`) gets all mapping, censored lab parsing, `VITAL.TOBACCO` fallback, and OMOP v5.4 `MED_ADMIN` domain routing in a single pass—**no post-build backfill is needed for a fresh build**.
+
+If a site database was produced earlier or by an external builder, `omop_etl.backfill_all(con, raw_dir, dry_run=True)` audits and repairs all five historical gaps in a fixed order:
+
+| PCORnet table / field | Target OMOP v5.4 table(s) | Fresh `etl_pcornet()` (`>= 0.36.0`, Py & R) | External / pre-0.36.0 DB backfill (`Python`, R `reticulate` wrapper) |
+|---|---|---|---|
+| `DEMOGRAPHIC` (`PATID` / `SSID`) | `person` | Native (`DEFAULT_ALIASES`) | — |
+| `ENCOUNTER` (`DISCHARGE_STATUS`, `OS` -> `581385`) | `visit_occurrence` | Native (`PCORNET_DISCHARGE_STATUS_CONCEPTS`, `data_cutoff="auto"`, undated drop audit) | `backfill_discharge_status()`, `cap_observation_period()` |
+| `DIAGNOSIS` (ICD-9-CM / ICD-10-CM / SNOMED) | `condition_occurrence`, `condition_era` | Native (dotless ICD + `ADMIT_DATE` / `visit_start_date` fallback + date audit) | Step 1: `backfill_condition_concepts()` |
+| `PROCEDURES` (CPT4 / HCPCS / ICD-9 / ICD-10-PCS) | `procedure_occurrence` | Native (`ADMIT_DATE` / `visit_start_date` fallback + date audit) | — |
+| `LAB_RESULT_CM` (`RESULT_NUM` + censored `RAW_RESULT`) | `measurement` | Native (`LAB_VALUE_SQL` + `LAB_OPERATOR_SQL`, `SPECIMEN_DATE` / `LAB_ORDER_DATE` fallback + date audit) | Step 3: `backfill_lab_values()` (`.csv`/`.parquet`/`.zip`, `SSID` & `crosswalk.csv`) |
+| `VITAL` (`HT`, `WT`, `BMI`, `SYSTOLIC`, `DIASTOLIC`, `SMOKING`, `TOBACCO`) | `measurement`, `observation` (`43054909`) | Native (`SMOKING` first, then `TOBACCO` `01`/`02`/`03` fallback + undated drop audit) | Step 4: `backfill_vital_tobacco()` |
+| `PRESCRIBING`, `DISPENSING` | `drug_exposure` + domain-routed tables, `drug_era` | Native + `route_drug_domains()` (`RX_ORDER_DATE` / `visit_start_date` fallback + date audit) | Step 2: `backfill_drug_concepts()` + Step 5: `route_drug_domains()` |
+| `MED_ADMIN` (`RX`, `ND`, `CH`/`CP`) | `drug_exposure`, `device_exposure`, `procedure_occurrence`, `observation`, `measurement` (`type = 38000180`) | Native + `route_drug_domains()` (`value_as_number = NULL` on `observation`/`measurement`, `visit_start_date` fallback + date audit) | Step 5: `backfill_med_admin()` + `route_drug_domains()` + `repair_routed_med_admin_values()` |
+| `LDS_ADDRESS_HISTORY` / `ADDRESS_HISTORY` | `location`, `person_address_history` | Native (5-digit ZIP zero-pad + unquoted-comma repair) | — |
+| `ENROLLMENT` (optional) | `observation_period` | Native (`use_enrollment="auto"`) | — |
+| `DEATH` (optional) | `death` | Native | — |
+
+### Running `backfill_all()` on an externally built database
+
+```python
+import duckdb
+from omop_etl import attach_central_vocabulary, backfill_all
+
+con = duckdb.connect("omop_site.duckdb", read_only=True)
+attach_central_vocabulary(con, "central_vocabulary.duckdb", temporary=True)
+print(backfill_all(con, "path/to/raw_pcornet", dry_run=True))
+```
+
+## 3. Build each sister site's OMOP CDM database from raw PCORnet
+
+```python
+import duckdb
+from omop_etl import build_schema, etl_pcornet
+
+con = duckdb.connect("db/omop_site1.duckdb")
+build_schema(con)
+con.close()
+
+etl_pcornet(
+    source_dir="raw/site1",
+    db_path="db/omop_site1.duckdb",
+    central_vocab="db/central_vocabulary.duckdb",
+    data_cutoff="auto",
+)
+```
+
+## 4. Run the anonymous multi-site study and verify zero name leaks
+
+Keep `site_names.txt` (one institution name or alias per line) and `labels.json` outside the shareable output directory:
+
+```bash
+python scripts/reproduce_study.py \
+  --db-dir db \
+  --out out/run_shareable \
+  --private-dir private/run_work \
+  --sites site1 site2 site3 \
+  --labels-out private/labels_v1.json \
+  --start 2017-01-01 --end 2022-09-30 \
+  --profile ederri \
+  --bootstraps 1000 \
+  --names-file private/site_names.txt
+
+python scripts/check_run_privacy.py \
+  --dir out/run_shareable \
+  --names-file private/site_names.txt
+```
+
+## 5. Re-issue under a fresh anonymous site-letter permutation (`relabel_study.py`)
+
+To rotate `Site A..Site N` labels without re-extracting features or refitting models:
+
+```bash
+python scripts/relabel_study.py \
+  --run-dir out/run_shareable \
+  --out out/run_relabelled \
+  --old-labels private/labels_v1.json \
+  --new-labels random --label-seed 2 \
+  --labels-out private/labels_v2.json \
+  --names-file private/site_names.txt
+
+python scripts/check_run_privacy.py \
+  --dir out/run_relabelled \
+  --names-file private/site_names.txt
+```

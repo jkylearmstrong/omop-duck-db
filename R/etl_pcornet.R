@@ -36,6 +36,7 @@
 #' @param key_check `"warn"` (default), `"raise"` or `"ignore"`: at the end of the build, compare distinct source ids
 #'   with distinct surrogate keys via [check_etl_keys()] and report any encounters/patients that would be merged.
 #' @param key_check_callback Optional function called with the list returned by [check_etl_keys()].
+#' @param date_audit_callback Optional function called with the list of per-source-table date-fallback and undated-drop counts.
 #' @param use_enrollment `"auto"` (default), `TRUE` or `FALSE`. Build `observation_period` from the PCORnet ENROLLMENT
 #'   file when the source has one ([load_enrollment_spans()]); people without an enrolment record keep the
 #'   event-span period. `TRUE` fails if no usable ENROLLMENT file exists.
@@ -60,6 +61,7 @@ etl_pcornet <- function(
     strict_source = FALSE,
     key_check = c("warn", "raise", "ignore"),
     key_check_callback = NULL,
+    date_audit_callback = NULL,
     use_enrollment = "auto",
     enrollment_type_concept_id = 0L,
     data_cutoff = "auto",
@@ -123,13 +125,21 @@ etl_pcornet <- function(
   .load_provider(con, source_dir)
   .load_person(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
   if (!append) load_location(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_visit_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_condition_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_procedure_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_measurement(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
-  .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  date_report <- list()
+  for (rec in list(
+    .load_visit_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids),
+    .load_condition_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids),
+    .load_procedure_occurrence(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids),
+    .load_measurement(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  )) {
+    if (!is.null(rec)) date_report[[length(date_report) + 1L]] <- rec
+  }
+  vit_res <- load_vital(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  if (!is.null(vit_res$date_audit)) date_report[[length(date_report) + 1L]] <- vit_res$date_audit
+  drug_audits <- .load_drug_exposure(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  if (length(drug_audits) > 0L) date_report <- c(date_report, drug_audits)
+  dth_rec <- .load_death(con, source_dir, site_id = site_id, disambiguate_patids = disambiguate_patids)
+  if (!is.null(dth_rec)) date_report[[length(date_report) + 1L]] <- dth_rec
 
   rm(list = ls(.append_state), envir = .append_state)
   # the era and observation-period builders each clear their own table, so append mode needs no up-front delete
@@ -162,8 +172,16 @@ etl_pcornet <- function(
     if (!is.null(key_check_callback)) key_check_callback(report)
   }
 
+  tot_fb <- sum(vapply(date_report, function(r) as.integer(r$dated_by_fallback), integer(1)))
+  tot_drop <- sum(vapply(date_report, function(r) as.integer(r$dropped_undated), integer(1)))
+  cat(sprintf("Date audit summary: %d row(s) dated by fallback, %d undated row(s) dropped across %d clinical source table(s).\n",
+              tot_fb, tot_drop, length(date_report)))
+  if (!is.null(date_audit_callback)) date_audit_callback(date_report)
+  out_res <- db_path
+  attr(out_res, "date_audit") <- date_report
+
   cat("PCORnet ETL complete.\n")
-  invisible(db_path)
+  invisible(out_res)
 }
 
 # Empty the tables a full-mode ETL populates so a re-run replaces rather than doubles them (C-02).
@@ -572,6 +590,57 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
 }
 .load_location <- load_location
 
+.audit_source_dates <- function(con, source_name, cdm_table, view_name, id_col, primary_expr,
+                                fallbacks = list(), join_visit = FALSE, vo_sdt = "CAST(NULL AS DATE)") {
+  dedup <- sprintf("(SELECT * FROM %s WHERE %s IS NOT NULL QUALIFY ROW_NUMBER() OVER (PARTITION BY %s) = 1) src",
+                   view_name, id_col, id_col)
+  rel <- if (isTRUE(join_visit) && !identical(vo_sdt, "CAST(NULL AS DATE)")) {
+    sprintf("%s LEFT JOIN (SELECT visit_source_value, MIN(visit_start_date) AS visit_start_date FROM visit_occurrence GROUP BY 1) vo ON vo.visit_source_value = src.ENCOUNTERID", dedup)
+  } else {
+    dedup
+  }
+  prior_nulls <- sprintf("(%s) IS NULL", primary_expr)
+  select_parts <- character(0)
+  fb_names <- names(fallbacks)
+  all_exprs <- primary_expr
+  if (length(fallbacks) > 0L) {
+    for (i in seq_along(fallbacks)) {
+      fb_expr <- fallbacks[[i]]
+      cond <- paste(c(prior_nulls, sprintf("(%s) IS NOT NULL", fb_expr)), collapse = " AND ")
+      select_parts <- c(select_parts, sprintf("COUNT(*) FILTER (WHERE %s) AS fb_%d", cond, i))
+      prior_nulls <- c(prior_nulls, sprintf("(%s) IS NULL", fb_expr))
+      all_exprs <- c(all_exprs, fb_expr)
+    }
+  }
+  undated_cond <- if (length(all_exprs) > 1L) sprintf("COALESCE(%s) IS NULL", paste(all_exprs, collapse = ", ")) else sprintf("(%s) IS NULL", primary_expr)
+  select_parts <- c(select_parts, sprintf("COUNT(*) FILTER (WHERE %s) AS n_drop", undated_cond))
+  row <- DBI::dbGetQuery(con, sprintf("SELECT %s FROM %s", paste(select_parts, collapse = ", "), rel))
+  fb_map <- list()
+  if (length(fallbacks) > 0L) {
+    for (i in seq_along(fallbacks)) {
+      fb_map[[fb_names[[i]]]] <- as.integer(row[[sprintf("fb_%d", i)]][[1]])
+    }
+  }
+  n_fb <- if (length(fb_map) > 0L) sum(unlist(fb_map)) else 0L
+  n_drop <- as.integer(row$n_drop[[1]])
+  if (n_fb > 0L || n_drop > 0L) {
+    nz <- fb_map[vapply(fb_map, function(v) v > 0L, logical(1))]
+    fb_str <- if (length(nz) > 0L) {
+      sprintf("%d dated by fallback (%s)", n_fb, paste(sprintf("%s=%d", names(nz), unlist(nz)), collapse = ", "))
+    } else {
+      sprintf("%d dated by fallback", n_fb)
+    }
+    cat(sprintf("  -> [%s] date audit: %s, %d dropped (no date)\n", source_name, fb_str, n_drop))
+  }
+  list(
+    source = source_name,
+    cdm_table = cdm_table,
+    dated_by_fallback = as.integer(n_fb),
+    fallback_by_column = fb_map,
+    dropped_undated = as.integer(n_drop)
+  )
+}
+
 .load_visit_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   path <- find_source_file(source_dir, "encounter")
   if (is.null(path)) {
@@ -636,8 +705,10 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     LEFT JOIN care_site cs
       ON cs.care_site_source_value = src.FACILITYID
     WHERE src.ENCOUNTERID IS NOT NULL
+      AND parse_omop_date(src.ADMIT_DATE) IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.ENCOUNTERID) = 1;
   ", patid_expr, .TYPE_CONCEPT_EHR_ENCOUNTER, care_site_id_expr, patid_expr))
+  audit <- .audit_source_dates(con, "ENCOUNTER", "visit_occurrence", "_temp_encounter", "ENCOUNTERID", "parse_omop_date(src.ADMIT_DATE)")
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_encounter;")
 
   # Proactive validation check for unmapped discharge statuses
@@ -658,6 +729,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     unmapped_codes <- paste(sprintf("'%s' (n=%d)", unmapped_disch$discharged_to_source_value, unmapped_disch$count), collapse = ", ")
     message("Notice: Visit occurrence contains unmapped discharge statuses (concept_id = 0): ", unmapped_codes)
   }
+  invisible(audit)
 }
 
 .load_condition_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
@@ -671,6 +743,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     c("DIAGNOSISID", "PATID", "DX_TYPE", "DX", "DX_DATE", "ADMIT_DATE", "PDX", "PROVIDERID", "ENCOUNTERID")
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+  vo_sdt <- if ("visit_start_date" %in% tolower(DBI::dbGetQuery(con, "DESCRIBE visit_occurrence")$column_name)) "vo.visit_start_date" else "CAST(NULL AS DATE)"
 
   DBI::dbExecute(con, "CREATE OR REPLACE TEMP TABLE _dx_codes AS
     SELECT vocabulary_id, k, concept_id, standard_concept FROM (
@@ -679,7 +752,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
                row_number() OVER (PARTITION BY vocabulary_id, replace(upper(concept_code), '.', '')
                                   ORDER BY (invalid_reason IS NULL) DESC, concept_id) AS rn
         FROM concept WHERE vocabulary_id IN ('ICD9CM', 'ICD10CM', 'SNOMED')) WHERE rn = 1")
-  run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", sprintf("
+  sprintf("
     INSERT INTO condition_occurrence
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.DIAGNOSISID) + (SELECT COALESCE(MAX(condition_occurrence_id), 0) FROM condition_occurrence) AS condition_occurrence_id,
@@ -690,8 +763,8 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             CASE WHEN COALESCE(c1.standard_concept, c2.standard_concept) = 'S' THEN COALESCE(c1.concept_id, c2.concept_id) ELSE 0 END,
             0
         ) AS condition_concept_id,
-        parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)) AS condition_start_date,
-        parse_omop_datetime(COALESCE(src.DX_DATE, src.ADMIT_DATE), NULL) AS condition_start_datetime,
+        COALESCE(parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)), __VOSDT__) AS condition_start_date,
+        COALESCE(parse_omop_datetime(COALESCE(src.DX_DATE, src.ADMIT_DATE), NULL), CAST(__VOSDT__ AS TIMESTAMP)) AS condition_start_datetime,
         NULL AS condition_end_date,
         NULL AS condition_end_datetime,
         CASE UPPER(src.PDX) WHEN 'P' THEN %d ELSE 0 END AS condition_type_concept_id,
@@ -744,10 +817,19 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
       ON stcm.source_vocabulary_id = src.dx_vocabulary_id
      AND stcm.source_code = src.DX
     WHERE src.DIAGNOSISID IS NOT NULL
+      AND COALESCE(parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)), __VOSDT__) IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DIAGNOSISID) = 1;
-  ", patid_expr, .TYPE_CONCEPT_PRIMARY_DX, patid_expr, .today_iso()))
+  ", patid_expr, .TYPE_CONCEPT_PRIMARY_DX, patid_expr, .today_iso()) -> dx_sql
+  run_insert(con, "CONDITION_OCCURRENCE (from DIAGNOSIS)", gsub("__VOSDT__", vo_sdt, dx_sql, fixed = TRUE))
+  audit <- .audit_source_dates(
+    con, "DIAGNOSIS", "condition_occurrence", "_temp_diagnosis", "DIAGNOSISID",
+    "parse_omop_date(src.DX_DATE)",
+    list(ADMIT_DATE = "parse_omop_date(src.ADMIT_DATE)", visit_start_date = vo_sdt),
+    join_visit = TRUE, vo_sdt = vo_sdt
+  )
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_diagnosis;")
   DBI::dbExecute(con, "DROP TABLE IF EXISTS _dx_codes;")
+  invisible(audit)
 }
 
 .load_procedure_occurrence <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
@@ -758,11 +840,12 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
   }
   prepare_source_view(
     con, "_temp_procedures", path,
-    c("PROCEDURESID", "PATID", "PX_TYPE", "PX", "PX_DATE", "PROVIDERID", "ENCOUNTERID")
+    c("PROCEDURESID", "PATID", "PX_TYPE", "PX", "PX_DATE", "ADMIT_DATE", "PROVIDERID", "ENCOUNTERID")
   )
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+  vo_sdt <- if ("visit_start_date" %in% tolower(DBI::dbGetQuery(con, "DESCRIBE visit_occurrence")$column_name)) "vo.visit_start_date" else "CAST(NULL AS DATE)"
 
-  run_insert(con, "PROCEDURE_OCCURRENCE (from PROCEDURES)", sprintf("
+  px_sql <- sprintf("
     INSERT INTO procedure_occurrence
     SELECT
         ROW_NUMBER() OVER (ORDER BY src.PROCEDURESID) + (SELECT COALESCE(MAX(procedure_occurrence_id), 0) FROM procedure_occurrence) AS procedure_occurrence_id,
@@ -773,8 +856,8 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
             CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
             0
         ) AS procedure_concept_id,
-        parse_omop_date(src.PX_DATE) AS procedure_date,
-        parse_omop_datetime(src.PX_DATE, NULL) AS procedure_datetime,
+        COALESCE(parse_omop_date(COALESCE(src.PX_DATE, src.ADMIT_DATE)), __VOSDT__) AS procedure_date,
+        COALESCE(parse_omop_datetime(COALESCE(src.PX_DATE, src.ADMIT_DATE), NULL), CAST(__VOSDT__ AS TIMESTAMP)) AS procedure_datetime,
         NULL AS procedure_end_date,
         NULL AS procedure_end_datetime,
         %d AS procedure_type_concept_id,
@@ -823,9 +906,18 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
       ON stcm.source_vocabulary_id = src.px_vocabulary_id
      AND stcm.source_code = src.PX
     WHERE src.PROCEDURESID IS NOT NULL
+      AND COALESCE(parse_omop_date(COALESCE(src.PX_DATE, src.ADMIT_DATE)), __VOSDT__) IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PROCEDURESID) = 1;
-  ", patid_expr, .TYPE_CONCEPT_EHR_PROCEDURE, patid_expr, .today_iso()))
+  ", patid_expr, .TYPE_CONCEPT_EHR_PROCEDURE, patid_expr, .today_iso())
+  run_insert(con, "PROCEDURE_OCCURRENCE (from PROCEDURES)", gsub("__VOSDT__", vo_sdt, px_sql, fixed = TRUE))
+  audit <- .audit_source_dates(
+    con, "PROCEDURES", "procedure_occurrence", "_temp_procedures", "PROCEDURESID",
+    "parse_omop_date(src.PX_DATE)",
+    list(ADMIT_DATE = "parse_omop_date(src.ADMIT_DATE)", visit_start_date = vo_sdt),
+    join_visit = TRUE, vo_sdt = vo_sdt
+  )
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_procedures;")
+  invisible(audit)
 }
 
 .load_measurement <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
@@ -908,9 +1000,17 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
     ) stcm
       ON stcm.source_code = src.LAB_LOINC
     WHERE src.LAB_RESULT_CM_ID IS NOT NULL
+      AND COALESCE(parse_omop_date(src.RESULT_DATE), parse_omop_date(src.SPECIMEN_DATE),
+                   parse_omop_date(src.LAB_ORDER_DATE)) IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.LAB_RESULT_CM_ID) = 1;
   ", patid_expr, .TYPE_CONCEPT_EHR_MEASUREMENT, patid_expr, .today_iso()))
+  audit <- .audit_source_dates(
+    con, "LAB_RESULT_CM", "measurement", "_temp_lab_result", "LAB_RESULT_CM_ID",
+    "parse_omop_date(src.RESULT_DATE)",
+    list(SPECIMEN_DATE = "parse_omop_date(src.SPECIMEN_DATE)", LAB_ORDER_DATE = "parse_omop_date(src.LAB_ORDER_DATE)")
+  )
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_lab_result;")
+  invisible(audit)
 }
 
 #' Load PCORnet VITAL into measurement and observation
@@ -930,7 +1030,7 @@ load_location <- function(con, source_dir, site_id = NULL, disambiguate_patids =
 #' @export
 load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE,
                        derive_bmi = TRUE, plausible_ranges = NULL) {
-  summary <- list(rows_loaded = integer(0), rows_dropped_implausible = integer(0))
+  summary <- list(rows_loaded = integer(0), rows_dropped_implausible = integer(0), dropped_undated = 0L, date_audit = NULL)
   path <- find_source_file(source_dir, "vital")
   if (is.null(path)) {
     cat("Skipping VITAL - no vital.csv found (optional table)
@@ -1037,6 +1137,7 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
       ) stcm
         ON stcm.source_code = '%s'
       WHERE %s
+        AND parse_omop_date(src.MEASURE_DATE) IS NOT NULL
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID, '%s') = 1;
     ", patid_expr, m[[2]], .TYPE_CONCEPT_EHR_MEASUREMENT, a$val, m[[4]], m[[1]], m[[3]], m[[4]], a$val,
        patid_expr, m[[1]], today, m[[1]], cond, a$tag))
@@ -1077,15 +1178,22 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
     LEFT JOIN visit_occurrence vo
       ON vo.visit_source_value = src.ENCOUNTERID
     WHERE src.VITALID IS NOT NULL
+      AND parse_omop_date(src.MEASURE_DATE) IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID) = 1;
   "))
+  v_audit <- .audit_source_dates(con, "VITAL", "measurement", "_temp_vital", "VITALID", "parse_omop_date(src.MEASURE_DATE)")
+  summary$dropped_undated <- v_audit$dropped_undated
+  summary$date_audit <- v_audit
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_vital;")
   invisible(summary)
 }
 
 .load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_patids = FALSE) {
   patid_expr <- if (isTRUE(disambiguate_patids) && !is.null(site_id)) sprintf("src.PATID || '-%s'", site_id) else "src.PATID"
+  tables_lower <- tolower(DBI::dbGetQuery(con, "SELECT table_name FROM duckdb_tables()")$table_name)
+  vo_sdt <- if ("visit_occurrence" %in% tables_lower && "visit_start_date" %in% tolower(DBI::dbGetQuery(con, "DESCRIBE visit_occurrence")$column_name)) "vo.visit_start_date" else "CAST(NULL AS DATE)"
   loaded_any <- FALSE
+  audits <- list()
 
   # 1. PRESCRIBING
   path_rx <- find_source_file(source_dir, "prescribing")
@@ -1093,10 +1201,10 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
     loaded_any <- TRUE
     prepare_source_view(
       con, "_temp_prescribing", path_rx,
-      c("PRESCRIBINGID", "PATID", "RXNORM_CUI", "RX_START_DATE", "RX_END_DATE",
+      c("PRESCRIBINGID", "PATID", "RXNORM_CUI", "RX_START_DATE", "RX_ORDER_DATE", "RX_END_DATE",
         "RAW_RX_MED_NAME", "RAW_RX_NDC", "PROVIDERID", "ENCOUNTERID")
     )
-    run_insert(con, "DRUG_EXPOSURE (from PRESCRIBING)", sprintf("
+    rx_sql <- sprintf("
       INSERT INTO drug_exposure
       SELECT
           ROW_NUMBER() OVER (ORDER BY src.PRESCRIBINGID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
@@ -1107,9 +1215,9 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
               CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
               0
           ) AS drug_concept_id,
-          parse_omop_date(src.RX_START_DATE) AS drug_exposure_start_date,
-          parse_omop_datetime(src.RX_START_DATE, NULL) AS drug_exposure_start_datetime,
-          COALESCE(parse_omop_date(src.RX_END_DATE), parse_omop_date(src.RX_START_DATE)) AS drug_exposure_end_date,
+          COALESCE(parse_omop_date(src.RX_START_DATE), parse_omop_date(src.RX_ORDER_DATE), __VOSDT__) AS drug_exposure_start_date,
+          COALESCE(parse_omop_datetime(COALESCE(src.RX_START_DATE, src.RX_ORDER_DATE), NULL), CAST(__VOSDT__ AS TIMESTAMP)) AS drug_exposure_start_datetime,
+          COALESCE(parse_omop_date(src.RX_END_DATE), parse_omop_date(src.RX_START_DATE), parse_omop_date(src.RX_ORDER_DATE), __VOSDT__) AS drug_exposure_end_date,
           parse_omop_datetime(src.RX_END_DATE, NULL) AS drug_exposure_end_datetime,
           NULL AS verbatim_end_date,
           %d AS drug_type_concept_id,
@@ -1154,8 +1262,16 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
       ) stcm
         ON stcm.source_code = src.RXNORM_CUI
       WHERE src.PRESCRIBINGID IS NOT NULL
+        AND COALESCE(parse_omop_date(src.RX_START_DATE), parse_omop_date(src.RX_ORDER_DATE), __VOSDT__) IS NOT NULL
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PRESCRIBINGID) = 1;
-    ", patid_expr, .TYPE_CONCEPT_EHR_DRUG, patid_expr, .today_iso()))
+    ", patid_expr, .TYPE_CONCEPT_EHR_DRUG, patid_expr, .today_iso())
+    run_insert(con, "DRUG_EXPOSURE (from PRESCRIBING)", gsub("__VOSDT__", vo_sdt, rx_sql, fixed = TRUE))
+    audits[[length(audits) + 1L]] <- .audit_source_dates(
+      con, "PRESCRIBING", "drug_exposure", "_temp_prescribing", "PRESCRIBINGID",
+      "parse_omop_date(src.RX_START_DATE)",
+      list(RX_ORDER_DATE = "parse_omop_date(src.RX_ORDER_DATE)", visit_start_date = vo_sdt),
+      join_visit = TRUE, vo_sdt = vo_sdt
+    )
     DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_prescribing;")
   }
 
@@ -1167,9 +1283,9 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
       con, "_temp_med_admin", path_admin,
       c("MEDADMINID", "PATID", "ENCOUNTERID", "MEDADMIN_CODE", "MEDADMIN_TYPE", "MEDADMIN_START_DATE",
         "MEDADMIN_START_TIME", "MEDADMIN_STOP_DATE", "RAW_MEDADMIN_MED_NAME",
-        "RAW_RX_NDC", "PROVIDERID")
+        "RAW_RX_NDC", "PROVIDERID", "MEDADMIN_DOSE_ADMIN", "MEDADMIN_DOSE_ADMIN_UNIT", "MEDADMIN_ROUTE")
     )
-    run_insert(con, "DRUG_EXPOSURE (from MED_ADMIN)", sprintf("
+    ma_sql <- sprintf("
       INSERT INTO drug_exposure
       SELECT
           ROW_NUMBER() OVER (ORDER BY src.MEDADMINID) + (SELECT COALESCE(MAX(drug_exposure_id), 0) FROM drug_exposure) AS drug_exposure_id,
@@ -1180,15 +1296,15 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
               CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
               0
           ) AS drug_concept_id,
-          parse_omop_date(src.MEDADMIN_START_DATE) AS drug_exposure_start_date,
-          parse_omop_datetime(src.MEDADMIN_START_DATE, src.MEDADMIN_START_TIME) AS drug_exposure_start_datetime,
-          COALESCE(parse_omop_date(src.MEDADMIN_STOP_DATE), parse_omop_date(src.MEDADMIN_START_DATE)) AS drug_exposure_end_date,
+          COALESCE(parse_omop_date(src.MEDADMIN_START_DATE), __VOSDT__) AS drug_exposure_start_date,
+          COALESCE(parse_omop_datetime(src.MEDADMIN_START_DATE, src.MEDADMIN_START_TIME), CAST(__VOSDT__ AS TIMESTAMP)) AS drug_exposure_start_datetime,
+          COALESCE(parse_omop_date(src.MEDADMIN_STOP_DATE), parse_omop_date(src.MEDADMIN_START_DATE), __VOSDT__) AS drug_exposure_end_date,
           parse_omop_datetime(COALESCE(src.MEDADMIN_STOP_DATE, src.MEDADMIN_START_DATE), NULL) AS drug_exposure_end_datetime,
           NULL AS verbatim_end_date,
           %d AS drug_type_concept_id,
           NULL AS stop_reason,
           NULL AS refills,
-          NULL AS quantity,
+          TRY_CAST(src.MEDADMIN_DOSE_ADMIN AS DOUBLE) AS quantity,
           NULL AS days_supply,
           NULL AS sig,
           0 AS route_concept_id,
@@ -1198,8 +1314,8 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
           NULL AS visit_detail_id,
           COALESCE(src.MEDADMIN_CODE, src.RAW_RX_NDC, src.RAW_MEDADMIN_MED_NAME) AS drug_source_value,
           COALESCE(c.concept_id, 0) AS drug_source_concept_id,
-          NULL AS route_source_value,
-          NULL AS dose_unit_source_value
+          src.MEDADMIN_ROUTE AS route_source_value,
+          src.MEDADMIN_DOSE_ADMIN_UNIT AS dose_unit_source_value
       FROM _temp_med_admin src
       LEFT JOIN person p
         ON p.person_source_value = %s
@@ -1239,8 +1355,16 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
              ELSE 'RxNorm'
            END
       WHERE src.MEDADMINID IS NOT NULL
+        AND COALESCE(parse_omop_date(src.MEDADMIN_START_DATE), __VOSDT__) IS NOT NULL
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.MEDADMINID) = 1;
-    ", patid_expr, .TYPE_CONCEPT_MED_ADMIN, patid_expr, .today_iso()))
+    ", patid_expr, .TYPE_CONCEPT_MED_ADMIN, patid_expr, .today_iso())
+    run_insert(con, "DRUG_EXPOSURE (from MED_ADMIN)", gsub("__VOSDT__", vo_sdt, ma_sql, fixed = TRUE))
+    audits[[length(audits) + 1L]] <- .audit_source_dates(
+      con, "MED_ADMIN", "drug_exposure", "_temp_med_admin", "MEDADMINID",
+      "parse_omop_date(src.MEDADMIN_START_DATE)",
+      list(visit_start_date = vo_sdt),
+      join_visit = TRUE, vo_sdt = vo_sdt
+    )
     DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_med_admin;")
   }
 
@@ -1317,14 +1441,163 @@ load_vital <- function(con, source_dir, site_id = NULL, disambiguate_patids = FA
              ELSE 'NDC'
            END
       WHERE src.DISPENSINGID IS NOT NULL
+        AND parse_omop_date(src.DISPENSING_DATE) IS NOT NULL
       QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DISPENSINGID) = 1;
     ", patid_expr, .TYPE_CONCEPT_DISPENSING, patid_expr, .today_iso()))
+    audits[[length(audits) + 1L]] <- .audit_source_dates(
+      con, "DISPENSING", "drug_exposure", "_temp_dispensing", "DISPENSINGID",
+      "parse_omop_date(src.DISPENSING_DATE)"
+    )
     DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_dispensing;")
   }
 
   if (!loaded_any) {
     cat("Skipping DRUG_EXPOSURE - no prescribing.csv, med_admin.csv, or dispensing.csv found\n")
+  } else {
+    routed <- route_drug_domains(con)
+    if (routed$total_routed > 0L) {
+      cat(sprintf("  -> routed %d non-Drug exposure row(s) to OMOP v5.4 domain tables\n", routed$total_routed))
+    }
   }
+  invisible(audits)
+}
+
+.insert_mapped_cols <- function(con, table_name, col_exprs, from_where_sql) {
+  desc <- DBI::dbGetQuery(con, sprintf("DESCRIBE %s", table_name))
+  lower_map <- stats::setNames(as.character(col_exprs), tolower(names(col_exprs)))
+  col_names <- character(nrow(desc))
+  select_exprs <- character(nrow(desc))
+  for (i in seq_len(nrow(desc))) {
+    cname <- as.character(desc$column_name[[i]])
+    ctype <- toupper(as.character(desc$column_type[[i]]))
+    nullable <- toupper(as.character(desc$null[[i]]))
+    col_names[[i]] <- sprintf('"%s"', cname)
+    cl <- tolower(cname)
+    if (cl %in% names(lower_map)) {
+      select_exprs[[i]] <- lower_map[[cl]]
+    } else if (identical(nullable, "NO") && grepl("INT|DOUBLE|FLOAT|DECIMAL", ctype)) {
+      select_exprs[[i]] <- "0"
+    } else {
+      select_exprs[[i]] <- "NULL"
+    }
+  }
+  before <- as.integer(DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s", table_name))$n[[1]])
+  DBI::dbExecute(con, sprintf(
+    "INSERT INTO %s (%s) SELECT %s %s",
+    table_name, paste(col_names, collapse = ", "), paste(select_exprs, collapse = ", "), from_where_sql
+  ))
+  as.integer(DBI::dbGetQuery(con, sprintf("SELECT count(*) AS n FROM %s", table_name))$n[[1]]) - before
+}
+
+#' Route non-Drug standard concepts out of drug_exposure into OMOP v5.4 domain tables
+#'
+#' Moves rows in `drug_exposure` whose standard `drug_concept_id` belongs to another OMOP v5.4
+#' clinical event domain (`Device`, `Procedure`, `Observation`, `Measurement`) into the matching
+#' domain table and removes them from `drug_exposure` (0.36.0, M1/M2). When routing to
+#' `observation` or `measurement`, `value_as_number` is set to `NULL` (so an administered dose is
+#' never read as a lab or vital measurement result) and the dose text and unit are preserved in
+#' `value_source_value` and `unit_source_value`.
+#'
+#' @param con Active DuckDB connection.
+#' @param dry_run Logical; if `TRUE`, return counts without modifying tables.
+#' @return Named list of counts (`device_exposure`, `procedure_occurrence`, `observation`,
+#'   `measurement`, `total_routed`).
+#' @export
+route_drug_domains <- function(con, dry_run = FALSE) {
+  tables_lower <- tolower(DBI::dbGetQuery(con, "SELECT table_name FROM duckdb_tables()")$table_name)
+  out <- list(device_exposure = 0L, procedure_occurrence = 0L, observation = 0L, measurement = 0L, total_routed = 0L)
+  dcols <- tolower(DBI::dbGetQuery(con, "DESCRIBE drug_exposure")$column_name)
+  qty_expr <- if ("quantity" %in% dcols) "TRY_CAST(round(x.quantity) AS INTEGER)" else "NULL"
+  qty_flt <- if ("quantity" %in% dcols) "TRY_CAST(x.quantity AS DOUBLE)" else "NULL"
+  prov_expr <- if ("provider_id" %in% dcols) "x.provider_id" else "NULL"
+  vid_expr <- if ("visit_occurrence_id" %in% dcols) "x.visit_occurrence_id" else "NULL"
+  vd_expr <- if ("visit_detail_id" %in% dcols) "x.visit_detail_id" else "NULL"
+  sv_expr <- if ("drug_source_value" %in% dcols) "x.drug_source_value" else "NULL"
+  scid_expr <- if ("drug_source_concept_id" %in% dcols) "coalesce(x.drug_source_concept_id, 0)" else "0"
+  usv_expr <- if ("dose_unit_source_value" %in% dcols) "x.dose_unit_source_value" else "NULL"
+  edt_expr <- if ("drug_exposure_end_date" %in% dcols) "x.drug_exposure_end_date" else "x.drug_exposure_start_date"
+  edts_expr <- if ("drug_exposure_end_datetime" %in% dcols) "x.drug_exposure_end_datetime" else "NULL"
+  sdts_expr <- if ("drug_exposure_start_datetime" %in% dcols) "x.drug_exposure_start_datetime" else "CAST(x.drug_exposure_start_date AS TIMESTAMP)"
+  vsv_expr <- "CASE WHEN qty_f IS NOT NULL THEN regexp_replace(CAST(qty_f AS VARCHAR), '\\.0$', '') END"
+
+  on.exit(try(DBI::dbExecute(con, "DROP TABLE IF EXISTS _rdd_src"), silent = TRUE), add = TRUE)
+  DBI::dbExecute(con, sprintf("
+    CREATE OR REPLACE TEMP TABLE _rdd_src AS
+    SELECT x.rowid AS rid, c.domain_id AS dom, x.person_id AS pid, x.drug_concept_id AS cid,
+           x.drug_exposure_start_date AS sdt, %s AS sdts, %s AS edt, %s AS edts,
+           x.drug_type_concept_id AS tcid, %s AS qty_i, %s AS qty_f,
+           %s AS prov, %s AS vid, %s AS vd,
+           %s AS sv, %s AS scid, %s AS usv
+    FROM drug_exposure x JOIN concept c ON c.concept_id = x.drug_concept_id
+    WHERE coalesce(x.drug_concept_id, 0) <> 0
+      AND c.domain_id IN ('Device', 'Procedure', 'Observation', 'Measurement')
+  ", sdts_expr, edt_expr, edts_expr, qty_expr, qty_flt, prov_expr, vid_expr, vd_expr, sv_expr, scid_expr, usv_expr))
+
+  cnt_df <- DBI::dbGetQuery(con, "SELECT dom, count(*) AS n FROM _rdd_src GROUP BY 1")
+  counts <- stats::setNames(as.integer(cnt_df$n), as.character(cnt_df$dom))
+  domain_tables <- list(
+    list(dom = "Device", tbl = "device_exposure"),
+    list(dom = "Procedure", tbl = "procedure_occurrence"),
+    list(dom = "Observation", tbl = "observation"),
+    list(dom = "Measurement", tbl = "measurement")
+  )
+  routed_domains <- character(0)
+  for (dt in domain_tables) {
+    n <- if (dt$dom %in% names(counts)) counts[[dt$dom]] else 0L
+    if (n <= 0L || !(dt$tbl %in% tables_lower)) next
+    out[[dt$tbl]] <- n
+    routed_domains <- c(routed_domains, dt$dom)
+    if (isTRUE(dry_run)) next
+    if (identical(dt$tbl, "device_exposure")) {
+      .insert_mapped_cols(con, dt$tbl, list(
+        device_exposure_id = "(SELECT coalesce(max(device_exposure_id), 0) FROM device_exposure) + row_number() OVER (ORDER BY rid)",
+        person_id = "pid", device_concept_id = "cid",
+        device_exposure_start_date = "sdt", device_exposure_start_datetime = "sdts",
+        device_exposure_end_date = "edt", device_exposure_end_datetime = "edts",
+        device_type_concept_id = "tcid", quantity = "qty_i", provider_id = "prov",
+        visit_occurrence_id = "vid", visit_detail_id = "vd",
+        device_source_value = "sv", device_source_concept_id = "scid",
+        unit_concept_id = "0", unit_source_value = "usv", unit_source_concept_id = "0"
+      ), "FROM _rdd_src WHERE dom = 'Device'")
+    } else if (identical(dt$tbl, "procedure_occurrence")) {
+      .insert_mapped_cols(con, dt$tbl, list(
+        procedure_occurrence_id = "(SELECT coalesce(max(procedure_occurrence_id), 0) FROM procedure_occurrence) + row_number() OVER (ORDER BY rid)",
+        person_id = "pid", procedure_concept_id = "cid",
+        procedure_date = "sdt", procedure_datetime = "sdts",
+        procedure_end_date = "edt", procedure_end_datetime = "edts",
+        procedure_type_concept_id = "tcid", modifier_concept_id = "0", quantity = "qty_i",
+        provider_id = "prov", visit_occurrence_id = "vid", visit_detail_id = "vd",
+        procedure_source_value = "sv", procedure_source_concept_id = "scid"
+      ), "FROM _rdd_src WHERE dom = 'Procedure'")
+    } else if (identical(dt$tbl, "observation")) {
+      .insert_mapped_cols(con, dt$tbl, list(
+        observation_id = "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER (ORDER BY rid)",
+        person_id = "pid", observation_concept_id = "cid",
+        observation_date = "sdt", observation_datetime = "sdts",
+        observation_type_concept_id = "tcid", value_as_number = "CAST(NULL AS DOUBLE)", value_as_concept_id = "0",
+        provider_id = "prov", visit_occurrence_id = "vid", visit_detail_id = "vd",
+        observation_source_value = "sv", observation_source_concept_id = "scid",
+        unit_source_value = "usv", value_source_value = vsv_expr, obs_event_field_concept_id = "0"
+      ), "FROM _rdd_src WHERE dom = 'Observation'")
+    } else if (identical(dt$tbl, "measurement")) {
+      .insert_mapped_cols(con, dt$tbl, list(
+        measurement_id = "(SELECT coalesce(max(measurement_id), 0) FROM measurement) + row_number() OVER (ORDER BY rid)",
+        person_id = "pid", measurement_concept_id = "cid",
+        measurement_date = "sdt", measurement_datetime = "sdts",
+        measurement_type_concept_id = "tcid", operator_concept_id = "0",
+        value_as_number = "CAST(NULL AS DOUBLE)", value_as_concept_id = "0", unit_concept_id = "0",
+        provider_id = "prov", visit_occurrence_id = "vid", visit_detail_id = "vd",
+        measurement_source_value = "sv", measurement_source_concept_id = "scid",
+        unit_source_value = "usv", unit_source_concept_id = "0", value_source_value = vsv_expr, meas_event_field_concept_id = "0"
+      ), "FROM _rdd_src WHERE dom = 'Measurement'")
+    }
+  }
+  out$total_routed <- as.integer(out$device_exposure + out$procedure_occurrence + out$observation + out$measurement)
+  if (length(routed_domains) > 0L && !isTRUE(dry_run)) {
+    dom_in <- paste(sprintf("'%s'", routed_domains), collapse = ", ")
+    DBI::dbExecute(con, sprintf("DELETE FROM drug_exposure WHERE rowid IN (SELECT rid FROM _rdd_src WHERE dom IN (%s))", dom_in))
+  }
+  out
 }
 
 #' Load Drug Exposure Records from PCORnet Extract
@@ -1372,10 +1645,20 @@ load_drug_exposure <- function(con, source_dir, site_id = NULL, disambiguate_pat
     LEFT JOIN person p
       ON p.person_source_value = %s
     WHERE src.PATID IS NOT NULL 
-      AND src.DEATH_DATE IS NOT NULL
+      AND parse_omop_date(src.DEATH_DATE) IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PATID ORDER BY parse_omop_date(src.DEATH_DATE) DESC) = 1;
   ", patid_expr, .TYPE_CONCEPT_EHR_DEATH, patid_expr))
+  d_drop <- as.integer(DBI::dbGetQuery(con, sprintf("
+    SELECT COUNT(*) FILTER (WHERE max_d IS NULL) AS n FROM (
+      SELECT MAX(parse_omop_date(src.DEATH_DATE)) AS max_d
+      FROM _temp_death src WHERE src.PATID IS NOT NULL GROUP BY %s
+    )
+  ", patid_expr))$n[[1]])
+  if (d_drop > 0L) {
+    cat(sprintf("  -> [DEATH] date audit: 0 dated by fallback, %d dropped (no date)\n", d_drop))
+  }
   DBI::dbExecute(con, "DROP VIEW IF EXISTS _temp_death;")
+  invisible(list(source = "DEATH", cdm_table = "death", dated_by_fallback = 0L, fallback_by_column = list(), dropped_undated = d_drop))
 }
 
 # Resolves the data cutoff for observation periods (N2): NULL keeps today; "auto" is the latest clinical event dated

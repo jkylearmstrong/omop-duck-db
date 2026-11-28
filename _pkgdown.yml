@@ -53,6 +53,7 @@ articles:
   - bigquery_synthetic_demo
 - title: Reproducibility and status
   contents:
+  - sister_site_guide
   - reproducing_the_manuscript
   - status_and_roadmap
 
@@ -88,6 +89,8 @@ reference:
   desc: Ingest PCORnet extracts and generate required OHDSI eras and observation periods.
   contents:
   - etl_pcornet
+  - route_drug_domains
+  - backfill_all
   - load_enrollment_spans
   - check_key_collisions
   - build_observation_period

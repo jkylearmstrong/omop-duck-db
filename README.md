@@ -111,7 +111,8 @@ menu).
 | **Cloud and demos** |  |
 |   Run the diabetes cohort on public BigQuery data (CMS SynPUF); the runnable BigQuery-to-DuckDB check is `inst/examples/bigquery_duckdb_roundtrip.qmd` | `vignette("bigquery_synthetic_demo")` |
 | **Reproducibility and status** |  |
-|   Reproducing the delivered manuscript, decisions that move the numbers | `vignette("reproducing_the_manuscript")` |
+|   Run this study at a sister site from raw PCORnet extracts (table & backfill matrix, anonymous outputs, relabelling) | `vignette("sister_site_guide")` |
+|   Reproducing the delivered manuscript, decisions that move the numbers | `vignette("reproducing_the_manuscript")` | |
 |   What is claimed, verified and planned; architecture notes and the R/Python parity table | `vignette("status_and_roadmap")` |
 
 ## Works with the OHDSI ecosystem
@@ -162,6 +163,18 @@ official tool for anything you publish.
   licence); until the licensed tool is run, CPT4 procedures map to
   concept 0. A few source fields (e.g. admission source) are not mapped
   yet.
+- **Post-build backfills.** Fresh builds via `etl_pcornet()` in both R
+  and Python natively parse censored lab values (`operator_concept_id`),
+  map `VITAL.TOBACCO` when `SMOKING` is absent, and route `MED_ADMIN` /
+  `drug_exposure` records to their OMOP v5.4 domain tables
+  (`route_drug_domains()`). Post-build repair functions for databases
+  built by an older or external builder (`backfill_all()`,
+  `backfill_condition_concepts()`, `backfill_drug_concepts()`,
+  `backfill_lab_values()`, `backfill_vital_tobacco()`,
+  `backfill_med_admin()`, `repair_routed_med_admin_values()`) are
+  implemented in Python (`omop_etl`); the R package provides `reticulate`
+  wrappers of the same names that raise a clear error when Python /
+  `omop_etl` is not configured. See `vignette("sister_site_guide")`.
 - **Not run live.** The BigQuery sync and Oracle cohort-SQL translation
   are unit-tested only. Oracle transfers (`to_sql` / `verify_transfer`)
   and the DGX Spark image (`gpu-check`, `dgx-smoke`) have each been run

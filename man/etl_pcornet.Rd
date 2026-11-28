@@ -20,6 +20,7 @@ etl_pcornet(
   strict_source = FALSE,
   key_check = c("warn", "raise", "ignore"),
   key_check_callback = NULL,
+  date_audit_callback = NULL,
   use_enrollment = "auto",
   enrollment_type_concept_id = 0L,
   data_cutoff = "auto",
@@ -69,6 +70,8 @@ required source table or column is missing.}
 with distinct surrogate keys via \code{\link[=check_etl_keys]{check_etl_keys()}} and report any encounters/patients that would be merged.}
 
 \item{key_check_callback}{Optional function called with the list returned by \code{\link[=check_etl_keys]{check_etl_keys()}}.}
+
+\item{date_audit_callback}{Optional function called with the list of per-source-table date-fallback and undated-drop counts.}
 
 \item{use_enrollment}{\code{"auto"} (default), \code{TRUE} or \code{FALSE}. Build \code{observation_period} from the PCORnet ENROLLMENT
 file when the source has one (\code{\link[=load_enrollment_spans]{load_enrollment_spans()}}); people without an enrolment record keep the
