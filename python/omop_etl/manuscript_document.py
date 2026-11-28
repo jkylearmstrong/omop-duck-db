@@ -290,7 +290,7 @@ def _yaml_str(v: Any) -> str:
 
 def _param_authors(prm: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The author block from the study team's parameters: ``authors`` as names, or as ``{"name", "affiliation" | "affiliations",
-    "email", "corresponding"}`` entries (``role`` feeds the contributions section, not the title page)."""
+    "email", "orcid", "corresponding"}`` entries (``role`` feeds the contributions section, not the title page)."""
     out = []
     for a in prm.get("authors") or []:
         if isinstance(a, str):
@@ -299,8 +299,9 @@ def _param_authors(prm: Mapping[str, Any]) -> list[dict[str, Any]]:
             continue
         aff = a.get("affiliations", a.get("affiliation"))
         aff = [aff] if isinstance(aff, str) else list(aff or [])
+        orcid = str(a.get("orcid") or "").strip() or None
         out.append({"name": str(a["name"]).strip(), "affiliations": [str(x.get("name", x) if isinstance(x, Mapping) else x) for x in aff if x],
-                    "email": a.get("email"), "corresponding": bool(a.get("corresponding"))})
+                    "email": a.get("email"), "orcid": orcid, "corresponding": bool(a.get("corresponding"))})
     return out
 
 
@@ -414,6 +415,8 @@ def render_manuscript_document(workbook: str | Path, out_dir: str | Path, *, pre
                 yaml += [f"      - name: {_yaml_str(x)}" for x in a["affiliations"]]
             if a.get("email"):
                 yaml.append(f"    email: {_yaml_str(a['email'])}")
+            if a.get("orcid"):
+                yaml.append(f"    orcid: {_yaml_str(a['orcid'])}")
             if a.get("corresponding"):
                 yaml.append("    corresponding: true")
     ref_doc = _reference_docx(out / f"{prefix}_reference.docx") if "docx" in formats else None

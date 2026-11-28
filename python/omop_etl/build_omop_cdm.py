@@ -56,6 +56,9 @@ DEFAULT_ALIASES = {
     "MEDADMIN_START_DATE": ["MEDADMIN_START_DATE", "ADMIN_DATE", "START_DATE"],
     "MEDADMIN_START_TIME": ["MEDADMIN_START_TIME", "ADMIN_TIME", "START_TIME"],
     "MEDADMIN_STOP_DATE": ["MEDADMIN_STOP_DATE", "STOP_DATE"],
+    "MEDADMIN_DOSE_ADMIN": ["MEDADMIN_DOSE_ADMIN", "DOSE_ADMIN"],
+    "MEDADMIN_DOSE_ADMIN_UNIT": ["MEDADMIN_DOSE_ADMIN_UNIT", "RAW_MEDADMIN_DOSE_ADMIN_UNIT"],
+    "MEDADMIN_ROUTE": ["MEDADMIN_ROUTE", "RAW_MEDADMIN_ROUTE"],
     "RAW_MEDADMIN_MED_NAME": ["RAW_MEDADMIN_MED_NAME", "MEDADMIN_MED_NAME", "RAW_RX_MED_NAME", "MED_NAME"],
     "DISPENSINGID": ["DISPENSINGID", "DISPENSING_ID"],
     "DISPENSING_TYPE": ["DISPENSING_TYPE", "DISP_TYPE", "DISPENSING_SRC", "NDC_TYPE", "DISP_CODE_TYPE"],
@@ -796,7 +799,7 @@ def backfill_discharge_status(con, supplemental_csv=None, *, remap=True):
 
 
 
-def backfill_drug_concepts(con):
+def backfill_drug_concepts(con, *, dry_run: bool = False):
     """Maps unmapped drug rows (``drug_concept_id`` 0 or NULL) from their ``drug_source_value`` (0.34.1; run C10 found a site with
     a fifth of its drug rows unmapped, their source values plain ingredient names such as "insulin lispro", and another with raw NDC codes).
 
@@ -805,7 +808,7 @@ def backfill_drug_concepts(con):
     Extension concept of that code if it is standard, else its 'Maps to'; else the exact name
     (trimmed, any case) of a standard RxNorm / RxNorm Extension concept, an Ingredient preferred, then the single concept of that name.
     The medication features roll concepts up through concept_ancestor, so an ingredient is enough. Needs the vocabulary on the
-    connection (attach the central vocabulary first) and a writable connection; work on a copy. Returns
+    connection (attach the central vocabulary first); ``dry_run=True`` (0.36.0) writes nothing and runs on a read-only connection. Returns
     ``{"unmapped_before": n, "by_ndc": n, "by_rxnorm": n, "by_name": n, "non_standard_before": n, "by_maps_to": n,
     "by_ingredient": n, "non_standard_after": n}`` (row counts). Raises ``ValueError`` when ``concept_relationship`` has no 'Maps to' row (vocabulary not attached).
 
@@ -829,25 +832,22 @@ def backfill_drug_concepts(con):
         GROUP BY 1 HAVING count(DISTINCT cr.concept_id_2) = 1""")
     by_maps_to = int(con.execute("SELECT count(*) FROM drug_exposure x JOIN _dstd m ON x.drug_concept_id = m.src").fetchone()[0])
     cols = {r[0] for r in con.execute("DESCRIBE drug_exposure").fetchall()}
-    if "drug_source_concept_id" in cols:
-        con.execute("""UPDATE drug_exposure SET drug_source_concept_id = drug_concept_id FROM _dstd m
-                       WHERE drug_exposure.drug_concept_id = m.src AND coalesce(drug_exposure.drug_source_concept_id, 0) = 0""")
-    con.execute("UPDATE drug_exposure SET drug_concept_id = m.cid FROM _dstd m WHERE drug_exposure.drug_concept_id = m.src")
-    con.execute("DROP TABLE _dstd")
+    if not dry_run:
+        if "drug_source_concept_id" in cols:
+            con.execute("""UPDATE drug_exposure SET drug_source_concept_id = drug_concept_id FROM _dstd m
+                           WHERE drug_exposure.drug_concept_id = m.src AND coalesce(drug_exposure.drug_source_concept_id, 0) = 0""")
+        con.execute("UPDATE drug_exposure SET drug_concept_id = m.cid FROM _dstd m WHERE drug_exposure.drug_concept_id = m.src")
     # Then (C16 audit: the rows left were deprecated RxNorm drugs and valid Brand Name concepts, none with a 'Maps to'): the
-    # single standard RxNorm ingredient of the concept. Ingredients come from the concept itself, its clinical drug ('Tradename of'),
-    # its unquantified form ('Quantified form of') or its pack contents ('Consists of'), through drug_strength or an ingredient
-    # relationship ('RxNorm has ing', 'Has ingredient', 'Brand name of', 'Tradename of'), whatever the relationship's validity
-    # (a deprecated concept keeps retired links), and for a deprecated ingredient a standard ingredient of the same name. Only a
-    # valid standard Ingredient counts, and only when there is exactly one, so a combination product stays as it is.
+    # single standard RxNorm ingredient of the concept.
     try:  # the unqualified name must resolve (a drug_strength in another attached catalog does not count)
         con.execute("SELECT 1 FROM drug_strength LIMIT 0")
         has_ds = True
     except duckdb.Error:
         has_ds = False
     ds_sql = "UNION SELECT r.src, ds.ingredient_concept_id FROM rel r JOIN drug_strength ds ON ds.drug_concept_id = r.cid" if has_ds else ""
+    rem_nonstd = f"SELECT src FROM ({nonstd}) WHERE src NOT IN (SELECT src FROM _dstd)" if dry_run else nonstd
     con.execute(f"""CREATE OR REPLACE TEMP TABLE _ding AS
-        WITH s AS (SELECT DISTINCT src FROM ({nonstd})),
+        WITH s AS (SELECT DISTINCT src FROM ({rem_nonstd})),
         rel AS (SELECT src, src AS cid FROM s
                 UNION SELECT s.src, cr.concept_id_2 FROM s JOIN concept_relationship cr ON cr.concept_id_1 = s.src
                       AND cr.relationship_id IN ('Tradename of', 'Quantified form of', 'Consists of')),
@@ -861,10 +861,12 @@ def backfill_drug_concepts(con):
          AND t.standard_concept = 'S' AND t.invalid_reason IS NULL
         GROUP BY 1 HAVING count(DISTINCT t.concept_id) = 1""")
     by_ingredient = int(con.execute("SELECT count(*) FROM drug_exposure x JOIN _ding m ON x.drug_concept_id = m.src").fetchone()[0])
-    if "drug_source_concept_id" in cols:
-        con.execute("""UPDATE drug_exposure SET drug_source_concept_id = drug_concept_id FROM _ding m
-                       WHERE drug_exposure.drug_concept_id = m.src AND coalesce(drug_exposure.drug_source_concept_id, 0) = 0""")
-    con.execute("UPDATE drug_exposure SET drug_concept_id = m.cid FROM _ding m WHERE drug_exposure.drug_concept_id = m.src")
+    if not dry_run:
+        if "drug_source_concept_id" in cols:
+            con.execute("""UPDATE drug_exposure SET drug_source_concept_id = drug_concept_id FROM _ding m
+                           WHERE drug_exposure.drug_concept_id = m.src AND coalesce(drug_exposure.drug_source_concept_id, 0) = 0""")
+        con.execute("UPDATE drug_exposure SET drug_concept_id = m.cid FROM _ding m WHERE drug_exposure.drug_concept_id = m.src")
+    con.execute("DROP TABLE _dstd")
     con.execute("DROP TABLE _ding")
     before = int(con.execute("SELECT count(*) FROM drug_exposure WHERE coalesce(drug_concept_id, 0) = 0").fetchone()[0])
     con.execute("""CREATE OR REPLACE TEMP TABLE _dsv AS
@@ -906,17 +908,26 @@ def backfill_drug_concepts(con):
         UNION ALL SELECT sv, cid, how FROM byname WHERE cid IS NOT NULL""")
     counts = dict(con.execute("""SELECT m.how, count(*) FROM drug_exposure x JOIN _dmap m ON x.drug_source_value = m.sv
                                  WHERE coalesce(x.drug_concept_id, 0) = 0 GROUP BY 1""").fetchall())
-    con.execute("""UPDATE drug_exposure SET drug_concept_id = m.cid FROM _dmap m
-                   WHERE drug_exposure.drug_source_value = m.sv AND coalesce(drug_exposure.drug_concept_id, 0) = 0""")
+    if not dry_run:
+        con.execute("""UPDATE drug_exposure SET drug_concept_id = m.cid FROM _dmap m
+                       WHERE drug_exposure.drug_source_value = m.sv AND coalesce(drug_exposure.drug_concept_id, 0) = 0""")
+        non_standard_after = int(con.execute(f"SELECT count(*) FROM ({nonstd})").fetchone()[0])
+    else:
+        mapped_nonstd = int(con.execute("""
+            SELECT count(*) FROM drug_exposure x JOIN _dmap m ON x.drug_source_value = m.sv
+            LEFT JOIN concept c ON c.concept_id = m.cid
+            WHERE coalesce(x.drug_concept_id, 0) = 0
+              AND coalesce(m.cid, 0) <> 0
+              AND (c.standard_concept IS DISTINCT FROM 'S' OR c.invalid_reason IS NOT NULL)""").fetchone()[0])
+        non_standard_after = max(0, non_standard_before - by_maps_to - by_ingredient) + mapped_nonstd
     con.execute("DROP TABLE _dsv")
     con.execute("DROP TABLE _dmap")
-    non_standard_after = int(con.execute(f"SELECT count(*) FROM ({nonstd})").fetchone()[0])
     return {"unmapped_before": before, "by_ndc": int(counts.get("ndc", 0)), "by_rxnorm": int(counts.get("rxnorm", 0)),
             "by_name": int(counts.get("name", 0)), "non_standard_before": non_standard_before, "by_maps_to": by_maps_to,
             "by_ingredient": by_ingredient, "non_standard_after": non_standard_after}
 
 
-def backfill_condition_concepts(con, *, add_rows=True):
+def backfill_condition_concepts(con, *, add_rows=True, dry_run: bool = False):
     """Maps condition rows that are not on a valid standard concept, as :func:`backfill_drug_concepts` does for drugs (0.35.0,
     issue 106: 2 to 4% of condition rows per site sat on a non-standard concept; Elixhauser and ``n_secondary_dx`` read the ICD
     source codes, but concept sets, ``elix_pre_index_conditions_count`` and PLP read ``condition_concept_id``).
@@ -986,25 +997,29 @@ def backfill_condition_concepts(con, *, add_rows=True):
     if add_rows:
         n_extra = int(con.execute("SELECT coalesce(sum(len(m.tgts) - 1), 0) FROM _cbf_rows r JOIN _cbf_map m USING (src)").fetchone()[0])
         if n_extra:
-            names = [r[0] for r in con.execute("DESCRIBE condition_occurrence").fetchall()]
-            sel = ", ".join(
-                "(SELECT coalesce(max(condition_occurrence_id), 0) FROM condition_occurrence) + row_number() OVER (ORDER BY x.rowid, e.tgt)"
-                if n.lower() == "condition_occurrence_id" else "e.tgt" if n.lower() == "condition_concept_id"
-                else "coalesce(nullif(x.condition_source_concept_id, 0), e.src)" if n.lower() == "condition_source_concept_id"
-                else f'x."{n}"' for n in names)
-            con.execute(f"""INSERT INTO condition_occurrence
-                SELECT {sel} FROM condition_occurrence x
-                JOIN (SELECT r.rid, r.src, unnest(m.tgts[2:]) AS tgt FROM _cbf_rows r JOIN _cbf_map m USING (src)) e ON e.rid = x.rowid""")
+            if not dry_run:
+                names = [r[0] for r in con.execute("DESCRIBE condition_occurrence").fetchall()]
+                sel = ", ".join(
+                    "(SELECT coalesce(max(condition_occurrence_id), 0) FROM condition_occurrence) + row_number() OVER (ORDER BY x.rowid, e.tgt)"
+                    if n.lower() == "condition_occurrence_id" else "e.tgt" if n.lower() == "condition_concept_id"
+                    else "coalesce(nullif(x.condition_source_concept_id, 0), e.src)" if n.lower() == "condition_source_concept_id"
+                    else f'x."{n}"' for n in names)
+                con.execute(f"""INSERT INTO condition_occurrence
+                    SELECT {sel} FROM condition_occurrence x
+                    JOIN (SELECT r.rid, r.src, unnest(m.tgts[2:]) AS tgt FROM _cbf_rows r JOIN _cbf_map m USING (src)) e ON e.rid = x.rowid""")
             out["rows_added"] = n_extra
     out["by_maps_to"] = int(con.execute("SELECT count(*) FROM _cbf_rows r JOIN _cbf_map m USING (src)").fetchone()[0])
-    # one UPDATE: DuckDB rewrites a row whose indexed column changes as delete + insert, which gives it a new rowid, so a second
-    # UPDATE keyed on the saved rowid would miss it (review of PR 107)
-    src_set = (", condition_source_concept_id = coalesce(nullif(condition_occurrence.condition_source_concept_id, 0), r.src)"
-               if "condition_source_concept_id" in cols else "")
-    con.execute(f"""UPDATE condition_occurrence SET condition_concept_id = m.tgts[1]{src_set} FROM _cbf_rows r JOIN _cbf_map m USING (src)
-                   WHERE condition_occurrence.rowid = r.rid""")
-    out["non_standard_after"] = int(con.execute(f"""SELECT count(*) FROM condition_occurrence x
-        LEFT JOIN concept c ON c.concept_id = x.condition_concept_id WHERE {bad}""").fetchone()[0])
+    if not dry_run:
+        # one UPDATE: DuckDB rewrites a row whose indexed column changes as delete + insert, which gives it a new rowid, so a second
+        # UPDATE keyed on the saved rowid would miss it (review of PR 107)
+        src_set = (", condition_source_concept_id = coalesce(nullif(condition_occurrence.condition_source_concept_id, 0), r.src)"
+                   if "condition_source_concept_id" in cols else "")
+        con.execute(f"""UPDATE condition_occurrence SET condition_concept_id = m.tgts[1]{src_set} FROM _cbf_rows r JOIN _cbf_map m USING (src)
+                       WHERE condition_occurrence.rowid = r.rid""")
+        out["non_standard_after"] = int(con.execute(f"""SELECT count(*) FROM condition_occurrence x
+            LEFT JOIN concept c ON c.concept_id = x.condition_concept_id WHERE {bad}""").fetchone()[0])
+    else:
+        out["non_standard_after"] = max(0, before - out["by_maps_to"])
     for t in ("_cbf_rows", "_cbf_codes", "_cbf_targets", "_cbf_map"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return out
@@ -1213,10 +1228,12 @@ def route_drug_domains(con, *, dry_run: bool = False) -> dict:
                     "observation_id": "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER (ORDER BY rid)",
                     "person_id": "pid", "observation_concept_id": "cid",
                     "observation_date": "sdt", "observation_datetime": "sdts",
-                    "observation_type_concept_id": "tcid", "value_as_number": "qty_f", "value_as_concept_id": "0",
+                    "observation_type_concept_id": "tcid", "value_as_number": "CAST(NULL AS DOUBLE)", "value_as_concept_id": "0",
                     "provider_id": "prov", "visit_occurrence_id": "vid", "visit_detail_id": "vd",
                     "observation_source_value": "sv", "observation_source_concept_id": "scid",
-                    "unit_source_value": "usv", "obs_event_field_concept_id": "0",
+                    "unit_source_value": "usv",
+                    "value_source_value": "CASE WHEN qty_f IS NOT NULL THEN regexp_replace(CAST(qty_f AS VARCHAR), '\\.0$', '') END",
+                    "obs_event_field_concept_id": "0",
                 }, "FROM _rdd_src WHERE dom = 'Observation'")
             elif tbl == "measurement":
                 _insert_mapped_cols(con, tbl, {
@@ -1224,10 +1241,12 @@ def route_drug_domains(con, *, dry_run: bool = False) -> dict:
                     "person_id": "pid", "measurement_concept_id": "cid",
                     "measurement_date": "sdt", "measurement_datetime": "sdts",
                     "measurement_type_concept_id": "tcid", "operator_concept_id": "0",
-                    "value_as_number": "qty_f", "value_as_concept_id": "0", "unit_concept_id": "0",
+                    "value_as_number": "CAST(NULL AS DOUBLE)", "value_as_concept_id": "0", "unit_concept_id": "0",
                     "provider_id": "prov", "visit_occurrence_id": "vid", "visit_detail_id": "vd",
                     "measurement_source_value": "sv", "measurement_source_concept_id": "scid",
-                    "unit_source_value": "usv", "unit_source_concept_id": "0", "meas_event_field_concept_id": "0",
+                    "unit_source_value": "usv", "unit_source_concept_id": "0",
+                    "value_source_value": "CASE WHEN qty_f IS NOT NULL THEN regexp_replace(CAST(qty_f AS VARCHAR), '\\.0$', '') END",
+                    "meas_event_field_concept_id": "0",
                 }, "FROM _rdd_src WHERE dom = 'Measurement'")
         out["total_routed"] = sum(out[k] for k in ("device_exposure", "procedure_occurrence", "observation", "measurement"))
         if routed_domains and not dry_run:
@@ -1257,13 +1276,23 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
 
     out = {"source_rows": 0, "drug_exposure": 0, "device_exposure": 0, "procedure_occurrence": 0,
            "observation": 0, "measurement": 0, "unmapped_drug": 0, "already_loaded": False}
-    if not force:
-        existing = int(con.execute(f"SELECT count(*) FROM drug_exposure WHERE drug_type_concept_id = {TYPE_CONCEPT_MED_ADMIN}").fetchone()[0])
-        if existing > 0:
-            out["already_loaded"] = True
-            return out
-
     tables_lower = {r[0].lower() for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+    if not force:
+        existing = 0
+        for _tbl, _tcol in (
+            ("drug_exposure", "drug_type_concept_id"),
+            ("device_exposure", "device_type_concept_id"),
+            ("procedure_occurrence", "procedure_type_concept_id"),
+            ("observation", "observation_type_concept_id"),
+            ("measurement", "measurement_type_concept_id"),
+        ):
+            if _tbl in tables_lower:
+                _tcols = {r[0].lower() for r in con.execute(f"DESCRIBE {_tbl}").fetchall()}
+                if _tcol in _tcols:
+                    existing += int(con.execute(f"SELECT count(*) FROM {_tbl} WHERE {_tcol} = {TYPE_CONCEPT_MED_ADMIN}").fetchone()[0])
+                    if existing > 0:
+                        out["already_loaded"] = True
+                        return out
     has_vo = "visit_occurrence" in tables_lower
     vcols = ({r[0].lower() for r in con.execute("DESCRIBE SELECT * FROM visit_occurrence LIMIT 0").fetchall()} if has_vo else set())
     has_pr = "provider" in tables_lower
@@ -1346,17 +1375,18 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
             rt_sql = f"NULLIF(trim(r.{route_col}), '')" if route_col else "CAST(NULL AS VARCHAR)"
             un_sql = f"NULLIF(trim(r.{unit_col}), '')" if unit_col else "CAST(NULL AS VARCHAR)"
             qt_sql = f"TRY_CAST(r.{dose_col} AS DOUBLE)" if dose_col else "CAST(NULL AS DOUBLE)"
+            dtxt_sql = f"NULLIF(trim(r.{dose_col}), '')" if dose_col else "CAST(NULL AS VARCHAR)"
             dedup = f"WHERE r.{id_col} IS NOT NULL AND trim(r.{id_col}) <> '' QUALIFY row_number() OVER (PARTITION BY r.{id_col}) = 1" if id_col else ""
 
             con.execute(f"""CREATE OR REPLACE TEMP TABLE _bma_stg AS
                 SELECT pid, vid, prid, sdt, sdts, edt, edts, tp, cd, nd, nm,
-                       COALESCE(cd, nd, nm) AS sv, rt, un, qt,
+                       COALESCE(cd, nd, nm) AS sv, rt, un, qt, dtxt,
                        md5(coalesce(tp, '') || chr(31) || coalesce(cd, '') || chr(31) || coalesce(nd, '') || chr(31) || coalesce(nm, '')) AS hk
                 FROM (
                     SELECT {pid_sql} AS pid, {vid_sql} AS vid, {pr_sql} AS prid,
                            {sdt_sql} AS sdt, {sdts_sql} AS sdts, {edt_sql} AS edt, {edts_sql} AS edts,
                            {tp_sql} AS tp, {cd_sql} AS cd, {nd_sql} AS nd, {nm_sql} AS nm,
-                           {rt_sql} AS rt, {un_sql} AS un, {qt_sql} AS qt
+                           {rt_sql} AS rt, {un_sql} AS un, {qt_sql} AS qt, {dtxt_sql} AS dtxt
                            {f', r.{id_col}' if id_col else ''}
                     FROM {src} r {' '.join(joins)}
                     {dedup}
@@ -1484,7 +1514,7 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                 LEFT JOIN concept tc ON tc.concept_id = cb.tcid""")
 
             con.execute("""CREATE OR REPLACE TEMP TABLE _bma_resolved AS
-                SELECT s.pid, s.vid, s.prid, s.sdt, s.sdts, s.edt, s.edts, s.sv, s.rt, s.un, s.qt,
+                SELECT s.pid, s.vid, s.prid, s.sdt, s.sdts, s.edt, s.edts, s.sv, s.rt, s.un, s.qt, s.dtxt,
                        m.scid, m.tcid,
                        CASE WHEN m.dom IN ('Drug', 'Device', 'Procedure', 'Observation', 'Measurement') THEN m.dom ELSE 'Drug' END AS dom
                 FROM _bma_stg s
@@ -1530,20 +1560,21 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
                     "observation_id": "(SELECT coalesce(max(observation_id), 0) FROM observation) + row_number() OVER ()",
                     "person_id": "pid", "observation_concept_id": "tcid",
                     "observation_date": "sdt", "observation_datetime": "sdts",
-                    "observation_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "value_as_number": "qt",
+                    "observation_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "value_as_number": "CAST(NULL AS DOUBLE)",
                     "value_as_concept_id": "0", "provider_id": "prid", "visit_occurrence_id": "vid",
                     "observation_source_value": "sv", "observation_source_concept_id": "scid",
-                    "unit_source_value": "un", "obs_event_field_concept_id": "0",
+                    "unit_source_value": "un", "value_source_value": "dtxt", "obs_event_field_concept_id": "0",
                 }),
                 ("Measurement", "measurement", {
                     "measurement_id": "(SELECT coalesce(max(measurement_id), 0) FROM measurement) + row_number() OVER ()",
                     "person_id": "pid", "measurement_concept_id": "tcid",
                     "measurement_date": "sdt", "measurement_datetime": "sdts",
                     "measurement_type_concept_id": str(TYPE_CONCEPT_MED_ADMIN), "operator_concept_id": "0",
-                    "value_as_number": "qt", "value_as_concept_id": "0", "unit_concept_id": "0",
+                    "value_as_number": "CAST(NULL AS DOUBLE)", "value_as_concept_id": "0", "unit_concept_id": "0",
                     "provider_id": "prid", "visit_occurrence_id": "vid",
                     "measurement_source_value": "sv", "measurement_source_concept_id": "scid",
-                    "unit_source_value": "un", "unit_source_concept_id": "0", "meas_event_field_concept_id": "0",
+                    "unit_source_value": "un", "unit_source_concept_id": "0", "value_source_value": "dtxt",
+                    "meas_event_field_concept_id": "0",
                 }),
             ]
             for dom, tbl, exprs in targets:
@@ -1563,6 +1594,145 @@ def backfill_med_admin(con, med_admin_path, *, dry_run: bool = False, crosswalk=
         finally:
             for t in ("_bma_pmap", "_bma_vmap", "_bma_prmap", "_bma_stg", "_bma_keys", "_bma_kmap", "_bma_resolved"):
                 con.execute(f"DROP TABLE IF EXISTS {t}")
+
+
+def repair_routed_med_admin_values(con, *, dry_run: bool = False) -> dict:
+    """One-time repair for databases routed under 0.35.3 (0.36.0, M1): clears ``value_as_number`` on ``measurement`` and
+    ``observation`` rows carrying ``type_concept_id`` = 38000180 (``Inpatient administration``), preserving the numeric dose text
+    in ``value_source_value`` when ``value_source_value`` is empty. ``dry_run=True`` runs on a read-only connection."""
+    tables_lower = {r[0].lower() for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+    out = {"measurement_cleared": 0, "observation_cleared": 0, "total_cleared": 0}
+    for tbl, type_col, key in (
+        ("measurement", "measurement_type_concept_id", "measurement_cleared"),
+        ("observation", "observation_type_concept_id", "observation_cleared"),
+    ):
+        if tbl not in tables_lower:
+            continue
+        cols = {r[0].lower() for r in con.execute(f"DESCRIBE {tbl}").fetchall()}
+        if type_col not in cols or "value_as_number" not in cols:
+            continue
+        cond = f"{type_col} = {TYPE_CONCEPT_MED_ADMIN} AND value_as_number IS NOT NULL"
+        n = int(con.execute(f"SELECT count(*) FROM {tbl} WHERE {cond}").fetchone()[0])
+        out[key] = n
+        if n and not dry_run:
+            if "value_source_value" in cols:
+                con.execute(f"""
+                    UPDATE {tbl}
+                    SET value_source_value = COALESCE(NULLIF(trim(value_source_value), ''), regexp_replace(CAST(value_as_number AS VARCHAR), '\\.0$', '')),
+                        value_as_number = NULL
+                    WHERE {cond}
+                """)
+            else:
+                con.execute(f"UPDATE {tbl} SET value_as_number = NULL WHERE {cond}")
+    out["total_cleared"] = out["measurement_cleared"] + out["observation_cleared"]
+    return out
+
+
+def _find_raw_table_any(raw_dir, stem: str):
+    """Finds ``<stem>.{parquet,csv,zip}`` case-insensitively in ``raw_dir``."""
+    from pathlib import Path
+
+    d = Path(os.fspath(raw_dir))
+    if not d.is_dir():
+        raise FileNotFoundError(f"Raw PCORnet directory not found: {raw_dir}")
+    by_lower = {p.name.lower(): p for p in d.iterdir() if p.is_file()}
+    for ext in (".parquet", ".csv", ".zip"):
+        hit = by_lower.get(f"{stem.lower()}{ext}")
+        if hit is not None:
+            return hit
+    return None
+
+
+def backfill_all(con, raw_dir, *, dry_run: bool = True, supplemental_discharge=None, crosswalk=None,
+                 start: str | None = None, end: str | None = None):
+    """Runs the five post-build backfills in a fixed order and returns a summary DataFrame of changes (0.36.0, S1).
+
+    Order:
+      1. ``condition_concepts`` (:func:`backfill_condition_concepts`)
+      2. ``drug_concepts`` (:func:`backfill_drug_concepts`)
+      3. ``lab_values`` (:func:`omop_etl.lab_text.backfill_lab_values`)
+      4. ``vital_tobacco`` (:func:`backfill_vital_tobacco`)
+      5. ``med_admin_and_routing`` (:func:`backfill_med_admin` + :func:`route_drug_domains` + :func:`repair_routed_med_admin_values`)
+
+    If ``supplemental_discharge`` is supplied (and ``dry_run=False``), :func:`backfill_discharge_status` runs first.
+    ``dry_run=True`` (the default) writes nothing and works on a ``read_only=True`` connection."""
+    import json as _json
+    import pandas as pd
+    from omop_etl.lab_text import backfill_lab_values
+
+    rows: list[dict] = []
+    if supplemental_discharge is not None:
+        if dry_run:
+            rows.append({"step": "discharge_status", "changes": 0, "source_file": os.path.basename(str(supplemental_discharge)),
+                         "detail": _json.dumps({"note": "skipped in dry_run"})})
+        else:
+            r_dis = backfill_discharge_status(con, supplemental_discharge)
+            rows.append({"step": "discharge_status", "changes": int(r_dis["source_filled"] + r_dis["concept_changed"]),
+                         "source_file": os.path.basename(str(supplemental_discharge)), "detail": _json.dumps(r_dis)})
+
+    # 1. Condition concepts
+    r_cond = backfill_condition_concepts(con, dry_run=dry_run)
+    rows.append({
+        "step": "condition_concepts",
+        "changes": int(r_cond["by_maps_to"] + r_cond["rows_added"]),
+        "source_file": "",
+        "detail": _json.dumps(r_cond),
+    })
+
+    # 2. Drug concepts
+    r_drug = backfill_drug_concepts(con, dry_run=dry_run)
+    drug_chg = int(r_drug["by_maps_to"] + r_drug["by_ingredient"] + r_drug["by_ndc"] + r_drug["by_rxnorm"] + r_drug["by_name"])
+    rows.append({
+        "step": "drug_concepts",
+        "changes": drug_chg,
+        "source_file": "",
+        "detail": _json.dumps(r_drug),
+    })
+
+    # 3. Lab values
+    lab_path = _find_raw_table_any(raw_dir, "lab_result_cm")
+    if lab_path is not None:
+        df_lab = backfill_lab_values(con, lab_path, start=start, end=end, dry_run=dry_run, crosswalk=crosswalk)
+        lab_filled = int(df_lab["filled"].sum()) if len(df_lab) else 0
+        lab_cens = int(df_lab["filled_censored"].sum()) if len(df_lab) else 0
+        rows.append({
+            "step": "lab_values",
+            "changes": lab_filled,
+            "source_file": lab_path.name,
+            "detail": _json.dumps({"filled": lab_filled, "filled_censored": lab_cens}),
+        })
+    else:
+        rows.append({"step": "lab_values", "changes": 0, "source_file": "(absent)", "detail": "{}"})
+
+    # 4. VITAL.TOBACCO
+    vital_path = _find_raw_table_any(raw_dir, "vital")
+    if vital_path is not None:
+        r_tob = backfill_vital_tobacco(con, vital_path, dry_run=dry_run, crosswalk=crosswalk)
+        rows.append({
+            "step": "vital_tobacco",
+            "changes": int(r_tob["inserted"]),
+            "source_file": vital_path.name,
+            "detail": _json.dumps(r_tob),
+        })
+    else:
+        rows.append({"step": "vital_tobacco", "changes": 0, "source_file": "(absent)", "detail": "{}"})
+
+    # 5. MED_ADMIN + OMOP v5.4 domain routing + M1 dose repair
+    med_path = _find_raw_table_any(raw_dir, "med_admin")
+    r_med = (backfill_med_admin(con, med_path, dry_run=dry_run, crosswalk=crosswalk, route_domains=True)
+             if med_path is not None else {"already_loaded": False, "drug_exposure": 0, "device_exposure": 0,
+                                           "procedure_occurrence": 0, "observation": 0, "measurement": 0})
+    r_route = route_drug_domains(con, dry_run=dry_run)
+    r_rep = repair_routed_med_admin_values(con, dry_run=dry_run)
+    med_loaded = sum(int(r_med.get(k, 0)) for k in ("drug_exposure", "device_exposure", "procedure_occurrence", "observation", "measurement"))
+    rows.append({
+        "step": "med_admin_and_routing",
+        "changes": int(med_loaded + r_route["total_routed"] + r_rep["total_cleared"]),
+        "source_file": med_path.name if med_path is not None else "(absent)",
+        "detail": _json.dumps({"med_admin": r_med, "routed": r_route, "dose_repaired": r_rep}),
+    })
+
+    return pd.DataFrame(rows, columns=["step", "changes", "source_file", "detail"])
 
 
 def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
@@ -1622,6 +1792,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
         LEFT JOIN care_site cs
           ON cs.care_site_source_value = src.FACILITYID
         WHERE src.ENCOUNTERID IS NOT NULL
+          AND parse_omop_date(src.ADMIT_DATE) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.ENCOUNTERID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_encounter;")
@@ -1658,6 +1829,7 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
     )
 
     patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+    vo_sdt = "vo.visit_start_date" if "visit_start_date" in {r[0].lower() for r in con.execute("DESCRIBE visit_occurrence").fetchall()} else "CAST(NULL AS DATE)"
 
     con.execute("""CREATE OR REPLACE TEMP TABLE _dx_codes AS
         SELECT vocabulary_id, k, concept_id, standard_concept FROM (
@@ -1677,8 +1849,8 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
                 CASE WHEN COALESCE(c1.standard_concept, c2.standard_concept) = 'S' THEN COALESCE(c1.concept_id, c2.concept_id) ELSE 0 END,
                 0
             ) AS condition_concept_id,
-            parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)) AS condition_start_date,
-            parse_omop_datetime(COALESCE(src.DX_DATE, src.ADMIT_DATE), NULL) AS condition_start_datetime,
+            COALESCE(parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)), {vo_sdt}) AS condition_start_date,
+            COALESCE(parse_omop_datetime(COALESCE(src.DX_DATE, src.ADMIT_DATE), NULL), CAST({vo_sdt} AS TIMESTAMP)) AS condition_start_datetime,
             NULL AS condition_end_date,
             NULL AS condition_end_datetime,
             CASE UPPER(src.PDX) WHEN 'P' THEN {TYPE_CONCEPT_PRIMARY_DX} ELSE 0 END AS condition_type_concept_id,
@@ -1731,6 +1903,7 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
           ON stcm.source_vocabulary_id = src.dx_vocabulary_id
          AND stcm.source_code = src.DX
         WHERE src.DIAGNOSISID IS NOT NULL
+          AND COALESCE(parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)), {vo_sdt}) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DIAGNOSISID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_diagnosis;")
@@ -1747,10 +1920,11 @@ def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids
         con,
         "_temp_procedures",
         path,
-        ["PROCEDURESID", "PATID", "PX_TYPE", "PX", "PX_DATE", "PROVIDERID", "ENCOUNTERID"],
+        ["PROCEDURESID", "PATID", "PX_TYPE", "PX", "PX_DATE", "ADMIT_DATE", "PROVIDERID", "ENCOUNTERID"],
     )
 
     patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+    vo_sdt = "vo.visit_start_date" if "visit_start_date" in {r[0].lower() for r in con.execute("DESCRIBE visit_occurrence").fetchall()} else "CAST(NULL AS DATE)"
 
     run_insert(con, "PROCEDURE_OCCURRENCE (from PROCEDURES)", f"""
         INSERT INTO procedure_occurrence
@@ -1763,8 +1937,8 @@ def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids
                 CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
                 0
             ) AS procedure_concept_id,
-            parse_omop_date(src.PX_DATE) AS procedure_date,
-            parse_omop_datetime(src.PX_DATE, NULL) AS procedure_datetime,
+            COALESCE(parse_omop_date(COALESCE(src.PX_DATE, src.ADMIT_DATE)), {vo_sdt}) AS procedure_date,
+            COALESCE(parse_omop_datetime(COALESCE(src.PX_DATE, src.ADMIT_DATE), NULL), CAST({vo_sdt} AS TIMESTAMP)) AS procedure_datetime,
             NULL AS procedure_end_date,
             NULL AS procedure_end_datetime,
             {TYPE_CONCEPT_EHR_PROCEDURE} AS procedure_type_concept_id,
@@ -1813,6 +1987,7 @@ def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids
           ON stcm.source_vocabulary_id = src.px_vocabulary_id
          AND stcm.source_code = src.PX
         WHERE src.PROCEDURESID IS NOT NULL
+          AND COALESCE(parse_omop_date(COALESCE(src.PX_DATE, src.ADMIT_DATE)), {vo_sdt}) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PROCEDURESID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_procedures;")
@@ -1918,6 +2093,8 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
         ) stcm
           ON stcm.source_code = src.LAB_LOINC
         WHERE src.LAB_RESULT_CM_ID IS NOT NULL
+          AND COALESCE(parse_omop_date(src.RESULT_DATE), parse_omop_date(src.SPECIMEN_DATE),
+                       parse_omop_date(src.LAB_ORDER_DATE)) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.LAB_RESULT_CM_ID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_lab_result;")
@@ -2047,6 +2224,7 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False, derive_
             ) stcm
               ON stcm.source_code = '{loinc_code}'
             WHERE {where_cond}
+              AND parse_omop_date(src.MEASURE_DATE) IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID, '{tag}') = 1;
         """)
         summary["rows_loaded"][tag] = int(con.execute("SELECT COUNT(*) FROM measurement").fetchone()[0]) - int(before)
@@ -2086,6 +2264,7 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False, derive_
         LEFT JOIN visit_occurrence vo
           ON vo.visit_source_value = src.ENCOUNTERID
         WHERE src.VITALID IS NOT NULL
+          AND parse_omop_date(src.MEASURE_DATE) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_vital;")
@@ -2094,6 +2273,12 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False, derive_
 
 def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False):
     patid_expr = f"src.PATID || '-{site_id}'" if (disambiguate_patids and site_id is not None) else "src.PATID"
+    vo_sdt = (
+        "vo.visit_start_date"
+        if ("visit_occurrence" in {r[0].lower() for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+            and "visit_start_date" in {r[0].lower() for r in con.execute("DESCRIBE visit_occurrence").fetchall()})
+        else "CAST(NULL AS DATE)"
+    )
     loaded_any = False
 
     # 1. PRESCRIBING (Prescriptions written)
@@ -2105,7 +2290,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             "_temp_prescribing",
             path_rx,
             [
-                "PRESCRIBINGID", "PATID", "RXNORM_CUI", "RX_START_DATE", "RX_END_DATE",
+                "PRESCRIBINGID", "PATID", "RXNORM_CUI", "RX_START_DATE", "RX_ORDER_DATE", "RX_END_DATE",
                 "RAW_RX_MED_NAME", "RAW_RX_NDC", "PROVIDERID", "ENCOUNTERID"
             ],
         )
@@ -2120,9 +2305,9 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
                     CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
                     0
                 ) AS drug_concept_id,
-                parse_omop_date(src.RX_START_DATE) AS drug_exposure_start_date,
-                parse_omop_datetime(src.RX_START_DATE, NULL) AS drug_exposure_start_datetime,
-                COALESCE(parse_omop_date(src.RX_END_DATE), parse_omop_date(src.RX_START_DATE)) AS drug_exposure_end_date,
+                COALESCE(parse_omop_date(src.RX_START_DATE), parse_omop_date(src.RX_ORDER_DATE), {vo_sdt}) AS drug_exposure_start_date,
+                COALESCE(parse_omop_datetime(COALESCE(src.RX_START_DATE, src.RX_ORDER_DATE), NULL), CAST({vo_sdt} AS TIMESTAMP)) AS drug_exposure_start_datetime,
+                COALESCE(parse_omop_date(src.RX_END_DATE), parse_omop_date(src.RX_START_DATE), parse_omop_date(src.RX_ORDER_DATE), {vo_sdt}) AS drug_exposure_end_date,
                 parse_omop_datetime(src.RX_END_DATE, NULL) AS drug_exposure_end_datetime,
                 NULL AS verbatim_end_date,
                 {TYPE_CONCEPT_EHR_DRUG} AS drug_type_concept_id,
@@ -2167,6 +2352,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             ) stcm
               ON stcm.source_code = src.RXNORM_CUI
             WHERE src.PRESCRIBINGID IS NOT NULL
+              AND COALESCE(parse_omop_date(src.RX_START_DATE), parse_omop_date(src.RX_ORDER_DATE), {vo_sdt}) IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PRESCRIBINGID) = 1;
         """)
         con.execute("DROP VIEW IF EXISTS _temp_prescribing;")
@@ -2182,7 +2368,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
             [
                 "MEDADMINID", "PATID", "ENCOUNTERID", "MEDADMIN_CODE", "MEDADMIN_TYPE", "MEDADMIN_START_DATE",
                 "MEDADMIN_START_TIME", "MEDADMIN_STOP_DATE", "RAW_MEDADMIN_MED_NAME",
-                "RAW_RX_NDC", "PROVIDERID"
+                "RAW_RX_NDC", "PROVIDERID", "MEDADMIN_DOSE_ADMIN", "MEDADMIN_DOSE_ADMIN_UNIT", "MEDADMIN_ROUTE"
             ],
         )
         run_insert(con, "DRUG_EXPOSURE (from MED_ADMIN)", f"""
@@ -2196,15 +2382,15 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
                     CASE WHEN c.standard_concept = 'S' THEN c.concept_id ELSE 0 END,
                     0
                 ) AS drug_concept_id,
-                parse_omop_date(src.MEDADMIN_START_DATE) AS drug_exposure_start_date,
-                parse_omop_datetime(src.MEDADMIN_START_DATE, src.MEDADMIN_START_TIME) AS drug_exposure_start_datetime,
-                COALESCE(parse_omop_date(src.MEDADMIN_STOP_DATE), parse_omop_date(src.MEDADMIN_START_DATE)) AS drug_exposure_end_date,
+                COALESCE(parse_omop_date(src.MEDADMIN_START_DATE), {vo_sdt}) AS drug_exposure_start_date,
+                COALESCE(parse_omop_datetime(src.MEDADMIN_START_DATE, src.MEDADMIN_START_TIME), CAST({vo_sdt} AS TIMESTAMP)) AS drug_exposure_start_datetime,
+                COALESCE(parse_omop_date(src.MEDADMIN_STOP_DATE), parse_omop_date(src.MEDADMIN_START_DATE), {vo_sdt}) AS drug_exposure_end_date,
                 parse_omop_datetime(COALESCE(src.MEDADMIN_STOP_DATE, src.MEDADMIN_START_DATE), NULL) AS drug_exposure_end_datetime,
                 NULL AS verbatim_end_date,
                 {TYPE_CONCEPT_MED_ADMIN} AS drug_type_concept_id,
                 NULL AS stop_reason,
                 NULL AS refills,
-                NULL AS quantity,
+                TRY_CAST(src.MEDADMIN_DOSE_ADMIN AS DOUBLE) AS quantity,
                 NULL AS days_supply,
                 NULL AS sig,
                 0 AS route_concept_id,
@@ -2214,8 +2400,8 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
                 NULL AS visit_detail_id,
                 COALESCE(src.MEDADMIN_CODE, src.RAW_RX_NDC, src.RAW_MEDADMIN_MED_NAME) AS drug_source_value,
                 COALESCE(c.concept_id, 0) AS drug_source_concept_id,
-                NULL AS route_source_value,
-                NULL AS dose_unit_source_value
+                src.MEDADMIN_ROUTE AS route_source_value,
+                src.MEDADMIN_DOSE_ADMIN_UNIT AS dose_unit_source_value
             FROM _temp_med_admin src
             LEFT JOIN person p
               ON p.person_source_value = {patid_expr}
@@ -2255,6 +2441,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
                    ELSE 'RxNorm'
                  END
             WHERE src.MEDADMINID IS NOT NULL
+              AND COALESCE(parse_omop_date(src.MEDADMIN_START_DATE), {vo_sdt}) IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.MEDADMINID) = 1;
         """)
         con.execute("DROP VIEW IF EXISTS _temp_med_admin;")
@@ -2336,6 +2523,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
                    ELSE 'NDC'
                  END
             WHERE src.DISPENSINGID IS NOT NULL
+              AND parse_omop_date(src.DISPENSING_DATE) IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DISPENSINGID) = 1;
         """)
         con.execute("DROP VIEW IF EXISTS _temp_dispensing;")
@@ -2387,7 +2575,7 @@ def load_death(con, source_dir, site_id=None, disambiguate_patids=False):
         LEFT JOIN person p
           ON p.person_source_value = {patid_expr}
         WHERE src.PATID IS NOT NULL 
-          AND src.DEATH_DATE IS NOT NULL
+          AND parse_omop_date(src.DEATH_DATE) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY {patid_expr} ORDER BY parse_omop_date(src.DEATH_DATE) DESC) = 1;
     """)
     con.execute("DROP VIEW IF EXISTS _temp_death;")

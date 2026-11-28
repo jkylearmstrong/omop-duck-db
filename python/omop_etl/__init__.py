@@ -815,7 +815,7 @@ __all__ = [
     "isotonic_apply", "adjust_for_prevalence", "capacity_threshold", "capacity_risk_tiers", "evaluate_at_capacity",
 ]
 
-__version__ = "0.35.3"
+__version__ = "0.36.0"
 __commit__ = "c072171c3c33098101ba7eeff99d3b466abf1da9"
 
 
@@ -888,21 +888,25 @@ from omop_etl.oracle_roundtrip import mirror_oracle, verify_duckdb_copy, verify_
 __all__ += ["mirror_oracle", "verify_duckdb_copy", "verify_postgres_copy"]
 
 from omop_etl.build_omop_cdm import (  # noqa: E402
+    backfill_all,
     backfill_condition_concepts,
     backfill_discharge_status,
     backfill_drug_concepts,
     backfill_med_admin,
     backfill_vital_tobacco,
+    repair_routed_med_admin_values,
     route_drug_domains,
 )
 from omop_etl.lab_text import backfill_lab_values  # noqa: E402
 
 __all__ += [
+    "backfill_all",
     "backfill_condition_concepts",
     "backfill_discharge_status",
     "backfill_drug_concepts",
     "backfill_lab_values",
     "backfill_med_admin",
     "backfill_vital_tobacco",
+    "repair_routed_med_admin_values",
     "route_drug_domains",
 ]

@@ -64,6 +64,9 @@ jobs:
       - name: Python in the image is exactly the pinned version
         run: bash scripts/check_image_python.sh omopduckdb:smoke Dockerfile
 
+      - name: Check key library and runtime versions against reference_env.json
+        run: python scripts/check_env.py --image omopduckdb:smoke --policy pinned
+
       - name: Smoke test inside the image (manuscript DOCX/PDF, privacy scan, Delta Lake, R)
         run: docker run --rm omopduckdb:smoke python scripts/container_smoke_test.py
 

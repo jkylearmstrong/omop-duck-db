@@ -213,7 +213,7 @@ def test_run_study_sensitivity_cap_and_known_gaps(tmp_path, monkeypatch):
     from omop_etl.manuscript_text import manuscript_context, render_manuscript_body
 
     body = render_manuscript_body(manuscript_context(out / "Study_Manuscript_Tables.xlsx"))
-    assert body["template"] in ("0.35.0", "0.35.1", "0.35.2")
+    assert body["template"] in ("0.35.0", "0.35.1", "0.35.2", "0.36.0")
     text = " ".join(body["markdown"].split())
     assert "repeated random draws the AUC-ROC ranged from" in text or "repeated random draws the AUC-ROC was" in text and "repeat the draw with two further seeds" in text
     # reuse: the saved all-stays features are read back
