@@ -317,15 +317,22 @@ def test_s4_template_0360_censored_sentence_and_optional_params(tmp_path):
     assert "Supplemental discharge dispositions were harmonized" in md_txt
 
 
-def test_converter_date_fallbacks_and_undated_row_guards(tmp_path):
-    """0.36.0 sister-site hardening: PROCEDURES/PRESCRIBING/MED_ADMIN fall back to ADMIT_DATE/RX_ORDER_DATE/visit_start_date and skip undated rows."""
+def test_converter_date_fallbacks_and_undated_row_guards(tmp_path, capsys):
+    """0.36.0 sister-site hardening: converters count and report fallback-dated rows and dropped undated rows across all tables."""
     src_dir = tmp_path / "pcornet_dates"
     src_dir.mkdir()
-    (src_dir / "demographic.csv").write_text("PATID,BIRTH_DATE,SEX,RACE,HISPANIC\nP1,1970-01-01,F,05,N\n", encoding="utf-8")
+    (src_dir / "demographic.csv").write_text("PATID,BIRTH_DATE,SEX,RACE,HISPANIC\nP1,1970-01-01,F,05,N\nP2,1965-05-05,M,05,N\n", encoding="utf-8")
     (src_dir / "encounter.csv").write_text(
         "ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,DISCHARGE_DATE,DISCHARGE_STATUS\n"
         "E1,P1,IP,2021-07-10,2021-07-12,HO\n"
         "E_BAD,P1,IP,NI,,HO\n",
+        encoding="utf-8",
+    )
+    (src_dir / "diagnosis.csv").write_text(
+        "DIAGNOSISID,PATID,ENCOUNTERID,DX_TYPE,DX,DX_DATE,ADMIT_DATE\n"
+        "DX1,P1,E1,10,E11.9,,2021-07-11\n"
+        "DX2,P1,E1,10,E11.9,,\n"
+        "DX_BAD,P1,,10,E11.9,NI,\n",
         encoding="utf-8",
     )
     (src_dir / "procedures.csv").write_text(
@@ -335,10 +342,42 @@ def test_converter_date_fallbacks_and_undated_row_guards(tmp_path):
         "PX_UNDATED,P1,,02,J9999,NI,\n",
         encoding="utf-8",
     )
+    (src_dir / "lab_result_cm.csv").write_text(
+        "LAB_RESULT_CM_ID,PATID,LAB_LOINC,RESULT_DATE,SPECIMEN_DATE,LAB_ORDER_DATE,RESULT_NUM\n"
+        "L1,P1,2345-7,,2021-07-10,,110\n"
+        "L2,P1,2345-7,,,2021-07-11,115\n"
+        "L_BAD,P1,2345-7,,,,120\n",
+        encoding="utf-8",
+    )
+    (src_dir / "vital.csv").write_text(
+        "VITALID,PATID,MEASURE_DATE,SYSTOLIC,SMOKING\n"
+        "V1,P1,2021-07-10,120,04\n"
+        "V_BAD,P1,NI,125,04\n",
+        encoding="utf-8",
+    )
     (src_dir / "prescribing.csv").write_text(
         "PRESCRIBINGID,PATID,ENCOUNTERID,RXNORM_CUI,RX_START_DATE,RX_ORDER_DATE\n"
-        "RX1,P1,E1,6809,,2021-07-10\n"
+        "RX1,P1,E1,6809,,2021-07-11\n"
+        "RX2,P1,E1,6809,,\n"
         "RX_UNDATED,P1,,6809,,\n",
+        encoding="utf-8",
+    )
+    (src_dir / "med_admin.csv").write_text(
+        "MEDADMINID,PATID,ENCOUNTERID,MEDADMIN_START_DATE,MEDADMIN_TYPE,MEDADMIN_CODE\n"
+        "MA1,P1,E1,,RX,6809\n"
+        "MA_BAD,P1,,,RX,6809\n",
+        encoding="utf-8",
+    )
+    (src_dir / "dispensing.csv").write_text(
+        "DISPENSINGID,PATID,DISPENSING_DATE,RAW_RX_NDC,DISPENSING_TYPE\n"
+        "D1,P1,2021-07-12,6809,RX\n"
+        "D_BAD,P1,,6809,RX\n",
+        encoding="utf-8",
+    )
+    (src_dir / "death.csv").write_text(
+        "PATID,DEATH_DATE,DEATH_SOURCE\n"
+        "P1,2022-01-01,L\n"
+        "P2,NI,L\n",
         encoding="utf-8",
     )
     db = tmp_path / "dates.duckdb"
@@ -347,12 +386,45 @@ def test_converter_date_fallbacks_and_undated_row_guards(tmp_path):
     _seed_vocab_for_routing(con)
     con.close()
 
-    etl_pcornet(str(src_dir), str(db), key_check="ignore")
+    captured: list[dict] = []
+    etl_pcornet(str(src_dir), str(db), key_check="ignore", date_audit_callback=captured.extend)
+    stdout = capsys.readouterr().out
+    assert "Date audit summary: 9 row(s) dated by fallback, 9 undated row(s) dropped across 9 clinical source table(s)." in stdout
+    by_src = {r["source"]: r for r in captured}
+    assert by_src["ENCOUNTER"] == {"source": "ENCOUNTER", "cdm_table": "visit_occurrence", "dated_by_fallback": 0, "fallback_by_column": {}, "dropped_undated": 1}
+    assert by_src["DIAGNOSIS"] == {"source": "DIAGNOSIS", "cdm_table": "condition_occurrence", "dated_by_fallback": 2, "fallback_by_column": {"ADMIT_DATE": 1, "visit_start_date": 1}, "dropped_undated": 1}
+    assert by_src["PROCEDURES"] == {"source": "PROCEDURES", "cdm_table": "procedure_occurrence", "dated_by_fallback": 2, "fallback_by_column": {"ADMIT_DATE": 1, "visit_start_date": 1}, "dropped_undated": 1}
+    assert by_src["LAB_RESULT_CM"] == {"source": "LAB_RESULT_CM", "cdm_table": "measurement", "dated_by_fallback": 2, "fallback_by_column": {"SPECIMEN_DATE": 1, "LAB_ORDER_DATE": 1}, "dropped_undated": 1}
+    assert by_src["VITAL"] == {"source": "VITAL", "cdm_table": "measurement", "dated_by_fallback": 0, "fallback_by_column": {}, "dropped_undated": 1}
+    assert by_src["PRESCRIBING"] == {"source": "PRESCRIBING", "cdm_table": "drug_exposure", "dated_by_fallback": 2, "fallback_by_column": {"RX_ORDER_DATE": 1, "visit_start_date": 1}, "dropped_undated": 1}
+    assert by_src["MED_ADMIN"] == {"source": "MED_ADMIN", "cdm_table": "drug_exposure", "dated_by_fallback": 1, "fallback_by_column": {"visit_start_date": 1}, "dropped_undated": 1}
+    assert by_src["DISPENSING"] == {"source": "DISPENSING", "cdm_table": "drug_exposure", "dated_by_fallback": 0, "fallback_by_column": {}, "dropped_undated": 1}
+    assert by_src["DEATH"] == {"source": "DEATH", "cdm_table": "death", "dated_by_fallback": 0, "fallback_by_column": {}, "dropped_undated": 1}
+
     ro = duckdb.connect(str(db), read_only=True)
     assert [str(r[0]) for r in ro.execute("SELECT procedure_date FROM procedure_occurrence ORDER BY procedure_occurrence_id").fetchall()] == [
         "2021-07-11", "2021-07-10"
     ]
-    assert [str(r[0]) for r in ro.execute("SELECT drug_exposure_start_date FROM drug_exposure").fetchall()] == ["2021-07-10"]
     assert ro.execute("SELECT count(*) FROM visit_occurrence").fetchone()[0] == 1
+    assert ro.execute("SELECT count(*) FROM death").fetchone()[0] == 1
     ro.close()
+
+    if _r_has_updated_omopduckdb():
+        r_db = tmp_path / "dates_r.duckdb"
+        rcon = duckdb.connect(str(r_db))
+        build_schema(rcon)
+        _seed_vocab_for_routing(rcon)
+        rcon.close()
+        out_json = tmp_path / "r_audit.json"
+        r_code = (
+            f"res <- omopduckdb::etl_pcornet(source_dir = {json.dumps(str(src_dir))}, "
+            f"db_path = {json.dumps(str(r_db))}, key_check = 'ignore'); "
+            f"jsonlite::write_json(attr(res, 'date_audit'), {json.dumps(str(out_json))}, auto_unbox = TRUE)"
+        )
+        subprocess.run(["Rscript", "--vanilla", "-e", r_code], check=True, cwd=REPO_ROOT, shell=RSCRIPT_SHELL)
+        r_audit = {r["source"]: r for r in json.loads(out_json.read_text(encoding="utf-8"))}
+        for k, v in by_src.items():
+            assert r_audit[k]["dated_by_fallback"] == v["dated_by_fallback"]
+            assert r_audit[k]["dropped_undated"] == v["dropped_undated"]
+            assert dict(r_audit[k]["fallback_by_column"]) == v["fallback_by_column"]
 

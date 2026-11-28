@@ -49,3 +49,32 @@ test_that("route_drug_domains moves non-Drug concepts and sets value_as_number N
 test_that("backfill_all R wrapper validates db_path argument cleanly (0.36.0 S2)", {
   expect_error(backfill_all(123, tempdir()), "db_path")
 })
+
+test_that("etl_pcornet records fallback dates and dropped undated rows on attr and callback (0.36.0)", {
+  src <- tempfile("pcornet_dates_")
+  dir.create(src)
+  on.exit(unlink(src, recursive = TRUE), add = TRUE)
+  writeLines(c("PATID,BIRTH_DATE,SEX,RACE,HISPANIC", "P1,1970-01-01,F,05,N"), file.path(src, "demographic.csv"))
+  writeLines(c("ENCOUNTERID,PATID,ENC_TYPE,ADMIT_DATE,DISCHARGE_DATE,DISCHARGE_STATUS",
+               "E1,P1,IP,2021-07-10,2021-07-12,HO",
+               "E_BAD,P1,IP,NI,,HO"), file.path(src, "encounter.csv"))
+  writeLines(c("PROCEDURESID,PATID,ENCOUNTERID,PX_TYPE,PX,PX_DATE,ADMIT_DATE",
+               "PX1,P1,E1,02,J9999,,2021-07-11",
+               "PX2,P1,E1,02,J9999,,",
+               "PX_BAD,P1,,02,J9999,NI,"), file.path(src, "procedures.csv"))
+
+  db_path <- tempfile(fileext = ".duckdb")
+  on.exit(unlink(db_path), add = TRUE)
+  build_schema(db_path)
+
+  got_cb <- NULL
+  res <- etl_pcornet(src, db_path, key_check = "ignore", date_audit_callback = function(rep) got_cb <<- rep)
+  expect_equal(as.character(res), db_path)
+  expect_equal(attr(res, "date_audit"), got_cb)
+  by_src <- stats::setNames(got_cb, vapply(got_cb, `[[`, character(1), "source"))
+  expect_equal(by_src$ENCOUNTER$dropped_undated, 1L)
+  expect_equal(by_src$PROCEDURES$dated_by_fallback, 2L)
+  expect_equal(by_src$PROCEDURES$fallback_by_column$ADMIT_DATE, 1L)
+  expect_equal(by_src$PROCEDURES$fallback_by_column$visit_start_date, 1L)
+  expect_equal(by_src$PROCEDURES$dropped_undated, 1L)
+})

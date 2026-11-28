@@ -500,6 +500,10 @@ def handle_build(args: argparse.Namespace) -> int:
                 m.add_step(f"key_check:{r['table']}.{r['id_column']}", r["distinct_ids"], distinct_keys=r["distinct_keys"],
                            lost=r["lost"], ok=r["ok"], cdm_table=r["cdm_table"], cdm_rows=r["cdm_rows"])
                 for r in report],
+            date_audit_callback=lambda report: [
+                m.add_step(f"date_audit:{r['source']}", r["dated_by_fallback"], dropped_undated=r["dropped_undated"],
+                           cdm_table=r["cdm_table"], fallback_by_column=r["fallback_by_column"])
+                for r in report],
         )
         con = duckdb.connect(args.target, read_only=True)
         try:

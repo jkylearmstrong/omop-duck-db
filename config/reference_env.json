@@ -1,5 +1,5 @@
 {
-  "_about": "Checked-in reference environment for omop-duck-db releases and multi-site benchmark studies (0.36.0, M3). Pinned runtimes (python, R, quarto) come from Dockerfile; library versions record the verified study container (0.31.0+) against which site and CI environments are compared via scripts/check_env.py.",
+  "_about": "Checked-in reference environment for omop-duck-db releases and multi-site benchmark studies (0.36.0, M3). Pinned runtimes (python, R, quarto) come from Dockerfile; library versions record the verified study container (ghcr.io/jkylearmstrong/omop-duck-db:0.31.0, confirmed against run C22's Study_Manuscript.bib) against which site and CI environments are compared via scripts/check_env.py.",
   "pinned": [
     "python",
     "R",
@@ -17,6 +17,7 @@
     "quarto": "1.10.19"
   },
   "compatible_ranges": {
+    "python": ">=3.10,<3.15",
     "duckdb": ">=1.0,<2.0",
     "pandas": ">=2.0,<3.0",
     "pyarrow": ">=14.0,<20.0",

@@ -199,6 +199,46 @@ def run_insert(con, label, sql):
     return n
 
 
+def _audit_source_dates(con, source_name: str, cdm_table: str, view_name: str, id_col: str, primary_expr: str,
+                        fallbacks=(), *, join_visit: bool = False, vo_sdt: str = "CAST(NULL AS DATE)") -> dict:
+    """Counts deduplicated source rows dated via fallback columns vs dropped for having no parseable date (0.36.0)."""
+    dedup = f"(SELECT * FROM {view_name} WHERE {id_col} IS NOT NULL QUALIFY ROW_NUMBER() OVER (PARTITION BY {id_col}) = 1) src"
+    if join_visit and vo_sdt != "CAST(NULL AS DATE)":
+        rel = (f"{dedup} LEFT JOIN (SELECT visit_source_value, MIN(visit_start_date) AS visit_start_date "
+               f"FROM visit_occurrence GROUP BY 1) vo ON vo.visit_source_value = src.ENCOUNTERID")
+    else:
+        rel = dedup
+
+    prior_nulls = [f"({primary_expr}) IS NULL"]
+    select_parts = []
+    fb_names = []
+    all_exprs = [primary_expr]
+    for idx, (fb_label, fb_expr) in enumerate(fallbacks):
+        cond = " AND ".join([*prior_nulls, f"({fb_expr}) IS NOT NULL"])
+        select_parts.append(f"COUNT(*) FILTER (WHERE {cond}) AS fb_{idx}")
+        prior_nulls.append(f"({fb_expr}) IS NULL")
+        fb_names.append(fb_label)
+        all_exprs.append(fb_expr)
+
+    undated_cond = f"COALESCE({', '.join(all_exprs)}) IS NULL" if len(all_exprs) > 1 else f"({primary_expr}) IS NULL"
+    select_parts.append(f"COUNT(*) FILTER (WHERE {undated_cond}) AS n_drop")
+    row = con.execute(f"SELECT {', '.join(select_parts)} FROM {rel}").fetchone()
+    fb_map = {fb_names[i]: int(row[i]) for i in range(len(fb_names))}
+    n_fb = sum(fb_map.values())
+    n_drop = int(row[-1])
+    if n_fb or n_drop:
+        fb_detail = ", ".join(f"{k}={v}" for k, v in fb_map.items() if v)
+        fb_str = f"{n_fb} dated by fallback ({fb_detail})" if fb_detail else f"{n_fb} dated by fallback"
+        print(f"  -> [{source_name}] date audit: {fb_str}, {n_drop} dropped (no date)")
+    return {
+        "source": source_name,
+        "cdm_table": cdm_table,
+        "dated_by_fallback": n_fb,
+        "fallback_by_column": fb_map,
+        "dropped_undated": n_drop,
+    }
+
+
 def _read_cdm_sql(name):
     path = _resource_path("extdata", "5.4", "duckdb", f"OMOPCDM_duckdb_5.4_{name}.sql")
     with open(path, encoding="utf-8") as f:
@@ -1739,7 +1779,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
     path = find_source_file(source_dir, "encounter")
     if path is None:
         print("Skipping VISIT_OCCURRENCE - no encounter.csv found")
-        return
+        return None
 
     prepare_source_view(
         con,
@@ -1795,6 +1835,7 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
           AND parse_omop_date(src.ADMIT_DATE) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.ENCOUNTERID) = 1;
     """)
+    audit = _audit_source_dates(con, "ENCOUNTER", "visit_occurrence", "_temp_encounter", "ENCOUNTERID", "parse_omop_date(src.ADMIT_DATE)")
     con.execute("DROP VIEW IF EXISTS _temp_encounter;")
 
     try:
@@ -1813,13 +1854,14 @@ def load_visit_occurrence(con, source_dir, site_id=None, disambiguate_patids=Fal
             print(f"Notice: Visit occurrence contains unmapped discharge statuses (concept_id = 0): {unmapped_str}")
     except Exception:
         pass
+    return audit
 
 
 def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "diagnosis")
     if path is None:
         print("Skipping CONDITION_OCCURRENCE - no diagnosis.csv found")
-        return
+        return None
 
     prepare_source_view(
         con,
@@ -1906,15 +1948,22 @@ def load_condition_occurrence(con, source_dir, site_id=None, disambiguate_patids
           AND COALESCE(parse_omop_date(COALESCE(src.DX_DATE, src.ADMIT_DATE)), {vo_sdt}) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DIAGNOSISID) = 1;
     """)
+    audit = _audit_source_dates(
+        con, "DIAGNOSIS", "condition_occurrence", "_temp_diagnosis", "DIAGNOSISID",
+        "parse_omop_date(src.DX_DATE)",
+        [("ADMIT_DATE", "parse_omop_date(src.ADMIT_DATE)"), ("visit_start_date", vo_sdt)],
+        join_visit=True, vo_sdt=vo_sdt,
+    )
     con.execute("DROP VIEW IF EXISTS _temp_diagnosis;")
     con.execute("DROP TABLE IF EXISTS _dx_codes;")
+    return audit
 
 
 def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "procedures")
     if path is None:
         print("Skipping PROCEDURE_OCCURRENCE - no procedures.csv found")
-        return
+        return None
 
     prepare_source_view(
         con,
@@ -1990,7 +2039,14 @@ def load_procedure_occurrence(con, source_dir, site_id=None, disambiguate_patids
           AND COALESCE(parse_omop_date(COALESCE(src.PX_DATE, src.ADMIT_DATE)), {vo_sdt}) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PROCEDURESID) = 1;
     """)
+    audit = _audit_source_dates(
+        con, "PROCEDURES", "procedure_occurrence", "_temp_procedures", "PROCEDURESID",
+        "parse_omop_date(src.PX_DATE)",
+        [("ADMIT_DATE", "parse_omop_date(src.ADMIT_DATE)"), ("visit_start_date", vo_sdt)],
+        join_visit=True, vo_sdt=vo_sdt,
+    )
     con.execute("DROP VIEW IF EXISTS _temp_procedures;")
+    return audit
 
 
 #: The 5-digit ZIP of an address row (0.34.1): ADDRESS_ZIP5, else the first 5 digits of ADDRESS_ZIP9. A ZIP read as a number lost its
@@ -2017,7 +2073,7 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "lab_result_cm")
     if path is None:
         print("Skipping MEASUREMENT - no lab_result_cm.csv found")
-        return
+        return None
 
     prepare_source_view(
         con,
@@ -2097,7 +2153,13 @@ def load_measurement(con, source_dir, site_id=None, disambiguate_patids=False):
                        parse_omop_date(src.LAB_ORDER_DATE)) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.LAB_RESULT_CM_ID) = 1;
     """)
+    audit = _audit_source_dates(
+        con, "LAB_RESULT_CM", "measurement", "_temp_lab_result", "LAB_RESULT_CM_ID",
+        "parse_omop_date(src.RESULT_DATE)",
+        [("SPECIMEN_DATE", "parse_omop_date(src.SPECIMEN_DATE)"), ("LAB_ORDER_DATE", "parse_omop_date(src.LAB_ORDER_DATE)")],
+    )
     con.execute("DROP VIEW IF EXISTS _temp_lab_result;")
+    return audit
 
 
 #: PCORnet VITAL column -> (LOINC code, standard OMOP concept used when the vocabulary tables cannot resolve the LOINC code,
@@ -2130,9 +2192,9 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False, derive_
     path = find_source_file(source_dir, "vital")
     if path is None:
         print("Skipping VITAL - no vital.csv found (optional table)")
-        return {"rows_loaded": {}, "rows_dropped_implausible": {}}
+        return {"rows_loaded": {}, "rows_dropped_implausible": {}, "dropped_undated": 0, "date_audit": None}
     ranges = dict(DEFAULT_VITAL_RANGES) if plausible_ranges is True else dict(plausible_ranges or {})
-    summary = {"rows_loaded": {}, "rows_dropped_implausible": {}}
+    summary = {"rows_loaded": {}, "rows_dropped_implausible": {}, "dropped_undated": 0, "date_audit": None}
 
     prepare_source_view(
         con,
@@ -2267,6 +2329,9 @@ def load_vital(con, source_dir, site_id=None, disambiguate_patids=False, derive_
           AND parse_omop_date(src.MEASURE_DATE) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY src.VITALID) = 1;
     """)
+    v_audit = _audit_source_dates(con, "VITAL", "measurement", "_temp_vital", "VITALID", "parse_omop_date(src.MEASURE_DATE)")
+    summary["dropped_undated"] = v_audit["dropped_undated"]
+    summary["date_audit"] = v_audit
     con.execute("DROP VIEW IF EXISTS _temp_vital;")
     return summary
 
@@ -2280,6 +2345,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
         else "CAST(NULL AS DATE)"
     )
     loaded_any = False
+    audits = []
 
     # 1. PRESCRIBING (Prescriptions written)
     path_rx = find_source_file(source_dir, "prescribing")
@@ -2355,6 +2421,12 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
               AND COALESCE(parse_omop_date(src.RX_START_DATE), parse_omop_date(src.RX_ORDER_DATE), {vo_sdt}) IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.PRESCRIBINGID) = 1;
         """)
+        audits.append(_audit_source_dates(
+            con, "PRESCRIBING", "drug_exposure", "_temp_prescribing", "PRESCRIBINGID",
+            "parse_omop_date(src.RX_START_DATE)",
+            [("RX_ORDER_DATE", "parse_omop_date(src.RX_ORDER_DATE)"), ("visit_start_date", vo_sdt)],
+            join_visit=True, vo_sdt=vo_sdt,
+        ))
         con.execute("DROP VIEW IF EXISTS _temp_prescribing;")
 
     # 2. MED_ADMIN (Administered medications)
@@ -2444,6 +2516,12 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
               AND COALESCE(parse_omop_date(src.MEDADMIN_START_DATE), {vo_sdt}) IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.MEDADMINID) = 1;
         """)
+        audits.append(_audit_source_dates(
+            con, "MED_ADMIN", "drug_exposure", "_temp_med_admin", "MEDADMINID",
+            "parse_omop_date(src.MEDADMIN_START_DATE)",
+            [("visit_start_date", vo_sdt)],
+            join_visit=True, vo_sdt=vo_sdt,
+        ))
         con.execute("DROP VIEW IF EXISTS _temp_med_admin;")
 
     # 3. DISPENSING (Prescriptions dispensed in pharmacy)
@@ -2526,6 +2604,10 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
               AND parse_omop_date(src.DISPENSING_DATE) IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY src.DISPENSINGID) = 1;
         """)
+        audits.append(_audit_source_dates(
+            con, "DISPENSING", "drug_exposure", "_temp_dispensing", "DISPENSINGID",
+            "parse_omop_date(src.DISPENSING_DATE)",
+        ))
         con.execute("DROP VIEW IF EXISTS _temp_dispensing;")
 
     if not loaded_any:
@@ -2534,6 +2616,7 @@ def load_drug_exposure(con, source_dir, site_id=None, disambiguate_patids=False)
         routed = route_drug_domains(con)
         if routed["total_routed"]:
             print(f"  -> routed {routed['total_routed']} non-Drug exposure row(s) to OMOP v5.4 domain tables: {routed}")
+    return audits
 
 
 def load_death(con, source_dir, site_id=None, disambiguate_patids=False):
@@ -2542,7 +2625,7 @@ def load_death(con, source_dir, site_id=None, disambiguate_patids=False):
     path = find_source_file(source_dir, "death")
     if path is None:
         print("Skipping DEATH - no death.csv found (optional table)")
-        return
+        return None
 
     prepare_source_view(
         con,
@@ -2578,7 +2661,16 @@ def load_death(con, source_dir, site_id=None, disambiguate_patids=False):
           AND parse_omop_date(src.DEATH_DATE) IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY {patid_expr} ORDER BY parse_omop_date(src.DEATH_DATE) DESC) = 1;
     """)
+    d_drop = int(con.execute(f"""
+        SELECT COUNT(*) FILTER (WHERE max_d IS NULL) FROM (
+            SELECT MAX(parse_omop_date(src.DEATH_DATE)) AS max_d
+            FROM _temp_death src WHERE src.PATID IS NOT NULL GROUP BY {patid_expr}
+        )
+    """).fetchone()[0])
+    if d_drop:
+        print(f"  -> [DEATH] date audit: 0 dated by fallback, {d_drop} dropped (no date)")
     con.execute("DROP VIEW IF EXISTS _temp_death;")
+    return {"source": "DEATH", "cdm_table": "death", "dated_by_fallback": 0, "fallback_by_column": {}, "dropped_undated": d_drop}
 
 
 def _iso_date(value, name):
@@ -3023,6 +3115,7 @@ def etl_pcornet(
     strict_source=False,
     key_check="warn",
     key_check_callback=None,
+    date_audit_callback=None,
     use_enrollment="auto",
     enrollment_type_concept_id=0,
     data_cutoff="auto",
@@ -3116,13 +3209,22 @@ def etl_pcornet(
     load_person(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
     if not append:
         load_location(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_visit_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_condition_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_procedure_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_measurement(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_vital(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
-    load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    date_report: list[dict] = []
+    for _rec in (
+        load_visit_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids),
+        load_condition_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids),
+        load_procedure_occurrence(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids),
+        load_measurement(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids),
+    ):
+        if _rec is not None:
+            date_report.append(_rec)
+    _vit_res = load_vital(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    if _vit_res.get("date_audit") is not None:
+        date_report.append(_vit_res["date_audit"])
+    date_report.extend(load_drug_exposure(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids) or [])
+    _dth_rec = load_death(con, source_dir, site_id=site_id, disambiguate_patids=disambiguate_patids)
+    if _dth_rec is not None:
+        date_report.append(_dth_rec)
 
     _APPEND.clear()
     # the era and observation-period builders each clear their own table, so append mode needs no up-front delete
@@ -3166,6 +3268,12 @@ def etl_pcornet(
                   f"({'ok' if r['ok'] else str(r['lost']) + ' lost'}); {r['cdm_table']} rows = {r['cdm_rows']}")
         if key_check_callback is not None:
             key_check_callback(report)
+
+    tot_fb = sum(r["dated_by_fallback"] for r in date_report)
+    tot_drop = sum(r["dropped_undated"] for r in date_report)
+    print(f"Date audit summary: {tot_fb} row(s) dated by fallback, {tot_drop} undated row(s) dropped across {len(date_report)} clinical source table(s).")
+    if date_audit_callback is not None:
+        date_audit_callback(date_report)
 
     con.close()
     print("PCORnet ETL complete.")

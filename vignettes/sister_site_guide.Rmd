@@ -32,13 +32,13 @@ If a site database was produced earlier or by an external builder, `omop_etl.bac
 | PCORnet table / field | Target OMOP v5.4 table(s) | Fresh `etl_pcornet()` (`>= 0.36.0`, Py & R) | External / pre-0.36.0 DB backfill (`Python`, R `reticulate` wrapper) |
 |---|---|---|---|
 | `DEMOGRAPHIC` (`PATID` / `SSID`) | `person` | Native (`DEFAULT_ALIASES`) | — |
-| `ENCOUNTER` (`DISCHARGE_STATUS`, `OS` -> `581385`) | `visit_occurrence` | Native (`PCORNET_DISCHARGE_STATUS_CONCEPTS`, `data_cutoff="auto"`) | `backfill_discharge_status()`, `cap_observation_period()` |
-| `DIAGNOSIS` (ICD-9-CM / ICD-10-CM / SNOMED) | `condition_occurrence`, `condition_era` | Native (dotless ICD + date-aware vocabulary fallback) | Step 1: `backfill_condition_concepts()` |
-| `PROCEDURES` (CPT4 / HCPCS / ICD-9 / ICD-10-PCS) | `procedure_occurrence` | Native | — |
-| `LAB_RESULT_CM` (`RESULT_NUM` + censored `RAW_RESULT`) | `measurement` | Native (`LAB_VALUE_SQL` + `LAB_OPERATOR_SQL` sets `operator_concept_id`) | Step 3: `backfill_lab_values()` (`.csv`/`.parquet`/`.zip`, `SSID` & `crosswalk.csv`) |
-| `VITAL` (`HT`, `WT`, `BMI`, `SYSTOLIC`, `DIASTOLIC`, `SMOKING`, `TOBACCO`) | `measurement`, `observation` (`43054909`) | Native (`SMOKING` first, then `TOBACCO` `01`/`02`/`03` fallback) | Step 4: `backfill_vital_tobacco()` |
-| `PRESCRIBING`, `DISPENSING` | `drug_exposure` + domain-routed tables, `drug_era` | Native + `route_drug_domains()` | Step 2: `backfill_drug_concepts()` + Step 5: `route_drug_domains()` |
-| `MED_ADMIN` (`RX`, `ND`, `CH`/`CP`) | `drug_exposure`, `device_exposure`, `procedure_occurrence`, `observation`, `measurement` (`type = 38000180`) | Native + `route_drug_domains()` (`value_as_number = NULL` on `observation`/`measurement`, dose in `value_source_value`) | Step 5: `backfill_med_admin()` + `route_drug_domains()` + `repair_routed_med_admin_values()` |
+| `ENCOUNTER` (`DISCHARGE_STATUS`, `OS` -> `581385`) | `visit_occurrence` | Native (`PCORNET_DISCHARGE_STATUS_CONCEPTS`, `data_cutoff="auto"`, undated drop audit) | `backfill_discharge_status()`, `cap_observation_period()` |
+| `DIAGNOSIS` (ICD-9-CM / ICD-10-CM / SNOMED) | `condition_occurrence`, `condition_era` | Native (dotless ICD + `ADMIT_DATE` / `visit_start_date` fallback + date audit) | Step 1: `backfill_condition_concepts()` |
+| `PROCEDURES` (CPT4 / HCPCS / ICD-9 / ICD-10-PCS) | `procedure_occurrence` | Native (`ADMIT_DATE` / `visit_start_date` fallback + date audit) | — |
+| `LAB_RESULT_CM` (`RESULT_NUM` + censored `RAW_RESULT`) | `measurement` | Native (`LAB_VALUE_SQL` + `LAB_OPERATOR_SQL`, `SPECIMEN_DATE` / `LAB_ORDER_DATE` fallback + date audit) | Step 3: `backfill_lab_values()` (`.csv`/`.parquet`/`.zip`, `SSID` & `crosswalk.csv`) |
+| `VITAL` (`HT`, `WT`, `BMI`, `SYSTOLIC`, `DIASTOLIC`, `SMOKING`, `TOBACCO`) | `measurement`, `observation` (`43054909`) | Native (`SMOKING` first, then `TOBACCO` `01`/`02`/`03` fallback + undated drop audit) | Step 4: `backfill_vital_tobacco()` |
+| `PRESCRIBING`, `DISPENSING` | `drug_exposure` + domain-routed tables, `drug_era` | Native + `route_drug_domains()` (`RX_ORDER_DATE` / `visit_start_date` fallback + date audit) | Step 2: `backfill_drug_concepts()` + Step 5: `route_drug_domains()` |
+| `MED_ADMIN` (`RX`, `ND`, `CH`/`CP`) | `drug_exposure`, `device_exposure`, `procedure_occurrence`, `observation`, `measurement` (`type = 38000180`) | Native + `route_drug_domains()` (`value_as_number = NULL` on `observation`/`measurement`, `visit_start_date` fallback + date audit) | Step 5: `backfill_med_admin()` + `route_drug_domains()` + `repair_routed_med_admin_values()` |
 | `LDS_ADDRESS_HISTORY` / `ADDRESS_HISTORY` | `location`, `person_address_history` | Native (5-digit ZIP zero-pad + unquoted-comma repair) | — |
 | `ENROLLMENT` (optional) | `observation_period` | Native (`use_enrollment="auto"`) | — |
 | `DEATH` (optional) | `death` | Native | — |
